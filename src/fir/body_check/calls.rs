@@ -354,7 +354,7 @@ impl BodyFirChecker<'_> {
                     return Ok(FirExprKind::Constant(FirConstant::String(constant)));
                 }
                 let receiver = self.explicit_receiver(receiver)?;
-                self.selected_extension_call(expression, arguments, *extension, receiver)
+                self.selected_extension_call(expression, arguments, *extension, Some(receiver))
             }
             Some(ResolvedCall::MemberExtension {
                 dispatch_receiver,
@@ -485,12 +485,12 @@ impl BodyFirChecker<'_> {
         if let Some(ResolvedCall::Extension(extension)) =
             self.info.resolved_calls.get(&expression).cloned()
         {
-            let receiver = self.implicit_receiver(expression)?.ok_or_else(|| {
+            let receiver = Some(self.implicit_receiver(expression)?.ok_or_else(|| {
                 self.failure(
                     self.file.expr_span(expression),
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
-            })?;
+            })?);
             return self.selected_extension_call(expression, arguments, *extension, receiver);
         }
         if self.info.resolved_top_level_call(expression).is_some() {
@@ -664,7 +664,7 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         arguments: &[ExprId],
         extension: crate::resolve::ResolvedExtensionCall,
-        extension_receiver: FirReceiver,
+        extension_receiver: Option<FirReceiver>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let dispatch_receiver = extension
             .callable
@@ -774,7 +774,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::Call(FirCall {
             target,
             dispatch_receiver,
-            extension_receiver: Some(extension_receiver),
+            extension_receiver,
             parameter_types: self
                 .published_parameter_types(self.file.expr_span(expression), &parameters)?,
             arguments: self.member_extension_arguments(

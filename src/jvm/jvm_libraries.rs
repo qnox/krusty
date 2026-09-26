@@ -9,7 +9,9 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
+mod static_properties;
 mod unsigned_intrinsics;
+use static_properties::StaticAccessor;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use builtin_classifier_shapes::{
@@ -606,7 +608,9 @@ impl JvmLibraries {
         }
         if let Some(class) = self.cp.find_name(internal) {
             for property in metadata::class_properties(&class) {
-                push(property.name.clone());
+                if !property.is_companion_block_member {
+                    push(property.name.clone());
+                }
             }
             // A Java field is surfaced to Kotlin as a property declaration. A Kotlin scalar's JVM
             // wrapper is only its backend carrier, however: `Character.value` is not a property of
@@ -1172,6 +1176,8 @@ impl JvmLibraries {
                                 .map_or(getter_params[0], Ty::obj_name),
                         )
                     }),
+                associated_classifier: None,
+                associated_access_owner: None,
                 formals: property_gsig
                     .as_ref()
                     .map(|gsig| gsig.formals.clone())
@@ -2015,6 +2021,14 @@ impl JvmLibraries {
                         == Some(crate::types::type_name("kotlin/enums/EnumEntries"))
                 {
                     enum_entries_accessor = Some(member);
+                } else if declaration.is_some_and(|declaration| {
+                    declaration.is_companion_block_member() && m.is_static()
+                }) {
+                    // A `companion { … }` block function is a static member of its class, named
+                    // through the classifier coordinate with no value operand.
+                    member.associated_classifier = Some(internal_name);
+                    member.associated_access_owner = Some(internal_name);
+                    companion.push(member);
                 } else if declaration.is_some() {
                     members.push(member);
                 } else if m.is_static() {
@@ -3487,82 +3501,6 @@ impl JvmLibraries {
         }
     }
 
-    fn register_external_static_field(&self, field: &mut JvmStaticField) {
-        let descriptor = field.descriptor.clone();
-        let mut declaration = LibraryCallable::library(
-            field.owner,
-            field.name.clone(),
-            Vec::new(),
-            field.ty,
-            field.ty.platform_lower_bound(),
-            descriptor,
-        );
-        declaration.external_identity = Some(self.cp.intern_external_callable(
-            &declaration,
-            super::classpath::ExternalCallableKind::StaticFieldRead,
-        ));
-        field.external_identity = declaration.external_identity;
-    }
-
-    fn associated_property_for_static_field(&self, field: JvmStaticField) -> Option<PropertyInfo> {
-        let descriptor = field.descriptor.clone();
-        let mut getter = LibraryCallable::library(
-            field.owner,
-            field.name.clone(),
-            Vec::new(),
-            field.ty,
-            field.ty.platform_lower_bound(),
-            descriptor.clone(),
-        );
-        getter.external_identity = field.external_identity;
-        let setter = (!field.is_final).then(|| {
-            let mut setter = LibraryCallable::library(
-                field.owner,
-                field.name.clone(),
-                vec![field.ty.platform_lower_bound()],
-                Ty::Unit,
-                Ty::Unit,
-                descriptor,
-            );
-            setter.params = vec![field.ty];
-            setter.external_identity = Some(self.cp.intern_external_callable(
-                &setter,
-                super::classpath::ExternalCallableKind::StaticFieldWrite,
-            ));
-            setter
-        });
-        let mut property = PropertyInfo {
-            return_value_status: None,
-            name: field.name,
-            kind: PropKind::TopLevel,
-            receiver: None,
-            formals: Vec::new(),
-            ty: field.ty,
-            context_count: 0,
-            context_param_names: Vec::new(),
-            context_parameter_identities: Vec::new(),
-            getter,
-            setter,
-            setter_visibility: field.visibility,
-            setter_parameter_name: None,
-            is_const: field.constant.is_some() && field.is_final,
-            implicit_integer_coercion: false,
-            compile_time_constant: field.constant,
-            visibility: field.visibility,
-            owner: field.owner,
-            receiver_rank: 0,
-            source_key: None,
-            stable_declaration: None,
-            getter_declaration: None,
-            setter_declaration: None,
-            source_member: None,
-            accessor_derived: false,
-            read_stability: crate::libraries::PropertyReadStability::Unstable,
-        };
-        self.register_external_property(&mut property);
-        Some(property)
-    }
-
     fn register_external_callables(
         &self,
         callables: crate::libraries::Callables,
@@ -3644,6 +3582,15 @@ impl JvmLibraries {
                 member.clone(),
             )
             .callable;
+            // A static with default arguments (a `companion { … }` block function) is called
+            // through its class's static `name$default` bridge, as a top-level function is.
+            if member.default_realization.is_none()
+                && member.call_sig.param_defaults.contains(&true)
+            {
+                callable.default_realization =
+                    self.top_level_default_realization(&callable).map(Box::new);
+                member.default_realization = callable.default_realization.clone();
+            }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             self.register_external_callable(&mut callable, FnKind::TopLevel);
             member.external_identity = callable.external_identity;
@@ -3687,7 +3634,8 @@ impl JvmLibraries {
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
-                if mp.name != name {
+                // A `companion { … }` block property is a classifier member, not an instance one.
+                if mp.name != name || mp.is_companion_block_member {
                     continue;
                 }
                 crate::trace_compiler!(
@@ -3810,6 +3758,8 @@ impl JvmLibraries {
                         name: name.to_string(),
                         kind: PropKind::MemberExtension,
                         receiver: Some(receiver),
+                        associated_classifier: None,
+                        associated_access_owner: None,
                         formals: property_signature
                             .map(|signature| signature.formals.clone())
                             .unwrap_or_default(),
@@ -3950,6 +3900,8 @@ impl JvmLibraries {
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
+                    associated_classifier: None,
+                    associated_access_owner: None,
                     formals: property_signature
                         .map(|signature| signature.formals.clone())
                         .or_else(|| {
@@ -4065,6 +4017,8 @@ impl JvmLibraries {
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
+                    associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty: field_ty,
                     context_count: 0,
@@ -4122,6 +4076,8 @@ impl JvmLibraries {
                     name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(recv),
+                    associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty,
                     context_count: 0,
@@ -4201,6 +4157,8 @@ impl JvmLibraries {
                         name: name.to_string(),
                         kind: PropKind::Member,
                         receiver: Some(recv),
+                        associated_classifier: None,
+                        associated_access_owner: None,
                         formals: Vec::new(),
                         ty,
                         context_count: 0,
@@ -4453,6 +4411,7 @@ impl JvmLibraries {
         // `Owner.INSTANCE` / `Outer.Companion`, not a facade `invokestatic`.
         if let SymbolNamespace::Classifier(owner) = namespace {
             self.object_member_callables(owner, name, &mut overloads, &mut props);
+            props.extend(self.classifier_associated_property(owner, name));
         }
         // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
         // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
@@ -4696,185 +4655,20 @@ impl JvmLibraries {
                     mprops.iter().count(),
                 );
             }
-            for mp in mprops.iter() {
-                if mp.name != name {
-                    continue; // this property name
-                }
-                // Accessors carry context parameters first, then the extension receiver when one
-                // exists. These are declaration roles from metadata; the descriptor only verifies
-                // that the selected physical accessor realizes the same arity.
-                let context_count = mp.context_params.len();
-                let receiver_params = usize::from(mp.is_extension);
-                let mp = mp.clone();
-                let property_gsig = mp.generic_sig.clone();
-                let context_parameter_identities = mp.context_parameter_identities();
-                let Some(getter_sig) = mp.getter else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: metadata has no getter realization"
-                    );
-                    continue;
-                };
-                let Some(getter_method) =
-                    self.cp
-                        .facade_static(facade, &getter_sig.name, &getter_sig.desc)
-                else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter {}{} is absent from facade {}",
-                        getter_sig.name,
-                        getter_sig.desc,
-                        facade.render()
-                    );
-                    continue;
-                };
-                let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: malformed getter descriptor {}",
-                        getter_sig.desc
-                    );
-                    continue;
-                };
-                if gparams.len() != context_count + receiver_params {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter parameter count {} != metadata context/receiver count {}",
-                        gparams.len(),
-                        context_count + receiver_params,
-                    );
-                    continue;
-                }
-                let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
-                let receiver = mp.is_extension.then(|| {
-                    generic_receiver.unwrap_or_else(|| {
-                        mp.receiver_class
-                            .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
-                    })
-                });
-                let semantic_context = property_gsig
-                    .as_ref()
-                    .map(|signature| signature.params.clone())
-                    .unwrap_or_else(|| gparams[..context_count].to_vec());
-                let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
-                let property_ty = property_gsig.as_ref().map_or_else(
-                    || {
-                        if mp.ret_nullable {
-                            Ty::nullable(fallback_ret)
-                        } else {
-                            fallback_ret
-                        }
-                    },
-                    |gsig| gsig.ret,
-                );
-                let property_kind = if mp.is_extension {
-                    PropKind::Extension
-                } else {
-                    PropKind::TopLevel
-                };
-                let property_intrinsic = match namespace {
-                    SymbolNamespace::Package(package) => {
-                        crate::libraries::builtin_top_level_realization::property_realization(
-                            crate::libraries::builtin_declaration::BuiltinPropertyDeclaration {
-                                package,
-                                name,
-                                kind: property_kind,
-                                receiver,
-                                ty: property_ty,
-                                context_count,
-                                type_parameter_count: property_gsig
-                                    .as_ref()
-                                    .map_or(0, |signature| signature.formals.len()),
-                                mutable: mp.setter.is_some(),
-                            },
-                        )
-                    }
+            for mp in mprops.iter().filter(|property| property.name == name) {
+                let package = match namespace {
+                    SymbolNamespace::Package(package) => Some(package),
                     SymbolNamespace::Classifier(_) => None,
                 };
-                // An exact compiler intrinsic may deliberately have no callable public accessor.
-                // `coroutineContext` is a public `@InlineOnly` suspend property whose private JVM
-                // getter throws; the provider publishes its semantic declaration and marks the
-                // compiler realization instead of exposing that physical method as a fallback.
-                if !getter_method.public && property_intrinsic.is_none() {
-                    continue;
-                }
-                let mut getter = LibraryCallable::library(
-                    getter_method.owner,
-                    getter_sig.name,
-                    gparams,
-                    property_ty,
-                    gret,
-                    getter_sig.desc,
-                );
-                getter.params = semantic_context.iter().copied().chain(receiver).collect();
-                getter.source_receiver = receiver;
-                getter.context_count = context_count;
-                getter.generic_sig = property_gsig.clone().map(Box::new);
-                getter.compiler_intrinsic = property_intrinsic;
-                let setter = mp.setter.and_then(|setter_sig| {
-                    let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
-                        return None;
-                    }
-                    let setter_method =
-                        self.cp
-                            .facade_static(facade, &setter_sig.name, &setter_sig.desc)?;
-                    if !setter_method.public {
-                        return None;
-                    }
-                    let mut setter = LibraryCallable::library(
-                        setter_method.owner,
-                        setter_sig.name,
-                        sparams,
-                        Ty::Unit,
-                        sret,
-                        setter_sig.desc,
-                    );
-                    setter.params = semantic_context
-                        .iter()
-                        .copied()
-                        .chain(receiver)
-                        .chain(std::iter::once(property_ty))
-                        .collect();
-                    setter.source_receiver = receiver;
-                    setter.context_count = context_count;
-                    Some(setter)
-                });
-                props.push(PropertyInfo {
-                    return_value_status: Some(mp.return_value_status),
-                    name: name.to_string(),
-                    kind: property_kind,
-                    receiver,
-                    formals: property_gsig
-                        .as_ref()
-                        .map(|gsig| gsig.formals.clone())
-                        .unwrap_or_default(),
-                    ty: property_ty,
-                    context_count,
-                    context_param_names: mp
-                        .context_params
-                        .iter()
-                        .map(|parameter| parameter.name.clone())
-                        .collect(),
-                    context_parameter_identities,
-                    getter,
-                    setter,
-                    setter_visibility: mp.visibility,
-                    setter_parameter_name: mp.setter_parameter_name.clone(),
-                    is_const: mp.is_const,
-                    implicit_integer_coercion: false,
-                    compile_time_constant: None,
-                    visibility: mp.visibility,
-                    owner: facade,
-                    receiver_rank: 0,
-                    source_key: None,
-                    stable_declaration: None,
-                    getter_declaration: None,
-                    setter_declaration: None,
-                    source_member: None,
-                    accessor_derived: false,
-                    read_stability: crate::libraries::PropertyReadStability::Unstable,
-                });
+                let accessor = |jvm_name: &str, descriptor: &str| {
+                    self.cp
+                        .facade_static(facade, jvm_name, descriptor)
+                        .map(|method| StaticAccessor {
+                            owner: method.owner,
+                            public: method.public,
+                        })
+                };
+                props.extend(self.static_metadata_property(mp, facade, package, accessor));
             }
         }
         if let SymbolNamespace::Package(package) = namespace {
@@ -4908,7 +4702,7 @@ impl JvmLibraries {
                 .iter()
                 .find(|property| property.name == name)
             {
-                super::top_level_properties::merge_top_level_const(
+                super::top_level_properties::merge_metadata_const(
                     name, metadata, field, &mut props,
                 );
             }
@@ -5451,109 +5245,6 @@ impl JvmLibraries {
     }
 }
 
-impl JvmLibraries {
-    fn top_level_static_field(&self, package: TypeName, name: &str) -> Option<JvmStaticField> {
-        // A top-level `const val` is a `public static final` field on the package facade that carries
-        // it. This classfile scan stays entirely inside the JVM provider.
-        self.cp
-            .package_facades_name(package)
-            .into_iter()
-            .find_map(|facade| self.static_field_name(facade, name))
-    }
-
-    fn static_field_name(&self, internal: TypeName, name: &str) -> Option<JvmStaticField> {
-        let mut stack = vec![internal];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            let Some(ci) = self.cp.find_name(cur) else {
-                continue;
-            };
-            if let Some(f) = ci.fields.iter().find(|f| {
-                f.name == name
-                    && f.access & 0x0008 != 0
-                    // Publish every non-private associated declaration. Kotlin visibility is
-                    // enforced by the resolver at the lexical use site; dropping `protected`
-                    // here made a valid subclass read indistinguishable from a missing property.
-                    && f.access & 0x0002 == 0
-            }) {
-                let ty = self
-                    .metadata_property_ty(cur, name)
-                    .or_else(|| {
-                        f.signature
-                            .as_deref()
-                            .and_then(|signature| {
-                                parse_concrete_field_gsig(signature, &f.descriptor)
-                            })
-                            .map(|ty| self.semanticize_jvm_type(ty))
-                    })
-                    .unwrap_or_else(|| declared_desc_to_ty(&f.descriptor));
-                let ty = if ci.meta.is_present() {
-                    ty
-                } else {
-                    java_type_nullability(ty, f.nullability)
-                };
-                let constant = f.const_value.as_ref().map(|value| LibraryConst {
-                    ty,
-                    value: Self::library_const(value),
-                });
-                let mut field = JvmStaticField {
-                    external_identity: None,
-                    owner: cur,
-                    name: name.to_string(),
-                    descriptor: f.descriptor.clone(),
-                    ty,
-                    constant,
-                    visibility: if f.access & 0x0001 != 0 {
-                        Visibility::Public
-                    } else if f.access & 0x0004 != 0 {
-                        Visibility::Protected
-                    } else {
-                        Visibility::PackagePrivate
-                    },
-                    is_final: f.access & 0x0010 != 0,
-                };
-                self.register_external_static_field(&mut field);
-                return Some(field);
-            }
-            if let Some(superclass) = ci.super_class {
-                stack.push(superclass);
-            }
-            stack.extend(ci.interfaces.iter_ids());
-        }
-        None
-    }
-
-    /// Physical storage for a companion-declared `@JvmField` property lives on the outer class.
-    /// Keep that placement inside the JVM provider: the semantic owner remains the companion and
-    /// callers receive an ordinary associated property with an opaque external accessor identity.
-    fn classifier_static_field_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<JvmStaticField> {
-        self.static_field_name(internal, name).or_else(|| {
-            let outer = internal.nested_owner()?;
-            let outer_class = self.cp.find_name(outer)?;
-            let is_companion =
-                super::metadata::class_companion_name(&outer_class).and_then(|companion| {
-                    crate::types::existing_type_name_nested_child(outer, &companion)
-                }) == Some(internal);
-            if !is_companion {
-                return None;
-            }
-            let companion = self.cp.find_name(internal)?;
-            super::metadata::class_properties(&companion)
-                .iter()
-                .any(|property| property.name == name)
-                .then(|| self.static_field_name(outer, name))
-                .flatten()
-        })
-    }
-}
-
 impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
         self.cp.validate_lazy_class_loads()
@@ -5681,16 +5372,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         } else {
             Vec::new()
         }
-    }
-
-    fn classifier_associated_property(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<crate::libraries::PropertyInfo> {
-        self.associated_property_for_static_field(
-            self.classifier_static_field_name(internal, name)?,
-        )
     }
 
     fn top_level_associated_property(
@@ -5954,6 +5635,8 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     name: property.to_owned(),
                     kind: crate::libraries::PropKind::Member,
                     receiver: Some(receiver),
+                    associated_classifier: None,
+                    associated_access_owner: None,
                     formals: Vec::new(),
                     ty,
                     context_count: 0,
@@ -7105,11 +6788,14 @@ mod tests {
         classpath.set_stub_overlay(stubs);
         let libraries = initialized_libraries(classpath);
 
-        let property = libraries
-            .classifier_associated_property(type_name("sample/Base"), "value")
-            .expect("protected associated property");
+        let base = type_name("sample/Base");
+        let record = libraries.symbols(SymbolNamespace::Classifier(base), "value");
+        let [property] = record.callables.properties() else {
+            panic!("one protected associated property");
+        };
         assert_eq!(property.visibility, Visibility::Protected);
-        assert_eq!(property.owner, type_name("sample/Base"));
+        assert_eq!(property.owner, base);
+        assert_eq!(property.associated_classifier, Some(base));
     }
 
     #[test]

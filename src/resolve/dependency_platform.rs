@@ -190,7 +190,7 @@ fn merge_functions(
             // matching source candidate made ordinary calls work while language conventions (most
             // visibly delegated properties) disappeared.
             let existing = &mut primary.overloads[existing];
-            existing.companion_extension = candidate.companion_extension;
+            existing.associated_classifier = candidate.associated_classifier;
             existing.receiver = candidate.receiver.or(existing.receiver);
             existing.flags = candidate.flags;
             existing.visibility = candidate.visibility;
@@ -392,7 +392,16 @@ impl SymbolSource for DependencyPlatform {
             shape.access = visibility.into();
             classifier = Some(std::sync::Arc::new(shape));
         }
-        let (primary_functions, primary_properties) = primary.callables.clone().into_parts();
+        let (primary_functions, mut primary_properties) = primary.callables.clone().into_parts();
+        // A source declaration of the namespace classifier hides the associated properties of a
+        // same-named classpath classifier.
+        if let SymbolNamespace::Classifier(owner) = namespace {
+            if !matches!(self.source_type_access(owner), SourceTypeAccess::Absent) {
+                primary_properties
+                    .overloads
+                    .retain(|property| property.associated_classifier != Some(owner));
+            }
+        }
         let (source_functions, source_properties) = source.callables.clone().into_parts();
         let merged = Rc::new(ResolvedSymbols {
             classifier_name: primary.classifier_name.or(source.classifier_name),
@@ -438,19 +447,6 @@ impl SemanticPlatform for DependencyPlatform {
                     .and_then(|shape| shape.value_underlying)
             })
         })
-    }
-
-    fn classifier_associated_property(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<crate::libraries::PropertyInfo> {
-        match self.source_type_access(internal) {
-            SourceTypeAccess::Absent => {
-                self.platform.classifier_associated_property(internal, name)
-            }
-            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
-        }
     }
 
     fn inherits_classifier_callables(&self, internal: TypeName) -> bool {
@@ -674,6 +670,8 @@ mod tests {
             name: "value".to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
+            associated_classifier: None,
+            associated_access_owner: None,
             formals: Vec::new(),
             ty: Ty::Int,
             context_count: 0,

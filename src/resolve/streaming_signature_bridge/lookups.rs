@@ -767,7 +767,7 @@ impl ProductionSignatureSemantics<'_> {
             };
             let Some(mut receiver) = self
                 .with_resolver(scope, |resolver| {
-                    resolver.classifier_associated_property(classifier, segments[length])
+                    resolver.associated_property(classifier, segments[length])
                 })
                 .ok()
                 .map(|property| property.ty)

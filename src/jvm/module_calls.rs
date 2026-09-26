@@ -1,7 +1,7 @@
 use crate::fir::{CallableId, PropertyId};
 use crate::ir::{
     Callee, ExprId, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrFunction,
-    IrModuleProperty, IrModuleSource,
+    IrModuleProperty, IrModuleSource, IrStaticPlacement,
 };
 use crate::jvm::inline::PropertyAccess;
 use crate::jvm::property_realizations::PropertyRealizations;
@@ -52,7 +52,10 @@ pub(super) fn jvm_field_storage(
         }
         (owner, owner_is_singleton(property))
     } else {
-        (facade_for(property.source, stems)?, true)
+        (
+            static_owner(property.placement, property.source, stems)?,
+            true,
+        )
     };
     Some((owner, is_static))
 }
@@ -379,10 +382,12 @@ pub(super) fn realize_default_calls(
                     .map_err(|()| failure)?
                     .unwrap_or(&name)
                     .to_owned();
-                let owner = provider
-                    .owner
-                    .or_else(|| facade_for(provider.source, stems))
-                    .ok_or(failure)?;
+                let owner = match provider.owner {
+                    Some(owner) => owner,
+                    None => {
+                        static_owner(provider.placement, provider.source, stems).ok_or(failure)?
+                    }
+                };
                 let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
                     params,
@@ -656,7 +661,8 @@ pub(super) fn realize(
                 if callable.owner.is_some() {
                     return Err(failure);
                 }
-                let owner = facade_for(callable.source, stems).ok_or(failure)?;
+                let owner =
+                    static_owner(callable.placement, callable.source, stems).ok_or(failure)?;
                 Some(IrExpr::Call {
                     callee: Callee::CrossFile {
                         facade: owner,
@@ -928,7 +934,7 @@ fn realize_property(
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
-        let facade = facade_for(property.source, stems).ok_or(failure)?;
+        let facade = static_owner(property.placement, property.source, stems).ok_or(failure)?;
         Ok((
             IrExpr::Call {
                 callee: Callee::CrossFile {
@@ -954,6 +960,19 @@ pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, stems: &[String]
         .filter_map(|(function, source)| Some((function, facade_for(source, stems)?)))
         .collect::<Vec<_>>();
     ir.record_foreign_template_facades(facades);
+}
+
+/// The class realizing a module declaration with no dispatch owner: its file facade, or the
+/// declaring class of a `companion { … }` block member.
+pub(super) fn static_owner(
+    placement: IrStaticPlacement,
+    source: IrModuleSource,
+    stems: &[String],
+) -> Option<crate::types::TypeName> {
+    match placement {
+        IrStaticPlacement::Package => facade_for(source, stems),
+        IrStaticPlacement::CompanionBlock { declaring_class } => Some(declaring_class),
+    }
 }
 
 pub(super) fn facade_for(

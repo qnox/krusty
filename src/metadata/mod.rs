@@ -29,6 +29,9 @@ pub(crate) mod function_flags {
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows
     /// `hasNonStableParameterNames` (bit 15).
     pub const RETURN_VALUE_STATUS_SHIFT: u32 = 16;
+    /// A companion-associated function (`companion { fun … }` or `companion fun C.name`), the
+    /// function counterpart of [`super::property_flags::IS_COMPANION`].
+    pub const IS_COMPANION: u64 = 1 << 18;
 }
 
 pub(crate) mod property_flags {
@@ -54,6 +57,9 @@ pub(crate) mod property_flags {
     /// 1-3) · final · `isNotDefault` (bit 6). The accessor flag word has its own layout — bit 0
     /// `hasAnnotations`, bits 1-3 visibility, bits 4-5 modality, bit 6 `isNotDefault`.
     pub const DECLARED_ACCESSOR: u64 = 70;
+    /// A companion-associated property (`companion { val … }` or `companion val C.name`): kotlinc
+    /// sets this bit on both, the extension additionally recording its classifier receiver.
+    pub const IS_COMPANION: u64 = 1 << 19;
 }
 
 /// The `Type` a `vararg` parameter RECORDS: `Array<out E>`, not the invariant `Array<E>` the

@@ -689,12 +689,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .with_is_final(is_final)
                             .with_is_suspend(is_suspend)
                             .with_is_companion_extension(companion_extension)
-                            // Reified source bodies may be emitted to make their inline body
-                            // available across a compilation boundary, but their erased JVM method
-                            // is not a legal direct-call fallback. Encode that semantic capability on
-                            // the signature itself so every source callable origin maps it to the
-                            // shared `InlineKind::MustInline` state instead of consulting a parallel
-                            // declaration set or rediscovering `reified` in individual call paths.
+                            .with_is_companion_block_member(f.is_companion_block_member())
+                            // A reified source body may cross compilation boundaries, but its erased
+                            // JVM method is not a legal fallback. Carry that semantic capability on
+                            // the signature so every origin maps it to shared `InlineKind::MustInline`.
                             .with_requires_splice(reified)
                             .with_has_reified_type_params(reified),
                         annotations: declaration_annotation_identities(
@@ -3964,6 +3962,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 ty,
                                 is_var: property_header.mutable,
                                 is_companion_extension: companion_extension,
+                                is_companion_block_member: p.is_companion_block_member,
                                 getter_name: property_getter_name(&property_name),
                                 setter_name: property_header
                                     .mutable

@@ -82,7 +82,7 @@ impl Parser<'_> {
         // consume them so the declaration keyword is next, and RETURN them so the caller keeps the
         // visibility/modality (annotations buffer as pending, read by the declaration parser).
         if self.at(TokenKind::At) || self.at_modifier() {
-            let m = self.skip_decl_prefix();
+            let m = self.extend_decl_prefix();
             self.skip_newlines();
             m
         } else {

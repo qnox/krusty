@@ -67,6 +67,10 @@ pub(super) fn publish(
         let Some(header) = index.declaration_header(declaration) else {
             continue;
         };
+        // A `companion { … }` member belongs to its classifier's declarations, not the package's.
+        if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+            continue;
+        }
         let source_order = index
             .source_order(declaration)
             .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?;
@@ -147,6 +151,7 @@ pub(super) fn publish(
                     infix: header.flags.has(DeclarationFlags::INFIX),
                     tailrec: header.flags.has(DeclarationFlags::TAILREC),
                     has_function_typed_parameter: index.has_function_typed_parameter(callable.id),
+                    companion: header.flags.has(DeclarationFlags::COMPANION),
                     contract: index.contract(declaration).cloned(),
                     type_params: type_parameters(index, declaration),
                     context_count: callable.shape.context_parameter_count as usize,
@@ -200,6 +205,10 @@ pub(super) fn publish(
                 let receiver = property_header
                     .extension_receiver
                     .map(crate::fir::ResolvedTy::get);
+                // A companion extension's receiver is a lookup coordinate: like a plain top-level
+                // property it may own a backing field and has default accessors.
+                let value_receiver =
+                    receiver.filter(|_| !header.flags.has(DeclarationFlags::COMPANION));
                 ir.package_properties.push(IrPackageProperty {
                     property: property_id,
                     name: property.name.clone(),
@@ -219,12 +228,12 @@ pub(super) fn publish(
                         .into_boxed_slice(),
                     flags: header.flags,
                     spellings: index.declaration_spellings_primary_bound_first(declaration),
-                    has_backing_field: receiver.is_none()
+                    has_backing_field: value_receiver.is_none()
                         && (!header.flags.has(DeclarationFlags::CUSTOM_GETTER)
                             || header
                                 .flags
                                 .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)),
-                    has_declared_getter: receiver.is_some()
+                    has_declared_getter: value_receiver.is_some()
                         || header.flags.has(DeclarationFlags::CUSTOM_GETTER),
                     source_order,
                 });

@@ -143,12 +143,7 @@ impl BodyFirChecker<'_> {
                 )
             } else {
                 parameters.remove(receiver_position);
-                (
-                    (!property.is_companion_extension())
-                        .then_some(property.receiver)
-                        .flatten(),
-                    None,
-                )
+                (property.receiver, None)
             }
         } else {
             (None, None)
@@ -206,12 +201,7 @@ impl BodyFirChecker<'_> {
                 )
             } else {
                 parameters.remove(receiver_position);
-                (
-                    (!property.is_companion_extension())
-                        .then_some(property.receiver)
-                        .flatten(),
-                    None,
-                )
+                (property.receiver, None)
             }
         } else {
             (None, None)
@@ -930,34 +920,21 @@ impl BodyFirChecker<'_> {
                 )
             }
             Some(ExprLowering::ExtensionPropertyGet { access }) => {
-                let companion_extension = access
-                    .property
-                    .stable_declaration
-                    .and_then(|declaration| self.index.declaration_header(declaration))
-                    .is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                    });
-                let extension_receiver = if companion_extension {
-                    None
-                } else {
-                    Some(match receiver {
-                        Some(receiver) => FirReceiver {
-                            value: self.expression(receiver)?,
-                            conversion: None,
-                        },
-                        None => {
-                            let Some(receiver) = self.implicit_receiver(expression)? else {
-                                return Ok(None);
-                            };
-                            receiver
-                        }
-                    })
+                let extension_receiver = match receiver {
+                    Some(receiver) => FirReceiver {
+                        value: self.expression(receiver)?,
+                        conversion: None,
+                    },
+                    None => {
+                        let Some(receiver) = self.implicit_receiver(expression)? else {
+                            return Ok(None);
+                        };
+                        receiver
+                    }
                 };
                 if access.property.getter.compiler_intrinsic
                     == Some(crate::libraries::CompilerIntrinsic::CharCode)
                 {
-                    let extension_receiver = extension_receiver
-                        .expect("the Char.code intrinsic has a runtime extension receiver");
                     let cause = self.expression_origin(expression)?;
                     let target = ResolvedTy::new(access.property.ty).map_err(|error| {
                         self.failure(
@@ -990,33 +967,22 @@ impl BodyFirChecker<'_> {
                     .external_property_identity
                     .map(|property| ExternalPropertyTarget {
                         property,
-                        receiver: singleton_dispatch.map_or_else(
-                            || {
-                                (!companion_extension)
-                                    .then_some(access.property.receiver)
-                                    .flatten()
-                            },
-                            |singleton| Some(singleton.ty()),
-                        ),
+                        receiver: singleton_dispatch
+                            .map_or(access.property.receiver, |singleton| Some(singleton.ty())),
                         parameters,
                         result: access.property.ty,
                         extension_receiver_parameter,
                     });
                 // An extension imported from an object is still a MEMBER extension: the
                 // selected getter carries its exact singleton dispatch declaration. Preserve
-                // that receiver in FIR just as selected extension calls do. Companion-marked
-                // source extensions are intentionally realized as receiverless declarations.
-                let dispatch_receiver = if companion_extension {
-                    None
-                } else {
-                    access
-                        .property
-                        .getter
-                        .singleton_dispatch
-                        .as_deref()
-                        .map(|singleton| self.singleton_call_receiver(expression, singleton))
-                        .transpose()?
-                };
+                // that receiver in FIR just as selected extension calls do.
+                let dispatch_receiver = access
+                    .property
+                    .getter
+                    .singleton_dispatch
+                    .as_deref()
+                    .map(|singleton| self.singleton_call_receiver(expression, singleton))
+                    .transpose()?;
                 let declaration = access.property.stable_declaration;
                 let substitutions = declaration.map_or_else(
                     || {
@@ -1036,7 +1002,7 @@ impl BodyFirChecker<'_> {
                     declaration,
                     external,
                     dispatch_receiver,
-                    extension_receiver,
+                    Some(extension_receiver),
                     access.context_args,
                     substitutions,
                 )
@@ -1394,29 +1360,16 @@ impl BodyFirChecker<'_> {
             crate::resolve::ImplicitPropertyWriteTarget::Extension { receiver, access } => {
                 let external_getter = Self::external_property_getter(&access.property, true);
                 let external_setter = Self::external_property_setter(&access.property, true);
-                let companion_extension = access
-                    .property
-                    .stable_declaration
-                    .and_then(|declaration| self.index.declaration_header(declaration))
-                    .is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                    });
-                let receiver = if companion_extension {
-                    None
-                } else {
-                    let Some(receiver) =
-                        self.materialize_implicit_receiver(cause, span, &receiver)?
-                    else {
-                        return Ok(None);
-                    };
-                    Some(receiver)
+                let Some(receiver) = self.materialize_implicit_receiver(cause, span, &receiver)?
+                else {
+                    return Ok(None);
                 };
                 (
                     access.property.stable_declaration,
                     external_getter,
                     external_setter,
                     None,
-                    receiver,
+                    Some(receiver),
                     access.context_args,
                 )
             }
@@ -2024,26 +1977,17 @@ impl BodyFirChecker<'_> {
                     let Some(receiver) = receiver else {
                         return Ok(None);
                     };
-                    let companion_extension = access.property.is_companion_extension();
-                    let extension_receiver = if companion_extension {
-                        None
-                    } else {
-                        Some(FirReceiver {
-                            value: self.expression(receiver)?,
-                            conversion: None,
-                        })
-                    };
-                    let dispatch_receiver = if companion_extension {
-                        None
-                    } else {
-                        access
-                            .property
-                            .setter
-                            .as_ref()
-                            .and_then(|setter| setter.singleton_dispatch.as_deref())
-                            .map(|singleton| self.singleton_call_receiver(value, singleton))
-                            .transpose()?
-                    };
+                    let extension_receiver = Some(FirReceiver {
+                        value: self.expression(receiver)?,
+                        conversion: None,
+                    });
+                    let dispatch_receiver = access
+                        .property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.singleton_dispatch.as_deref())
+                        .map(|singleton| self.singleton_call_receiver(value, singleton))
+                        .transpose()?;
                     (
                         access.property.stable_declaration,
                         Self::external_property_setter(&access.property, true),
@@ -2103,39 +2047,23 @@ impl BodyFirChecker<'_> {
                         )
                     }
                     crate::resolve::ImplicitPropertyWriteTarget::Extension { receiver, access } => {
-                        let companion_extension = access
+                        let Some(receiver) =
+                            self.materialize_implicit_receiver(cause, span, &receiver)?
+                        else {
+                            return Ok(None);
+                        };
+                        let dispatch_receiver = access
                             .property
-                            .stable_declaration
-                            .and_then(|declaration| self.index.declaration_header(declaration))
-                            .is_some_and(|header| {
-                                header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                            });
-                        let receiver = if companion_extension {
-                            None
-                        } else {
-                            let Some(receiver) =
-                                self.materialize_implicit_receiver(cause, span, &receiver)?
-                            else {
-                                return Ok(None);
-                            };
-                            Some(receiver)
-                        };
-                        let dispatch_receiver = if companion_extension {
-                            None
-                        } else {
-                            access
-                                .property
-                                .setter
-                                .as_ref()
-                                .and_then(|setter| setter.singleton_dispatch.as_deref())
-                                .map(|singleton| self.singleton_call_receiver(value, singleton))
-                                .transpose()?
-                        };
+                            .setter
+                            .as_ref()
+                            .and_then(|setter| setter.singleton_dispatch.as_deref())
+                            .map(|singleton| self.singleton_call_receiver(value, singleton))
+                            .transpose()?;
                         (
                             access.property.stable_declaration,
                             Self::external_property_setter(&access.property, true),
                             dispatch_receiver,
-                            receiver,
+                            Some(receiver),
                             access.context_args,
                         )
                     }

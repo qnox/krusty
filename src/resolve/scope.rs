@@ -232,6 +232,10 @@ pub(crate) struct Scope<'p, B> {
     /// Source-declared receiver type label (`String` in `fun String.f`). This cannot be recovered
     /// from the semantic type when the source used a type alias.
     extension_receiver_label: Option<String>,
+    /// Classifier whose static scope this function rung opens: a companion extension or
+    /// `companion { … }` block member has no value receiver, only the companion-associated
+    /// declarations of its classifier in lexical scope.
+    companion_classifier: Option<crate::types::TypeName>,
     /// Bindings on this rung that are the lexical names of receiver entries owned by its parent
     /// function rung. Member parameters live on a child rung so they can shadow properties; named
     /// context parameters therefore need an explicit alias marker instead of being counted as a
@@ -264,6 +268,7 @@ impl<'p, B> Scope<'p, B> {
             current_receiver_name: None,
             extension_receiver_declaration: None,
             extension_receiver_label: None,
+            companion_classifier: None,
             parent_receiver_aliases: HashMap::new(),
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
@@ -377,6 +382,26 @@ impl<'p, B> Scope<'p, B> {
             .get_mut()
             .extend_from_slice(context_receivers);
         child
+    }
+
+    /// Function rung of a companion extension or companion-block member of `classifier`: its
+    /// context receivers are implicit receivers, and `classifier`'s companion-associated
+    /// declarations are in lexical scope without any value receiver.
+    pub(crate) fn declaration_companion_function_child(
+        &'p self,
+        classifier: crate::types::TypeName,
+        context_receivers: &[ContextReceiver],
+    ) -> Scope<'p, B> {
+        let mut child = self.declaration_function_child_with_context(None, None, context_receivers);
+        child.companion_classifier = Some(classifier);
+        child
+    }
+
+    /// Classifiers whose companion-associated declarations are in lexical scope, innermost first.
+    pub(crate) fn companion_classifiers(&self) -> Vec<crate::types::TypeName> {
+        self.ancestors()
+            .filter_map(|rung| rung.companion_classifier)
+            .collect()
     }
 
     /// Attach classifier-owned context receivers after its type parameters have entered the class

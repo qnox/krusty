@@ -88,8 +88,8 @@ pub(super) fn emit(
     let (after_source, before_source): (Vec<_>, Vec<_>) = clinit_statics
         .iter()
         .partition(|(index, _)| ir.static_initializer_is_after_source(*index));
-    for (_, property) in &before_source {
-        emitter.emit_static_initializer_store(fq_name, property, &mut clinit);
+    for (index, _) in &before_source {
+        emitter.emit_static_initializer_store(fq_name, *index, &mut clinit);
     }
 
     let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
@@ -141,13 +141,13 @@ pub(super) fn emit(
         }
     }
 
-    for (_, property) in &after_source {
+    for (index, property) in &after_source {
         if property.line != 0
             && clinit_line_entries.last().map(|&(_, line)| line) != Some(property.line)
         {
             clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
         }
-        emitter.emit_static_initializer_store(fq_name, property, &mut clinit);
+        emitter.emit_static_initializer_store(fq_name, *index, &mut clinit);
     }
 
     let clinit_max = emitter.frame.max();

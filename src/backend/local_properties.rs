@@ -9,6 +9,18 @@ use crate::fir::PropertyId;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrLocalPropertyLayout};
 use crate::types::{Ty, TypeName};
 
+/// A same-file call to a property accessor. A `companion { … }` block property's accessor is a
+/// static member of the class whose block declared it, as common lowering placed it.
+fn accessor_callee(ir: &IrFile, accessor: crate::ir::FunId) -> Callee {
+    match ir.companion_blocks.declaring_class(accessor) {
+        Some(class) => Callee::ClassStatic {
+            owner: ir.classes[class as usize].fq_name_id(),
+            function: accessor,
+        },
+        None => Callee::Local(accessor),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RealizedLocalPropertyAccess {
     pub operation: ExprId,
@@ -141,7 +153,7 @@ fn property_read(
                 Err(target)
             } else if let Some(getter) = getter {
                 Ok(IrExpr::Call {
-                    callee: Callee::Local(*getter),
+                    callee: accessor_callee(ir, *getter),
                     dispatch_receiver: None,
                     args: Vec::new(),
                 })
@@ -165,7 +177,7 @@ fn property_read(
                 _ => return Err(target),
             }
             Ok(IrExpr::Call {
-                callee: Callee::Local(*getter),
+                callee: accessor_callee(ir, *getter),
                 dispatch_receiver: None,
                 args,
             })
@@ -281,7 +293,7 @@ fn property_write(
                 Err(target)
             } else if let Some(setter) = setter {
                 Ok(IrExpr::Call {
-                    callee: Callee::Local(*setter),
+                    callee: accessor_callee(ir, *setter),
                     dispatch_receiver: None,
                     args: vec![value],
                 })
@@ -310,7 +322,7 @@ fn property_write(
             }
             args.push(value);
             Ok(IrExpr::Call {
-                callee: Callee::Local(setter),
+                callee: accessor_callee(ir, setter),
                 dispatch_receiver: None,
                 args,
             })

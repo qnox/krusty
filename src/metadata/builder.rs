@@ -58,6 +58,8 @@ pub struct FnMeta {
     pub infix: bool,
     /// `tailrec fun` — sets `Function.flags` `IS_TAILREC` (bit 11).
     pub tailrec: bool,
+    /// Companion-associated (`companion fun C.name`) — sets `Function.flags` bit 18.
+    pub companion: bool,
     /// Declared type parameters in order `(name, reified)` — emitted as the `Function.type_parameter`
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
@@ -120,6 +122,7 @@ impl FnMeta {
             operator: false,
             infix: false,
             tailrec: false,
+            companion: false,
             type_params: Vec::new(),
             semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
@@ -420,7 +423,12 @@ fn function_pb(
         | (u64::from(f.tailrec) << 11)
         | (u64::from(f.inline) << 10)
         | (u64::from(f.infix) << 9)
-        | (u64::from(f.operator) << 8);
+        | (u64::from(f.operator) << 8)
+        | if f.companion {
+            crate::metadata::function_flags::IS_COMPANION
+        } else {
+            0
+        };
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
                                                  // `Type.type_parameter` ids generic types and contract conclusions reference.
@@ -637,6 +645,8 @@ pub struct PropMeta {
     /// `Property.getter_flags` (f7) = 70 — public·final·`isNotDefault` — for a declared getter and
     /// omits the field for a default one.
     pub has_declared_getter: bool,
+    /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
+    pub companion: bool,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -813,7 +823,12 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     };
     // A `const val` sets the CONST flag bit (kotlinc: public const `10758` = `8710 | 2048`).
     let const_bit = if m.is_const { 1 << 11 } else { 0 };
-    let pflags = (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit;
+    let companion_bit = if m.companion {
+        property_flags::IS_COMPANION
+    } else {
+        0
+    };
+    let pflags = (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit | companion_bit;
     // protobuf omits an optional field at its declared default — a plain `public val` with a
     // non-constant initializer records NO flags word, exactly like a class property.
     if pflags != property_flags::DEFAULT {
@@ -1014,6 +1029,7 @@ mod tests {
                 has_constant,
                 has_backing_field: true,
                 has_declared_getter: false,
+                companion: false,
                 decl_order: 0,
             }
         }
@@ -1063,6 +1079,7 @@ mod tests {
                 is_const: false,
                 has_backing_field: false,
                 has_declared_getter: true,
+                companion: false,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1115,6 +1132,7 @@ mod tests {
                 is_const: false,
                 has_backing_field: false,
                 has_declared_getter: true,
+                companion: false,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1169,6 +1187,7 @@ mod tests {
                 is_const: false,
                 has_backing_field: true,
                 has_declared_getter: false,
+                companion: false,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1212,6 +1231,7 @@ mod tests {
                 has_constant: false,
                 has_backing_field: false,
                 has_declared_getter: true,
+                companion: false,
                 decl_order: 0,
             }],
             &[],

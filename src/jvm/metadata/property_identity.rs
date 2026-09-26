@@ -19,18 +19,22 @@ pub(super) fn inline_underlying_property_name_id(message: &[u8]) -> Option<u64> 
 /// Parse the getter and setter declaration identities from a `JvmPropertySignature` extension.
 /// Keeping this beside the property-name identity decoder makes the protobuf edges explicit before
 /// the main decoder normalizes them into semantic property facts.
-pub(super) fn parse_jvm_property_signature(
-    body: &[u8],
-) -> (
-    Option<super::ParsedJvmSignature>,
-    Option<super::ParsedJvmSignature>,
-) {
+pub(super) fn parse_jvm_property_signature(body: &[u8]) -> ParsedJvmPropertySignature {
     let mut pb = super::Pb::new(body);
+    let mut field = None;
     let mut getter = None;
     let mut setter = None;
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
+            // `JvmFieldSignature` has the same `name`/`desc` fields as a method signature.
+            (1, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(signature) = pb.bytes(n as usize) {
+                        field = super::parse_jvm_signature(signature);
+                    }
+                }
+            }
             (3, 2) => {
                 if let Some(n) = pb.varint() {
                     if let Some(signature) = pb.bytes(n as usize) {
@@ -52,7 +56,20 @@ pub(super) fn parse_jvm_property_signature(
             }
         }
     }
-    (getter, setter)
+    ParsedJvmPropertySignature {
+        field,
+        getter,
+        setter,
+    }
+}
+
+/// A property's `JvmPropertySignature`: its backing field and accessors, each absent when the
+/// metadata omits it.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ParsedJvmPropertySignature {
+    pub(super) field: Option<super::ParsedJvmSignature>,
+    pub(super) getter: Option<super::ParsedJvmSignature>,
+    pub(super) setter: Option<super::ParsedJvmSignature>,
 }
 
 #[cfg(test)]

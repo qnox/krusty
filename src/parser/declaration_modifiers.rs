@@ -134,6 +134,20 @@ impl Parser<'_> {
         }
         mods
     }
+
+    /// Consume another modifier/annotation run belonging to the declaration whose prefix is
+    /// already buffered. Kotlin permits context and `companion` clauses between such runs, so a
+    /// later run must append annotations rather than erase the ones parsed before the clause.
+    pub(super) fn extend_decl_prefix(&mut self) -> Vec<String> {
+        let mut annotations = std::mem::take(&mut self.pending_annotations);
+        let mut annotation_args = std::mem::take(&mut self.pending_annotation_args);
+        let modifiers = self.skip_decl_prefix();
+        annotations.append(&mut self.pending_annotations);
+        annotation_args.append(&mut self.pending_annotation_args);
+        self.pending_annotations = annotations;
+        self.pending_annotation_args = annotation_args;
+        modifiers
+    }
 }
 
 /// Return the source span of `modifier` when it was present in the parsed modifier set.

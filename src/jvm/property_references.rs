@@ -610,8 +610,9 @@ fn module_property(
     } else {
         None
     };
-    let declaration_facade =
-        super::module_calls::facade_for(property.source, stems).ok_or(failure)?;
+    let static_owner =
+        super::module_calls::static_owner(property.placement, property.source, stems)
+            .ok_or(failure)?;
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
     let access_bridge = enclosing.is_some()
@@ -620,9 +621,9 @@ fn module_property(
         .extension_receiver
         .and_then(Ty::kotlin_class_internal)
         .or(enclosing)
-        .unwrap_or(declaration_facade);
+        .unwrap_or(static_owner);
     // A companion-block receiver names the reflected classifier but is not passed to the accessor.
-    // Keep the semantic owner (`C`) separate from the physical file-facade call owner.
+    // Keep the semantic owner (`C`) separate from the physical static call owner.
     let static_dispatch =
         companion_associated || (property.extension_receiver.is_none() && enclosing.is_none());
     let ext_facade = if access_bridge {
@@ -630,7 +631,7 @@ fn module_property(
     } else if companion_associated {
         None
     } else {
-        property.extension_receiver.map(|_| declaration_facade)
+        property.extension_receiver.map(|_| static_owner)
     }
     .map(Some);
     let getter_descriptor = if access_bridge {
@@ -672,7 +673,7 @@ fn module_property(
     Ok((
         PropRef {
             owner_internal: Some(owner),
-            call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
+            call_owner_internal: Some(enclosing.unwrap_or(static_owner)),
             prop_name: name.to_string(),
             getter_name: if access_bridge {
                 format!("access${declared_getter_name}$p")

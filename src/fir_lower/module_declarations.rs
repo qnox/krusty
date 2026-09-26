@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::fir::{
     CallableId, DeclarationFlags, DeclarationId, FirPropertyReferenceTarget, PropertyId,
-    ResolvedModuleIndex,
+    ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
     Callee, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrHeaderAnnotation,
@@ -66,6 +66,11 @@ fn publish_callable(
         })
         .transpose()?;
     let owner = owner.map(|classifier| classifier.classifier);
+    let placement = super::companion_blocks::static_placement(
+        flags,
+        callable.shape.extension_receiver.map(ResolvedTy::get),
+        FirFileLoweringFailure::MissingCallable(callable.declaration),
+    )?;
     let signature =
         index
             .signature(callable.declaration)
@@ -117,6 +122,7 @@ fn publish_callable(
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            placement,
         },
     );
     Ok(())
@@ -216,6 +222,11 @@ fn publish_property(
                 .to_vec()
                 .into_boxed_slice(),
             flags: header.flags,
+            placement: super::companion_blocks::static_placement(
+                header.flags,
+                property.extension_receiver.map(ResolvedTy::get),
+                FirFileLoweringFailure::MissingProperty(property.declaration),
+            )?,
         },
     );
     Ok(())

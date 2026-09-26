@@ -643,6 +643,7 @@ impl FdFlags {
     const IS_COMPANION_EXTENSION: u16 = 1 << 9;
     const IS_EXTERNAL: u16 = 1 << 10;
     const IS_ACTUAL: u16 = 1 << 11;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 12;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -705,6 +706,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_actual(self, on: bool) -> Self {
         self.with(Self::IS_ACTUAL, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
     }
 }
 
@@ -852,6 +857,12 @@ impl FunDecl {
     #[inline]
     pub fn is_companion_extension(&self) -> bool {
         self.flags.has(FdFlags::IS_COMPANION_EXTENSION)
+    }
+    /// Declared inside a `companion { … }` block rather than written as `companion fun C.f()`.
+    /// Both resolve alike; only a block member is a static member of its classifier.
+    #[inline]
+    pub fn is_companion_block_member(&self) -> bool {
+        self.flags.has(FdFlags::IS_COMPANION_BLOCK_MEMBER)
     }
     /// The `external` modifier. krusty does not implement an external body; the modifier is
     /// recorded because a declaration diagnostic renders it.
@@ -1257,6 +1268,9 @@ pub struct PropDecl {
     /// `companion val/var C.name`: an associated extension declaration whose classifier receiver
     /// is a source lookup coordinate rather than a runtime value receiver.
     pub is_companion_extension: bool,
+    /// Declared inside a `companion { … }` block: a static member of the receiver classifier,
+    /// where a written `companion val C.name` is a static member of the file facade.
+    pub is_companion_block_member: bool,
     /// `open` or `override` (without `final`) — the accessors are overridable, so the JVM backend
     /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
     pub is_open: bool,
