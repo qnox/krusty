@@ -69,3 +69,21 @@ fn object_only_file_emits_no_facade() {
         "spurious empty facade emitted for an object-only file: {names:?}",
     );
 }
+
+/// A reference field's fresh value is `null`, so a boxed zero or `false` is a real store: kotlinc
+/// keeps it in `<clinit>` and in the constructor, where a scalar zero would be elided.
+#[test]
+fn a_boxed_zero_initializer_is_stored_like_kotlinc() {
+    let src = "val boxedCount: Int? = 0\n\
+        val boxedFlag: Boolean? = false\n\
+        var anyLong: Any = 0L\n\
+        val absent: String? = null\n\
+        val count: Int = 0\n\
+        class Holder {\n    val boxed: Int? = 0\n    var ratio: Double? = 0.0\n    val plain = 0\n}\n";
+    let pair = common::ModuleClassPair::compile(&[("BoxedDefaults.kt", src)], "BoxedDefaultsKt");
+    let (kotlinc, krusty) = pair.method_code("BoxedDefaultsKt", "<clinit>");
+    assert_eq!(krusty, kotlinc);
+    let pair = common::ModuleClassPair::compile(&[("BoxedDefaults.kt", src)], "Holder");
+    let (kotlinc, krusty) = pair.method_code("Holder", "Holder");
+    assert_eq!(krusty, kotlinc);
+}

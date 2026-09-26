@@ -44,6 +44,7 @@ mod overrides;
 mod progression;
 pub(crate) mod referenced_classifiers;
 mod references;
+mod storage_default;
 mod type_check_role;
 mod type_reflection;
 mod value_class_constructors;
@@ -3509,51 +3510,6 @@ impl IrFile {
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
-    /// Is `expression` a declaration's initializer store that writes only what a freshly allocated
-    /// object's storage already holds, and so must not be emitted?
-    ///
-    /// `var x = 0` in a class body stores nothing: kotlinc omits an initializer that writes the
-    /// value fresh storage already holds (`null`, a zero of any width, `false`). The omission is
-    /// observable, not an optimization: a base-class constructor that dispatches to an override runs
-    /// BEFORE the subclass's initializers, so a value it wrote through that override survives
-    /// exactly because the declaration's own store was never emitted. A later `init { x = 0 }` is a
-    /// different statement with a different meaning, which is why the store's exact identity comes
-    /// from `property_initializer_stores` rather than from its shape.
-    ///
-    /// Every target krusty emits for clears an object's storage when it allocates, so this is one
-    /// rule for every backend.
-    pub fn is_elided_initializer_store(&self, expression: ExprId) -> bool {
-        self.property_initializer_stores.contains(&expression)
-            && matches!(self.expr(expression), IrExpr::SetField { value, .. }
-                if self.is_storage_default(*value))
-    }
-
-    /// Is `expression` the value a freshly allocated object's storage already holds: `null`, a zero
-    /// of any width (signed or unsigned, whose carrier is the same), or `false`?
-    pub fn is_storage_default(&self, expression: ExprId) -> bool {
-        match self.expr(expression) {
-            IrExpr::Const(IrConst::Boolean(false))
-            | IrExpr::Const(IrConst::Byte(0))
-            | IrExpr::Const(IrConst::Short(0))
-            | IrExpr::Const(IrConst::Int(0))
-            | IrExpr::Const(IrConst::Long(0))
-            | IrExpr::Const(IrConst::Char(0))
-            | IrExpr::Const(IrConst::UByte(0))
-            | IrExpr::Const(IrConst::UShort(0))
-            | IrExpr::Const(IrConst::UInt(0))
-            | IrExpr::Const(IrConst::ULong(0))
-            | IrExpr::Const(IrConst::Null) => true,
-            IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
-            IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => self.is_storage_default(*arg),
-            _ => false,
-        }
-    }
-
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
     }

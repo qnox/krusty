@@ -67,10 +67,16 @@ pub fn elide_default_property_stores(ir: &mut IrFile) {
 mod tests {
     use super::*;
     use crate::ir::IrConst;
+    use crate::types::Ty;
 
     #[test]
     fn removes_only_the_recorded_declaration_store() {
         let mut ir = IrFile::default();
+        let mut holder = crate::plugins::synthetic_class("fixture/Holder");
+        holder
+            .fields
+            .push(crate::ir::IrField::new("count".to_string(), Ty::Int));
+        ir.add_class(holder);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let declaration = ir.add_expr(IrExpr::SetField {
@@ -110,9 +116,9 @@ mod tests {
             IrConst::ULong(0),
         ] {
             let expression = ir.add_expr(IrExpr::Const(zero));
-            assert!(ir.is_storage_default(expression));
+            assert!(ir.is_storage_default(Ty::UInt, expression));
         }
         let one = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
-        assert!(!ir.is_storage_default(one));
+        assert!(!ir.is_storage_default(Ty::UInt, one));
     }
 }

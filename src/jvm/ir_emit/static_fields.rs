@@ -218,7 +218,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     // (`val absent: String? = null`, `var count: Int = 0`) — the same elision instance fields get
     // from `elide_default_property_stores`.
     let should_store = |s: &crate::ir::IrStatic| {
-        !(ir.is_storage_default(s.init) || s.is_const && const_value_idx_peek(ir, s.init))
+        !(ir.is_storage_default(s.ty, s.init) || s.is_const && const_value_idx_peek(ir, s.init))
     };
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. With nothing left to store there is NO `<clinit>` at all, so reserve only when a

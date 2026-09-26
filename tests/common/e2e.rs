@@ -558,10 +558,13 @@ impl ModuleClassPair {
 }
 
 /// The instruction lines of the first method whose declaration names `method`, with `#N` pool
-/// references masked.
+/// references masked. javap spells the static initializer `<clinit>` as `static {};`.
 fn method_instructions(disassembly: &str, method: &str) -> Option<String> {
     let mut lines = disassembly.lines().map(str::trim);
     lines.find(|line| {
+        if method == "<clinit>" {
+            return *line == "static {};";
+        }
         line.split('(')
             .next()
             .and_then(|head| head.split_whitespace().last())
