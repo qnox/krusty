@@ -785,11 +785,13 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:warning=native runtime: compiler `{}` was not found; no native target will be available. Install clang, or set KRUSTY_RUNTIME_CC.\n\
@@ -834,11 +836,13 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
          cargo:rerun-if-changed=build.rs\n\
          cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n"
     );

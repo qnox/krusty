@@ -1,6 +1,5 @@
 /* krusty native runtime — generated; do not edit. */
-#include "krusty_rt.h"
-#include "krusty_sys.h"
+#include "krusty_internal.h"
 
 /* ---- kernel interface ---------------------------------------------------------------------- */
 
@@ -9,8 +8,6 @@ void kt_exit(kt_int status) { kt_sys_exit(status); }
 static void kt_write(kt_int fd, const char *bytes, size_t length) {
     kt_sys_write(fd, bytes, length);
 }
-
-#define KT_FAIL(literal) KT_SYS_FAIL(literal)
 
 /* ---- freestanding C support --------------------------------------------------------------- */
 
@@ -43,7 +40,7 @@ static kt_int kt_builtin_hash_code(KRef self);
 static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_builtin_hash_code,
                                           (kt_fn)kt_to_string};
 
-static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+const kt_fn kt_any_vtable[3] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                       (kt_fn)kt_any_to_string};
 
 /* The names of a class of the runtime's own: `simple` in `package` (which ends in its dot), both
@@ -279,36 +276,11 @@ void kt_no_such_enum_constant(KRef name) {
 
 typedef KArray KByteArray;
 
-static kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
-
 static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
 
 static KByteArray *kt_bytes_new(kt_int length) {
     return (KByteArray *)kt_array_new(&kt_type_byte_array, length);
 }
-
-/* Every built-in value is one of these; the header's type says which. */
-struct KObject {
-    KObjectHeader header;
-    union {
-        struct {
-            /* The heap byte array holding the text, or NULL when `bytes` points into static
-               storage (a literal). This is the string type's one reference field: it is what
-               keeps the text alive exactly as long as the string. */
-            KRef storage;
-            const char *bytes;
-            kt_int byte_length;
-        } string;
-        kt_byte byte_value;
-        kt_short short_value;
-        kt_int int_value;
-        kt_long long_value;
-        kt_char char_value;
-        kt_boolean boolean_value;
-        kt_float float_value;
-        kt_double double_value;
-    } as;
-};
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
@@ -436,18 +408,7 @@ kt_char kt_string_get(KRef self, kt_int index) {
     return 0;
 }
 
-/* A UTF-16 walk over UTF-8 storage, which is what every question Kotlin asks about a string's
-   CONTENT needs: the unit is the unit Kotlin counts, and a character above U+FFFF is two of them.
-   `pending` holds the trailing surrogate of a pair whose leading half has already been handed out;
-   zero is not a valid trailing surrogate, so it doubles as "none". */
-typedef struct KUnits {
-    const char *bytes;
-    kt_int byte_length;
-    kt_int at;
-    uint32_t pending;
-} KUnits;
-
-static KUnits kt_units_of(KRef self) {
+KUnits kt_units_of(KRef self) {
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     KUnits units = {bytes, byte_length, 0, 0};
@@ -455,7 +416,7 @@ static KUnits kt_units_of(KRef self) {
 }
 
 /* The next unit, or zero when the text is exhausted. */
-static kt_boolean kt_units_next(KUnits *units, kt_char *out) {
+kt_boolean kt_units_next(KUnits *units, kt_char *out) {
     if (units->pending != 0) {
         *out = (kt_char)units->pending;
         units->pending = 0;
@@ -1937,7 +1898,6 @@ static KRef kt_lazy_to_string(KRef self) {
    cannot ask the object for it, since a property reference answers `name` from a table of the
    emitted code's own. */
 static void kt_raise_uninitialized_property(KRef name);
-static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
 
 typedef struct KNotNullVar {
     KObjectHeader header;
@@ -2389,7 +2349,7 @@ KRef kt_ulong_range_until(kt_long first, kt_long last) {
 }
 
 /* Empty is direction-dependent once there is a step: `10 downTo 1` runs, `1 downTo 10` does not. */
-static kt_boolean kt_range_empty(const KRange *range) {
+kt_boolean kt_range_empty(const KRange *range) {
     kt_boolean unsigned_bounds = kt_range_unsigned(range->header.type);
     return range->step > 0 ? kt_range_below(unsigned_bounds, range->last, range->first)
                            : kt_range_below(unsigned_bounds, range->first, range->last);
@@ -2533,7 +2493,7 @@ static const KType *const kt_range_iterator_types[KT_RANGE_KINDS] = {
    struct is read through, because everything that is not one of this runtime's own shapes and not
    a walkable class of the program ends up at the range reader — and a value read as a struct it is
    not is a wrong answer where a refusal is the honest one. */
-static kt_boolean kt_is_range(KRef value) {
+kt_boolean kt_is_range(KRef value) {
     return value != NULL && kt_range_kind(value->header.type) >= 0;
 }
 
@@ -2624,9 +2584,6 @@ KRef kt_ulong_range_down_to(kt_long first, kt_long last) {
    `CharIterator` — the narrow protocol these two functions implement. So the walk has to answer
    here as well as through the general dispatch, and the descriptor is what says which object this
    is. */
-static kt_boolean kt_walk_is(KRef iterator);
-static kt_boolean kt_walk_has_next(KRef iterator);
-static kt_long kt_walk_next_long(KRef iterator);
 
 kt_boolean kt_range_iterator_has_next(KRef iterator) {
     if (kt_walk_is(iterator)) {

@@ -1,0 +1,83 @@
+/* krusty native runtime: what its translation units share and generated code never sees.
+
+   `krusty_rt.h` is the contract generated code is written against. This header is the runtime's
+   own: the layout of a built-in value, and the handful of helpers that `krusty_rt.c` defines and
+   `krusty_collections.c` calls, or the other way round. Nothing outside `src/native/runtime/`
+   includes it. */
+#ifndef KRUSTY_INTERNAL_H
+#define KRUSTY_INTERNAL_H
+
+#include "krusty_rt.h"
+#include "krusty_sys.h"
+
+#define KT_FAIL(literal) KT_SYS_FAIL(literal)
+
+/* Every built-in value is one of these; the header's type says which. */
+struct KObject {
+    KObjectHeader header;
+    union {
+        struct {
+            /* The heap byte array holding the text, or NULL when `bytes` points into static
+               storage (a literal). This is the string type's one reference field: it is what
+               keeps the text alive exactly as long as the string. */
+            KRef storage;
+            const char *bytes;
+            kt_int byte_length;
+        } string;
+        kt_byte byte_value;
+        kt_short short_value;
+        kt_int int_value;
+        kt_long long_value;
+        kt_char char_value;
+        kt_boolean boolean_value;
+        kt_float float_value;
+        kt_double double_value;
+    } as;
+};
+
+/* An array's element count, from the header every array begins with. */
+static inline kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
+
+/* `kotlin.Any`'s three members, the table of every runtime type that overrides none of them. */
+extern const kt_fn kt_any_vtable[3];
+
+/* A UTF-16 walk over UTF-8 storage, which is what every question Kotlin asks about a string's
+   CONTENT needs: the unit is the unit Kotlin counts, and a character above U+FFFF is two of them.
+   `pending` holds the trailing surrogate of a pair whose leading half has already been handed out;
+   zero is not a valid trailing surrogate, so it doubles as "none". */
+typedef struct KUnits {
+    const char *bytes;
+    kt_int byte_length;
+    kt_int at;
+    uint32_t pending;
+} KUnits;
+
+KUnits kt_units_of(KRef self);
+/* The next unit, or zero when the text is exhausted. */
+kt_boolean kt_units_next(KUnits *units, kt_char *out);
+
+/* Whether a value is one of the runtime's ranges or progressions, and whether one is empty in the
+   direction it walks. Defined with the ranges in `krusty_rt.c`. */
+kt_boolean kt_is_range(KRef value);
+kt_boolean kt_range_empty(const KRange *range);
+
+/* The iterator a range or progression hands out, one per element kind, which says how to box what
+   it yields. */
+extern const KType kt_type_int_progression_iterator;
+extern const KType kt_type_long_progression_iterator;
+extern const KType kt_type_char_progression_iterator;
+extern const KType kt_type_uint_progression_iterator;
+extern const KType kt_type_ulong_progression_iterator;
+
+/* The walks over arrays and strings, which a range iterator's entry points also answer for:
+   whether an iterator is one, and its `hasNext` and `next` as a 64-bit value. Defined in
+   `krusty_collections.c`. */
+kt_boolean kt_walk_is(KRef iterator);
+kt_boolean kt_walk_has_next(KRef iterator);
+kt_long kt_walk_next_long(KRef iterator);
+
+/* `function(first, second, third)` through the slot every function value declares. Defined in
+   `krusty_collections.c`. */
+KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
+
+#endif /* KRUSTY_INTERNAL_H */
