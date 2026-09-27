@@ -131,13 +131,6 @@ extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyWithInline.kt
 fieldRename/delegates.kt
-finally/kt31923_break.kt
-finally/kt31923_continue.kt
-finally/kt31923_return.kt
-finally/nestedFinallyAndNonFinallyTry.kt
-finally/nestedFinallyAndNonFinallyTry2.kt
-finally/nestedFinallyAndNonFinallyTry3.kt
-finally/nestedFinallyAndNonFinallyTry4.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
 funInterface/funInterfaceWithSuspendMethod.kt
