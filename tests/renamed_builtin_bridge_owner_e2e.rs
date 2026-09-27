@@ -90,6 +90,34 @@ fn a_stdlib_abstract_list_subclass_inherits_the_final_size_bridge() {
     assert_methods_match_kotlinc("AbstractListSize", ABSTRACT_LIST_SIZE, &["Pair2"]);
 }
 
+const INHERITED_ABSTRACT_MUTABLE_LIST: &str =
+    "abstract class Mid : AbstractMutableList<String>()\n\
+class Tail : Mid() {\n\
+    override val size: Int get() = 1\n\
+    override fun get(index: Int): String = \"a\"\n\
+    override fun add(index: Int, element: String) {}\n\
+    override fun removeAt(index: Int): String = \"a\"\n\
+    override fun set(index: Int, element: String): String = \"a\"\n\
+}\n\
+fun box(): String {\n\
+    val erased: Collection<String> = Tail()\n\
+    return if (erased.size == 1) \"OK\" else \"fail\"\n\
+}\n";
+
+/// `AbstractMutableList` declares no `size` of its own: it inherits the member, and kotlinc still
+/// gives it the final `size()` bridge. No override edge of `Tail.size` names that class, and the
+/// source class between them declares nothing, yet `Tail` must not redeclare the bridge. (`Mid`'s
+/// own substituted `remove`/`contains`/`indexOf` bridges are a separate gap.)
+#[test]
+fn a_subclass_below_an_inherited_stdlib_size_bridge_does_not_redeclare_it() {
+    assert_eq!(run(INHERITED_ABSTRACT_MUTABLE_LIST), "OK");
+    assert_methods_match_kotlinc(
+        "InheritedAbstractMutableList",
+        INHERITED_ABSTRACT_MUTABLE_LIST,
+        &["Tail"],
+    );
+}
+
 const SOURCE_COLLECTION_CHAIN: &str = "abstract class Base : Collection<String> {\n\
     override val size: Int get() = 0\n\
     override fun isEmpty(): Boolean = size == 0\n\

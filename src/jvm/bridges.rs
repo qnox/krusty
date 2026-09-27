@@ -59,6 +59,44 @@ fn declaration_order(bridges: &mut [Bridge], order: Vec<u32>) {
     }
 }
 
+/// kotlinc's `BridgeLowering` blacklists the special bridge of every overridden declaration in a
+/// Kotlin superclass: a Kotlin class that first takes `size` from a collection already carries the
+/// final `size()` bridge to its `getSize()`, including through an inherited fake override, so a
+/// subclass must not declare it again (`IncompatibleClassChangeError: overrides final method`). The
+/// override edges name only the declarations that spell the member, so walk the superclass chain
+/// for a Kotlin class whose classfile already has that final method.
+fn inherits_final_special_bridge(
+    ir: &IrFile,
+    cid: usize,
+    classpath: &crate::jvm::classpath::Classpath,
+    name: &str,
+    descriptor: &str,
+) -> bool {
+    let mut next = ir.classes[cid].superclass;
+    loop {
+        if let Some(module_class) = ir.classes.iter().find(|class| class.fq_name == next) {
+            next = module_class.superclass;
+            continue;
+        }
+        let Some(info) = classpath.find_name(next) else {
+            return false;
+        };
+        if info.meta.class_kind.is_some()
+            && info.methods.iter().any(|method| {
+                method.name == name
+                    && method.descriptor == descriptor
+                    && method.access & crate::jvm::classfile::ACC_FINAL != 0
+            })
+        {
+            return true;
+        }
+        match info.super_class {
+            Some(superclass) => next = superclass,
+            None => return false,
+        }
+    }
+}
+
 fn external_method_name(
     classpath: &crate::jvm::classpath::Classpath,
     target: crate::fir::ExternalCallableId,
@@ -179,6 +217,17 @@ fn superclass_method_bridges(
             }
         };
         if bridge_name != edge.name && edge.has_kotlin_superclass_override {
+            continue;
+        }
+        if bridge_name != target_name
+            && inherits_final_special_bridge(
+                ir,
+                cid,
+                classpath,
+                &bridge_name,
+                &method_descriptor(&base_params, base_ret),
+            )
+        {
             continue;
         }
         crate::trace_compiler!(
@@ -328,6 +377,15 @@ fn property_bridges(
             continue;
         }
         if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
+            continue;
+        }
+        let bridge_descriptor = method_descriptor(
+            &declared_receiver.into_iter().collect::<Vec<_>>(),
+            bridge_erasure(edge.declared_type),
+        );
+        if bridge_getter != target_getter
+            && inherits_final_special_bridge(ir, cid, classpath, &bridge_getter, &bridge_descriptor)
+        {
             continue;
         }
         let position = implementation_property
