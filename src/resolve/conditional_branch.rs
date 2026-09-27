@@ -91,3 +91,105 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
         }
     }
 }
+
+impl Checker<'_> {
+    /// The outer expectation that fixes each branch's own generic result, so a sibling branch
+    /// does not rebind it.
+    ///
+    /// kotlinc gives a declared expectation to every branch of an `if`, `when` or elvis:
+    /// `val i: I = if (c) materialize() else B()` fixes `materialize`'s `T` to `I`, not to the
+    /// sibling's `B`. An expectation of `Any` or `Any?` constrains nothing and leaves the sibling to
+    /// decide, as without one (`val x: Any = if (c) materialize() else B()` binds `T` to `B`). So
+    /// does a call argument's: the conditional is then part of the enclosing call's inference, and
+    /// `sink(if (c) materialize() else B())` binds `T` to `B` whatever `sink`'s parameter type.
+    pub(super) fn expectation_fixes_branches(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        conditional: ExprId,
+        expected: Option<Ty>,
+    ) -> Option<Ty> {
+        usable_expected(scope, expected)
+            .filter(|ty| {
+                !matches!(ty.non_null(), Ty::Obj(name, _)
+                    if crate::types::same(name, crate::types::wk::any()))
+            })
+            .filter(|_| !self.is_call_argument(conditional))
+    }
+
+    /// Whether `expression` is written as a value argument of a call.
+    fn is_call_argument(&mut self, expression: ExprId) -> bool {
+        let file = self.file;
+        self.call_arguments
+            .get_or_insert_with(|| {
+                file.expr_arena
+                    .iter()
+                    .flat_map(|candidate| match candidate {
+                        Expr::Call { args, .. }
+                        | Expr::SafeCall {
+                            args: Some(args), ..
+                        } => args.as_slice(),
+                        _ => &[],
+                    })
+                    .copied()
+                    .collect()
+            })
+            .contains(&expression)
+    }
+
+    /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
+    /// result as its expectation. An outer expectation that fixes the branch (see
+    /// [`expectation_fixes_branches`]) keeps it while the sibling conforms to that expectation; a
+    /// sibling that does not (`val s: String = if (c) from(t) else 0`) still decides, so kotlinc's
+    /// mismatch names the sibling's `Int`.
+    pub(super) fn rebind_conditional_branch(
+        &mut self,
+        branch: ExprId,
+        sibling: Ty,
+        current: Ty,
+        fixing_expectation: Option<Ty>,
+        recheck: impl FnOnce(&mut Self, Ty) -> Ty,
+    ) -> Ty {
+        if fixing_expectation.is_some_and(|expected| self.receiver_is_assignable(sibling, expected))
+            || current == Ty::Error
+            || matches!(sibling, Ty::Error | Ty::Nothing)
+            || sibling.mentions_pending()
+        {
+            return current;
+        }
+        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
+            return current;
+        };
+        let infer = |expected| {
+            crate::symbol_resolver::infer_generic_return_bindings(
+                &signature,
+                expected,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            )
+        };
+        // The sibling may be MORE specific than the generic result classifier: a
+        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
+        // supertype. Project the sibling to the selected call's result classifier before giving up;
+        // this is ordinary subtype information, not collection-specific approximation.
+        let expectation = if infer(sibling).is_some() {
+            sibling
+        } else {
+            let source = self.fed_source();
+            let Some(applied) = crate::assignable::applied_supertype(
+                &crate::symbol_resolver::SourceOracle(&source),
+                sibling,
+                signature.ret,
+            ) else {
+                return current;
+            };
+            if infer(applied).is_none() {
+                return current;
+            }
+            applied
+        };
+        crate::trace_compiler!(
+            "expected_call",
+            "conditional branch {branch:?} rebinds against sibling {sibling:?} as {expectation:?}"
+        );
+        recheck(self, expectation)
+    }
+}

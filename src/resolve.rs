@@ -37543,6 +37543,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
+        call_arguments: None,
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
         discovers_captures_at_construction: false,
@@ -40526,6 +40527,8 @@ struct Checker<'a> {
     /// constraints, but it cannot finalize an inference diagnostic; the selected argument check
     /// immediately following overload selection owns that decision.
     postponed_argument_depth: usize,
+    /// Every expression written as a call's value argument, collected on first use.
+    call_arguments: Option<std::collections::HashSet<ExprId>>,
     /// Nonzero while checking a statement that cannot execute because an earlier statement in the
     /// same block always transfers control. The statement is still checked enough to build local
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
@@ -67307,11 +67310,14 @@ impl<'a> Checker<'a> {
                 None if lt == Ty::Nothing => self.expr(scope, rhs),
                 None => self.expr_expected(scope, rhs, lt),
             };
-            let lt0 = self
-                .rebind_conditional_branch(lhs, rt, lt0, |c, exp| c.expr_expected(scope, lhs, exp));
+            let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
+            let lt0 = self.rebind_conditional_branch(lhs, rt, lt0, fixed, |c, exp| {
+                c.expr_expected(scope, lhs, exp)
+            });
             lt = definitely_non_null_ty(lt0);
-            let rt = self
-                .rebind_conditional_branch(rhs, lt, rt, |c, exp| c.expr_expected(scope, rhs, exp));
+            let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
+                c.expr_expected(scope, rhs, exp)
+            });
             self.report_unbound_conditional_branch(scope, lhs);
             self.report_unbound_conditional_branch(scope, rhs);
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
@@ -69427,58 +69433,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
-    /// result as its expectation.
-    fn rebind_conditional_branch(
-        &mut self,
-        branch: ExprId,
-        sibling: Ty,
-        current: Ty,
-        recheck: impl FnOnce(&mut Self, Ty) -> Ty,
-    ) -> Ty {
-        if current == Ty::Error
-            || matches!(sibling, Ty::Error | Ty::Nothing)
-            || sibling.mentions_pending()
-        {
-            return current;
-        }
-        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
-            return current;
-        };
-        let infer = |expected| {
-            crate::symbol_resolver::infer_generic_return_bindings(
-                &signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-        };
-        // The sibling may be MORE specific than the generic result classifier: a
-        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
-        // supertype. Project the sibling to the selected call's result classifier before giving up;
-        // this is ordinary subtype information, not collection-specific approximation.
-        let expectation = if infer(sibling).is_some() {
-            sibling
-        } else {
-            let source = self.fed_source();
-            let Some(applied) = crate::assignable::applied_supertype(
-                &crate::symbol_resolver::SourceOracle(&source),
-                sibling,
-                signature.ret,
-            ) else {
-                return current;
-            };
-            if infer(applied).is_none() {
-                return current;
-            }
-            applied
-        };
-        crate::trace_compiler!(
-            "expected_call",
-            "conditional branch {branch:?} rebinds against sibling {sibling:?} as {expectation:?}"
-        );
-        recheck(self, expectation)
-    }
-
     /// Report a conditional branch whose selected generic call remains symbolic after sibling
     /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
     /// diagnosed here.
@@ -69525,19 +69479,21 @@ impl<'a> Checker<'a> {
             match else_branch {
                 Some(eb) => {
                     let et = self.if_branch_ty(scope, cond, eb, false, wanted);
-                    let tt = self.rebind_conditional_branch(then_branch, et, tt, |c, exp| {
-                        c.if_branch_ty(
-                            scope,
-                            cond,
-                            then_branch,
-                            true,
-                            Wanted {
-                                expected: Some(exp),
-                                value_required: wanted.value_required,
-                            },
-                        )
-                    });
-                    let et = self.rebind_conditional_branch(eb, tt, et, |c, exp| {
+                    let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
+                    let tt =
+                        self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
+                            c.if_branch_ty(
+                                scope,
+                                cond,
+                                then_branch,
+                                true,
+                                Wanted {
+                                    expected: Some(exp),
+                                    value_required: wanted.value_required,
+                                },
+                            )
+                        });
+                    let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
                         c.if_branch_ty(
                             scope,
                             cond,
@@ -69927,6 +69883,7 @@ impl<'a> Checker<'a> {
             }
             // Recheck a symbolic generic call against the other arms' common result type. Conditions
             // and guards are not rechecked.
+            let fixed = self.expectation_fixes_branches(scope, e, expected);
             if arm_results.len() >= 2 {
                 for i in 0..arm_results.len() {
                     let sibling = arm_results
@@ -69951,7 +69908,7 @@ impl<'a> Checker<'a> {
                     let arm_declined = record.arm_declined.clone();
                     let this_narrow = record.this_narrow;
                     let rebound =
-                        self.rebind_conditional_branch(body, sibling, current, |c, exp| {
+                        self.rebind_conditional_branch(body, sibling, current, fixed, |c, exp| {
                             let arm_scope = scope.child(ScopeKind::Block);
                             let scope = &arm_scope;
                             c.apply_narrowings(

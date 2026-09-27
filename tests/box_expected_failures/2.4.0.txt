@@ -103,7 +103,6 @@ delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegation/delegationDifferentModule.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
-elvis/kt6694ExactAnnotationForElvis.kt
 enum/emptyEnumValuesValueOf.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt
@@ -147,9 +146,6 @@ inference/pcla/issues/kt57707.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionFunctions.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionProperties.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inference/whenAtAssignment.kt
-inference/whenAtAssignmentWithSmartCast.kt
-inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
 initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
