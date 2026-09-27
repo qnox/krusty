@@ -60,10 +60,15 @@ pub struct Bridge {
     /// When set, the bridge boxes its (unboxed value-class) result with `<owner>.box-impl` before
     /// returning — a value-class-returning override seen through a supertype hands back a boxed `X`.
     pub box_ret: Option<TypeName>,
+    /// Whether the boxed result may be null: a nullable value class whose carrier holds the null.
+    pub box_ret_nullable: bool,
     /// Per concrete parameter, the boxed value class to `checkcast` + `unbox-impl` before the target
     /// call — a generic supertype method (`B.f(T,U)` → erased `f(Object,Object)`) delegates to a
     /// mangled concrete override taking the value class's UNDERLYING, while the incoming arg is a
     /// boxed `X`. Empty (or all-`None`) ⇒ plain checkcast/convert (the common case). JVM/value-class
     /// concern, populated by the value-class pass; the front end leaves it empty.
     pub unbox_params: Vec<Option<TypeName>>,
+    /// Per concrete parameter, whether the box may be null: a nullable value class whose carrier
+    /// holds the null, so the null passes `unbox-impl` by.
+    pub unbox_param_nullable: Vec<bool>,
 }

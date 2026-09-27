@@ -14,6 +14,7 @@
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
 
 mod bridge_names;
+mod bridge_parameters;
 mod bridge_returns;
 mod call_arguments;
 mod call_result_boundaries;
@@ -1502,35 +1503,15 @@ pub(crate) fn lower_value_classes(
                     b.erased_ret,
                     b.box_ret
                 );
-                let concrete_ret_vc = match &b.concrete_ret {
-                    Ty::Obj(fq_name, _) if callable_under.contains_key(fq_name) => Some(*fq_name),
-                    _ => None,
-                };
+                let concrete_ret_vc =
+                    bridge_parameters::carried_value_class(&b.concrete_ret, &callable_under);
                 let erased_ret_vc = b
                     .erased_ret
                     .non_null()
                     .obj_internal()
                     .filter(|fq_name| callable_under.contains_key(fq_name));
                 if !owner_is_value && !bridge_mentions_vc {
-                    let vc_params: Vec<Option<TypeName>> = b
-                        .concrete_params
-                        .iter()
-                        .zip(b.erased_params.iter())
-                        .map(|(concrete, erased)| match concrete {
-                            Ty::Obj(fq_name, _)
-                                if callable_under.contains_key(fq_name) && is_ref(erased) =>
-                            {
-                                Some(*fq_name)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    if vc_params.iter().any(Option::is_some) {
-                        for parameter in &mut b.concrete_params {
-                            *parameter = erase(parameter, &callable_under);
-                        }
-                        b.unbox_params = vc_params;
-                    }
+                    bridge_parameters::unbox_arguments(b, &callable_under);
                 }
                 if let Some(fq_name) = concrete_ret_vc {
                     if b.target_name.is_none() {
@@ -1583,6 +1564,7 @@ pub(crate) fn lower_value_classes(
                         b.erased_ret = b.concrete_ret.clone();
                     } else {
                         b.box_ret = Some(fq_name);
+                        b.box_ret_nullable = b.concrete_ret.is_nullable();
                         b.concrete_ret = concrete_carrier;
                     }
                 } else if erased_ret_vc.is_some() {
@@ -1612,25 +1594,7 @@ pub(crate) fn lower_value_classes(
                     // param to `checkcast` + `unbox-impl`, then erase the concrete param to its underlying for
                     // the delegated call. A param already AT its underlying (bridge param not a reference —
                     // a primitive-underlying value class) needs no unbox.
-                    let vc_params: Vec<Option<TypeName>> = b
-                        .concrete_params
-                        .iter()
-                        .zip(b.erased_params.iter())
-                        .map(|(cp, ep)| match cp {
-                            Ty::Obj(fq_name, _)
-                                if callable_under.contains_key(fq_name) && is_ref(ep) =>
-                            {
-                                Some(*fq_name)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    if vc_params.iter().any(Option::is_some) {
-                        for p in b.concrete_params.iter_mut() {
-                            *p = erase(p, &callable_under);
-                        }
-                        b.unbox_params = vc_params;
-                    }
+                    bridge_parameters::unbox_arguments(b, &callable_under);
                     naming.answer_to_value_class_parameters(b, &target);
                 }
                 if let Some((target_name, target_params, target_ret)) = lowered_member_target {
@@ -1653,6 +1617,10 @@ pub(crate) fn lower_value_classes(
                                     && physical.non_null().obj_internal() != Some(*classifier)
                             })
                         })
+                        .collect();
+                    b.unbox_param_nullable = logical_concrete_params
+                        .iter()
+                        .map(|logical| logical.is_nullable())
                         .collect();
                     b.concrete_params = physical_params.to_vec();
                     b.target_name = Some(target_name);

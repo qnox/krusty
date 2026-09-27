@@ -6,8 +6,9 @@
 //! boxing and carrier decisions stay in one JVM-owned place.
 
 use super::{
-    box_prim_free, discard, emit_num_conv, emit_return, finish_code, finish_code_sig, ir_ty_to_jvm,
-    jvm_declared_ty, jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
+    box_prim_free, discard, emit_num_conv, emit_return, emit_value_class_box_adapter,
+    emit_value_class_unbox_adapter, finish_code, finish_code_sig, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
     method_descriptor, slot_words, throw_assertion_error, type_descriptor, unbox_prim_from,
     verif_for_jvm_free, ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter,
     VerifType,
@@ -310,12 +311,10 @@ fn emit_bridge(
         // A boxed value-class param (a generic supertype method `f(Object,…)` delegating to a mangled
         // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
         // then `unbox-impl` it to the underlying `ct` the target expects.
+        // A carrier that holds null (`X?` over a non-null reference) takes a null past `unbox-impl`.
         if let Some(Some(vc)) = b.unbox_params.get(k) {
-            let vc = vc.render();
-            let ci = cw.class_ref(&vc);
-            code.checkcast(ci);
-            let m = cw.methodref(&vc, "unbox-impl", &format!("(){}", type_descriptor(*ct)));
-            code.invokevirtual(m, 0, slot_words(*ct) as i32);
+            let nullable = b.unbox_param_nullable.get(k).copied().unwrap_or(false);
+            emit_value_class_unbox_adapter(cw, &mut code, *vc, *ct, nullable);
         } else if et != ct {
             if et.is_reference() && ct.is_reference() {
                 let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
@@ -407,18 +406,8 @@ fn emit_bridge(
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
     }
-    if let Some(owner) = &b.box_ret {
-        let owner = owner.render();
-        let bi = cw.methodref(
-            &owner,
-            "box-impl",
-            &format!(
-                "({}){}",
-                type_descriptor(cr),
-                type_descriptor(Ty::obj(&owner))
-            ),
-        );
-        code.invokestatic(bi, slot_words(cr) as i32, 1);
+    if let Some(owner) = b.box_ret {
+        emit_value_class_box_adapter(cw, &mut code, owner, cr, b.box_ret_nullable);
     } else if let Some(plan) = return_unboxing.filter(|_| unboxes_result) {
         // The supertype declares a VALUE CLASS in its UNBOXED form, so this bridge returns that
         // class's carrier and the carrier comes out of the class's own `unbox-impl` — whether

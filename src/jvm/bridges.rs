@@ -348,7 +348,9 @@ fn superclass_method_bridges(
             special,
             target_name,
             box_ret: None,
+            box_ret_nullable: false,
             unbox_params: Vec::new(),
+            unbox_param_nullable: Vec::new(),
         });
         if packed_arguments {
             let class = &ir.classes[cid];
@@ -504,7 +506,9 @@ fn push_member_extension_accessor_bridges(
         special: false,
         target_name: None,
         box_ret: None,
+        box_ret_nullable: false,
         unbox_params: Vec::new(),
+        unbox_param_nullable: Vec::new(),
     };
     let mut accessors = vec![accessor(
         property_getter_name(&edge.name),
@@ -567,7 +571,9 @@ fn push_property_bridge(
             special,
             target_name,
             box_ret: None,
+            box_ret_nullable: false,
             unbox_params: Vec::new(),
+            unbox_param_nullable: Vec::new(),
         });
     }
     if !needs_setter {
@@ -596,7 +602,9 @@ fn push_property_bridge(
             special: false,
             target_name: None,
             box_ret: None,
+            box_ret_nullable: false,
             unbox_params: Vec::new(),
+            unbox_param_nullable: Vec::new(),
         });
     }
 }

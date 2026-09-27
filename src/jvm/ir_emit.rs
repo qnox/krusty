@@ -91,6 +91,8 @@ mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
 mod suspend_lambda_class;
+mod value_class_adapters;
+use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_adapter};
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
@@ -5576,37 +5578,6 @@ fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
         Ty::Null => VerifType::Null,
         _ => VerifType::Top,
     }
-}
-
-fn emit_value_class_unbox_adapter(
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    value_class: TypeName,
-    target: Ty,
-    nullable: bool,
-) {
-    let value_class = value_class.render();
-    let value_class_ref = cw.class_ref(&value_class);
-    code.checkcast(value_class_ref);
-    let unbox = cw.methodref(
-        &value_class,
-        "unbox-impl",
-        &format!("(){}", type_descriptor(target)),
-    );
-    if !nullable {
-        code.invokevirtual(unbox, 0, slot_words(target) as i32);
-        return;
-    }
-    let null = code.new_label();
-    let end = code.new_label();
-    code.dup();
-    code.ifnull(null);
-    code.invokevirtual(unbox, 0, slot_words(target) as i32);
-    code.goto(end);
-    code.bind(null);
-    code.pop();
-    code.aconst_null();
-    code.bind(end);
 }
 
 /// The `kotlin/jvm/internal/Ref$XxxRef` holder class and its `element` field descriptor for a boxed
