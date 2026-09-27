@@ -13,7 +13,8 @@ use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
 use super::{
-    finish_callable_body, BodyLowering, CaptureSlot, FirLoweringFailure, LocalCallableRealization,
+    finish_callable_body, BodyLowering, CaptureSlot, CapturedDeclaration, FirLoweringFailure,
+    LocalCallableRealization,
 };
 
 impl BodyLowering<'_> {
@@ -121,7 +122,7 @@ impl BodyLowering<'_> {
         let capture = self
             .capture_slots
             .get(&(enclosing_depth, crate::fir::FirCaptureSource::Value(source)))
-            .copied()
+            .cloned()
             .ok_or(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
                 source: crate::fir::FirCaptureSource::Value(source),
@@ -145,7 +146,7 @@ impl BodyLowering<'_> {
         let capture = self
             .capture_slots
             .get(&(enclosing_depth, crate::fir::FirCaptureSource::Value(source)))
-            .copied()
+            .cloned()
             .ok_or(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
                 source: crate::fir::FirCaptureSource::Value(source),
@@ -842,7 +843,7 @@ impl BodyLowering<'_> {
             )
             .expect("too many lambda receiver parameters")
         });
-        if body.is_source_lambda()
+        if body.source_lambda().is_some()
             && body.receiver_type().is_some_and(|receiver| {
                 receiver.get().is_reference() && !receiver.get().is_nullable()
             })
@@ -933,7 +934,8 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        let parameter_identities = local_function_parameter_identities(self.body, body);
+        let parameter_identities =
+            local_function_parameter_identities(self.body, &self.capture_slots, body)?;
         self.ir
             .fn_params
             .entry(function)
@@ -941,7 +943,7 @@ impl BodyLowering<'_> {
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
-        if body.is_source_lambda() {
+        if body.source_lambda().is_some() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
             // the diagnostic placeholder `<anonymous>` into common IR: angle-bracket names are
             // illegal JVM methods, and other targets own their own physical spelling.
@@ -1012,17 +1014,38 @@ impl BodyLowering<'_> {
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
+        let identities = self
+            .ir
+            .fn_params
+            .get(&function)
+            .map(|parameters| parameters.identities.as_slice())
+            .expect("a lifted callable publishes its parameter identities before its body lowers");
         let capture_slots = body
             .captures()
             .iter()
             .enumerate()
             .map(|(slot, capture)| {
+                let declared = match identities
+                    .get(slot)
+                    .map(|identity| (identity, identity.role))
+                {
+                    Some((identity, crate::ir::IrParameterRole::CapturedValue { capture, .. })) => {
+                        CapturedDeclaration {
+                            name: identity.source_name.clone(),
+                            declaration: capture.declaration,
+                        }
+                    }
+                    _ => unreachable!(
+                        "a lifted callable publishes one captured-value identity per capture"
+                    ),
+                };
                 (
                     (capture.enclosing_depth, capture.source),
                     CaptureSlot {
                         slot: u32::try_from(slot).expect("too many FIR captures"),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
+                        declared,
                     },
                 )
             })
@@ -1205,30 +1228,71 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
         .collect()
 }
 
+/// What `body` captures, as the scope that declares each value names and classifies it. A value
+/// declared in `enclosing` is a parameter there or a variable; one declared further out reaches
+/// `body` through `enclosing`'s own capture slot, which already carries both facts.
+fn captured_declaration(
+    enclosing: &FirBody,
+    enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    capture: &crate::fir::FirCapture,
+) -> Result<CapturedDeclaration, FirLoweringFailure> {
+    if let Some(depth) = capture.enclosing_depth.checked_sub(1) {
+        return enclosing_slots
+            .get(&(depth, capture.source))
+            .map(|slot| slot.declared.clone())
+            .ok_or(FirLoweringFailure::MissingCapture {
+                enclosing_depth: depth,
+                source: capture.source,
+            });
+    }
+    Ok(match capture.source {
+        crate::fir::FirCaptureSource::Value(value) => CapturedDeclaration {
+            name: enclosing.debug_value_name(value).map(str::to_owned),
+            declaration: if enclosing
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.value == value)
+            {
+                crate::ir::IrCapturedDeclaration::Parameter
+            } else {
+                crate::ir::IrCapturedDeclaration::Variable
+            },
+        },
+        crate::fir::FirCaptureSource::ConstructorPrefix { .. } => CapturedDeclaration {
+            name: None,
+            declaration: crate::ir::IrCapturedDeclaration::Parameter,
+        },
+    })
+}
+
 fn local_function_parameter_identities(
     enclosing: &FirBody,
+    enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     body: &FirBody,
-) -> Vec<crate::ir::IrParameterIdentity> {
+) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
+    let capturer = match body.source_lambda() {
+        None => crate::ir::IrCapturingCallable::LocalFunction,
+        Some(crate::fir::FirLambdaForm::AnonymousFunction) => {
+            crate::ir::IrCapturingCallable::AnonymousFunction
+        }
+        Some(crate::fir::FirLambdaForm::Literal) => crate::ir::IrCapturingCallable::Lambda,
+    };
     let mut identities = body
         .captures()
         .iter()
         .enumerate()
         .map(|(ordinal, capture)| {
-            let source_name = (capture.enclosing_depth == 0)
-                .then(|| {
-                    capture
-                        .source
-                        .value()
-                        .and_then(|source| enclosing.debug_value_name(source))
-                })
-                .flatten()
-                .map(str::to_owned);
-            crate::ir::IrParameterIdentity::captured_value(
-                source_name,
+            let declared = captured_declaration(enclosing, enclosing_slots, capture)?;
+            Ok(crate::ir::IrParameterIdentity::captured_value(
+                declared.name,
                 u32::try_from(ordinal).expect("too many captured parameters"),
-            )
+                crate::ir::IrValueCapture {
+                    declaration: declared.declaration,
+                    capturer,
+                },
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
     identities.extend(
         body.implicit_receiver_captures()
             .iter()
@@ -1283,7 +1347,7 @@ fn local_function_parameter_identities(
                     })
             }),
     );
-    identities
+    Ok(identities)
 }
 
 fn local_function_debug_line(body: &FirBody) -> Option<u32> {

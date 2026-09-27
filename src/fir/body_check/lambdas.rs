@@ -70,7 +70,12 @@ impl BodyFirChecker<'_> {
         if let Some(name) = self.body.debug_name() {
             body.set_debug_name(name.to_owned());
         }
-        body.mark_source_lambda(self.lambda_binding_name.clone());
+        let form = if self.file.anon_fun_lambdas.contains(&expression.0) {
+            crate::fir::FirLambdaForm::AnonymousFunction
+        } else {
+            crate::fir::FirLambdaForm::Literal
+        };
+        body.mark_source_lambda(form, self.lambda_binding_name.clone());
         if let Some(site) = self.file.lambda_lifting_sites.get(&expression.0) {
             // A suspend lambda becomes a class of its own rather than a lifted method.
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(
