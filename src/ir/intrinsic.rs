@@ -58,11 +58,11 @@ pub enum IrIntrinsic {
     /// Generated-member equality of one property (a data class's, or a value class's sole one).
     /// Backends preserve Kotlin's scalar, floating-point, nullable, array-reference, and value-class
     /// equality semantics.
-    DataClassFieldEquals {
+    GeneratedPropertyEquals {
         ty: Ty,
     },
     /// Generated-member hash of one property (a data class's, or a value class's sole one).
-    DataClassFieldHash {
+    GeneratedPropertyHash {
         ty: Ty,
     },
     /// Kotlin's content rendering for an array stored in a data-class property.

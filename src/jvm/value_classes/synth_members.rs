@@ -522,7 +522,7 @@ pub(super) fn synth_value_members(
                 // value class's `equals-impl0`, otherwise `Intrinsics.areEqual`.
                 let eq = ir.add_expr(IrExpr::Call {
                     callee: Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::DataClassFieldEquals { ty: u_ir },
+                        operation: crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty: u_ir },
                         ret: bool_ir,
                     },
                     dispatch_receiver: None,
@@ -901,7 +901,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
         let value = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::Call {
             callee: Callee::Intrinsic {
-                operation: crate::ir::IrIntrinsic::DataClassFieldHash { ty: underlying },
+                operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty: underlying },
                 ret: Ty::Int,
             },
             dispatch_receiver: None,
