@@ -5,12 +5,14 @@
 //! erasure. Value-class lowering may subsequently remove a guard when the selected carrier is a
 //! primitive. No frontend phase records an intrinsic name or makes a JVM representation decision.
 
-use crate::ir::{FunId, IrFile, IrParameterRole};
+use crate::ir::{FunId, IrFile, IrLambdaForm, IrParameterRole};
 use crate::types::Ty;
 use std::collections::HashSet;
 
+/// kotlinc guards a parameter whose type is non-null and whose JVM type is not primitive, which
+/// includes `Unit` (`kotlin.Unit`).
 fn requires_reference_guard(ty: Ty) -> bool {
-    ty.is_reference() && !ty.upper_bound_admits_null()
+    (ty.is_reference() || ty == Ty::Unit) && !ty.upper_bound_admits_null()
 }
 
 fn realize_function(ir: &mut IrFile, function: FunId) {
@@ -57,7 +59,53 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
     }
 }
 
+/// kotlinc's `generateNonNullAssertions` skips a private function unless it is the local function
+/// of a lambda literal (`LOCAL_FUNCTION_FOR_LAMBDA`): that one guards its own receiver and value
+/// parameters, a bare `_` or destructuring pattern included, but not the values it captures. An
+/// anonymous function (`fun(…) {}`) lowers to an ordinary private local function and guards
+/// nothing, and a suspend lambda becomes a class whose resumption arguments are null.
+fn realize_lambda(ir: &mut IrFile, function: FunId) {
+    if ir.suspend_funs.contains(&function) {
+        return;
+    }
+    let Some(identities) = ir.function_parameter_identities(function) else {
+        return;
+    };
+    let guarded = identities
+        .iter()
+        .map(|identity| match identity.role {
+            IrParameterRole::ExtensionReceiver
+            | IrParameterRole::UnusedValue
+            | IrParameterRole::DestructuredValue => true,
+            IrParameterRole::Value => identity.source_name.is_some(),
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    let lambda = &mut ir.functions[function as usize];
+    lambda.param_checks.resize(lambda.params.len(), None);
+    for ((check, ty), guarded) in lambda
+        .param_checks
+        .iter_mut()
+        .zip(&lambda.params)
+        .zip(guarded)
+    {
+        if guarded && requires_reference_guard(*ty) {
+            *check = Some(crate::ir::IrParameterCheck::NonNull);
+        }
+    }
+}
+
 pub(super) fn realize(ir: &mut IrFile) {
+    let mut lambdas = ir
+        .lambda_origins
+        .iter()
+        .filter(|(_, origin)| origin.form == IrLambdaForm::Literal)
+        .map(|(function, _)| *function)
+        .collect::<Vec<_>>();
+    lambdas.sort_unstable();
+    for function in lambdas {
+        realize_lambda(ir, function);
+    }
     let mut functions = ir
         .checked_callable_functions
         .values()

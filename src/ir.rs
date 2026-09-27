@@ -3365,8 +3365,8 @@ mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
 pub use debug_locals::IrCatchBinding;
-pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub use debug_locals::{IrLambdaForm, IrLambdaOrigin};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

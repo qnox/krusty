@@ -10,6 +10,7 @@ use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 use std::collections::HashMap;
 
+mod anonymous_functions;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -5032,96 +5033,6 @@ impl<'a> Parser<'a> {
     }
 
     // ---- statements ----
-    /// Anonymous function expression: `fun (params): T = expr` / `fun (params): T { … }`. Desugars to a
-    /// lambda (`Expr::Lambda`) carrying each parameter's declared type in the `lambda_param_types`
-    /// side-table, so the value types even without an expected function type. An expression body
-    /// (`= expr`) becomes a `Block` whose only value is that expression; a block body reuses the normal
-    /// statement parser, so a `return` inside returns from the anonymous function (it lowers to the
-    /// lambda's own `invoke`). A receiver form `fun R.(…)` records `R` separately and uses the same
-    /// semantic path as any other receiver lambda.
-    fn parse_anon_fun(&mut self, context_params: Vec<Param>) -> ExprId {
-        let start = self.tok().span;
-        self.bump(); // 'fun'
-        let receiver = if self.at(TokenKind::LParen) {
-            None
-        } else {
-            self.parsing_anonymous_function_receiver = true;
-            let receiver = self.parse_type();
-            self.parsing_anonymous_function_receiver = false;
-            self.expect(TokenKind::Dot, "'.'");
-            Some(receiver)
-        };
-        self.expect(TokenKind::LParen, "'('");
-        let context_count = context_params.len() as u32;
-        let mut params: Vec<String> = context_params
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .collect();
-        let mut param_types: Vec<Option<TypeRef>> = context_params
-            .into_iter()
-            .map(|parameter| Some(parameter.ty))
-            .collect();
-        self.skip_newlines();
-        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            // `_` marks an unused parameter; keep the name so the arity is preserved.
-            let name = self.ident_or_error("parameter name");
-            let ty = if self.eat(TokenKind::Colon) {
-                Some(self.parse_type())
-            } else {
-                None
-            };
-            params.push(name);
-            param_types.push(ty);
-            self.skip_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::RParen, "')'");
-        // An explicit return type (`: T`) drives the desugared lambda's function type — recorded below
-        // once the lambda ExprId exists. A block body ending in `return` has body type `Nothing`, so the
-        // checker relies on this annotation rather than the (diverging) body value.
-        let ret_ty = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
-        let body = if self.eat(TokenKind::Eq) {
-            let e = self.parse_expr();
-            let sp = self.file.expr_spans[e.0 as usize];
-            self.file.add_expr(
-                Expr::Block {
-                    stmts: Vec::new(),
-                    trailing: Some(e),
-                },
-                sp,
-            )
-        } else {
-            self.parse_block_expr(false)
-        };
-        let end = self.file.expr_spans[body.0 as usize];
-        let lam = self
-            .file
-            .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));
-        if param_types.iter().any(|t| t.is_some()) {
-            self.file.lambda_param_types.insert(lam.0, param_types);
-        }
-        self.file.anon_fun_lambdas.insert(lam.0);
-        if context_count != 0 {
-            self.file
-                .anon_fun_context_count
-                .insert(lam.0, context_count);
-        }
-        if let Some(receiver) = receiver {
-            self.file.anon_fun_receivers.insert(lam.0, receiver);
-        }
-        if let Some(rt) = ret_ty {
-            self.file.anon_fun_ret.insert(lam.0, rt);
-        }
-        lam
-    }
-
     fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
