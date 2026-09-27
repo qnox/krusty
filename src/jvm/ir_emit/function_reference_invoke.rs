@@ -8,20 +8,22 @@
 use super::*;
 
 /// kotlinc's `LocalVariableTable` for a callable-reference constructor: `this`, then each
-/// constructor parameter under its generated name. The entries intern after the constructor's
-/// code, where a writer visits them, and attach to the finished `<init>`.
+/// constructor parameter under its name, with its descriptor. The entries intern after the
+/// constructor's code, where a writer visits them, and attach to the finished `<init>`.
 pub(super) fn reference_constructor_locals(
     cw: &mut ClassWriter,
     class: &str,
-    parameters: &[&str],
+    parameters: &[(&str, &str)],
 ) -> Vec<(String, String, u16)> {
     let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
-    for (index, name) in parameters.iter().enumerate() {
-        locals.push((
-            name.to_string(),
-            "Ljava/lang/Object;".to_string(),
-            index as u16 + 1,
-        ));
+    let mut slot = 1u16;
+    for (name, descriptor) in parameters {
+        locals.push((name.to_string(), descriptor.to_string(), slot));
+        slot += if matches!(*descriptor, "J" | "D") {
+            2
+        } else {
+            1
+        };
     }
     cw.reserve_method_lvt(&locals);
     locals

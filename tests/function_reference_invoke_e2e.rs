@@ -332,14 +332,15 @@ fn reference_carriers_run() {
 /// backend unit test separately pins the exact decision that keeps these shapes on that path.
 #[test]
 fn retained_dispatching_reference_shapes_run() {
-    let source = "fun shapes(): String {\n\
-         \x20   val prefix = \"K\"\n\
-         \x20   fun local(value: String): String = prefix + value\n\
-         \x20   val captured: (String) -> String = ::local\n\
-         \x20   arrayOf<Any>(captured)\n\
-         \x20   return captured(\"!\")\n\
+    let source = "class Host(val prefix: String) {\n\
+         \x20   fun shapes(): String {\n\
+         \x20       fun local(value: String): String = prefix + value\n\
+         \x20       val captured: (String) -> String = ::local\n\
+         \x20       arrayOf<Any>(captured)\n\
+         \x20       return captured(\"!\")\n\
+         \x20   }\n\
          }\n\
-         fun box(): String = if (shapes() == \"K!\") \"OK\" else \"fail: \" + shapes()\n";
+         fun box(): String = if (Host(\"K\").shapes() == \"K!\") \"OK\" else \"fail\"\n";
     let emitted = common::compile_in_process_metadata_cp(
         source,
         "ReferenceInvokeRetainedRun",
@@ -372,14 +373,10 @@ fn retained_dispatching_reference_shapes_run() {
         })
         .collect::<Vec<_>>();
     let expected = vec![(
-        "ReferenceInvokeRetainedRunKt$shapes$captured$1".to_string(),
-        vec![(
-            "$captured$0".to_string(),
-            0x0012,
-            "Ljava/lang/String;".to_string(),
-        )],
+        "Host$shapes$captured$1".to_string(),
+        vec![("$captured$0".to_string(), 0x0012, "LHost;".to_string())],
         vec![
-            ("<init>".to_string(), 0, "(Ljava/lang/String;)V".to_string()),
+            ("<init>".to_string(), 0, "(LHost;)V".to_string()),
             (
                 "invoke".to_string(),
                 0x0001,
@@ -693,6 +690,43 @@ fn extension_reference_carriers_reflect_the_receiver_parameter() {
             "ExtensionReferenceInvokeKt$carriers$text$1",
             "ExtensionReferenceInvokeKt$carriers$boundText$1",
             "ExtensionReferenceInvokeKt$carriers$bound$1",
+        ],
+    });
+}
+
+const LOCAL_FUNCTION_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+fun carriers(k: Int, label: String, wide: Long): Held {
+    fun twice(x: Int): Int = x * 2
+    fun shift(x: Int): Int = x + k
+    fun describe(x: Int): String = label + x + wide
+    val plain = ::twice
+    val offset = ::shift
+    val text = ::describe
+    return Held(plain, offset, text)
+}
+
+fun box(): String {
+    val all = carriers(40, "n", 7L).all
+    if ((all[0] as (Int) -> Int)(21) != 42) return "plain"
+    if ((all[1] as (Int) -> Int)(2) != 42) return "offset"
+    if ((all[2] as (Int) -> String)(4) != "n47") return "text"
+    return "OK"
+}
+"##;
+
+/// A local function is reflected on kotlinc's `Intrinsics$Kotlin` owner under its lifted
+/// signature, and a carrier stores each captured value in a synthetic field named after it.
+#[test]
+fn local_function_reference_carriers_store_named_captures() {
+    assert_carriers_match_and_run(&Fixture {
+        source: LOCAL_FUNCTION_SOURCE,
+        stem: "LocalFunctionReferenceInvoke",
+        dependency: None,
+        carriers: &[
+            "LocalFunctionReferenceInvokeKt$carriers$plain$1",
+            "LocalFunctionReferenceInvokeKt$carriers$offset$1",
+            "LocalFunctionReferenceInvokeKt$carriers$text$1",
         ],
     });
 }

@@ -93,8 +93,19 @@ pub(super) fn emit_func_ref_class(
         // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
         cw.add_interface("kotlin/coroutines/jvm/internal/SuspendFunction");
     }
-    for (index, descriptor) in field_capture_descs.iter().enumerate() {
-        cw.add_field(0x0012, &format!("$captured${index}"), descriptor);
+    // kotlinc's capture fields are final and synthetic; the dispatching `invoke` keeps its own
+    // private ones.
+    let capture_access = if fr.invoke.is_some() { 0x1010 } else { 0x0012 };
+    let capture_constructor = format!(
+        "({}{})V",
+        field_capture_descs.concat(),
+        if fr.bound { "Ljava/lang/Object;" } else { "" }
+    );
+    if !fr.capture_fields.is_empty() {
+        // kotlinc visits its constructor first: the fields it fills are interned as its code
+        // stores them, and declared after it.
+        cw.seed_utf8("<init>");
+        cw.seed_utf8(&capture_constructor);
     }
 
     // The call argument param types begin AFTER the receiver for an unbound member ref.
@@ -135,7 +146,13 @@ pub(super) fn emit_func_ref_class(
         type_descriptor(jvm_declared_ty(&reflection_target_ret))
     };
     signature_desc.push_str(&signature_ret);
-    let reflection_name = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
+    // A local function is reflected under the name its lifted function is finally emitted with.
+    let reflection_name = match fr.reflected {
+        crate::ir::ReflectedCallable::LocalFunction(function) => {
+            ir.functions[function as usize].name.as_str()
+        }
+        _ => fr.reflection_name.as_deref().unwrap_or(&fr.fn_name),
+    };
     let signature_name = match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound | FrDispatch::SuspendConvert => {
             reflection_name
@@ -174,6 +191,7 @@ pub(super) fn emit_func_ref_class(
     };
 
     if !field_capture_tys.is_empty() {
+        let descriptor = capture_constructor;
         let capture_words: u16 = field_capture_tys.iter().map(|ty| slot_words(*ty)).sum();
         let ctor_locals = 1 + capture_words + u16::from(fr.bound);
         let mut ctor = CodeBuilder::new(ctor_locals);
@@ -181,11 +199,7 @@ pub(super) fn emit_func_ref_class(
         for (index, ty) in field_capture_tys.iter().copied().enumerate() {
             ctor.aload(0);
             load(ty, slot, &mut ctor);
-            let field = cw.fieldref(
-                &fq,
-                &format!("$captured${index}"),
-                &field_capture_descs[index],
-            );
+            let field = cw.fieldref(&fq, &fr.capture_fields[index], &field_capture_descs[index]);
             ctor.putfield(field, slot_words(ty) as i32 + 1);
             slot += slot_words(ty);
         }
@@ -206,15 +220,29 @@ pub(super) fn emit_func_ref_class(
         let sup = cw.methodref(&superclass, "<init>", super_descriptor);
         ctor.invokespecial(sup, if fr.bound { 6 } else { 5 }, 0);
         ctor.ret_void();
-        let descriptor = format!(
-            "({}{})V",
-            field_capture_descs.concat(),
-            if fr.bound { "Ljava/lang/Object;" } else { "" }
-        );
+        for (name, descriptor) in fr.capture_fields.iter().zip(&field_capture_descs) {
+            cw.add_field(capture_access, name, descriptor);
+        }
+        // kotlinc names a carrier's constructor parameters after the fields they fill.
+        let locals = fr.invoke.map(|_| {
+            let mut parameters = fr
+                .capture_fields
+                .iter()
+                .map(String::as_str)
+                .zip(field_capture_descs.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            if fr.bound {
+                parameters.push(("receiver0", "Ljava/lang/Object;"));
+            }
+            function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &parameters)
+        });
         if cross_package || inline_reachable {
             finish_code::<0x0001>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
         } else {
             finish_code::<0x0000>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
+        }
+        if let Some(locals) = locals {
+            cw.set_method_debug("<init>", &descriptor, None, &locals);
         }
     } else if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
@@ -235,8 +263,11 @@ pub(super) fn emit_func_ref_class(
         );
         ctor.invokespecial(sup, 6, 0);
         ctor.ret_void();
-        let locals =
-            function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &["receiver0"]);
+        let locals = function_reference_invoke::reference_constructor_locals(
+            &mut cw,
+            &fq,
+            &[("receiver0", "Ljava/lang/Object;")],
+        );
         // The ctor's access mirrors the class's: a PUBLIC synthetic is constructed from other
         // packages by spliced code.
         if cross_package || inline_reachable {
@@ -299,11 +330,7 @@ pub(super) fn emit_func_ref_class(
     let mut inv = CodeBuilder::new(invoke_locals);
     for (index, ty) in field_capture_tys.iter().copied().enumerate() {
         inv.aload(0);
-        let field = cw.fieldref(
-            &fq,
-            &format!("$captured${index}"),
-            &field_capture_descs[index],
-        );
+        let field = cw.fieldref(&fq, &fr.capture_fields[index], &field_capture_descs[index]);
         inv.getfield(field, slot_words(ty) as i32);
     }
     // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).
