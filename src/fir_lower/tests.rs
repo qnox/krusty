@@ -2472,7 +2472,7 @@ fn consuming_sink_keeps_primary_and_secondary_constructor_semantics() {
     assert!(matches!(
         class.secondary_ctors[0].delegate,
         crate::ir::CtorDelegateTarget::This {
-            target: crate::ir::IrConstructorTarget { primary: true, .. },
+            target: crate::ir::IrConstructorTarget { ordinal: 0, .. },
             ..
         }
     ));

@@ -18,6 +18,10 @@ pub(super) struct SynthesizedValueMembers {
     /// JVM name was chosen from the declared accessor signature; the carrier parameter they gained
     /// here is not part of that signature and must not be hashed into the name again.
     pub(super) accessors: HashSet<u32>,
+    /// The static `constructor-impl` realizing each source constructor, by its class and its
+    /// [`crate::ir::IrConstructorTarget::ordinal`], so a construction reaches the exact overload
+    /// its checked selection named.
+    pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
@@ -324,6 +328,8 @@ pub(super) fn synth_value_members(
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.jvm_value_class_representation_order.insert(cfid, 0);
+        realized.constructor_impls.insert((internal_name, 0), cfid);
+        ir.jvm_value_class_constructor_impls.insert(cfid);
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -604,7 +610,7 @@ pub(super) fn synth_value_members(
     }
     let secs = std::mem::take(&mut ir.classes[class_id as usize].secondary_ctors);
     if !secs.is_empty() {
-        for sc in secs {
+        for (secondary, sc) in secs.into_iter().enumerate() {
             if !sc.prefix_params.is_empty() {
                 return false;
             }
@@ -644,6 +650,10 @@ pub(super) fn synth_value_members(
             if let Some(body) = sc.body {
                 reframe_value_class_secondary(ir, body, delegated_value);
             }
+            // A default reads the earlier parameters, which move down with the static layout.
+            for &default in sc.defaults.iter().flatten() {
+                shift_slots(ir, default);
+            }
 
             let mut stmts = sc.delegate_prelude.clone();
             let call = ir.add_expr(IrExpr::Call {
@@ -676,11 +686,27 @@ pub(super) fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            // Like the primary's, its first parameter is a declared parameter, not a receiver, so
+            // the default stub counts it in the mask.
+            ir.functions[constructor as usize].dispatch_receiver = None;
+            let ordinal = u32::try_from(secondary + 1).expect("constructor ordinal fits in u32");
+            realized
+                .constructor_impls
+                .insert((internal_name, ordinal), constructor);
+            ir.jvm_value_class_constructor_impls.insert(constructor);
             let names = sc
                 .named_params
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>();
+            // Omitted arguments are filled by `constructor-impl$default`, as for the primary.
+            if sc.defaults.iter().any(Option::is_some) {
+                let names = names.iter().map(|name| (*name).to_string()).collect();
+                ir.fn_params.insert(
+                    constructor,
+                    crate::ir::FnParamInfo::source_defaults(names, sc.defaults.clone()),
+                );
+            }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
             // `public static`, non-final — like the primary's `constructor-impl`.
