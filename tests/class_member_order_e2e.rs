@@ -16,6 +16,8 @@
 //! - members an interface inherits from sibling supertypes (its `access$…$jd` bridges, its
 //!   `DefaultImpls` forwarders, an implementing class's default-method forwarders) follow the
 //!   supertypes' declaration order at every level of the hierarchy.
+//! - bridges to members of the superclass and of interfaces follow the order the class writes its
+//!   supertypes in, wherever the superclass stands among them.
 //!
 //! Each case asserts the complete member list of every class kotlinc emits — names and descriptors
 //! in order — against the reference compiler. The fixtures use neutral names only.
@@ -190,6 +192,47 @@ fn inherited_interface_members_follow_sibling_supertypes_in_declaration_order() 
          interface Both : Left, Right\n\
          interface Child : Both\n\
          class Leaf : Child\n",
+    );
+}
+
+const BRIDGED_PARENTS: &str = "open class Top\n\
+     open class Mid : Top()\n\
+     class Low : Mid()\n\
+     interface Wide { fun pick(): Top }\n\
+     open class Narrow { open fun pick(): Mid = Mid() }\n";
+
+#[test]
+fn bridges_follow_a_superclass_written_before_the_interfaces() {
+    assert_same_member_order(
+        "SuperclassFirstBridges",
+        &format!(
+            "{BRIDGED_PARENTS}abstract class Middle : Narrow(), Wide {{ abstract override fun pick(): Low }}\n\
+             class Leaf : Middle() {{ override fun pick(): Low = Low() }}\n"
+        ),
+    );
+}
+
+#[test]
+fn bridges_follow_a_superclass_written_after_the_interfaces() {
+    assert_same_member_order(
+        "SuperclassLastBridges",
+        &format!(
+            "{BRIDGED_PARENTS}abstract class Middle : Wide, Narrow() {{ abstract override fun pick(): Low }}\n\
+             class Leaf : Middle() {{ override fun pick(): Low = Low() }}\n"
+        ),
+    );
+}
+
+#[test]
+fn bridges_follow_a_superclass_named_without_a_constructor_call() {
+    assert_same_member_order(
+        "ParenlessSuperclassBridges",
+        &format!(
+            "{BRIDGED_PARENTS}class Leaf : Narrow, Wide {{\n\
+             \x20   constructor() : super()\n\
+             \x20   override fun pick(): Low = Low()\n\
+             }}\n"
+        ),
     );
 }
 
