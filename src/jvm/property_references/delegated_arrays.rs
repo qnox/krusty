@@ -63,12 +63,14 @@ pub(super) struct DelegatedOperand {
 /// Pass `null` for a delegated reference whose inline operator never reads it, as kotlinc does
 /// (`PropertyReferenceLowering.visitCall`): such a property takes no slot.
 ///
-/// Common lowering already did this for the operator calls it expanded; this covers the ones kept
-/// as calls: of a current-module inline function, judged by its body, and of a dependency's, judged
-/// by its bytecode.
+/// Common lowering already did this for the operator calls it inlined. This covers a dependency's
+/// inline operator, judged by its bytecode. kotlinc always inlines, so it ignores the operator's own
+/// null check of the parameter; here a callee with a legal call fallback may still be called, so
+/// only one that must be inlined may null-check the parameter it is given `null` for. A
+/// current-module operator kept as a call can fall back the same way, and keeps its slot.
 pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
     for raw in 0..ir.exprs.len() {
-        if let IrExpr::Call {
+        let IrExpr::Call {
             callee:
                 Callee::Static {
                     owner,
@@ -79,74 +81,37 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
             dispatch_receiver,
             args,
         } = &ir.exprs[raw]
+        else {
+            continue;
+        };
+        if !inline.can_inline()
+            || !args
+                .iter()
+                .any(|&arg| ir.is_delegated_property_operand(arg))
         {
-            if !inline.can_inline()
-                || !args
-                    .iter()
-                    .any(|&arg| ir.is_delegated_property_operand(arg))
-            {
-                continue;
-            }
-            let unread = dependency_unread_arguments(
-                bodies,
-                (&owner.render(), name, descriptor),
-                dispatch_receiver.is_some(),
-                args,
-            );
-            for argument in unread {
-                if ir.is_delegated_property_operand(argument) {
-                    ir.elide_delegated_property_operand(argument);
-                }
-            }
             continue;
         }
-        let (function, first_value, args) = match &ir.exprs[raw] {
-            IrExpr::MethodCall {
-                class, index, args, ..
-            } => {
-                let function = ir.classes[*class as usize].methods[*index as usize];
-                (function, 1, args.to_vec())
-            }
-            IrExpr::Call {
-                callee: Callee::Local(function),
-                args,
-                ..
-            } => {
-                let receiver = ir.functions[*function as usize].dispatch_receiver.is_some();
-                (
-                    *function,
-                    u32::from(receiver),
-                    args.iter().copied().map(Some).collect(),
-                )
-            }
-            _ => continue,
-        };
-        let Some(body) = ir.functions[function as usize].body else {
-            continue;
-        };
-        if !ir.inline_fns.contains(&function) {
-            continue;
-        }
-        for (position, argument) in args.into_iter().enumerate() {
-            let Some(argument) = argument else {
-                continue;
-            };
-            if ir.is_delegated_property_operand(argument)
-                && !crate::ir::reads_value(ir, body, first_value + position as u32)
-            {
+        let unread = dependency_unread_arguments(
+            bodies,
+            (&owner.render(), name, descriptor),
+            (dispatch_receiver.is_some(), inline.must_inline()),
+            args,
+        );
+        for argument in unread {
+            if ir.is_delegated_property_operand(argument) {
                 ir.elide_delegated_property_operand(argument);
             }
         }
     }
 }
 
-/// The arguments of a dependency's inline function `owner.name descriptor` its body never reads,
-/// null checks aside. An instance method's receiver takes local 0 ahead of the descriptor's
-/// parameters.
+/// The arguments of a dependency's inline function `owner.name descriptor` its body never reads:
+/// null checks aside when it `must_inline`, which removes them. An instance method's receiver takes
+/// local 0 ahead of the descriptor's parameters.
 fn dependency_unread_arguments(
     bodies: &dyn MethodBodies,
     (owner, name, descriptor): (&str, &str, &str),
-    instance: bool,
+    (instance, must_inline): (bool, bool),
     args: &[ExprId],
 ) -> Vec<ExprId> {
     let Some(body) = bodies.body(owner, name, descriptor) else {
@@ -159,9 +124,13 @@ fn dependency_unread_arguments(
         return Vec::new();
     };
     let receiver = u16::from(instance);
+    let reads = |slot: u16| match must_inline {
+        true => crate::jvm::inliner::reads_local(&callee, slot + receiver),
+        false => crate::jvm::inliner::loads_local(&callee, slot + receiver),
+    };
     args.iter()
         .zip(slots)
-        .filter(|&(_, slot)| !crate::jvm::inliner::reads_local(&callee, slot + receiver))
+        .filter(|&(_, slot)| !reads(slot))
         .map(|(&arg, _)| arg)
         .collect()
 }
