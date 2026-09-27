@@ -1178,6 +1178,8 @@ mod value_class_nothing_override_bridges_e2e;
 mod value_class_object_carrier_generic_result_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
+#[path = "value_class_secondary_constructor_return_e2e.rs"]
+mod value_class_secondary_constructor_return_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;

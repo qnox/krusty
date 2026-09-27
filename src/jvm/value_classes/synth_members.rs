@@ -648,7 +648,7 @@ pub(super) fn synth_value_members(
                 shift_slots(ir, a);
             }
             if let Some(body) = sc.body {
-                reframe_value_class_secondary(ir, body, delegated_value);
+                reframe_value_class_secondary(ir, body, delegated_value, sc.lines.decl_line);
             }
             // A default reads the earlier parameters, which move down with the static layout.
             for &default in sc.defaults.iter().flatten() {
@@ -666,12 +666,14 @@ pub(super) fn synth_value_members(
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
-            stmts.push(ir.add_expr(IrExpr::Variable {
+            let delegation = ir.add_expr(IrExpr::Variable {
                 index: delegated_value,
                 ty: u_ir,
                 init: Some(call),
                 named: false,
-            }));
+            });
+            mark_line(ir, delegation, sc.lines.delegation_line);
+            stmts.push(delegation);
             if let Some(body) = sc.body {
                 if let IrExpr::Block { stmts: bs, value } = &ir.exprs[body as usize] {
                     stmts.extend(bs.iter().copied());
@@ -682,10 +684,19 @@ pub(super) fn synth_value_members(
                     stmts.push(body);
                 }
             }
+            // The fall-through return belongs to the declaration, like kotlinc's `return $this`.
             let result = ir.add_expr(IrExpr::GetValue(delegated_value));
-            stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
+            let fall_through = ir.add_expr(IrExpr::Return(Some(result)));
+            mark_line(ir, fall_through, sc.lines.decl_line);
+            if sc.lines.decl_line != 0 {
+                ir.mark_implicit_return_end_line(fall_through, sc.lines.decl_line);
+            }
+            stmts.push(fall_through);
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            if sc.lines.decl_line != 0 {
+                ir.fn_decl_lines.insert(constructor, sc.lines.decl_line);
+            }
             // Like the primary's, its first parameter is a declared parameter, not a receiver, so
             // the default stub counts it in the mask.
             ir.functions[constructor as usize].dispatch_receiver = None;
@@ -733,7 +744,7 @@ fn max_value_slot(ir: &IrFile, roots: &[ExprId]) -> u32 {
         .unwrap_or(0)
 }
 
-fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32) {
+fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32, decl_line: u32) {
     let mut reachable = HashSet::new();
     collect_reachable_scoped(&ir.exprs, root, &mut reachable);
     for id in reachable {
@@ -749,6 +760,45 @@ fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32)
             *index -= 1;
         }
     }
+    // The body's own `return` (always `Unit`) leaves the static `constructor-impl`, so it yields
+    // the constructed value, after evaluating any operand other than the `Unit` singleton.
+    let returns = reachable_returns(ir, root);
+    for id in returns {
+        let IrExpr::Return(operand) = ir.exprs[id as usize] else {
+            unreachable!("collected a return")
+        };
+        let value = ir.add_expr(IrExpr::GetValue(this_value));
+        let value = match operand {
+            Some(operand) if !matches!(ir.exprs[operand as usize], IrExpr::UnitInstance) => ir
+                .add_expr(IrExpr::Block {
+                    stmts: vec![operand],
+                    value: Some(value),
+                }),
+            _ => value,
+        };
+        ir.exprs[id as usize] = IrExpr::Return(Some(value));
+        // The value loads on the `return`'s own line; the return itself is the declaration's.
+        if decl_line != 0 {
+            ir.mark_implicit_return_end_line(id, decl_line);
+        }
+    }
+}
+
+fn mark_line(ir: &mut IrFile, statement: ExprId, line: u32) {
+    if line != 0 {
+        ir.expr_lines.insert(statement, line);
+    }
+}
+
+fn reachable_returns(ir: &IrFile, root: ExprId) -> Vec<ExprId> {
+    let mut reachable = HashSet::new();
+    collect_reachable_scoped(&ir.exprs, root, &mut reachable);
+    let mut returns = reachable
+        .into_iter()
+        .filter(|&id| matches!(ir.exprs[id as usize], IrExpr::Return(_)))
+        .collect::<Vec<_>>();
+    returns.sort_unstable();
+    returns
 }
 
 /// The value-class underlying-value equality kotlinc emits: a reference compares via
