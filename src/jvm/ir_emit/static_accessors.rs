@@ -10,9 +10,12 @@
 //!
 //! The owner appends its accessors after every declared and lifted member, ahead of `<clinit>`, in
 //! the order the file first uses them. [`plan`] finds those uses once per emission pass; each use
-//! site routes itself through [`routes_through_accessor`], the same rule the plan applies.
+//! site routes itself through [`routes_through_accessor`], the same rule the plan applies. Owners
+//! are [`StaticOwner`] identities throughout; an interface owner's accessors are not `final` and
+//! are named by `InterfaceMethodref`s.
 
 use super::*;
+use crate::jvm::private_static_access::{bridged_storage, StaticOwner};
 use std::collections::{HashMap, HashSet};
 
 /// One synthetic accessor a static owner declares.
@@ -29,18 +32,20 @@ pub(super) enum StaticAccessor {
 /// Every static owner's accessors, in first-use order.
 #[derive(Default)]
 pub(super) struct StaticAccessorPlan {
-    by_owner: HashMap<String, Vec<StaticAccessor>>,
+    by_owner: HashMap<StaticOwner, Vec<StaticAccessor>>,
 }
 
 impl StaticAccessorPlan {
-    fn accessors_of(&self, owner: &str) -> &[StaticAccessor] {
-        self.by_owner.get(owner).map_or(&[], Vec::as_slice)
+    fn accessors_of(&self, owner: StaticOwner) -> &[StaticAccessor] {
+        self.by_owner.get(&owner).map_or(&[], Vec::as_slice)
     }
 }
 
 /// A JVM class whose code this file emits, with the IR roots of that code.
 pub(super) struct EmissionContext {
-    pub(super) owner: String,
+    pub(super) owner: StaticOwner,
+    /// The class's index in the file's classes; `None` for the facade.
+    class: Option<usize>,
     pub(super) roots: Vec<crate::ir::ExprId>,
 }
 
@@ -48,7 +53,6 @@ pub(super) struct EmissionContext {
 /// functions some class lists as its methods; every other receiverless body is the facade's.
 pub(super) fn emission_contexts(
     ir: &IrFile,
-    facade: &str,
     class_member_fids: &HashSet<u32>,
 ) -> Vec<EmissionContext> {
     let facade_roots = ir
@@ -67,11 +71,11 @@ pub(super) fn emission_contexts(
         )
         .collect();
     let mut contexts = vec![EmissionContext {
-        owner: facade.to_string(),
+        owner: StaticOwner::Facade,
+        class: None,
         roots: facade_roots,
     }];
-    for class in &ir.classes {
-        let owner = class.fq_name();
+    for (index, class) in ir.classes.iter().enumerate() {
         let mut roots = class
             .methods
             .iter()
@@ -111,42 +115,40 @@ pub(super) fn emission_contexts(
         roots.extend(
             ir.statics
                 .iter()
-                .filter(|property| property.owner_matches(&owner))
+                .filter(|property| property.owner == Some(class.fq_name))
                 .map(|property| property.init),
         );
-        contexts.push(EmissionContext { owner, roots });
+        contexts.push(EmissionContext {
+            owner: StaticOwner::Class(class.fq_name),
+            class: Some(index),
+            roots,
+        });
     }
     contexts
 }
 
-/// The static owner of storage `index` when its field is reached only through `access$…$p`
-/// accessors: a PRIVATE property of a facade or of a companion block, with neither a constant
-/// value, an accessor of its own nor a public field.
-pub(super) fn bridged_storage_owner(ir: &IrFile, facade: &str, index: u32) -> Option<String> {
-    let property = &ir.statics[index as usize];
-    if property.is_const
-        || property.custom_accessor
-        || ir.is_jvm_field_static(index)
-        || !property.visibility.is_private()
-    {
-        return None;
-    }
-    match property.owner {
-        None => Some(facade.to_string()),
-        Some(owner) if ir.companion_blocks.is_storage(index) => Some(owner.render()),
-        Some(_) => None,
-    }
+/// Whether code reaches a private static `function` through its owner's accessor: exactly when
+/// the code is emitted into another class than the owner.
+pub(super) fn routes_through_accessor(ir: &IrFile, emitted_by_owner: bool, function: u32) -> bool {
+    !emitted_by_owner && ir.private_methods.contains(&function)
 }
 
-/// Whether code emitted into `context` reaches a private static `function` of `owner` through
-/// the owner's accessor: exactly when the two are different classes.
-pub(super) fn routes_through_accessor(
+/// The constant naming static method `name` of `owner`: an interface's through an
+/// `InterfaceMethodref`, as `invokestatic` requires.
+pub(super) fn static_methodref(
+    cw: &mut ClassWriter,
     ir: &IrFile,
-    context: &str,
-    owner: &str,
-    function: u32,
-) -> bool {
-    context != owner && ir.private_methods.contains(&function)
+    facade: &str,
+    owner: StaticOwner,
+    name: &str,
+    descriptor: &str,
+) -> u16 {
+    let internal = owner.internal_name(facade);
+    if owner.is_interface(ir) {
+        cw.interface_methodref(&internal, name, descriptor)
+    } else {
+        cw.methodref(&internal, name, descriptor)
+    }
 }
 
 /// Find every accessor the file's code needs, ordered by the source position of its first use,
@@ -154,31 +156,28 @@ pub(super) fn routes_through_accessor(
 /// reference is written, since that is where kotlinc lowers its body.
 pub(super) fn plan(
     ir: &IrFile,
-    facade: &str,
     env: &EmitEnv,
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
 ) -> StaticAccessorPlan {
     let walk = Walk {
         ir,
-        facade,
         class_member_fids,
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::new();
     for context in contexts {
-        let Some(class) = ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name() == context.owner)
+        let Some(class) = context
+            .class
+            .map(|index| &ir.classes[index])
             .filter(|class| class.func_ref.is_some() || class.prop_ref.is_some())
         else {
             continue;
         };
         let mut uses = Vec::new();
         for &root in &context.roots {
-            walk.collect(&context.owner, root, 0, &HashMap::new(), &mut uses);
+            walk.collect(context.owner, root, 0, &HashMap::new(), &mut uses);
         }
-        uses.extend(synthesized_carrier_uses(ir, facade, env, class));
+        uses.extend(synthesized_carrier_uses(ir, env, class));
         carriers.insert(class.fq_name, uses);
     }
     let reference_lines = ir
@@ -192,11 +191,7 @@ pub(super) fn plan(
         .collect::<HashMap<_, _>>();
     let mut uses = Vec::new();
     for context in contexts {
-        let owner = ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name() == context.owner)
-            .map(|class| class.fq_name);
+        let owner = context.class.map(|index| ir.classes[index].fq_name);
         match owner.and_then(|owner| carriers.get(&owner).map(|uses| (owner, uses))) {
             // A carrier constructed nowhere this walk sees counts at its reference's line.
             Some((owner, carrier_uses)) => {
@@ -208,7 +203,7 @@ pub(super) fn plan(
             }
             None => {
                 for &root in &context.roots {
-                    walk.collect(&context.owner, root, 0, &carriers, &mut uses);
+                    walk.collect(context.owner, root, 0, &carriers, &mut uses);
                 }
             }
         }
@@ -221,7 +216,7 @@ pub(super) fn plan(
         owner, accessor, ..
     } in uses
     {
-        if seen.insert((owner.clone(), accessor)) {
+        if seen.insert((owner, accessor)) {
             plan.by_owner.entry(owner).or_default().push(accessor);
         }
     }
@@ -232,14 +227,14 @@ pub(super) fn plan(
 #[derive(Clone)]
 struct Use {
     line: u32,
-    owner: String,
+    owner: StaticOwner,
     accessor: StaticAccessor,
 }
 
 /// The uses a carrier's synthesized body makes: a function reference whose `invoke` is not
 /// lowered calls its target itself, and a property reference reads and writes bridged storage.
-fn synthesized_carrier_uses(ir: &IrFile, facade: &str, env: &EmitEnv, class: &IrClass) -> Vec<Use> {
-    let context = class.fq_name();
+fn synthesized_carrier_uses(ir: &IrFile, env: &EmitEnv, class: &IrClass) -> Vec<Use> {
+    let context = StaticOwner::Class(class.fq_name);
     let mut uses = Vec::new();
     if let Some(reference) = class.func_ref.as_ref().filter(|reference| {
         reference.invoke.is_none()
@@ -248,9 +243,9 @@ fn synthesized_carrier_uses(ir: &IrFile, facade: &str, env: &EmitEnv, class: &Ir
                 crate::ir::FrDispatch::Static | crate::ir::FrDispatch::StaticBound
             )
     }) {
-        let owner = reference.call_owner_or_facade(facade);
+        let owner = StaticOwner::of(reference.call_owner);
         if let Some(target) = function_reference_target(ir, reference)
-            .filter(|target| routes_through_accessor(ir, &context, &owner, *target))
+            .filter(|target| routes_through_accessor(ir, context == owner, *target))
         {
             uses.push(Use {
                 line: 0,
@@ -266,19 +261,17 @@ fn synthesized_carrier_uses(ir: &IrFile, facade: &str, env: &EmitEnv, class: &Ir
             .map(|storage| (reference.mutable, storage))
     });
     if let Some((mutable, storage)) = storage {
-        if let Some(owner) = bridged_storage_owner(ir, facade, storage) {
+        uses.push(Use {
+            line: 0,
+            owner: storage.owner,
+            accessor: StaticAccessor::Getter(storage.index),
+        });
+        if mutable {
             uses.push(Use {
                 line: 0,
-                owner: owner.clone(),
-                accessor: StaticAccessor::Getter(storage),
+                owner: storage.owner,
+                accessor: StaticAccessor::Setter(storage.index),
             });
-            if mutable {
-                uses.push(Use {
-                    line: 0,
-                    owner,
-                    accessor: StaticAccessor::Setter(storage),
-                });
-            }
         }
     }
     uses
@@ -286,7 +279,6 @@ fn synthesized_carrier_uses(ir: &IrFile, facade: &str, env: &EmitEnv, class: &Ir
 
 struct Walk<'a> {
     ir: &'a IrFile,
-    facade: &'a str,
     class_member_fids: &'a HashSet<u32>,
 }
 
@@ -296,7 +288,7 @@ impl Walk<'_> {
     /// construction of a carrier in `carriers` stands for that carrier's own uses.
     fn collect(
         &self,
-        context: &str,
+        context: StaticOwner,
         root: crate::ir::ExprId,
         line: u32,
         carriers: &HashMap<TypeName, Vec<Use>>,
@@ -335,7 +327,7 @@ impl Walk<'_> {
             };
             let needed = match accessor {
                 StaticAccessor::Function(function) => {
-                    routes_through_accessor(ir, context, &owner, function)
+                    routes_through_accessor(ir, context == owner, function)
                 }
                 StaticAccessor::Getter(_) | StaticAccessor::Setter(_) => context != owner,
             };
@@ -350,22 +342,25 @@ impl Walk<'_> {
     }
 
     /// The private static declaration `expression` uses, with its static owner, if any.
-    fn target(&self, expression: crate::ir::ExprId) -> Option<(String, StaticAccessor)> {
+    fn target(&self, expression: crate::ir::ExprId) -> Option<(StaticOwner, StaticAccessor)> {
         match self.ir.expr(expression) {
             IrExpr::Call {
                 callee: Callee::Local(function),
                 ..
             } if !self.class_member_fids.contains(function) => {
-                Some((self.facade.to_string(), StaticAccessor::Function(*function)))
+                Some((StaticOwner::Facade, StaticAccessor::Function(*function)))
             }
             IrExpr::Call {
                 callee: Callee::ClassStatic { owner, function },
                 ..
-            } => Some((owner.render(), StaticAccessor::Function(*function))),
-            IrExpr::GetStatic(index) => bridged_storage_owner(self.ir, self.facade, *index)
-                .map(|owner| (owner, StaticAccessor::Getter(*index))),
-            IrExpr::SetStatic { index, .. } => bridged_storage_owner(self.ir, self.facade, *index)
-                .map(|owner| (owner, StaticAccessor::Setter(*index))),
+            } => Some((
+                StaticOwner::Class(*owner),
+                StaticAccessor::Function(*function),
+            )),
+            IrExpr::GetStatic(index) => bridged_storage(self.ir, *index)
+                .map(|storage| (storage.owner, StaticAccessor::Getter(*index))),
+            IrExpr::SetStatic { index, .. } => bridged_storage(self.ir, *index)
+                .map(|storage| (storage.owner, StaticAccessor::Setter(*index))),
             _ => None,
         }
     }
@@ -373,100 +368,127 @@ impl Walk<'_> {
 
 /// Append `owner`'s planned accessors to its class, with kotlinc's debug tables: each maps its
 /// body to the line the owner is declared on (a facade's is the file's first) and names the
-/// parameters it forwards.
+/// parameters it forwards. An interface's accessors are `public static synthetic`, every other
+/// owner's `public static final synthetic`.
 pub(super) fn emit(
     ir: &IrFile,
     plan: &StaticAccessorPlan,
-    owner: &str,
+    owner: StaticOwner,
+    facade: &str,
     declaration_line: u32,
     cw: &mut ClassWriter,
 ) {
-    for accessor in plan.accessors_of(owner) {
-        match *accessor {
-            StaticAccessor::Function(function) => {
-                emit_function_accessor(ir, function, owner, declaration_line, cw);
-            }
-            StaticAccessor::Getter(index) => {
-                let property = &ir.statics[index as usize];
-                let ty = jvm_declared_ty(&property.ty);
-                let descriptor = format!("(){}", type_descriptor(ty));
-                let name = format!("access${}$p", property_getter_name(&property.name));
-                let mut code = CodeBuilder::new(0);
-                code.mark_line(declaration_line);
-                let field =
-                    cw.fieldref(owner, ir.static_field_jvm_name(index), &type_descriptor(ty));
-                code.getstatic(field, slot_words(ty) as i32);
-                emit_return(ty, &mut code);
-                code.ensure_locals(0);
-                code.link();
-                cw.add_method(0x1019, &name, &descriptor, &code);
-            }
-            StaticAccessor::Setter(index) => {
-                let property = &ir.statics[index as usize];
-                let ty = jvm_declared_ty(&property.ty);
-                let descriptor = format!("({})V", type_descriptor(ty));
-                let name = format!("access${}$p", property_setter_name(&property.name));
-                let words = slot_words(ty);
-                let mut code = CodeBuilder::new(words);
-                code.mark_line(declaration_line);
-                load(ty, 0, &mut code);
-                let field =
-                    cw.fieldref(owner, ir.static_field_jvm_name(index), &type_descriptor(ty));
-                code.putstatic(field, words as i32);
-                code.ret_void();
-                code.ensure_locals(words);
-                code.link();
-                cw.add_method(0x1019, &name, &descriptor, &code);
-                cw.set_method_debug(
-                    &name,
-                    &descriptor,
-                    None,
-                    &[("<set-?>".to_string(), type_descriptor(ty), 0)],
-                );
-            }
+    let accessor = Accessor {
+        ir,
+        owner,
+        facade,
+        declaration_line,
+        flags: if owner.is_interface(ir) {
+            0x1009
+        } else {
+            0x1019
+        },
+    };
+    for planned in plan.accessors_of(owner) {
+        match *planned {
+            StaticAccessor::Function(function) => accessor.function(function, cw),
+            StaticAccessor::Getter(index) => accessor.getter(index, cw),
+            StaticAccessor::Setter(index) => accessor.setter(index, cw),
         }
     }
 }
 
-fn emit_function_accessor(
-    ir: &IrFile,
-    function: u32,
-    owner: &str,
+/// The accessors one static owner declares.
+struct Accessor<'a> {
+    ir: &'a IrFile,
+    owner: StaticOwner,
+    facade: &'a str,
     declaration_line: u32,
-    cw: &mut ClassWriter,
-) {
-    let target = &ir.functions[function as usize];
-    let parameters = jvm_function_params(ir, function);
-    let result = jvm_declared_ty(&target.ret);
-    let descriptor = method_descriptor(&parameters, result);
-    let name = format!("access${}", target.name);
-    // One accessor per target: a function whose emission-built state machine re-enters it through
-    // `access$<name>` already has it.
-    if cw.declares_method(&name, &descriptor) {
-        return;
+    flags: u16,
+}
+
+impl Accessor<'_> {
+    fn getter(&self, index: u32, cw: &mut ClassWriter) {
+        let property = &self.ir.statics[index as usize];
+        let ty = jvm_declared_ty(&property.ty);
+        let descriptor = format!("(){}", type_descriptor(ty));
+        let name = format!("access${}$p", property_getter_name(&property.name));
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(self.declaration_line);
+        let field = self.field(index, ty, cw);
+        code.getstatic(field, slot_words(ty) as i32);
+        emit_return(ty, &mut code);
+        code.ensure_locals(0);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
     }
-    let words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
-    let mut code = CodeBuilder::new(words);
-    let mut slot = 0u16;
-    let mut locals = Vec::new();
-    let names = crate::jvm::parameter_names::function_locals(ir, function, &parameters);
-    for (ordinal, &ty) in parameters.iter().enumerate() {
-        load(ty, slot, &mut code);
-        if let Some(local) = names
-            .as_ref()
-            .and_then(|names| names.get(ordinal).cloned().flatten())
-        {
-            locals.push((local, type_descriptor(ty), slot));
+
+    fn setter(&self, index: u32, cw: &mut ClassWriter) {
+        let property = &self.ir.statics[index as usize];
+        let ty = jvm_declared_ty(&property.ty);
+        let descriptor = format!("({})V", type_descriptor(ty));
+        let name = format!("access${}$p", property_setter_name(&property.name));
+        let words = slot_words(ty);
+        let mut code = CodeBuilder::new(words);
+        code.mark_line(self.declaration_line);
+        load(ty, 0, &mut code);
+        let field = self.field(index, ty, cw);
+        code.putstatic(field, words as i32);
+        code.ret_void();
+        code.ensure_locals(words);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+        cw.set_method_debug(
+            &name,
+            &descriptor,
+            None,
+            &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+        );
+    }
+
+    fn field(&self, index: u32, ty: Ty, cw: &mut ClassWriter) -> u16 {
+        cw.fieldref(
+            &self.owner.internal_name(self.facade),
+            self.ir.static_field_jvm_name(index),
+            &type_descriptor(ty),
+        )
+    }
+
+    fn function(&self, function: u32, cw: &mut ClassWriter) {
+        let ir = self.ir;
+        let target = &ir.functions[function as usize];
+        let parameters = jvm_function_params(ir, function);
+        let result = jvm_declared_ty(&target.ret);
+        let descriptor = method_descriptor(&parameters, result);
+        let name = format!("access${}", target.name);
+        // One accessor per target: a function whose emission-built state machine re-enters it
+        // through `access$<name>` already has it.
+        if cw.declares_method(&name, &descriptor) {
+            return;
         }
-        slot += slot_words(ty);
+        let words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
+        let mut code = CodeBuilder::new(words);
+        let mut slot = 0u16;
+        let mut locals = Vec::new();
+        let names = crate::jvm::parameter_names::function_locals(ir, function, &parameters);
+        for (ordinal, &ty) in parameters.iter().enumerate() {
+            load(ty, slot, &mut code);
+            if let Some(local) = names
+                .as_ref()
+                .and_then(|names| names.get(ordinal).cloned().flatten())
+            {
+                locals.push((local, type_descriptor(ty), slot));
+            }
+            slot += slot_words(ty);
+        }
+        // kotlinc maps the forwarding call, after its operands are loaded.
+        code.mark_line(self.declaration_line);
+        let method = static_methodref(cw, ir, self.facade, self.owner, &target.name, &descriptor);
+        code.invokestatic(method, words as i32, slot_words(result) as i32);
+        emit_return(result, &mut code);
+        code.ensure_locals(words);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+        cw.set_method_debug(&name, &descriptor, None, &locals);
     }
-    // kotlinc maps the forwarding call, after its operands are loaded.
-    code.mark_line(declaration_line);
-    let method = cw.methodref(owner, &target.name, &descriptor);
-    code.invokestatic(method, words as i32, slot_words(result) as i32);
-    emit_return(result, &mut code);
-    code.ensure_locals(words);
-    code.link();
-    cw.add_method(0x1019, &name, &descriptor, &code);
-    cw.set_method_debug(&name, &descriptor, None, &locals);
 }

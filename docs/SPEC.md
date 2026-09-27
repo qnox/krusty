@@ -3962,8 +3962,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reflects the declaring class, not the facade, with flags 0, and its classes (and every local
   class of a block body) are named in that class's chain: `C$ref$g$1`, not `<File>Kt$ref$g$1`. A
   property reference to a private static property reflects its declared getter (`getP()I`) while
-  calling `access$getP$p`. Tests: `tests/companion_block_members_e2e.rs`
-  (`private_block_members_used_from_other_classes_go_through_class_accessors`),
+  calling `access$getP$p`. The owner is an identity (facade or declaring class) from planning to
+  emission; which private storage is bridged is selected once, by storage identity, and both the
+  use sites and a reference's realization consume that selection. An **interface** owner (a block
+  member of an interface) declares its accessor `public static synthetic` — an interface method
+  cannot be `final` — at the interface's declaration line, before the `access$…$jd` bridges, and
+  every use names it by an `InterfaceMethodref`, as does a reference carrier's static call to any
+  interface static. kotlinc treats an interface's block property as an interface property: one
+  without a getter body is abstract whatever its initializer, so a `private` one is rejected with
+  `abstract property in interface cannot be private.` at its `private` modifier, and no private
+  interface storage is ever bridged. Tests: `tests/companion_block_members_e2e.rs`
+  (`private_block_members_used_from_other_classes_go_through_class_accessors`,
+  `private_interface_block_functions_go_through_interface_accessors`,
+  `private_interface_block_property_without_a_getter_is_rejected`),
   `tests/synthetic_accessor_e2e.rs`
   (`private_top_level_declarations_used_from_classes_go_through_facade_accessors`).
 - **A private property reached from outside its class gets kotlinc's `access$get<X>$p` bridge.** An

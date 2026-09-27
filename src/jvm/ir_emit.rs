@@ -80,6 +80,7 @@ mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 mod value_class_descriptors;
 mod value_class_signatures;
+use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
     seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
     PlainClassPoolSeed,
@@ -3621,7 +3622,7 @@ fn cross_owner_private_member_calls(
             if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
                 let target_class = &ir.classes[*class as usize];
                 let target = target_class.methods[*index as usize];
-                if target_class.fq_name() != context.owner
+                if context.owner != StaticOwner::Class(target_class.fq_name)
                     && (private_interface_bodies_are_members || !target_class.is_interface)
                     && ir.private_methods.contains(&target)
                 {
@@ -3684,7 +3685,7 @@ fn emit_pass(
         .iter()
         .flat_map(|c| c.methods.iter().copied())
         .collect();
-    let contexts = static_accessors::emission_contexts(ir, facade, &class_member_fids);
+    let contexts = static_accessors::emission_contexts(ir, &class_member_fids);
     env.run
         .private_member_access_bridges
         .borrow_mut()
@@ -3694,7 +3695,7 @@ fn emit_pass(
             opts.jvm_default != JvmDefaultMode::Disable,
         ));
     *env.run.static_accessor_plan.borrow_mut() =
-        static_accessors::plan(ir, facade, env, &contexts, &class_member_fids);
+        static_accessors::plan(ir, env, &contexts, &class_member_fids);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -3796,6 +3797,7 @@ fn emit_pass(
     static_accessors::emit(
         ir,
         &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Facade,
         facade,
         1,
         &mut cw,
@@ -5817,7 +5819,8 @@ fn emit_class(
     static_accessors::emit(
         ir,
         &env.run.static_accessor_plan.borrow(),
-        &fq_name,
+        StaticOwner::Class(c.fq_name),
+        facade,
         c.decl_start_line.max(c.decl_line),
         &mut cw,
     );
@@ -6481,8 +6484,17 @@ fn emit_interface_class(
             }
         }
     }
-    // The `access$…$jd` bridges follow every declared member (kotlinc's order): declared bodies
-    // first, then the republished surface for inherited defaults this interface does not redeclare.
+    // The synthetic accessors of private statics come first, then the `access$…$jd` bridges
+    // (kotlinc's order): declared bodies first, then the republished surface for inherited
+    // defaults this interface does not redeclare.
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
         let physical_params = jvm_function_params(ir, fid);
@@ -12203,8 +12215,7 @@ impl<'a> Emitter<'a> {
                     // those callers through the facade's `access$<name>` accessor.
                     let name = if static_accessors::routes_through_accessor(
                         self.ir,
-                        &self.owner,
-                        &self.facade,
+                        self.owner == self.facade,
                         *fid,
                     ) {
                         format!("access${}", f.name)
@@ -12241,9 +12252,8 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
-                    let source_owner_is_interface = self.ir.classes.iter().any(|candidate| {
-                        candidate.is_interface && candidate.fq_name_id() == *owner
-                    });
+                    let static_owner = StaticOwner::Class(*owner);
+                    let source_owner_is_interface = static_owner.is_interface(self.ir);
                     let owner = owner.render();
                     // `owner_is_interface` answers from the CLASSPATH; a static declared on an
                     // interface being compiled right now is not there. An `invokestatic` naming an
@@ -12254,8 +12264,7 @@ impl<'a> Emitter<'a> {
                     // A private one reached from another class goes through its owner's accessor.
                     let name = if static_accessors::routes_through_accessor(
                         self.ir,
-                        &self.owner,
-                        &owner,
+                        static_owner.is_emitted_class(&self.owner, &self.facade),
                         *function,
                     ) {
                         format!("access${}", f.name)

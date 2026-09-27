@@ -504,6 +504,8 @@ fn emit_toplevel_prop_ref_class(
 ) -> Vec<u8> {
     let owner = pr.owner_or_facade(facade);
     let call_owner = pr.call_owner().unwrap_or_else(|| facade.to_string());
+    // The accessors of an interface's static property are named by `InterfaceMethodref`s.
+    let call_owner_is_interface = StaticOwner::of(pr.call_owner_internal).is_interface(ir);
     let fq = c.fq_name();
     let superclass = c.superclass();
     let mut cw = property_reference_writer(ir, c, facade, env, opts);
@@ -563,7 +565,11 @@ fn emit_toplevel_prop_ref_class(
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
     let mut get = CodeBuilder::new(1);
-    let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
+    let gref = if call_owner_is_interface {
+        cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+    } else {
+        cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
+    };
     get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
     if carrier {
         box_property_reference_value(
@@ -638,7 +644,11 @@ fn emit_toplevel_prop_ref_class(
             let cref = cw.class_ref(&internal);
             set.checkcast(cref);
         }
-        let sref = cw.methodref(&call_owner, &setter, &setter_desc);
+        let sref = if call_owner_is_interface {
+            cw.interface_methodref(&call_owner, &setter, &setter_desc)
+        } else {
+            cw.methodref(&call_owner, &setter, &setter_desc)
+        };
         set.invokestatic(sref, slot_words(setter_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
