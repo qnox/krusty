@@ -30,7 +30,7 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         4
     } else if c.is_interface {
         1
-    } else if !c.enum_entries.is_empty() {
+    } else if c.is_enum {
         2
     } else if c.enum_entry_of.is_some() {
         3
@@ -53,7 +53,7 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         | (u64::from(c.is_data) << 10)
         | (u64::from(c.is_value) << 13)
         | (u64::from(c.is_fun_interface) << 14)
-        | (u64::from(!c.enum_entries.is_empty()) << 15)
+        | (u64::from(c.is_enum) << 15)
 }
 
 /// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape

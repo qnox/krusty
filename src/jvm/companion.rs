@@ -139,7 +139,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         let Some(companion_name) = outer_class.companion_class else {
             continue;
         };
-        if !outer_class.enum_entries.is_empty() || outer_class.is_value {
+        if outer_class.is_enum || outer_class.is_value {
             continue;
         }
         // Annotation classes are distinct in common IR but are JVM interfaces for storage rules.
