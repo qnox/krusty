@@ -219,8 +219,9 @@ pub(super) fn eligible_points(
         ),
     ];
     // Gates of the state machine itself: its spills, its continuation class and that class's
-    // `@DebugMetadata`. A function with no suspension point has none of them, as kotlinc's
-    // transformer returns before building them.
+    // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
+    // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
+    // machine.
     let machine_declines: [(&dyn Fn() -> bool, &str); 6] = [
         (
             &|| !route.context.null_out_dead_spills,
@@ -246,11 +247,12 @@ pub(super) fn eligible_points(
         // yet, which the transformer's `@DebugMetadata` reads off the body.
         (&|| splices_inline_code(ir, body), "splices an inline body"),
     ];
-    let machine_declines: &[(&dyn Fn() -> bool, &str)] = if points.is_empty() {
-        &[]
-    } else {
-        &machine_declines
-    };
+    let machine_declines: &[(&dyn Fn() -> bool, &str)] =
+        if points.is_empty() && subject == Subject::NamedFunction {
+            &[]
+        } else {
+            &machine_declines
+        };
     // Checked in order, each only while every earlier one holds.
     let declined = body_declines
         .iter()
