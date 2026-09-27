@@ -10341,7 +10341,7 @@ impl<'a> Emitter<'a> {
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
         self.machine_after(suspension, code);
-        self.close_transformed_suspension(e, false, code);
+        self.close_declared_suspension(e, code);
     }
 
     /// Open a suspension this emission's machine owns, if `e` is one.

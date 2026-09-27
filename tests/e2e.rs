@@ -1188,6 +1188,8 @@ mod mpp_requires_the_feature_e2e;
 mod nothing_type_argument_signature_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "suspend_under_try_e2e.rs"]
+mod suspend_under_try_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
