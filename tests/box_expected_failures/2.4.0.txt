@@ -196,7 +196,6 @@ innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-lateinit/innerIsInitialized.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt

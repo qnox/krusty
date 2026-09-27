@@ -20,6 +20,7 @@ use crate::jvm::names::{
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use field_visibility::{is_jvm_field, jvm_field_visibility};
 
 mod access_bridges;
 mod annotation_impl;
@@ -45,6 +46,7 @@ mod declared_nullability;
 mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
+mod field_visibility;
 mod field_write;
 mod frame_map;
 mod function_debug;
@@ -4203,38 +4205,6 @@ fn property_backing_field_annotations(
         .unwrap_or_default()
 }
 
-/// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
-/// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
-/// declared visibility, so every read and write — inside the class and out — is a field access, and
-/// the `@Metadata` record describes only the field.
-///
-/// Read off the resolved application rather than the spelling: `@JvmField` reaches the FIELD use
-/// site by its own declared `@Target` (see `class_field_annotations`), so it is already interned
-/// here under its exact identity, and an unrelated user annotation that happens to be spelled
-/// `JvmField` resolves to a different one.
-///
-/// A companion is excluded here because the companion-storage pass hoists its field to the enclosing
-/// classifier. A named object's `@JvmField`, by contrast, is a public static on that object class and
-/// uses this rule together with the object's backend-selected static storage.
-fn is_jvm_field(c: &crate::ir::IrClass, property: &str) -> bool {
-    !c.is_companion && c.property_has_jvm_field(property)
-}
-
-fn jvm_field_visibility(c: &crate::ir::IrClass, property: &str) -> Option<u16> {
-    is_jvm_field(c, property)
-        .then(|| {
-            c.properties
-                .iter()
-                .find(|declaration| declaration.name == property)
-        })
-        .flatten()
-        .map(|declaration| match declaration.visibility {
-            crate::types::Visibility::Protected => 0x0004,
-            crate::types::Visibility::Private => 0x0002,
-            _ => 0x0001,
-        })
-}
-
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(annotations) = c.field_annotations.iter().find(|a| a.field == field) {
         cw.set_last_late_field_annotations(&annotations.annotations);
@@ -5272,8 +5242,9 @@ fn emit_class(
         //
         // A `@JvmField` property has no accessor, so the field IS the declaration's visible face and
         // takes the PROPERTY's declared visibility instead — `protected val` stays `ACC_PROTECTED`,
-        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact).
-        let jvm_field_visibility = jvm_field_visibility(c, name);
+        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact). A
+        // `lateinit` field likewise takes its setter's visibility.
+        let jvm_field_visibility = jvm_field_visibility(c, field_index);
         let private = field.is_private();
         let acc = if is_continuation {
             // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
