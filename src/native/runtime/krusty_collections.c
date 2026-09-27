@@ -491,13 +491,14 @@ KRef kt_list_iterator(KRef list) {
     return (KRef)iterator;
 }
 
-/* `cursor != size`, as the JVM's `ArrayList` and `AbstractList` iterators answer it, and not
-   `cursor < size`: a walk whose last element removes an element leaves the cursor past the end,
-   where the JVM says there is more and the `next()` that follows raises
-   `ConcurrentModificationException`. The cursor only passes the size through such a change. */
+/* `cursor < size`, as Kotlin/Native's `ArrayList` iterator answers it (`Itr.hasNext` in the
+   stdlib's `ArrayList.kt`): a walk whose last element removes an element leaves the cursor past the
+   end, and the walk ends there without a `ConcurrentModificationException`. The JVM's `ArrayList`
+   answers `cursor != size` and goes on to a `next()` that raises; the runtime behaves as
+   Kotlin/Native does, and `map_mutated_source` declares the difference. */
 kt_boolean kt_list_iterator_has_next(KRef iterator) {
     const KListIterator *self = (const KListIterator *)iterator;
-    return self->at != kt_list_size(self->list);
+    return self->at < kt_list_size(self->list);
 }
 
 KRef kt_list_iterator_next(KRef iterator) {

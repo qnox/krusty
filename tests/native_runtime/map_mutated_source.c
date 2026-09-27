@@ -1,14 +1,15 @@
 /* `map` and `forEach` over a `MutableList` the lambda changes structurally stop the way Kotlin's
    do. Kotlin's `map` sizes its result from the list but walks the list's iterator, asking
-   `hasNext()` before every element, and the JVM's `ArrayList` iterator answers that as
-   `cursor != size`; its `next()` after a structural change throws
+   `hasNext()` before every element, and `next()` after a structural change throws
    `ConcurrentModificationException`. The runtime's `map` instead took the size first and called
    `next()` exactly that many times with no final `hasNext()`, so a transform that appended to a
-   one-element list answered a one-element result; and its iterator answered `hasNext()` as
-   `cursor < size`, so a walk whose last element removed itself ended cleanly where Kotlin throws.
+   one-element list answered a one-element result.
 
-   The driver prints each answer and the list afterwards, and the harness compares the lines with
-   what `map_mutated_source.kt` answers under the reference kotlinc. */
+   The iterator answers `hasNext()` as Kotlin/Native's `ArrayList` does, `cursor < size`, so a walk
+   whose last element removes an element ends cleanly; the JVM's answers `cursor != size` and
+   throws there. The driver prints each answer and the list afterwards, and the harness compares the
+   lines with what `map_mutated_source.kt` answers under the reference kotlinc, those two lines
+   being declared divergences. */
 #include "collections_later_tiers.h"
 #include "transcript.h"
 

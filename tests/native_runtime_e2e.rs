@@ -854,7 +854,25 @@ fn the_list_walk_and_array_entry_points_answer_as_kotlin_does() {
 
 #[test]
 fn a_map_or_for_each_over_a_list_its_lambda_changes_stops_where_kotlins_iterator_does() {
-    run_driver_against_kotlin("map_mutated_source");
+    // Kotlin/Native's `ArrayList` iterator answers `hasNext()` as `index < list.length`
+    // (`ArrayList.kt`, `Itr.hasNext`, JetBrains/kotlin v2.4.10,
+    // libraries/stdlib/native-wasm/src/kotlin/collections), so a walk whose last element removed an
+    // element ends there; the JVM's answers `cursor != size` and its next `next()` throws.
+    run_driver_against_kotlin_with(
+        "map_mutated_source",
+        &[
+            Divergence::native_behaviour(
+                "map removing the last at the last of [1, 2]: threw \
+                 ConcurrentModificationException: null [1]",
+                "map removing the last at the last of [1, 2]: [10, 20] [1]",
+            ),
+            Divergence::native_behaviour(
+                "forEach removing the last at the last of [1, 2]: threw \
+                 ConcurrentModificationException: null [1]",
+                "forEach removing the last at the last of [1, 2]: kotlin.Unit [1]",
+            ),
+        ],
+    );
 }
 
 #[test]

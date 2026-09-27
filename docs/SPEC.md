@@ -9142,15 +9142,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   JVM for `builder_map_and_self_list.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`builder_map_and_self_list`).
 - **A native `map` over a mutable collection walks its iterator, which answers `hasNext` as
-  `cursor != size`.** Kotlin's `map` sizes its result from the receiver but is a `for` loop over its
+  `cursor < size`.** Kotlin's `map` sizes its result from the receiver but is a `for` loop over its
   iterator, asking `hasNext()` before every element, so a transform that changes the receiver
   structurally reaches a `next()` that raises `ConcurrentModificationException`: appending to
   `mutableListOf(1)` while mapping it throws where a walk of the size taken first returned `[10]`.
   Only a receiver the transform cannot change (a read-only list, an array, a `String`, a range) is
-  sized ahead. A list iterator answers `hasNext()` as the JVM's `ArrayList` and `AbstractList`
-  iterators do, `cursor != size`, so a walk whose last element removes an element goes on to that
-  `next()` and throws, and one whose first element removes the first ends cleanly. Compared with
-  kotlinc's answers for `map_mutated_source.kt` on every run.
+  sized ahead. A list iterator answers `hasNext()` as Kotlin/Native's `ArrayList` iterator does,
+  `cursor < size`, so a walk whose last element removes an element ends there cleanly, where the
+  JVM's `ArrayList` (`cursor != size`) goes on to a `next()` that throws -- a declared divergence.
+  Compared with kotlinc's answers for `map_mutated_source.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`map_mutated_source`).
 - **Every native iterator is an `Iterator`, and an array's is its kind's.** A progression's iterator
   (`IntProgressionIterator` and kin, through the abstract `IntIterator` family, and the two
