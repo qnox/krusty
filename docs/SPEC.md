@@ -8734,6 +8734,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm::parameter_assertions`, replacing the receiver-only guard common lowering used to record.
   Test: `tests/lambda_parameter_checks_e2e.rs`.
 
+- **A destructuring loop's container temporary is not a source local** (kotlinc's
+  `isVisibleInLVT`). A `for ((a, b) in xs)` loop's own variable is read only by the prepended
+  `val (a, b) = …`: the parser records that role, checked FIR publishes no debug name, and common
+  lowering marks the declaration unnamed. It therefore produces neither a local-variable row nor
+  named-local spill semantics, including in a suspend state machine. Test:
+  `tests/destructuring_loop_temporary_locals_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare

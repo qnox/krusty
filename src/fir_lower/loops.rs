@@ -41,14 +41,15 @@ impl BodyLowering<'_> {
     ) -> (u32, ExprId) {
         let source = crate::fir::LocalValueId::from_raw(variable);
         let variable = self.value_slot(source);
+        let name = self.body.debug_value_name(source).map(str::to_owned);
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: variable,
             ty,
             init: Some(initializer),
-            named: true,
+            named: name.is_some(),
         });
-        if let Some(name) = self.body.debug_value_name(source) {
-            self.ir.value_names.insert(declaration, name.to_owned());
+        if let Some(name) = name {
+            self.ir.value_names.insert(declaration, name);
         }
         (variable, declaration)
     }

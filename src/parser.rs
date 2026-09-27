@@ -5821,6 +5821,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let destructured = destructure.is_some();
         let name = match &destructure {
             Some(_) => format!("$dest${}", start.lo),
             None => {
@@ -5885,7 +5886,7 @@ impl<'a> Parser<'a> {
             let body = self.parse_loop_body();
             let body = self.desugar_destructure_body(&name, destructure, body);
             // Iterate over `rstart`: the checker decides whether it is a counted progression.
-            return self.finish_stmt(
+            return self.finish_loop(
                 Stmt::ForEach {
                     name,
                     iterable: rstart,
@@ -5893,6 +5894,7 @@ impl<'a> Parser<'a> {
                     label,
                 },
                 start,
+                destructured,
             );
         };
         let rend = self.parse_bp(9);
@@ -5945,7 +5947,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RParen, "')'");
             let body = self.parse_loop_body();
             let body = self.desugar_destructure_body(&name, destructure, body);
-            return self.finish_stmt(
+            return self.finish_loop(
                 Stmt::ForEach {
                     name,
                     iterable,
@@ -5953,12 +5955,13 @@ impl<'a> Parser<'a> {
                     label,
                 },
                 start,
+                destructured,
             );
         }
         self.expect(TokenKind::RParen, "')'");
         let body = self.parse_loop_body();
         let body = self.desugar_destructure_body(&name, destructure, body);
-        self.finish_stmt(
+        self.finish_loop(
             Stmt::For {
                 name,
                 range: ForRange {
@@ -5970,7 +5973,17 @@ impl<'a> Parser<'a> {
                 label,
             },
             start,
+            destructured,
         )
+    }
+
+    /// Finish a `for` statement, recording whether its variable is a destructuring pattern.
+    fn finish_loop(&mut self, statement: Stmt, start: Span, destructured: bool) -> StmtId {
+        let statement = self.finish_stmt(statement, start);
+        if destructured {
+            self.file.destructured_loops.insert(statement);
+        }
+        statement
     }
 
     /// Return whether an infix operand follows, allowing newlines after the operator.

@@ -317,6 +317,12 @@ impl IrFile {
                 .all(|identity| identity.source_name.as_deref() != Some("")),
             "published source parameter identities are never empty"
         );
+        assert!(
+            identities.iter().all(|identity| {
+                !matches!(identity.role, IrParameterRole::Value) || identity.source_name.is_some()
+            }),
+            "a value parameter identity carries its source name"
+        );
         Some(identities)
     }
 }
@@ -387,6 +393,22 @@ mod tests {
         file.fn_params.insert(
             function,
             FnParamInfo::source_names(vec!["onlyOne".to_string()]),
+        );
+        let _ = file.function_parameter_identities(function);
+    }
+
+    #[test]
+    #[should_panic(expected = "a value parameter identity carries its source name")]
+    fn parameter_identity_view_rejects_an_unnamed_value_parameter() {
+        let mut file = IrFile::default();
+        let function = add_function(&mut file, "unnamed", 1);
+        file.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity {
+                source_name: None,
+                role: IrParameterRole::Value,
+                provenance: IrParameterProvenance::SourceDeclared,
+            }]),
         );
         let _ = file.function_parameter_identities(function);
     }

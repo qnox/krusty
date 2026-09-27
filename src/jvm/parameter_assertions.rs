@@ -76,8 +76,8 @@ fn realize_lambda(ir: &mut IrFile, function: FunId) {
         .map(|identity| match identity.role {
             IrParameterRole::ExtensionReceiver
             | IrParameterRole::UnusedValue
-            | IrParameterRole::DestructuredValue => true,
-            IrParameterRole::Value => identity.source_name.is_some(),
+            | IrParameterRole::DestructuredValue
+            | IrParameterRole::Value => true,
             _ => false,
         })
         .collect::<Vec<_>>();

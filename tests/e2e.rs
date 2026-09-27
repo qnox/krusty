@@ -1460,6 +1460,8 @@ mod child_serializer_lazy_factory_e2e;
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
+#[path = "destructuring_loop_temporary_locals_e2e.rs"]
+mod destructuring_loop_temporary_locals_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
