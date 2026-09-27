@@ -266,6 +266,44 @@ impl Emitter<'_> {
         true
     }
 
+    /// Kotlin's IEEE equality with a nullable floating operand: kotlinc's `Ieee754Equals` calls the
+    /// `Intrinsics.areEqual` overload typed by each operand's nullability (`(Ljava/lang/Double;D)Z`,
+    /// `(DLjava/lang/Double;)Z`, `(Ljava/lang/Double;Ljava/lang/Double;)Z`), marking the
+    /// comparison's line before the call.
+    pub(super) fn emit_nullable_ieee754_equals(
+        &mut self,
+        expression: ExprId,
+        operand: Ty,
+        args: &[ExprId],
+        code: &mut CodeBuilder,
+    ) {
+        let &[lhs, rhs] = args else {
+            panic!("IEEE equality has two operands, not {args:?}");
+        };
+        self.emit_operands(&[lhs, rhs], code);
+        let descriptor = |ty: Ty| {
+            if ty.is_jvm_scalar() {
+                type_descriptor(operand)
+            } else {
+                type_descriptor(Ty::nullable(operand))
+            }
+        };
+        let (left, right) = (self.value_ty(lhs), self.value_ty(rhs));
+        let method = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "areEqual",
+            &format!("({}{})Z", descriptor(left), descriptor(right)),
+        );
+        self.at_comparison_line(expression, |this| {
+            this.mark_comparison_decision(&[lhs, rhs], code)
+        });
+        let words = [left, right]
+            .iter()
+            .map(|ty| if ty.is_jvm_scalar() { slot_words(*ty) } else { 1 } as i32)
+            .sum::<i32>();
+        code.invokestatic(method, words, 1);
+    }
+
     /// Put the null-safe structural equality result for two references on the operand stack.
     fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.

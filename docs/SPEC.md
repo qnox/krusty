@@ -8558,6 +8558,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Identity (`===`) and ordering keep the direct compare-and-jump. Test:
   `tests/ieee754_equality_e2e.rs`.
 
+- **Floating `==` with a nullable operand is one IEEE equality operation** (fir2ir's
+  `ieee754equals`, kotlinc's `Ieee754Equals`). An equality between two operands of one floating
+  type, either of them nullable, lowers to `IrIntrinsic::Ieee754Equals` over both operands in
+  source order (two nulls are equal, a null and a value are not, two values compare as IEEE
+  primitives); `!=` negates it. Common lowering no longer expands it into null tests: the JVM calls
+  the `Intrinsics.areEqual` overload typed by each operand's nullability
+  (`(Ljava/lang/Double;D)Z`, `(DLjava/lang/Double;)Z`, `(Ljava/lang/Double;Ljava/lang/Double;)Z`,
+  and the `Float` forms), marking the comparison's line before the call, and JavaScript compares
+  with `===`. A nullable integral equality keeps its null tests (kotlinc's
+  `PrimitiveToObjectComparison` is a separate rule). Test: `tests/ieee754_equality_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare

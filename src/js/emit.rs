@@ -791,6 +791,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     emit_expr(ir, args[0], inst),
                     emit_expr(ir, args[1], inst)
                 ),
+                // JavaScript `===` is IEEE equality on numbers and identity on `null`.
+                crate::ir::IrIntrinsic::Ieee754Equals { .. } => format!(
+                    "({} === {})",
+                    emit_expr(ir, args[0], inst),
+                    emit_expr(ir, args[1], inst)
+                ),
                 crate::ir::IrIntrinsic::DataClassFieldHash { .. } => format!(
                     "(String({}).split('').reduce((h,c)=>((h*31+c.charCodeAt(0))|0),0))",
                     emit_expr(ir, args[0], inst)
