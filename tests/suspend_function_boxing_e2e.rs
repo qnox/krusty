@@ -92,3 +92,51 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "SuspendContextRuns");
 }
+
+/// A member with no suspension point that builds a suspend lambda: the lambda is realized as its
+/// own class before the member's body is reshaped for the transformer, so krusty writes kotlinc's
+/// classes, and the member and the lambda class declare kotlinc's methods.
+#[test]
+fn a_member_without_a_suspension_point_builds_its_suspend_lambda_class() {
+    let src = "fun builder(c: suspend () -> Unit) {}\n\
+class A {\n\
+    suspend fun step(): String = \"s\"\n\
+    suspend fun member(): String {\n\
+        builder { step() }\n\
+        return \"m\"\n\
+    }\n\
+}\n";
+    let classes = common::classes_against_kotlinc_lib(
+        "SuspendLambdaHost",
+        &[("Lib.kt", "package lib\n")],
+        src,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for class in classes.reference.keys() {
+        let (reference, krusty) = classes
+            .method_declarations(class)
+            .expect("both compilers write the class");
+        assert_eq!(krusty, reference, "{class}");
+    }
+}
+
+/// A suspend lambda with no suspension point that reads `coroutineContext` reads the context of its
+/// own class, which is its continuation.
+#[test]
+fn a_suspend_lambda_without_a_suspension_point_reads_its_context() {
+    let src = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+fun box(): String {\n\
+    var seen: CoroutineContext? = null\n\
+    suspend { seen = coroutineContext }.startCoroutine(Done())\n\
+    return if (seen == EmptyCoroutineContext) \"OK\" else \"F:$seen\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "SuspendLambdaContext");
+}
