@@ -8711,8 +8711,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   under `+UnitConversionsOnArbitraryExpressions` (KT-84393; kotlinc implements it from 2.4.20, so
   krusty reproducing 2.4.0/2.4.10 keeps rejecting it even with the flag) a value whose result is not
   `Unit` converts to the same shape returning `Unit` (unit conversion). The two compose
-  (`() -> String` into `suspend () -> Unit`). Only a regular, non-null value converts, and a callable
-  reference adapts its own result instead. The resolver (`src/resolve/function_value_conversions.rs`)
+  (`() -> String` into `suspend () -> Unit`). As in kotlinc's `argumentTypeWithUnitConversion`, kind
+  conversion applies first and the value may already have the expected kind, so a `suspend () ->
+  String` value unit-converts to `suspend () -> Unit`; kind conversion never removes suspension, and a
+  `suspend` value reaching a regular function type is an `argument type mismatch`
+  (`is_assignable` refuses a `suspend` function type as a regular one). Only a non-null value
+  converts, and a callable reference adapts its own result instead. The resolver (`src/resolve/function_value_conversions.rs`)
   selects the exact callable constituent converted — for a value whose class implements the function
   type, that function supertype — and applicability admits the non-`Unit` result only through this
   rule. Checked FIR carries `FirConversionKind::FunctionValue { from, to, ordinal }`; common lowering
@@ -8724,7 +8728,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the value as bound receiver and reflecting `Intrinsics.Kotlin`'s `suspendConversion<N>` with the
   source function type as first parameter (`suspendConversion0(Lkotlin/jvm/functions/Function0;)V`,
   or `…Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` for a suspend target); its `invoke`
-  casts `receiver` to the source `FunctionN` and calls it, then `pop`s for a unit conversion.
+  casts `receiver` to the source `FunctionN` and calls it, then `pop`s for a unit conversion. An
+  already-`suspend` value is invoked as a suspension point of the suspend adapter: it receives the
+  adapter's continuation, `COROUTINE_SUSPENDED` returns through, and the carrier's `invoke` becomes a
+  state machine completing with `Unit`. kotlinc 2.4.20's frontend accepts that argument but its JVM
+  lowering fails (`findSubtypeOfBasicFunctionType` requires a regular function type), so there is
+  no kotlinc class to match instruction for instruction; the carrier's header, members and
+  `@Metadata` are those kotlinc writes for the same target converted from a regular value, and its
+  state machine takes krusty's member-suspend-function layout, which differs from kotlinc's in
+  instruction order for any member function with a non-tail suspension.
   Naming follows kotlinc's one local-class walk: a conversion takes the next position of the sequence
   it is written in (shifting every later lambda and reference there) and its operand is named inside
   it, so `src/frontend/local_class_names.rs` replays the walk once resolution has selected the

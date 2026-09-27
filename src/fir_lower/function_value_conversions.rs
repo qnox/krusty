@@ -7,10 +7,10 @@ use crate::types::{stored_value_ty, Ty};
 use super::BodyLowering;
 
 impl BodyLowering<'_> {
-    /// Realize the conversion of an already-materialized regular function value to the suspend
-    /// and/or `Unit`-returning function type `to` as a callable reference bound to that value. Its
-    /// adapter takes the value, then the target's parameters, invokes the value and coerces the
-    /// result to the target's. `from` and `to` are complete checked callable shapes and `ordinal`
+    /// Realize the conversion of an already-materialized function value to the suspend and/or
+    /// `Unit`-returning function type `to` as a callable reference bound to that value. Its adapter
+    /// takes the value, then the target's parameters, invokes the value (suspending when the value
+    /// is itself `suspend`) and coerces the result to the target's. `from` and `to` are complete checked callable shapes and `ordinal`
     /// the conversion's checked place in its callable; this routine selects nothing.
     pub(super) fn function_value_conversion(
         &mut self,
@@ -23,7 +23,8 @@ impl BodyLowering<'_> {
         else {
             return None;
         };
-        if source.suspend || source.params.len() != target.params.len() {
+        // Kind conversion only adds suspension; the frontend never selects the reverse.
+        if (source.suspend && !target.suspend) || source.params.len() != target.params.len() {
             return None;
         }
 
@@ -44,6 +45,11 @@ impl BodyLowering<'_> {
             params: source.params.clone(),
             ret: erased_result,
         });
+        // An already-suspend value is invoked as a suspension point of the suspend adapter, which
+        // hands it the adapter's continuation.
+        if source.suspend {
+            self.ir.suspend_calls.insert(invoke, source.ret);
+        }
         let adapter_result = if target.ret == Ty::Unit {
             Ty::Unit
         } else {

@@ -19,6 +19,24 @@
   Main.kt:6:12: return type mismatch: expected 'suspend () -> String', actual '() -> String'.
   Main.kt:8:49: return type mismatch: expected 'suspend () -> Unit', actual '() -> String'.
 
+[a_suspend_value_is_not_converted_to_a_regular_function_type]
+2.4.0..2.4.20:
+  Main.kt:5:13: argument type mismatch: actual type is 'suspend () -> String', but '() -> Unit' was expected.
+  Main.kt:6:10: argument type mismatch: actual type is 'suspend () -> String', but '() -> String' was expected.
+
+[an_already_suspend_value_unit_converts_to_a_suspend_parameter]
+2.4.0..2.4.10:
+  Main.kt:14:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.
+2.4.20:
+
+[an_already_suspend_value_unit_converts_to_a_suspend_parameter#kotlinc backend]
+2.4.0..2.4.10:
+  exit code 1
+2.4.20:
+  exit code 2
+  java.lang.IllegalArgumentException: Failed requirement.
+  at org.jetbrains.kotlin.fir.types.FunctionalTypeUtilsKt.findSubtypeOfBasicFunctionType(FunctionalTypeUtils.kt:176)
+
 [conversion_carriers_take_kotlincs_names]
 2.4.0..2.4.10:
   Main.kt:6:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.

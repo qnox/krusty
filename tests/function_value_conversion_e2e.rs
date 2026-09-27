@@ -407,3 +407,185 @@ fn named_and_conditional_arguments_convert_a_function_value() {
         common::expect_box_same_as_kotlinc(SOURCE, "ArgumentFormsRun");
     }
 }
+
+/// A value that is already `suspend` unit-converts to a `suspend` parameter. `pause` genuinely
+/// suspends, so the carrier must hand the value its continuation, return `COROUTINE_SUSPENDED`
+/// through, and complete with `Unit` rather than the value's `String` when resumed.
+const SUSPEND_UNIT_SOURCE: &str = "import kotlin.coroutines.*\n\
+    fun launch(f: suspend () -> Unit) {\n\
+    \x20   f.startCoroutine(Completion)\n\
+    }\n\
+    var effects = \"\"\n\
+    var paused: Continuation<String>? = null\n\
+    object Completion : Continuation<Unit> {\n\
+    \x20   override val context: CoroutineContext get() = EmptyCoroutineContext\n\
+    \x20   override fun resumeWith(result: Result<Unit>) { effects += \" \" + result.getOrThrow() }\n\
+    }\n\
+    suspend fun pause(): String = suspendCoroutine { paused = it }\n\
+    fun pass(g: suspend () -> String) {\n\
+    \x20   launch(g)\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   pass { effects += \"suspended\"; pause() }\n\
+    \x20   paused!!.resume(\"ignored\")\n\
+    \x20   return if (effects == \"suspended kotlin.Unit\") \"OK\" else effects\n\
+    }\n";
+
+/// kotlinc's exit code for `source` and, when it failed internally rather than reporting an error,
+/// the root cause of its exception with the frame that raised it.
+fn kotlinc_backend_outcome(stem: &str, source: &str) -> Vec<String> {
+    let dir = common::scratch_dir().expect("scratch directory");
+    let source_path = dir.join(format!("{stem}.kt"));
+    std::fs::write(&source_path, source).expect("write fixture");
+    let mut arguments = vec![
+        "-d".to_string(),
+        dir.join("ref").to_string_lossy().into_owned(),
+    ];
+    arguments.extend(common::language_directives::kotlinc_args(source));
+    arguments.push(source_path.to_string_lossy().into_owned());
+    let (code, stderr) =
+        common::kotlinc_compile(&arguments).expect("reference kotlinc is provisioned");
+    let _ = std::fs::remove_dir_all(dir);
+    let mut outcome = vec![format!("exit code {code}")];
+    let mut lines = stderr.lines().map(str::trim);
+    let mut root_cause = None;
+    while let Some(line) = lines.next() {
+        if let Some(cause) = line.strip_prefix("Caused by: ") {
+            root_cause = Some((
+                cause.to_string(),
+                lines.next().unwrap_or_default().to_string(),
+            ));
+        }
+    }
+    if let Some((cause, frame)) = root_cause {
+        outcome.push(cause);
+        outcome.push(frame);
+    }
+    outcome
+}
+
+/// kotlinc applies kind conversion before unit conversion and lets the value already have the
+/// expected kind, so a `suspend () -> String` value reaches a `suspend () -> Unit` parameter from
+/// 2.4.20 on. kotlinc 2.4.20's frontend accepts it, but its JVM lowering then fails a requirement
+/// that the converted value be a regular function type, so it writes no class to compare
+/// instruction for instruction. krusty compiles the program: its carrier has the class header,
+/// members and `@Metadata` kotlinc writes for the same target type converted from a regular value,
+/// and the program runs through a real suspension.
+#[test]
+fn an_already_suspend_value_unit_converts_to_a_suspend_parameter() {
+    let source = format!("{UNIT_CONVERSIONS}{SUSPEND_UNIT_SOURCE}");
+    let accepted = accepted_like_kotlinc(&source);
+    let backend = common::recorded_named("kotlinc backend", || {
+        kotlinc_backend_outcome("SuspendUnitValue", &source)
+    });
+    if !accepted {
+        assert_eq!(backend, ["exit code 1"], "kotlinc rejects the argument");
+        return;
+    }
+    assert_eq!(
+        backend.first().map(String::as_str),
+        Some("exit code 2"),
+        "kotlinc {} fails internally after accepting the argument: {backend:?}",
+        krusty::kotlin_version::target()
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "SuspendUnitValueRun"),
+        "OK"
+    );
+    // The same program over a regular value, which kotlinc compiles; only the carrier's
+    // `invoke` body and reflected descriptor depend on the value's own kind.
+    let regular = source
+        .replace(
+            "fun pass(g: suspend () -> String)",
+            "fun pass(g: () -> String)",
+        )
+        .replace(
+            "pass { effects += \"suspended\"; pause() }",
+            "pass { \"\" }",
+        );
+    let carrier = "SuspendUnitValueKt$pass$1";
+    let reference = assert_class_shape_matches(
+        "SuspendUnitValue",
+        &regular,
+        carrier,
+        &common::compile_in_process_metadata_cp(
+            &source,
+            "SuspendUnitValue",
+            &[common::stdlib_jar()],
+        )
+        .expect("krusty compiles the conversion"),
+    );
+    assert_eq!(
+        reference.len(),
+        3,
+        "kotlinc's carrier members: {reference:?}"
+    );
+}
+
+/// Require krusty's `class` among `classes` to have the class header, member table and `@Metadata`
+/// kotlinc writes for `class` compiled from `reference_source`, and return that member table.
+fn assert_class_shape_matches(
+    stem: &str,
+    reference_source: &str,
+    class: &str,
+    classes: &[(String, Vec<u8>)],
+) -> Vec<String> {
+    let comparison = common::compare_with_kotlinc_plugin(
+        stem,
+        reference_source,
+        class,
+        &[common::stdlib_jar()],
+        "17",
+        &common::language_directives::kotlinc_args(reference_source),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let ours = &classes
+        .iter()
+        .find(|(name, _)| name == class)
+        .unwrap_or_else(|| panic!("krusty wrote {class}"))
+        .1;
+    let header = |bytes: &[u8]| {
+        let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
+        (
+            info.access,
+            info.this_class,
+            info.super_class,
+            info.interfaces(),
+            info.signature.clone(),
+        )
+    };
+    assert_eq!(
+        header(ours),
+        header(&comparison.reference_bytes),
+        "{class}: kotlinc's class header"
+    );
+    let members = common::member_table(&comparison.reference_bytes);
+    assert_eq!(
+        common::member_table(ours),
+        members,
+        "{class}: kotlinc's member table"
+    );
+    assert_eq!(
+        common::raw_kotlin_metadata(ours),
+        common::raw_kotlin_metadata(&comparison.reference_bytes),
+        "{class}: kotlinc's @Metadata"
+    );
+    members
+}
+
+/// Kind conversion only adds suspension. Under the language feature a `suspend` value still
+/// reaches neither a regular `Unit`-returning parameter nor one of its own result type.
+#[test]
+fn a_suspend_value_is_not_converted_to_a_regular_function_type() {
+    const SOURCE: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n\
+        fun consume(f: () -> Unit) {}\n\
+        fun take(f: () -> String) {}\n\
+        fun pass(g: suspend () -> String) {\n\
+        \x20   consume(g)\n\
+        \x20   take(g)\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SOURCE)],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+}

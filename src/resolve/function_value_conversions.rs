@@ -2,9 +2,10 @@
 //!
 //! A value of a regular function type converts to a `suspend` function type of the same shape
 //! (suspend conversion), and under `+UnitConversionsOnArbitraryExpressions` a value whose result is
-//! not `Unit` converts to the same shape returning `Unit` (unit conversion). The two compose. The
-//! resolver selects the exact callable constituent the conversion wraps; checked FIR carries the
-//! pair and common lowering realizes it without selecting again.
+//! not `Unit` converts to the same shape returning `Unit` (unit conversion). The two compose, and a
+//! value that is already `suspend` unit-converts to a `suspend` target. The resolver selects the
+//! exact callable constituent the conversion wraps; checked FIR carries the pair and common
+//! lowering realizes it without selecting again.
 //!
 //! kotlinc converts a value only where it is passed as a call argument (positional, named, or a
 //! conditional passed as one). An initializer, assignment, return, expression body or lambda
@@ -99,11 +100,13 @@ impl Checker<'_> {
         }
     }
 
-    /// Select the exact regular callable constituent of `expression` that a function-value
-    /// conversion wraps for `expected`. The nominal value can implement several function
-    /// supertypes; arity alone is not enough, so each complete function type is compared against
-    /// the target with the converted components (suspension, a non-`Unit` result) taken from the
-    /// candidate. `None` when the value needs no conversion or none applies.
+    /// Select the exact callable constituent of `expression` that a function-value conversion
+    /// wraps for `expected`. As in kotlinc, kind conversion applies first and unit conversion then
+    /// compares the rest, so an already-suspend constituent is kept for a suspend target and only
+    /// its result converts. The nominal value can implement several function supertypes; arity
+    /// alone is not enough, so each complete function type is compared against the target with the
+    /// converted components (suspension, a non-`Unit` result) taken from the candidate. `None`
+    /// when the value needs no conversion or none applies.
     fn function_value_conversion_source(
         &self,
         scope: &CheckerScope<'_>,
@@ -130,12 +133,14 @@ impl Checker<'_> {
                 let Ty::Fun(source) = candidate else {
                     return false;
                 };
-                if source.suspend {
+                // Kind conversion only adds suspension: a suspend value never reaches a regular
+                // function type. An already-suspend value keeps its kind for a suspend target.
+                if source.suspend && !target.suspend {
                     return false;
                 }
                 let converts_result =
                     unit_conversion && !self.receiver_is_assignable(source.ret, Ty::Unit);
-                if !target.suspend && !converts_result {
+                if source.suspend == target.suspend && !converts_result {
                     return false;
                 }
                 let converted_target = Ty::fun_with_shape(
@@ -147,7 +152,7 @@ impl Checker<'_> {
                     },
                     target.context_count,
                     target.has_receiver,
-                    false,
+                    source.suspend,
                 );
                 self.receiver_is_assignable(*candidate, converted_target)
             })
