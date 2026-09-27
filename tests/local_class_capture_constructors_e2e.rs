@@ -257,3 +257,86 @@ fn captured_context_receivers_are_named_like_kotlinc() {
         ],
     );
 }
+
+const FUNCTION_TYPE_CONTEXTS: &str = r##"
+interface Action {
+    fun run(): Any
+}
+
+class Crate(val v: Any)
+
+class Shelf(val w: Any)
+
+class Two(val first: Any, val second: Any)
+
+context(c: Crate)
+fun readCrate(): Any = c.v
+
+context(s: Shelf)
+fun readShelf(): Any = s.w
+
+fun one(): context(Crate) () -> Action = {
+    object : Action {
+        override fun run() = readCrate()
+    }
+}
+
+fun two(): context(Crate, Shelf) () -> Action = {
+    object : Action {
+        override fun run() = Two(readShelf(), readCrate())
+    }
+}
+
+fun withReceiver(): context(Crate) Shelf.() -> Action = {
+    object : Action {
+        override fun run() = Two(w, readCrate())
+    }
+}
+"##;
+
+/// A lambda checked against a function type with context parameters captures them as kotlinc
+/// names anonymous context parameters (`$$context-Crate`), whether the last one stands as the
+/// lambda's current receiver or an extension receiver takes that place.
+#[test]
+fn captured_function_type_context_receivers_are_named_like_kotlinc() {
+    assert_identical(
+        "FunctionTypeContexts",
+        FUNCTION_TYPE_CONTEXTS,
+        &[
+            "FunctionTypeContextsKt$one$1$1",
+            "FunctionTypeContextsKt$two$1$1",
+            "FunctionTypeContextsKt$withReceiver$1$1",
+        ],
+    );
+}
+
+/// kotlinc 2.4.20 no longer compiles legacy `context(Box)` receivers, so there are no reference
+/// bytes: this pins the distinct legacy capture role, which spells its field after the legacy
+/// parameter name (`$context_receiver_0`) rather than an anonymous parameter's label.
+#[test]
+fn a_captured_legacy_context_receiver_keeps_its_own_role() {
+    let source = "// LANGUAGE: +ContextReceivers\n\
+         interface Action {\n\
+         \x20   fun run(): Any\n\
+         }\n\
+         \n\
+         class Box(val v: Any)\n\
+         \n\
+         context(Box)\n\
+         fun legacy(): Action = object : Action {\n\
+         \x20   override fun run() = v\n\
+         }\n";
+    let emitted = common::compile_in_process_metadata_cp(source, "Legacy", &[common::stdlib_jar()])
+        .expect("krusty compiles the fixture");
+    let (_, bytes) = emitted
+        .iter()
+        .find(|(name, _)| name == "LegacyKt$legacy$1")
+        .expect("krusty emits the anonymous object");
+    let class = krusty::jvm::classreader::parse_class(bytes).expect("parse the anonymous object");
+    let fields = class
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.descriptor.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(fields, [("$$context_receiver_0", "LBox;")]);
+}

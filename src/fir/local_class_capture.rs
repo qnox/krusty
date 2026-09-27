@@ -81,12 +81,25 @@ pub enum FirCapturedReceiver {
     Callable(Box<str>),
     /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
     Lambda(Option<Box<str>>),
-    /// An anonymous context parameter (`context(_: Box)`): the declared types of its callable's
-    /// anonymous context parameters, in order, and its own position among them.
+    /// A context parameter that is an implicit receiver: its kind, the declared types of its
+    /// rung's context parameters of that kind, in order, and its own position among them.
     Context {
-        anonymous: Box<[ResolvedTy]>,
+        kind: CapturedContextKind,
+        types: Box<[ResolvedTy]>,
         index: u32,
     },
+}
+
+/// Which kind of context parameter a captured implicit context receiver is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapturedContextKind {
+    /// `context(_: Box)` on a callable or class.
+    Anonymous,
+    /// A context parameter of the function type a lambda is checked against,
+    /// `context(Box) () -> R`.
+    FunctionType,
+    /// Legacy `context(Box)`.
+    LegacyReceiver,
 }
 
 impl FirCapturedReceiver {
@@ -94,7 +107,7 @@ impl FirCapturedReceiver {
         match self {
             Self::Enclosing | Self::Lambda(None) => 0,
             Self::Callable(label) | Self::Lambda(Some(label)) => label.len(),
-            Self::Context { anonymous, .. } => anonymous.len() * std::mem::size_of::<ResolvedTy>(),
+            Self::Context { types, .. } => types.len() * std::mem::size_of::<ResolvedTy>(),
         }
     }
 }

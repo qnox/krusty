@@ -45,31 +45,75 @@ pub(crate) enum ScopeKind {
     Block,
 }
 
+/// How a context entry entered its rung. It decides whether the entry is an implicit receiver and
+/// what a local class capturing it calls it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextReceiverKind {
+    /// `context(name: Type)`: an ordinary lexical value. It may satisfy another context parameter,
+    /// but its members are not available unqualified.
+    Named,
+    /// `context(_: Type)`.
+    Anonymous,
+    /// Legacy `context(Type)`.
+    LegacyReceiver,
+    /// A context parameter of the function type a lambda is checked against (`context(Type) () -> R`).
+    FunctionType,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ContextReceiver {
     pub(crate) ty: Ty,
-    /// Legacy `context(Type)` entries participate in the implicit-receiver tower. Named context
-    /// parameters are ordinary lexical values: they may satisfy another context parameter, but
-    /// their members are not available unqualified.
-    pub(crate) implicit_receiver: bool,
-    pub(crate) name: String,
+    pub(crate) kind: ContextReceiverKind,
+    /// The source name, which only a named parameter has.
+    name: Option<String>,
     pub(crate) label: Option<String>,
 }
 
 impl ContextReceiver {
-    pub(crate) fn new(
-        ty: Ty,
-        name: impl Into<String>,
-        label: Option<String>,
-        implicit_receiver: bool,
-    ) -> Self {
+    /// An unnamed entry: anonymous, legacy or function-type.
+    pub(crate) fn new(ty: Ty, kind: ContextReceiverKind, label: Option<String>) -> Self {
+        assert_ne!(
+            kind,
+            ContextReceiverKind::Named,
+            "a named parameter carries its name"
+        );
+        let name = None;
         Self {
             ty,
-            implicit_receiver,
-            name: name.into(),
+            kind,
+            name,
             label,
         }
     }
+
+    /// A named context parameter `context(name: Type)`.
+    pub(crate) fn named(ty: Ty, name: impl Into<String>) -> Self {
+        let (kind, name, label) = (ContextReceiverKind::Named, Some(name.into()), None);
+        Self {
+            ty,
+            kind,
+            name,
+            label,
+        }
+    }
+
+    /// The parameter's source name, when it is a named one.
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Whether the entry joins the implicit-receiver tower: every kind but a named parameter.
+    pub(crate) fn implicit_receiver(&self) -> bool {
+        self.kind != ContextReceiverKind::Named
+    }
+}
+
+/// The context parameter an implicit receiver is: its kind, the types of its rung's context
+/// parameters of that kind in declaration order, and its position among them.
+pub(crate) struct ImplicitContext {
+    pub(crate) kind: ContextReceiverKind,
+    pub(crate) types: Vec<Ty>,
+    pub(crate) index: usize,
 }
 
 /// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT value followed
@@ -256,6 +300,9 @@ pub(crate) struct Scope<'p, B> {
     current_receiver_name: Option<String>,
     /// A receiver lambda's label (explicit, or the called function's name) when this rung is one.
     lambda_label: Option<String>,
+    /// The context parameters of the function type a lambda rung is checked against, in order,
+    /// when the last of them is this rung's current receiver (no extension receiver took it).
+    current_receiver_context: Option<Vec<Ty>>,
     /// Source declaration that introduced this rung's ordinary extension receiver. Receiver
     /// lambdas have no declaration; extension functions and properties retain the exact span so a
     /// selected outer receiver marks that declaration used without reconstructing identity from a
@@ -268,11 +315,6 @@ pub(crate) struct Scope<'p, B> {
     /// `companion { … }` block member has no value receiver, only the companion-associated
     /// declarations of its classifier in lexical scope.
     companion_classifier: Option<crate::types::TypeName>,
-    /// Bindings on this rung that are the lexical names of receiver entries owned by its parent
-    /// function rung. Member parameters live on a child rung so they can shadow properties; named
-    /// context parameters therefore need an explicit alias marker instead of being counted as a
-    /// second value with the same name.
-    parent_receiver_aliases: HashMap<String, usize>,
     /// Bindings introduced by THIS scope, in declaration order. Declaration order is what makes
     /// `fun g(a: Int, b: Int = a)` resolve and `fun g(a: Int = b, b: Int)` not.
     ///
@@ -299,10 +341,10 @@ impl<'p, B> Scope<'p, B> {
             context_receivers: RefCell::new(Vec::new()),
             current_receiver_name: None,
             lambda_label: None,
+            current_receiver_context: None,
             extension_receiver_declaration: None,
             extension_receiver_label: None,
             companion_classifier: None,
-            parent_receiver_aliases: HashMap::new(),
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
         }
@@ -316,17 +358,8 @@ impl<'p, B> Scope<'p, B> {
         Scope::with_parent(Some(self), kind)
     }
 
-    pub(crate) fn parameter_child(&'p self, context_receivers: &[ContextReceiver]) -> Scope<'p, B> {
-        let mut child = Scope::with_parent(Some(self), ScopeKind::Block);
-        for receiver in context_receivers {
-            if receiver.implicit_receiver && receiver.name != "_" {
-                *child
-                    .parent_receiver_aliases
-                    .entry(receiver.name.clone())
-                    .or_default() += 1;
-            }
-        }
-        child
+    pub(crate) fn parameter_child(&'p self) -> Scope<'p, B> {
+        Scope::with_parent(Some(self), ScopeKind::Block)
     }
 
     /// Capture the flow state of this scope chain before checking a sibling execution path.
@@ -928,34 +961,48 @@ impl<'p, B> Scope<'p, B> {
         })
     }
 
-    /// The anonymous context parameter (`context(_: Box)`) that is the implicit receiver `identity`:
-    /// the types of its callable's anonymous context parameters in declaration order, and its
-    /// position among them.
-    pub(crate) fn implicit_receiver_anonymous_context(
+    /// The context parameter that is the implicit receiver `identity`, if it is one: an entry of
+    /// its rung's context list, or a function-type lambda's last context parameter standing as the
+    /// rung's current receiver.
+    pub(crate) fn implicit_receiver_context(
         &self,
         identity: (usize, usize),
-    ) -> Option<(Vec<Ty>, usize)> {
-        let ordinal = identity.1.checked_sub(1)?;
+    ) -> Option<ImplicitContext> {
         let scope = self
             .ancestors()
             .find(|scope| *scope as *const Self as usize == identity.0)?;
+        let Some(ordinal) = identity.1.checked_sub(1) else {
+            let types = scope.current_receiver_context.clone()?;
+            let index = types.len() - 1;
+            return Some(ImplicitContext {
+                kind: ContextReceiverKind::FunctionType,
+                types,
+                index,
+            });
+        };
         let receivers = scope.context_receivers.borrow();
         let implicit = receivers
             .iter()
-            .filter(|receiver| receiver.implicit_receiver)
+            .filter(|receiver| receiver.implicit_receiver())
             .collect::<Vec<_>>();
         let receiver = *implicit.get(implicit.len().checked_sub(ordinal + 1)?)?;
-        let anonymous = receivers
+        let same_kind = receivers
             .iter()
-            .filter(|candidate| candidate.name == "_")
+            .filter(|candidate| candidate.kind == receiver.kind)
             .collect::<Vec<_>>();
-        let index = anonymous
+        let index = same_kind
             .iter()
             .position(|candidate| std::ptr::eq(*candidate, receiver))?;
-        Some((
-            anonymous.iter().map(|candidate| candidate.ty).collect(),
+        // A function type's context list continues into the current receiver when it took the last.
+        let types = match (&scope.current_receiver_context, receiver.kind) {
+            (Some(types), ContextReceiverKind::FunctionType) => types.clone(),
+            _ => same_kind.iter().map(|candidate| candidate.ty).collect(),
+        };
+        Some(ImplicitContext {
+            kind: receiver.kind,
+            types,
             index,
-        ))
+        })
     }
 
     /// The label of the receiver lambda whose rung introduced the receiver `identity`.
@@ -971,6 +1018,12 @@ impl<'p, B> Scope<'p, B> {
     /// This receiver lambda rung's label.
     pub(crate) fn with_lambda_label(mut self, label: Option<String>) -> Self {
         self.lambda_label = label;
+        self
+    }
+
+    /// This lambda rung's function-type context parameters, when the last is its current receiver.
+    pub(crate) fn with_current_receiver_context(mut self, types: Option<Vec<Ty>>) -> Self {
+        self.current_receiver_context = types;
         self
     }
 
@@ -1053,16 +1106,9 @@ impl<'p, B> Scope<'p, B> {
                     ..
                 }
             );
-            let mut receiver_binding_counts = scope.parent_receiver_aliases.clone();
+            let mut receiver_binding_counts = HashMap::<String, usize>::new();
             if let Some(name) = scope.current_receiver_name.as_ref() {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
-            }
-            for receiver in scope.context_receivers.borrow().iter() {
-                if receiver.implicit_receiver && receiver.name != "_" {
-                    *receiver_binding_counts
-                        .entry(receiver.name.clone())
-                        .or_default() += 1;
-                }
             }
             for binding in scope.bindings.borrow().iter().rev() {
                 if binding.ns != Ns::Value {
@@ -1106,17 +1152,16 @@ impl<'p, B> Scope<'p, B> {
                     .context_receivers
                     .borrow()
                     .iter()
-                    .filter(|receiver| receiver.implicit_receiver)
+                    .filter(|receiver| receiver.implicit_receiver())
                     .rev()
                     .enumerate()
                 {
-                    let context_name = (receiver.name != "_").then(|| receiver.name.clone());
                     push(
                         &mut out,
                         &mut same_name_depths,
                         receiver.ty,
                         (scope_identity, index + 1),
-                        context_name,
+                        None,
                         None,
                     );
                 }
@@ -1239,9 +1284,9 @@ mod tests {
     #[test]
     fn named_context_parameter_binding_aliases_its_parent_receiver() {
         let root: Scope<'_, u32> = Scope::root();
-        let receiver = ContextReceiver::new(Ty::String, "value", None, false);
+        let receiver = ContextReceiver::named(Ty::String, "value");
         let function = root.function_child(None, None, std::slice::from_ref(&receiver));
-        let parameters = function.parameter_child(std::slice::from_ref(&receiver));
+        let parameters = function.parameter_child();
         parameters.rebind("value", Ns::Value, 1);
 
         let selected = parameters.find_context_value(|ty| ty == Ty::String, |value| *value == 1);
@@ -1326,7 +1371,11 @@ mod tests {
         let function = class_scope.function_child(
             None,
             None,
-            &[ContextReceiver::new(obj("A"), "_", None, true)],
+            &[ContextReceiver::new(
+                obj("A"),
+                ContextReceiverKind::LegacyReceiver,
+                None,
+            )],
         );
 
         let receivers = function.implicit_receivers_with_declarations();

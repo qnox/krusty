@@ -161,9 +161,13 @@ pub enum IrCapturedReceiver {
     Callable(Box<str>),
     /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
     Lambda(Option<Box<str>>),
-    /// An anonymous context parameter (`context(_: Box)`): the declared types of its callable's
-    /// anonymous context parameters, in order, and its own position among them.
-    Context { anonymous: Box<[Ty]>, index: u32 },
+    /// A context parameter that is an implicit receiver: its kind, the declared types of its
+    /// rung's context parameters of that kind, in order, and its own position among them.
+    Context {
+        kind: crate::fir::CapturedContextKind,
+        types: Box<[Ty]>,
+        index: u32,
+    },
 }
 
 /// The constructors the compiler generates for a class, by role, and the calls that select one.

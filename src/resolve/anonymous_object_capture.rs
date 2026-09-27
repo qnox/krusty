@@ -1,9 +1,10 @@
 //! What a local class or anonymous object captures at its construction site: the checker's
 //! contract with checked FIR, which turns each capture into a constructor parameter and field.
 
+use super::scope::ContextReceiverKind;
 use super::{Checker, CheckerScope};
 use crate::diag::Span;
-use crate::fir::FirCapturedReceiver;
+use crate::fir::{CapturedContextKind, FirCapturedReceiver};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,8 +66,9 @@ pub enum AnonymousObjectCaptureSource {
 }
 
 impl Checker<'_> {
-    /// What the implicit receiver `identity` was in source: the enclosing class instance, the
-    /// extension receiver of the named callable declared at `extension`, or a receiver lambda's.
+    /// What the implicit receiver `identity` was in source: the enclosing class instance, a context
+    /// parameter of its kind, the extension receiver of the named callable declared at `extension`,
+    /// or a receiver lambda's.
     pub(super) fn captured_receiver(
         &self,
         scope: &CheckerScope<'_>,
@@ -77,16 +79,20 @@ impl Checker<'_> {
         if class_receiver {
             return FirCapturedReceiver::Enclosing;
         }
-        if let Some((anonymous, index)) = scope.implicit_receiver_anonymous_context(identity) {
+        if let Some(context) = scope.implicit_receiver_context(identity) {
+            let kind = match context.kind {
+                ContextReceiverKind::Anonymous => CapturedContextKind::Anonymous,
+                ContextReceiverKind::FunctionType => CapturedContextKind::FunctionType,
+                ContextReceiverKind::LegacyReceiver => CapturedContextKind::LegacyReceiver,
+                ContextReceiverKind::Named => unreachable!("a named context value is no receiver"),
+            };
+            let types = context.types.into_iter().map(|ty| {
+                crate::fir::ResolvedTy::new(ty).expect("a context parameter's type is published")
+            });
             return FirCapturedReceiver::Context {
-                anonymous: anonymous
-                    .into_iter()
-                    .map(|ty| {
-                        crate::fir::ResolvedTy::new(ty)
-                            .expect("a context parameter's declared type is published")
-                    })
-                    .collect(),
-                index: u32::try_from(index).expect("too many context parameters"),
+                kind,
+                types: types.collect(),
+                index: u32::try_from(context.index).expect("too many context parameters"),
             };
         }
         let Some(declaration) = extension else {
