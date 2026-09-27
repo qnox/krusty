@@ -942,9 +942,11 @@ fn semantic_function(
 ) -> Result<(metadata::KotlinMember, Option<metadata::KotlinFunction>), PackageFragmentDecodeError>
 {
     let contract_type_table = type_table_bodies(body, "function declaration")?;
+    // Metadata's own annotation fields, `.kotlin_builtins`' `BuiltInsProtoBuf.functionAnnotation`
+    // (150), and the KLIB extensions (170, 171).
     let annotations = annotation_identities(
         body,
-        &[12, 34, 170, 171],
+        &[12, 34, 150, 170, 171],
         tables.strings,
         tables.qnames,
         "function declaration",
@@ -1845,6 +1847,8 @@ mod tests {
         assert!(package.functions[0].ret.nullable());
     }
 
+    /// `.kotlin_builtins` writes a function's annotations to `BuiltInsProtoBuf` field 150, a KLIB
+    /// to field 170; both decode to the annotation's qualified identity.
     #[test]
     fn function_annotations_keep_their_qualified_identity() {
         let strings = [
@@ -1863,15 +1867,18 @@ mod tests {
         ];
         let mut annotation = Vec::new();
         int_field(&mut annotation, 1, 3);
-        let mut function = function_with_return(Some(&class_type(1)), None);
-        bytes_field(&mut function, 170, &annotation);
-        let bytes = fragment(&strings, &qnames, &package_with_function(&function, None));
+        for annotation_field in [150, 170] {
+            let mut function = function_with_return(Some(&class_type(1)), None);
+            bytes_field(&mut function, annotation_field, &annotation);
+            let bytes = fragment(&strings, &qnames, &package_with_function(&function, None));
 
-        let package = parse_package_fragment_checked(&bytes).expect("valid annotated function");
-        assert_eq!(
-            package.functions[0].annotations,
-            vec![crate::types::wk::intrinsic_const_evaluation()]
-        );
+            let package = parse_package_fragment_checked(&bytes).expect("valid annotated function");
+            assert_eq!(
+                package.functions[0].annotations,
+                vec![crate::types::wk::intrinsic_const_evaluation()],
+                "annotation field {annotation_field}"
+            );
+        }
     }
 
     #[test]
