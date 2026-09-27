@@ -1214,15 +1214,16 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
 
 /* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
    one is not read as zero. Kotlin's common declaration specifies no exception, and the platforms
-   differ, so this runtime answers as Kotlin/Native does, being a native target: its constructor
-   allocates the builder's storage as `CharArray(capacity)`, and a negative array size there throws
-   `IllegalArgumentException` with no message. (Kotlin/JVM throws Java's
-   `NegativeArraySizeException`, a type Kotlin does not declare; Kotlin/JS ignores the capacity.)
-   The exception is raised before the builder is allocated, and the NULL returned is never read:
-   the call site tests for the exception first. */
+   differ, so this runtime throws the type Kotlin/Native does, being a native target: its
+   constructor allocates the builder's storage as `CharArray(capacity)`, and a negative array size
+   there throws `IllegalArgumentException`. The message is the JVM's, the capacity (Kotlin/JVM
+   throws Java's `NegativeArraySizeException("-1")`; Kotlin/Native's has none). The exception is
+   raised before the builder is allocated, and the NULL returned is never read: the call site tests
+   for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
     if (capacity < 0) {
-        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, NULL));
+        KRef size = kt_to_string(kt_box_int(capacity));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, size));
         return NULL;
     }
     KStringBuilder *builder =
@@ -2666,7 +2667,6 @@ kt_long kt_range_iterator_next(KRef iterator) {
     return value;
 }
 
-
 /* ---- floating-point ranges ------------------------------------------------------------------ */
 
 /* `0.0..2.0`. A floating-point range is NOT a progression: it has no step and no walk, because
@@ -2924,7 +2924,6 @@ static KRef kt_comparable_range_to_string(KRef self) {
     }
     return kt_string_plus(text, end);
 }
-
 
 /* Append `count` bytes of `text` at `out`, answering how many were written. */
 static kt_int kt_range_put(char *out, const char *text, kt_int count) {

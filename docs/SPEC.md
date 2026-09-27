@@ -8867,7 +8867,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
   exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
   that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
-  NEGATIVE one throws `IllegalArgumentException` with no message, making no builder. This is
+  NEGATIVE one throws `IllegalArgumentException` with the capacity as its message, making no
+  builder. This is
   platform-defined: the common `expect` constructor documents no exception; Kotlin/JVM throws
   Java's `NegativeArraySizeException` with the capacity as message (`AbstractStringBuilder(int)`
   allocates `new byte[capacity]`; kotlinc 2.4.10 on JDK 21 prints `-1` for `StringBuilder(-1)`), a
@@ -8877,7 +8878,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in the Kotlin/Native 2.4.10 distribution's linux_x64 stdlib cache, `StringBuilder(kotlin.Int)`
   calls `AllocArrayInstance(kclass:kotlin.CharArray, capacity)` with no check of its own, and
   `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a negative size, which throws
-  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`).
+  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`). Its
+  message, under the runtime's rule for messages, is the JVM's: the capacity, `-1`. The exception
+  type is a declared divergence in `builder_negative_capacity`, compared with kotlinc otherwise.
   `StringBuilder(text)` over a `CharSequence` the program implements reads
   it through its own `length` and `get`; when either throws, no builder is made and nothing more of
   the sequence is read.

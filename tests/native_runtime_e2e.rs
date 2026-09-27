@@ -487,7 +487,26 @@ fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
 
 #[test]
 fn a_negative_builder_capacity_throws_illegal_argument_exception() {
-    run_driver("builder_negative_capacity");
+    // Kotlin/Native's type: 2.4.10's stdlib (the distribution's linux_x64 static cache) compiles
+    // `StringBuilder(capacity)` to `AllocArrayInstance(CharArray, capacity)`, which calls
+    // `ThrowIllegalArgumentException` for a negative size. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "builder_negative_capacity",
+        &[
+            Divergence::native_behaviour(
+                "StringBuilder(-1): threw NegativeArraySizeException: -1",
+                "StringBuilder(-1): threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(-42): threw NegativeArraySizeException: -42",
+                "StringBuilder(-42): threw IllegalArgumentException: -42",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(-2147483648): threw NegativeArraySizeException: -2147483648",
+                "StringBuilder(-2147483648): threw IllegalArgumentException: -2147483648",
+            ),
+        ],
+    );
 }
 
 #[test]
