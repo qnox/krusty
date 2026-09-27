@@ -68,3 +68,61 @@ fn value_class_lambdas_are_the_reference_compilers_classes() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+/// A nullable value class over a primitive stays boxed: kotlinc's lambda body takes `Num?` as the
+/// box `invoke` passes, so the lambda's node applies no `unbox-impl` coercion to it.
+const NULLABLE_LIB: &str = r#"
+package lib
+
+@JvmInline
+value class Num(val n: Int)
+
+interface Source {
+    fun read(value: Any?): Int
+}
+
+inline fun maybeCounted(crossinline take: (Num?) -> Int): Source = object : Source {
+    override fun read(value: Any?): Int = take(value as Num?)
+}
+"#;
+
+const NULLABLE_MAIN: &str = r#"
+import lib.*
+
+fun absent(): Int = maybeCounted { it?.n ?: -1 }.read(null)
+
+fun present(): Int = maybeCounted { it?.n ?: -1 }.read(Num(7))
+
+fun box(): String {
+    if (absent() != -1) return "FAIL absent: " + absent()
+    if (present() != 7) return "FAIL present: " + present()
+    return "OK"
+}
+"#;
+
+#[test]
+fn nullable_value_class_lambdas_run_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_kotlinc(NULLABLE_LIB, NULLABLE_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
+
+#[test]
+fn nullable_value_class_lambdas_stay_boxed_like_the_reference_compiler() {
+    let classes = common::classes_against_kotlinc_lib(
+        "NullableValueClassLambdas",
+        &[("Lib.kt", NULLABLE_LIB)],
+        NULLABLE_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "NullableValueClassLambdasKt",
+            "NullableValueClassLambdasKt$absent$$inlined$maybeCounted$1",
+            "NullableValueClassLambdasKt$present$$inlined$maybeCounted$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
