@@ -9079,6 +9079,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `AbstractList.equals` does — `hasNext`, `next`, the element's `equals`, and a final `hasNext` — and
   a merely `Iterable` object never. A call into the program that throws ends the comparison.
   Tests: `tests/native_runtime_e2e.rs` (`list_identity`).
+- **A native walk stops at the program's first throwing call, `iterator()` and `hasNext()`
+  included.** Every runtime walk over an `Iterable` — `map`, `forEach`, `any`/`all`/`none`,
+  `count`, `filter`, `first`/`firstOrNull`/`last`, `fold`, `forEachIndexed`, `toList`,
+  `reversed`, `sortedWith`, `indexOf`, `joinToString`, `plus`, `sumOf`, `withIndex`, `addAll` —
+  looks for a pending exception after the program's `iterator()`, after every `hasNext()` and
+  `next()`, and after every lambda or element member it calls, and makes no further call into the
+  program, whatever placeholder the throwing call answered; no later raise replaces that exception.
+  `Iterable.indexOf(x)` asks `x.equals(item)`, the argument's `equals`, as Kotlin's `element ==
+  item` does. The calls match kotlinc 2.4.10 on the JVM for the program recorded in the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_polls_program_calls`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type

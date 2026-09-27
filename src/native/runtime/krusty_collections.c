@@ -243,6 +243,8 @@ KRef kt_list_last(KRef list) {
    would act on the placeholder and call into the program again for the elements after it. */
 static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
 
+static kt_boolean kt_more(KRef iterator);
+
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     kt_int length = kt_list_size(list);
@@ -373,7 +375,7 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
         return;
     }
     KRef iterator = kt_iterable_iterator(elements);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return;
@@ -1099,6 +1101,22 @@ kt_boolean kt_iterator_has_next(KRef iterator) {
     return kt_range_iterator_has_next(iterator);
 }
 
+/* Whether a walk has another element. A program's `iterator()` and `hasNext()` are the program's
+   code and may throw, and a throw comes back with a placeholder — a NULL or a stray object for an
+   iterator, a `true` or a `false` for `hasNext` — that no walk may act on: a `true` would go on to
+   `next` and into the program again, a `false` would end the walk as if it were complete, and
+   either would let a later raise overwrite the exception in flight. So this answers false once an
+   exception is pending, whether it came from the `iterator()` that made `iterator` or from this
+   `hasNext`, and it never asks a placeholder iterator anything. A walk that stops on false asks
+   `kt_raised` before it answers anything of its own. */
+static kt_boolean kt_more(KRef iterator) {
+    if (kt_raised()) {
+        return false;
+    }
+    kt_boolean more = kt_iterator_has_next(iterator);
+    return !kt_raised() && more;
+}
+
 /* Call a one-argument function value. The second place the runtime calls back into emitted code,
    through the same slot `kt_lazy_value` uses; see `KT_SLOT_INVOKE`. */
 static KRef kt_invoke_one(KRef function, KRef argument) {
@@ -1183,7 +1201,7 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
            single — and a walk's side effects are what a program can see. */
         KRef growing = kt_mutable_list_new();
         KRef walk = kt_iterable_iterator(iterable);
-        while (kt_iterator_has_next(walk)) {
+        while (kt_more(walk)) {
             KRef element = kt_iterator_next(walk);
             if (kt_raised()) {
                 return NULL;
@@ -1193,6 +1211,9 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
                 return NULL;
             }
             kt_mutable_list_add(growing, mapped);
+        }
+        if (kt_raised()) {
+            return NULL;
         }
         return kt_frozen(growing, 0);
     }
@@ -1218,7 +1239,7 @@ KRef kt_iterable_join_to_string(KRef iterable) {
     KRef joined = kt_string_utf8("", 0);
     KRef iterator = kt_iterable_iterator(iterable);
     kt_boolean first = 1;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         if (!first) {
             joined = kt_string_plus(joined, separator);
         }
@@ -1237,13 +1258,16 @@ KRef kt_iterable_join_to_string(KRef iterable) {
         }
         joined = kt_string_plus(joined, rendered);
     }
+    if (kt_raised()) {
+        return NULL;
+    }
     return joined;
 }
 
 /* `xs.forEach { … }`: the same walk with nothing kept, and so nothing to size. */
 void kt_iterable_for_each(KRef iterable, KRef action) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return;
@@ -1348,7 +1372,7 @@ static kt_boolean kt_next_holds(KRef iterator, KRef predicate, KRef *element) {
    through a predicate with a side effect. */
 kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         if (kt_next_holds(iterator, predicate, &element)) {
             return 1;
@@ -1362,13 +1386,13 @@ kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
 
 kt_boolean kt_iterable_all(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         if (!kt_next_holds(iterator, predicate, &element)) {
             return 0;
         }
     }
-    return 1;
+    return !kt_raised();
 }
 
 kt_boolean kt_iterable_none(KRef iterable, KRef predicate) {
@@ -1377,7 +1401,7 @@ kt_boolean kt_iterable_none(KRef iterable, KRef predicate) {
 
 /* `xs.any()` and `xs.none()` with no predicate: whether the walk yields anything at all. */
 kt_boolean kt_iterable_is_not_empty(KRef iterable) {
-    return kt_iterator_has_next(kt_iterable_iterator(iterable));
+    return kt_more(kt_iterable_iterator(iterable));
 }
 
 kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empty(iterable); }
@@ -1387,20 +1411,20 @@ kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empt
 kt_int kt_iterable_count(KRef iterable) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int counted = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         (void)kt_iterator_next(iterator);
         if (kt_raised()) {
             return 0;
         }
         counted++;
     }
-    return counted;
+    return kt_raised() ? 0 : counted;
 }
 
 kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int counted = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         if (kt_next_holds(iterator, predicate, &element)) {
             counted++;
@@ -1409,7 +1433,7 @@ kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
             return 0;
         }
     }
-    return counted;
+    return kt_raised() ? 0 : counted;
 }
 
 /* Every element a walk yields, collected without asking the iterable for a SIZE.
@@ -1440,7 +1464,7 @@ static KRef kt_frozen(KRef growing, kt_boolean reversed) {
 static KRef kt_iterable_filtered(KRef iterable, KRef predicate, kt_boolean keep) {
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         kt_boolean holds = kt_next_holds(iterator, predicate, &element);
         if (kt_raised()) {
@@ -1449,6 +1473,9 @@ static KRef kt_iterable_filtered(KRef iterable, KRef predicate, kt_boolean keep)
         if (holds == keep) {
             kt_mutable_list_add(growing, element);
         }
+    }
+    if (kt_raised()) {
+        return NULL;
     }
     return kt_frozen(growing, 0);
 }
@@ -1466,7 +1493,7 @@ KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
    exception for the call site and comes back. */
 KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         if (kt_next_holds(iterator, predicate, &element)) {
             return element;
@@ -1480,7 +1507,7 @@ KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
 
 KRef kt_iterable_first_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         if (kt_next_holds(iterator, predicate, &element)) {
             return element;
@@ -1489,6 +1516,10 @@ KRef kt_iterable_first_matching(KRef iterable, KRef predicate) {
         if (kt_raised()) {
             return NULL;
         }
+    }
+    /* Nor the exception an `iterator()` or `hasNext()` of the program's threw. */
+    if (kt_raised()) {
+        return NULL;
     }
     kt_throw(kt_throwable_new(
         &kt_type_no_such_element_exception,
@@ -1501,7 +1532,7 @@ KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     KRef found = NULL;
     kt_boolean any = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = NULL;
         kt_boolean holds = kt_next_holds(iterator, predicate, &element);
         if (kt_raised()) {
@@ -1511,6 +1542,9 @@ KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
             found = element;
             any = 1;
         }
+    }
+    if (kt_raised()) {
+        return NULL;
     }
     if (!any) {
         kt_throw(kt_throwable_new(
@@ -1525,7 +1559,7 @@ KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
 KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
     KRef accumulator = initial;
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return NULL;
@@ -1535,7 +1569,7 @@ KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
             return NULL;
         }
     }
-    return accumulator;
+    return kt_raised() ? NULL : accumulator;
 }
 
 /* `xs.forEachIndexed { i, e -> … }`. The index is BOXED on the way in, because a function value
@@ -1543,7 +1577,7 @@ KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
 void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int index = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return;
@@ -1562,12 +1596,15 @@ void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
 static KRef kt_iterable_snapshot(KRef iterable, kt_boolean reversed) {
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return NULL;
         }
         kt_mutable_list_add(growing, element);
+    }
+    if (kt_raised()) {
+        return NULL;
     }
     return kt_frozen(growing, reversed);
 }
@@ -1582,12 +1619,15 @@ KRef kt_iterable_reversed(KRef iterable) { return kt_iterable_snapshot(iterable,
 KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return NULL;
         }
         (void)kt_mutable_list_add(growing, element);
+    }
+    if (kt_raised()) {
+        return NULL;
     }
     kt_list_sort_with(growing, comparator);
     if (kt_raised()) {
@@ -1602,13 +1642,14 @@ KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
 kt_int kt_iterable_index_of(KRef iterable, KRef value) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int at = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return -1;
         }
-        kt_boolean equal = kt_equals(element, value);
-        /* As in `kt_list_index_of`: an `equals` that threw ends the search with no index. */
+        /* The ARGUMENT's `equals`, as Kotlin's `element == item` asks. As in `kt_list_index_of`, an
+           `equals` that threw ends the search with no index. */
+        kt_boolean equal = kt_equals(value, element);
         if (kt_raised()) {
             return -1;
         }
@@ -1631,7 +1672,7 @@ kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
    of them look alike, and only the declaration tells them apart. */
 static KRef kt_iterable_walked_into(KRef iterable, KRef growing) {
     KRef iterator = kt_iterable_iterator(iterable);
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
         if (kt_raised()) {
             return growing;
@@ -1680,40 +1721,40 @@ static KRef kt_select_next(KRef iterator, KRef selector) {
 kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int total = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef selected = kt_select_next(iterator, selector);
         if (kt_raised()) {
             return 0;
         }
         total = (kt_int)((uint32_t)total + (uint32_t)kt_unbox_int(selected));
     }
-    return total;
+    return kt_raised() ? 0 : total;
 }
 
 kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_long total = 0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef selected = kt_select_next(iterator, selector);
         if (kt_raised()) {
             return 0;
         }
         total = (kt_long)((uint64_t)total + (uint64_t)kt_unbox_long(selected));
     }
-    return total;
+    return kt_raised() ? 0 : total;
 }
 
 kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_double total = 0.0;
-    while (kt_iterator_has_next(iterator)) {
+    while (kt_more(iterator)) {
         KRef selected = kt_select_next(iterator, selector);
         if (kt_raised()) {
             return 0.0;
         }
         total += kt_unbox_double(selected);
     }
-    return total;
+    return kt_raised() ? 0 : total;
 }
 
 KRef kt_iterator_next(KRef iterator) {
@@ -1805,12 +1846,12 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
     }
     KRef walk = kt_iterable_iterator(other);
     for (kt_int i = 0; i <= size; i++) {
-        kt_boolean more = !kt_raised() && kt_iterator_has_next(walk);
-        if (kt_raised() || i == size) {
-            return !kt_raised() && !more;
-        }
-        if (!more) {
+        kt_boolean more = kt_more(walk);
+        if (kt_raised()) {
             return false;
+        }
+        if (i == size || !more) {
+            return i == size && !more;
         }
         KRef theirs = kt_iterator_next(walk);
         if (kt_raised()) {

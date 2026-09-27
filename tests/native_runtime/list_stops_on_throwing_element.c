@@ -202,13 +202,18 @@ void kt_program_entry(void) {
     arm(0);
     (void)kt_iterable_join_to_string(program_iterable);
     EXPECT_STOPPED("joinToString");
-    arm(0);
-    (void)kt_iterable_index_of(program_iterable, probe);
-    EXPECT_STOPPED("Iterable.indexOf");
-    arm(1);
-    CHECK(kt_iterable_index_of(program_iterable, probe) == -1,
-          "Iterable.indexOf matched an element whose equals threw\n");
-    EXPECT_STOPPED("Iterable.indexOf answering true");
+    /* `Iterable.indexOf(x)` asks `x.equals(item)`, Kotlin's `element == item`, so what throws is
+       the probe's own `equals`, on the first comparison, and nothing after it is compared. */
+    for (int answer = 0; answer <= 1; answer++) {
+        arm((kt_boolean)answer);
+        thrower = 9;
+        (void)kt_iterable_index_of(program_iterable, probe);
+        CHECK(last_called == 9 && calls == 1,
+              "Iterable.indexOf called into the program after the member that threw\n");
+        CHECK(took(&kt_type_illegal_argument_exception),
+              "Iterable.indexOf did not come back with the probe's exception\n");
+        thrower = 0;
+    }
 
     /* The same members of an array's contents, which walk an array the way the list's walk its
        storage. */

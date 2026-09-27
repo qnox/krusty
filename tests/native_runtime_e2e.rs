@@ -812,6 +812,11 @@ fn a_list_is_the_collection_interfaces_and_equals_a_program_list() {
     run_driver("list_identity");
 }
 
+#[test]
+fn a_walk_stops_at_a_throwing_iterator_or_has_next_of_the_program() {
+    run_driver("walk_polls_program_calls");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
