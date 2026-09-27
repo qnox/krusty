@@ -275,6 +275,10 @@ pub struct CatchClause {
     pub body: ExprId,
     /// The full catch parameter (`name: ty`) span used by parameter diagnostics.
     pub param_span: Span,
+    /// The `catch` keyword's span, where the clause begins.
+    pub keyword_span: Span,
+    /// The 1-based line of the `catch` keyword, attached after parsing; 0 when unknown.
+    pub line: u32,
 }
 
 #[derive(Clone, Debug)]

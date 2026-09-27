@@ -238,12 +238,11 @@ impl BodyLowering<'_> {
         let failed = construct(self, failure);
         Some(self.ir.add_expr(IrExpr::Try {
             body: normal,
-            catches: vec![crate::ir::IrCatch {
-                var: caught,
-                binding: None,
-                exc_internal: caught_internal,
-                body: failed,
-            }],
+            catches: vec![crate::ir::IrCatch::generated(
+                caught,
+                caught_internal,
+                failed,
+            )],
             finally: None,
             result: result_ty,
         }))
@@ -623,15 +622,15 @@ impl BodyLowering<'_> {
                 });
                 let rethrown = self.ir.add_expr(IrExpr::GetValue(caught));
                 let rethrow = self.ir.add_expr(IrExpr::Throw { operand: rethrown });
-                vec![crate::ir::IrCatch {
-                    var: caught,
-                    binding: None,
-                    exc_internal: cause_ty.non_null().obj_internal()?,
-                    body: self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![record, rethrow],
-                        value: None,
-                    }),
-                }]
+                let handler = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![record, rethrow],
+                    value: None,
+                });
+                vec![crate::ir::IrCatch::generated(
+                    caught,
+                    cause_ty.non_null().obj_internal()?,
+                    handler,
+                )]
             }
         };
         let cleanup_calls = cleanup
