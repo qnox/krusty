@@ -15,12 +15,9 @@ impl Emitter<'_> {
         if self.emit_data_class_value_hash(ty, value, code) {
             return;
         }
-        if ty.is_array() {
+        if ty.non_null().is_array() {
             self.emit_value(value, code);
-            let descriptor = format!("({})I", type_descriptor(ty));
-            let method = self
-                .cw
-                .methodref("java/util/Arrays", "hashCode", &descriptor);
+            let method = crate::jvm::array_representation::arrays_hash_code(self.cw, ty);
             code.invokestatic(method, 1, 1);
         } else if ty.non_null().is_jvm_scalar() && !ty.is_nullable() {
             let scalar = ty.non_null();
@@ -109,7 +106,7 @@ impl Emitter<'_> {
         true
     }
 
-    /// Exact semantic identity, terminal declared underlying, and the already-selected JVM
+    /// Exact semantic identity, JVM carrier, and the already-selected JVM
     /// representation of one generated data-class field operation.
     fn data_class_value_class_field(
         &self,
@@ -117,8 +114,7 @@ impl Emitter<'_> {
         value: ExprId,
     ) -> Option<(TypeName, Ty, bool)> {
         let owner = declared.non_null().obj_internal()?;
-        let underlying =
-            crate::jvm::value_classes::boxed_value_class_terminal_underlying(self.ir, owner)?;
+        let underlying = crate::jvm::value_classes::boxed_value_class_carrier(self.ir, owner)?;
         let boxed = self.value_ty(value).non_null().obj_internal() == Some(owner);
         Some((owner, underlying, boxed))
     }

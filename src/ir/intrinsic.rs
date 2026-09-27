@@ -55,12 +55,13 @@ pub enum IrIntrinsic {
     Ieee754Equals {
         operand: Ty,
     },
-    /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
-    /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
+    /// Generated-member equality of one property (a data class's, or a value class's sole one).
+    /// Backends preserve Kotlin's scalar, floating-point, nullable, array-reference, and value-class
+    /// equality semantics.
     DataClassFieldEquals {
         ty: Ty,
     },
-    /// Kotlin data-class hash contribution for one primary-constructor property.
+    /// Generated-member hash of one property (a data class's, or a value class's sole one).
     DataClassFieldHash {
         ty: Ty,
     },

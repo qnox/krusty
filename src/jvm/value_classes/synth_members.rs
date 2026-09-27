@@ -448,20 +448,7 @@ pub(super) fn synth_value_members(
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
         if !custom_hash_code {
-            let v = ir.add_expr(IrExpr::GetValue(0));
-            // A NON-NULL reference underlying hashes through its OWN `hashCode()` (kotlinc's shape,
-            // `String.hashCode()`), not the null-safe `Objects.hashCode` — that is only for a nullable (or
-            // boxed-primitive) underlying, which can actually be null.
-            // Only a real non-null reference CLASS underlying: an ARRAY has no such class (`kotlin/IntArray`
-            // is not a JVM type — a virtual call on it is a `NoClassDefFoundError`), and a nullable or
-            // boxed-primitive underlying must keep the null-safe `Objects.hashCode`.
-            let nonnull_ref_owner: Option<TypeName> = (is_ref_under
-                && !eu.is_nullable()
-                && !eu.non_null().is_array()
-                && matches!(eu.non_null(), Ty::String | Ty::Obj(..)))
-            .then(|| eu.non_null().kotlin_class_internal())
-            .flatten();
-            let h = field_hash_ir(ir, v, terminal_underlying, nonnull_ref_owner);
+            let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
@@ -519,32 +506,38 @@ pub(super) fn synth_value_members(
             });
             // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`): the
             // other value is unboxed into a temporary and compared as `arg0 == tmp`, then guarded
-            // `if (!eq) return false; return true`. A primitive temporary stays in a local and the
-            // guard branches on the negated comparison itself.
-            let (tmp, not_eq) = if is_ref_under {
-                let v = ir.add_expr(IrExpr::GetValue(0));
-                let eq = vc_underlying_eq(ir, v, ounbox, true, terminal_underlying);
+            // `if (!eq) return false; return true`. Temporary elimination later keeps a reference
+            // temporary on the stack (`aload_0; swap`); a primitive one stays in its local.
+            const TMP: u32 = 2;
+            let declare = ir.add_expr(IrExpr::Variable {
+                index: TMP,
+                ty: u_ir,
+                init: Some(ounbox),
+                named: false,
+            });
+            let v = ir.add_expr(IrExpr::GetValue(0));
+            let tmp = ir.add_expr(IrExpr::GetValue(TMP));
+            let not_eq = if is_ref_under {
+                // The declared type's own equality, as a data class compares a property: a nested
+                // value class's `equals-impl0`, otherwise `Intrinsics.areEqual`.
+                let eq = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::DataClassFieldEquals { ty: u_ir },
+                        ret: bool_ir,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![v, tmp],
+                });
                 let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-                let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: crate::ir::IrBinOp::Eq,
                     lhs: eq,
                     rhs: zero,
-                });
-                (None, not_eq)
+                })
             } else {
-                const TMP: u32 = 2;
-                let declare = ir.add_expr(IrExpr::Variable {
-                    index: TMP,
-                    ty: u_ir,
-                    init: Some(ounbox),
-                    named: false,
-                });
-                let v = ir.add_expr(IrExpr::GetValue(0));
-                let tmp = ir.add_expr(IrExpr::GetValue(TMP));
-                let not_eq = vc_underlying_ne(ir, v, tmp, terminal_underlying);
-                (Some(declare), not_eq)
+                vc_underlying_ne(ir, v, tmp, terminal_underlying)
             };
-            stmts.extend(tmp);
+            stmts.push(declare);
             stmts.push(guard_false(ir, not_eq));
             let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
@@ -900,71 +893,34 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
     })
 }
 
-/// `field.hashCode()` for an underlying type (primitive → its wrapper's static `hashCode`, unsigned
-/// → its own `hashCode-impl`, reference → `hashCode()` or the null-safe `Objects.hashCode`).
-fn field_hash_ir(
-    ir: &mut IrFile,
-    v: ExprId,
-    underlying: Ty,
-    nonnull_ref_owner: Option<TypeName>,
-) -> ExprId {
-    let call = |ir: &mut IrFile, owner: &str, desc: &str, v: ExprId| {
+/// kotlinc's generated-member hash of the sole property, the one a data class gives each of its
+/// properties: the declared type's own hash, behind `v == null ? 0 : …` when the type admits null
+/// (`String?`, `Int?`, an unbounded `T`).
+fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
+    let hash = |ir: &mut IrFile| {
+        let value = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: owner.into(),
-                name: "hashCode".into(),
-                descriptor: desc.into(),
-                inline: InlineKind::None,
+            callee: Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::DataClassFieldHash { ty: underlying },
+                ret: Ty::Int,
             },
             dispatch_receiver: None,
-            args: vec![v],
+            args: vec![value],
         })
     };
-    match underlying {
-        // kotlinc hashes every primitive through its wrapper's static `hashCode`, and an unsigned
-        // underlying through that unsigned class's own `hashCode-impl` over its carrier.
-        Ty::Int => call(ir, "java/lang/Integer", "(I)I", v),
-        Ty::Short => call(ir, "java/lang/Short", "(S)I", v),
-        Ty::Byte => call(ir, "java/lang/Byte", "(B)I", v),
-        Ty::Char => call(ir, "java/lang/Character", "(C)I", v),
-        Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong => {
-            let carrier = match underlying {
-                Ty::UByte => "B",
-                Ty::UShort => "S",
-                Ty::UInt => "I",
-                _ => "J",
-            };
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: underlying
-                        .obj_internal()
-                        .expect("an unsigned builtin has a classifier identity"),
-                    name: "hashCode-impl".into(),
-                    descriptor: format!("({carrier})I"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![v],
-            })
-        }
-        Ty::Boolean => call(ir, "java/lang/Boolean", "(Z)I", v),
-        Ty::Long => call(ir, "java/lang/Long", "(J)I", v),
-        Ty::Double => call(ir, "java/lang/Double", "(D)I", v),
-        Ty::Float => call(ir, "java/lang/Float", "(F)I", v),
-        _ => match nonnull_ref_owner {
-            // `v.hashCode()` on the underlying's own class.
-            Some(owner) => ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner,
-                    name: "hashCode".into(),
-                    descriptor: "()I".into(),
-                    params: None,
-                    interface: false,
-                },
-                dispatch_receiver: Some(v),
-                args: vec![],
-            }),
-            None => call(ir, "java/util/Objects", "(Ljava/lang/Object;)I", v),
-        },
+    if !underlying.upper_bound_admits_null() {
+        return hash(ir);
     }
+    let value = ir.add_expr(IrExpr::GetValue(0));
+    let null = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: crate::ir::IrBinOp::RefEq,
+        lhs: value,
+        rhs: null,
+    });
+    let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+    let non_null = hash(ir);
+    ir.add_expr(IrExpr::When {
+        branches: vec![(Some(is_null), zero), (None, non_null)],
+    })
 }
