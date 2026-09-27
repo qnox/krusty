@@ -206,6 +206,27 @@ fn private_block_members_used_from_other_classes_go_through_class_accessors() {
     common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "BlockAccessors");
 }
 
+/// kotlinc treats a block property of an interface as an interface property: without a getter
+/// body it is abstract, initializer or not, and an abstract interface property cannot be private.
+/// So no private interface storage exists to reach through accessors; a private property with a
+/// getter body has no backing field and stays legal.
+#[test]
+fn private_interface_block_property_without_a_getter_is_rejected() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        interface Registry {\n\
+        \x20   companion {\n\
+        \x20       private val seed: Int = 1\n\
+        \x20       private lateinit var count: String\n\
+        \x20       private val derived: Int get() = 3\n\
+        \x20       private fun next(): Int = derived\n\
+        \x20   }\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
 #[test]
 fn private_block_members_are_owned_by_their_class_not_their_file() {
     const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\

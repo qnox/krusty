@@ -140,8 +140,8 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
     let mut block_chains = HashMap::new();
     for &declaration in &file.decls {
         if let Decl::Class(class) = file.decl(declaration) {
-            for &member in &class.companion_block_members {
-                block_chains.insert(member, class_chain(declaration, class));
+            for member in &class.companion_block_members {
+                block_chains.insert(member.declaration, class_chain(declaration, class));
             }
         }
     }
