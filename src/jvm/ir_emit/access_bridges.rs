@@ -111,7 +111,7 @@ pub(super) fn cross_owner_private_member_calls(
             if !seen.insert(expression) {
                 continue;
             }
-            // A value-class member call is already a static `-impl` call with its exact target.
+            // A value-class `-impl` call and a private getter read carry their exact target.
             let target = match ir.expr(expression) {
                 IrExpr::MethodCall { class, index, .. } => {
                     Some((*class, ir.classes[*class as usize].methods[*index as usize]))
@@ -119,16 +119,16 @@ pub(super) fn cross_owner_private_member_calls(
                 IrExpr::Call {
                     callee: Callee::Static { owner, .. },
                     ..
-                } => ir
-                    .jvm_static_member_calls
-                    .get(&expression)
-                    .map(|&function| {
+                }
+                | IrExpr::PropertyRead { owner, .. } => {
+                    ir.jvm_member_targets.get(&expression).map(|&function| {
                         let class = ir.class_id_by_name(*owner);
                         (
                             class.expect("a realized member's owner is in this file"),
                             function,
                         )
-                    }),
+                    })
+                }
                 _ => None,
             };
             if let Some((class, target)) = target {
@@ -227,6 +227,36 @@ pub(super) fn emit_private_member_access_bridges(
         } else {
             emit_private_member_access_bridge(ir, fid, owner, cw, false, class.decl_line);
         }
+    }
+}
+
+/// How another class reads a private property through the bridge of its exact `getter`: a static
+/// value-class `-impl` getter's bridge takes the same carrier, an instance getter's takes the owner.
+pub(super) fn private_member_read_access(
+    ir: &IrFile,
+    getter: u32,
+    owner: &str,
+) -> crate::jvm::inline::PropertyAccess {
+    use crate::jvm::inline::PropertyAccess;
+    let function = &ir.functions[getter as usize];
+    let parameters = jvm_function_params(ir, getter);
+    let result = jvm_declared_ty(&function.ret);
+    let name = format!("access${}", function.name);
+    if function.is_static {
+        return PropertyAccess::Accessor {
+            owner: owner.to_string(),
+            name,
+            descriptor: method_descriptor(&parameters, result),
+            is_static: true,
+            is_interface: false,
+        };
+    }
+    let mut bridge_parameters = vec![Ty::obj(owner)];
+    bridge_parameters.extend(parameters);
+    PropertyAccess::AccessBridge {
+        owner: owner.to_string(),
+        name,
+        descriptor: method_descriptor(&bridge_parameters, result),
     }
 }
 
@@ -335,4 +365,16 @@ pub(super) fn emit_facade_function_access_bridge(
         0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
         &name, &desc, &g,
     );
+}
+
+impl Emitter<'_> {
+    /// Whether this class reaches `function`, a private member of `owner`, through its bridge.
+    pub(super) fn reaches_through_bridge(&self, owner: &str, function: u32) -> bool {
+        self.owner != owner
+            && self
+                .run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    }
 }

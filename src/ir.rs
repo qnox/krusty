@@ -2523,8 +2523,8 @@ pub struct IrFile {
     pub open_methods: std::collections::HashSet<u32>,
     /// Methods kotlinc emits `private`; the JVM backend gives a `FunId` in this set `ACC_PRIVATE`.
     pub private_methods: std::collections::HashSet<u32>,
-    /// Value-class member calls realized as a static `-impl` call, by the exact function each reaches.
-    pub(crate) jvm_static_member_calls: std::collections::HashMap<ExprId, FunId>,
+    /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
+    pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's

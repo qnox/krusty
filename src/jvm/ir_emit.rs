@@ -11415,6 +11415,12 @@ impl<'a> Emitter<'a> {
         let direct_field = self.direct_field_access(class, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
+            // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
+            if self.reaches_through_bridge(owner, getter) {
+                return Some(access_bridges::private_member_read_access(
+                    self.ir, getter, owner,
+                ));
+            }
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: if class.is_annotation {
@@ -12686,18 +12692,10 @@ impl<'a> Emitter<'a> {
                     // (stdlib facades, the common case) stay `Methodref`.
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
                     // A private value-class `-impl` another class calls goes through its bridge.
-                    let name = match self.ir.jvm_static_member_calls.get(&e) {
-                        Some(function)
-                            if self.owner != owner
-                                && self
-                                    .run
-                                    .private_member_access_bridges
-                                    .borrow()
-                                    .contains(function) =>
-                        {
-                            format!("access${name}")
-                        }
-                        _ => name,
+                    let bridged = self.ir.jvm_member_targets.get(&e);
+                    let name = match bridged.filter(|&&f| self.reaches_through_bridge(&owner, f)) {
+                        Some(_) => format!("access${name}"),
+                        None => name,
                     };
                     let m = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &name, &descriptor)

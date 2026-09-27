@@ -6023,12 +6023,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
   is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
   static when the backend sees it; value-class lowering records the exact function each such call
-  reaches (`IrFile::jvm_static_member_calls`), and the cross-class walk bridges it like an instance
+  reaches (`IrFile::jvm_member_targets`), and the cross-class walk bridges it like an instance
   member. kotlinc's bridge is `public static final synthetic access$<name>-impl` over the same
   parameters, forwarding with `invokestatic`. Every private-member bridge now sits after the class's
   declared and generated members, as SyntheticAccessorLowering appends it, and carries kotlinc's
   debug tables: one line (the class declaration) at the invoke, `$this` for an instance target, then
-  the target's own parameter names (the carrier is `arg0`). Tests:
+  the target's own parameter names (the carrier is `arg0`). A private property with a declared getter
+  is reached the same way, through its exact getter (`access$getHeavy-impl(I)` on a value class,
+  `access$getHeavy(LHolder;)` on a class): the JVM property realization records the getter each
+  cross-class read reaches, where it previously called the private getter directly. Tests:
   `tests/value_class_private_member_access_e2e.rs`,
   `tests/class_member_order_e2e.rs::a_class_appends_private_member_bridges_after_its_members`,
   `tests/value_class_member_order_e2e.rs`, box

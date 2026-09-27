@@ -2857,7 +2857,7 @@ pub(crate) fn lower_value_classes(
                     }
                 }
                 if let Some(function) = function.filter(|_| !uses_default_stub) {
-                    ir.jvm_static_member_calls.insert(id, function);
+                    ir.jvm_member_targets.insert(id, function);
                 }
                 let descriptor = if uses_default_stub {
                     name.push_str("$default");
