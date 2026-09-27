@@ -572,6 +572,8 @@ mod diagnostics_parity_support;
 mod diagnostics_receiver_reference_cases_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
+#[path = "discarded_generic_result_e2e.rs"]
+mod discarded_generic_result_e2e;
 #[path = "discarded_when_e2e.rs"]
 mod discarded_when_e2e;
 #[path = "discarded_when_value_e2e.rs"]

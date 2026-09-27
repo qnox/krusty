@@ -94,7 +94,13 @@ impl Emitter<'_> {
             return;
         };
         let ret = self.ret;
-        self.emit_value_as(value, ret, code);
+        if ret == crate::types::Ty::Unit {
+            // A void function's `return <Unit expression>` evaluates that expression as a
+            // statement: kotlinc leaves nothing of its value on the stack.
+            self.emit_discarding(value, code);
+        } else {
+            self.emit_value_as(value, ret, code);
+        }
         // `return <diverging>` has already transferred control and must not grow dead bytecode.
         if self.diverges(value) {
             return;
