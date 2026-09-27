@@ -1000,6 +1000,8 @@ mod labeled_this_e2e;
 mod lambda_e2e;
 #[path = "lambda_exit_join_e2e.rs"]
 mod lambda_exit_join_e2e;
+#[path = "lambda_implicit_return_lines_e2e.rs"]
+mod lambda_implicit_return_lines_e2e;
 #[path = "lambda_receiver_label_e2e.rs"]
 mod lambda_receiver_label_e2e;
 #[path = "lambda_result_inference_e2e.rs"]

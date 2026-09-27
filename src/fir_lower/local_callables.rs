@@ -943,6 +943,9 @@ impl BodyLowering<'_> {
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
+        if let Some(line) = body.close_line() {
+            self.ir.fn_close_lines.insert(function, line);
+        }
         if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
             // the diagnostic placeholder `<anonymous>` into common IR: angle-bracket names are
@@ -1147,19 +1150,41 @@ impl BodyLowering<'_> {
                 body_origin(body),
             )?
         } else {
-            finish_callable_body(
+            let callable = finish_callable_body(
                 nested.ir,
                 roots,
                 result,
                 body.has_implicit_return(),
                 unit_as_value,
                 body_origin(body),
-            )?
+            )?;
+            if let (true, Some(line)) = (body.has_implicit_return(), body.close_line()) {
+                mark_implicit_unit_return(nested.ir, callable, line);
+            }
+            callable
         };
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;
         Ok(NestedCallableBodies { callable, inline })
+    }
+}
+
+/// kotlinc maps a `Unit` lambda's implicit return to its closing `}`: the `Unit` it returns, or the
+/// bare return, starts that line.
+fn mark_implicit_unit_return(ir: &mut crate::ir::IrFile, body: ExprId, line: u32) {
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return;
+    };
+    let Some(&returned) = stmts.last() else {
+        return;
+    };
+    match *ir.expr(returned) {
+        IrExpr::Return(Some(unit)) if matches!(ir.expr(unit), IrExpr::UnitInstance) => {
+            ir.expr_source_lines.insert(unit, line);
+        }
+        IrExpr::Return(None) => ir.mark_implicit_return_end_line(returned, line),
+        _ => {}
     }
 }
 
