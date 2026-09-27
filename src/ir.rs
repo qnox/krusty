@@ -2577,6 +2577,9 @@ pub struct IrFile {
     /// private primary constructor. The JVM value-class pass records the function identities when
     /// it creates them; emission must not recover their roles from generated method spellings.
     pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
+    /// The static `constructor-impl` realizing each value-class constructor: its `$default` stub
+    /// takes kotlinc's constructor marker (`DefaultConstructorMarker`), not a function's `Object`.
+    pub(crate) jvm_value_class_constructor_impls: std::collections::HashSet<u32>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
@@ -2586,11 +2589,8 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,
-    /// Per-method (`FunId`) `(param index, boxed value-class type)` for params whose value class has a
-    /// NULLABLE underlying: the base (mangled) method unboxes them, but its `<name>$default` synthetic
-    /// keeps them BOXED (kotlinc — a `$default` can't disambiguate the unboxed signature without the
-    /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
-    /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
+    /// Per-method `(param index, boxed type)` for DEFAULTED params whose value class's carrier accepts
+    /// null: the base method unboxes them; its `$default` stub and call sites keep them boxed (kotlinc).
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
     /// The subset declared in this MODULE's SOURCE (this file or a sibling). Whether such a class ends up
     /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —

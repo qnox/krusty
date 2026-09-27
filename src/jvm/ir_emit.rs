@@ -4977,21 +4977,8 @@ fn emit_scheduled_member(
     let f = &ir.functions[fid as usize];
     if let Some(defaults) = ir.param_defaults(fid) {
         if f.is_static {
-            // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
-            // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
-            emit_facade_default_stub(
-                ir,
-                fid,
-                fq_name,
-                cw,
-                defaults,
-                env,
-                if f.name == "constructor-impl" && !ir.class_static_local_functions.contains(&fid) {
-                    Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
-                } else {
-                    Ty::obj("java/lang/Object")
-                },
-            );
+            let marker = static_default_stub_marker(ir, fid);
+            emit_facade_default_stub(ir, fid, fq_name, cw, defaults, env, marker);
         } else {
             emit_default_stub(ir, fid, fq_name, facade, cw, defaults, env, false);
         }
@@ -9244,7 +9231,18 @@ fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<usize, Ty> {
         .unwrap_or_default()
 }
 
-fn static_default_stub_params(ir: &IrFile, fid: u32, marker: Ty) -> Vec<Ty> {
+/// A `$default` stub's trailing marker: kotlinc's `DefaultConstructorMarker` for a constructor (a
+/// value class's `constructor-impl`), the plain `Object` a function's stub takes otherwise.
+fn static_default_stub_marker(ir: &IrFile, fid: u32) -> Ty {
+    if ir.jvm_value_class_constructor_impls.contains(&fid) {
+        Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
+    } else {
+        Ty::obj("java/lang/Object")
+    }
+}
+
+fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
+    let marker = static_default_stub_marker(ir, fid);
     let function = &ir.functions[fid as usize];
     let mut parameters = jvm_function_params(ir, fid);
     let boxed = default_stub_boxed_parameters(ir, fid);
@@ -12366,8 +12364,7 @@ impl<'a> Emitter<'a> {
                 }
                 Callee::ClassStaticDefault { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
-                    let param_tys =
-                        static_default_stub_params(self.ir, *function, Ty::obj("java/lang/Object"));
+                    let param_tys = static_default_stub_params(self.ir, *function);
                     let ret = jvm_declared_ty(&f.ret);
                     if let Err(mismatch) =
                         self.emit_source_default_call_operands(e, args, &param_tys, code)
@@ -12389,8 +12386,7 @@ impl<'a> Emitter<'a> {
                     // The `foo$default(realparams, mask..., Object marker)` synthetic on the self facade
                     // (emitted by `emit_facade_default_stub`). Args already include mask words + marker.
                     let f = &self.ir.functions[*fid as usize];
-                    let param_tys =
-                        static_default_stub_params(self.ir, *fid, Ty::obj("java/lang/Object"));
+                    let param_tys = static_default_stub_params(self.ir, *fid);
                     let ret = jvm_declared_ty(&f.ret);
                     let name = format!("{}$default", f.name);
                     let args = args.clone();
@@ -15716,7 +15712,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 
 fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
     let mut params = jvm_tys(&c.super_ctor_params);
-    let uses_accessor = (c.super_ctor.primary && ir.has_value_param_ctor(superclass))
+    let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(superclass))
         || constructor_accessors::reached_through_accessor(
             c.super_ctor,
             Some(c.fq_name_id()),

@@ -21,6 +21,7 @@ mod call_results;
 mod constructor_bodies;
 mod declaration_inventory;
 mod default_calls;
+mod default_constructions;
 mod descriptor_parameters;
 mod equality;
 mod function_references;
@@ -871,8 +872,8 @@ pub(crate) fn lower_value_classes(
             }
         }
     }
-    // `(fid, param idx, boxed value-class Ty)` for nullable-underlying value-class params — the base
-    // method unboxes them (below), but its `$default` stub + call site keep them boxed (recorded here).
+    // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
+    // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
     // `(fid, declared name, declared params, declared ret)` — collected while `ir.functions` is borrowed
     // mutably, moved into `ir.vc_declared_sigs` once the loop releases it.
@@ -999,6 +1000,12 @@ pub(crate) fn lower_value_classes(
         let sam_params = own_from.and_then(|s| {
             lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
         });
+        let receivers = usize::from(f.is_static && f.dispatch_receiver.is_some())
+            + usize::from(ir.extension_receiver_fns.contains(&(fid as u32)));
+        let defaults = ir
+            .fn_params
+            .get(&(fid as u32))
+            .and_then(|p| p.defaults.as_ref());
         for (idx, p) in f.params.iter_mut().enumerate() {
             // A lifted lambda's OWN value-class parameter arrives BOXED through the `FunctionN`
             // generic invoke slot, so it must KEEP the boxed `LX;` in the impl signature — erased
@@ -1034,7 +1041,10 @@ pub(crate) fn lower_value_classes(
                 continue;
             }
             if !vc_member || f.is_static || !is_vc_ty(p) {
-                if vc_underlying_nullable(p, &under) {
+                let defaulted = idx
+                    .checked_sub(receivers)
+                    .and_then(|i| defaults?.get(i)?.as_ref());
+                if defaulted.is_some() && vc_underlying_nullable(p, &under) {
                     default_boxed.push((fid as u32, idx, *p));
                 }
                 *p = erase(p, &under);
@@ -2271,13 +2281,8 @@ pub(crate) fn lower_value_classes(
                 owner: TypeName,
                 carrier: Ty,
             },
-            /// Constructing a value class with its sole (defaulted) param omitted (`Id()`) →
-            /// `constructor-impl$default(<underlying>, 1, DefaultConstructorMarker)` — mask `1` because a
-            /// value class is single-field. `u` is the erased underlying.
-            VcCtorDefault {
-                owner: TypeName,
-                u: Ty,
-            },
+            /// Constructing a value class with defaulted params omitted.
+            VcCtorDefault(default_constructions::DefaultConstruction),
         }
         if let IrExpr::Call {
             callee: Callee::Virtual { owner, name, .. },
@@ -2326,10 +2331,18 @@ pub(crate) fn lower_value_classes(
                     .get(&owner)
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
-                // A krusty-unboxed value class has one underlying parameter. Common IR retains the
-                // checked omission directly and carries no placeholder value.
-                if args.is_empty() && defaults.as_ref() == [0] && *default_prefix_count == 0 {
-                    Some(Rw::VcCtorDefault { owner, u })
+                if !defaults.is_empty() && *default_prefix_count == 0 {
+                    let ordinal = ir.construction_targets[&id].ordinal;
+                    let function = realized_members.constructor_impls.get(&(owner, ordinal));
+                    Some(Rw::VcCtorDefault(
+                        default_constructions::DefaultConstruction {
+                            owner,
+                            underlying: u,
+                            function: function.copied(),
+                            args: args.clone(),
+                            omitted: defaults.clone(),
+                        },
+                    ))
                 } else {
                     let ret = desc(&u);
                     let params: String = match ctor_params {
@@ -2732,29 +2745,7 @@ pub(crate) fn lower_value_classes(
                 }
                 Some(expr)
             }
-            Some(Rw::VcCtorDefault { owner, u }) => {
-                // `constructor-impl$default(<underlying dummy>, mask=1, DefaultConstructorMarker=null)`:
-                // the stub fills the omitted param from the class's default; the dummy underlying is a
-                // zero/null placeholder, the marker a trailing `null`.
-                let ud = desc(&u);
-                let marker = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
-                let dummy = ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
-                    u.canonical_semantic(),
-                )));
-                let mask = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
-                let null_marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-                ir.record_erased_value_construction(id, owner, u);
-                Some(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner,
-                        name: "constructor-impl$default".to_string(),
-                        descriptor: format!("({ud}I{marker}){ud}"),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![dummy, mask, null_marker],
-                })
-            }
+            Some(Rw::VcCtorDefault(construction)) => Some(construction.realize(ir, id, &under)),
             Some(Rw::Prop {
                 receiver,
                 owner,

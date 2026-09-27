@@ -949,7 +949,7 @@ pub(super) fn accept_constructor_body(
     Ok(())
 }
 
-/// The declaration facts of a selected module constructor: whether it is its class's primary, and
+/// The declaration facts of a selected module constructor: its place among its class's constructors, and
 /// who may call it, from its class's modality and its declared visibility. Every source constructor
 /// of a sealed class is restricted, whatever its modifier says: Kotlin makes an unmodified one
 /// `protected` and rejects a public one. `None` when a header is missing, which a checked selection
@@ -968,12 +968,9 @@ pub(super) fn module_constructor_target(
     let access = if sealed {
         IrConstructorAccess::SealedClass
     } else if visibility == crate::types::Visibility::Private {
-        IrConstructorAccess::Private { ordinal }
+        IrConstructorAccess::Private
     } else {
         IrConstructorAccess::Unrestricted
     };
-    Some(IrConstructorTarget {
-        primary: ordinal == 0,
-        access,
-    })
+    Some(IrConstructorTarget { ordinal, access })
 }

@@ -235,7 +235,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // reach it through the `(…args, DefaultConstructorMarker)` accessor, from a subclass's
             // `super(…)` and from the class's own `this(…)` alike. So are a sealed class's
             // constructors, and a private one that a nested subclass delegates to.
-            let targets_hidden_primary = target.primary && e.ir.has_value_param_ctor(&target_class);
+            let targets_hidden_primary =
+                target.primary() && e.ir.has_value_param_ctor(&target_class);
             if emitted_default_masks.is_empty()
                 && (targets_hidden_primary
                     || super::constructor_accessors::reached_through_accessor(
