@@ -37,14 +37,6 @@ impl StaticOwner {
         }
     }
 
-    /// Whether `internal`, the class an emitter is writing, is this owner.
-    pub(crate) fn is_emitted_class(self, internal: &str, facade: &str) -> bool {
-        match self {
-            Self::Facade => internal == facade,
-            Self::Class(name) => name.matches(internal),
-        }
-    }
-
     /// The owner's JVM internal name, for a class-file constant.
     pub(crate) fn internal_name(self, facade: &str) -> String {
         match self {
