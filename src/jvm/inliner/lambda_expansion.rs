@@ -38,6 +38,12 @@ pub(crate) struct Lambda {
     pub parameter_types: Vec<String>,
     /// The descriptor of what the lambda returns (`invokeMethod.returnType`), `V` for `Unit`.
     pub return_type: String,
+    /// For each parameter the lambda takes as the unboxed representation of a value class, that
+    /// class (the Kotlin types of `invokeMethodParameters`): `invoke` passes its box.
+    pub value_class_parameters: Vec<Option<String>>,
+    /// The value class the lambda returns unboxed, which `invoke` returns boxed
+    /// (`invokeMethodReturnType`).
+    pub value_class_return: Option<String>,
     /// The lambda's captured values: this range of [`Parameters::captured`].
     pub captured: std::ops::Range<usize>,
     /// The name of each captured value (`capturedVars`: `$x` for a captured `x`), which a
@@ -148,8 +154,18 @@ fn method(op: u8, owner: &str, name: &str, desc: &str) -> Node {
     })
 }
 
-/// `StackValue.coerce` from the `Object` `invoke` receives to a lambda parameter's type.
-fn coerce_from_object(desc: &str) -> Vec<Node> {
+/// `StackValue.coerce` from the `Object` `invoke` receives to a lambda parameter's type, the
+/// unboxed representation of `value_class` when there is one.
+fn coerce_from_object(desc: &str, value_class: Option<&str>) -> Vec<Node> {
+    if let Some(class) = value_class {
+        return vec![
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class: class.to_string(),
+            }),
+            method(INVOKEVIRTUAL, class, "unbox-impl", &format!("(){desc}")),
+        ];
+    }
     if let Some((owner, primitive)) = wrapper(desc) {
         let class = if matches!(desc, "Z" | "C") {
             owner
@@ -178,8 +194,17 @@ fn coerce_from_object(desc: &str) -> Vec<Node> {
     })]
 }
 
-/// `StackValue.coerce` from a lambda's result to the `Object` `invoke` returns.
-fn coerce_to_object(desc: &str) -> Vec<Node> {
+/// `StackValue.coerce` from a lambda's result to the `Object` `invoke` returns: a value class's
+/// unboxed representation goes through its `box-impl`.
+fn coerce_to_object(desc: &str, value_class: Option<&str>) -> Vec<Node> {
+    if let Some(class) = value_class {
+        return vec![method(
+            INVOKESTATIC,
+            class,
+            "box-impl",
+            &format!("({desc})L{class};"),
+        )];
+    }
     if desc == "V" {
         return vec![Node::Insn(Insn::Field {
             op: GETSTATIC,
@@ -358,8 +383,13 @@ impl Expansion<'_> {
         // kotlinc stores the arguments with `InstructionAdapter.store`, which writes to the
         // delegate and so never advances `InlineAdapter.nextLocalIndex`: a later invoke stores its
         // arguments in the same slots.
-        for ty in types.iter().rev() {
-            out.nodes.extend(coerce_from_object(ty));
+        for (index, ty) in types.iter().enumerate().rev() {
+            let value_class = self
+                .lambda
+                .value_class_parameters
+                .get(index)
+                .and_then(Option::as_deref);
+            out.nodes.extend(coerce_from_object(ty, value_class));
             value_param_shift -= descriptors::size(ty) as i32;
             let slot = u16::try_from(value_param_shift).map_err(|_| InlineError::LambdaArity)?;
             let op = Category::of_descriptor(ty).store_op();
@@ -427,7 +457,10 @@ impl Expansion<'_> {
             sorter.visit_local(&mut local);
             out.local_variables.push(local);
         }
-        out.nodes.extend(coerce_to_object(&self.lambda.return_type));
+        out.nodes.extend(coerce_to_object(
+            &self.lambda.return_type,
+            self.lambda.value_class_return.as_deref(),
+        ));
         if self.context.inline_markers {
             out.nodes.push(inline_call_marker(false));
         }

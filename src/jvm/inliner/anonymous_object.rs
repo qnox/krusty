@@ -21,7 +21,9 @@ use lambda_inlining::FieldLambda;
 mod type_remapper;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
+use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::{Annotation, ClassMethod, ClassNode, ElementValue, FieldNode};
 use crate::jvm::classfile::{ClassWriter, CopyError, InnerClassSpec};
 use crate::jvm::metadata::anonymous_origin::{record_origin_name, MetadataStrings};
@@ -105,6 +107,8 @@ pub(crate) struct Regeneration<'a> {
     pub caller_lines: &'a SourceMap,
     /// Which classes the original names are regenerated in turn.
     pub classes: &'a dyn ClassRoles,
+    /// The caller's value classes, which the copy's code boxes like the caller's.
+    pub value_classes: &'a Rc<ValueClassDescriptors>,
 }
 
 /// The regenerated class.
@@ -149,6 +153,7 @@ pub(crate) fn regenerate(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
+    cw.set_value_classes(Rc::clone(regeneration.value_classes));
     cw.set_access(original.access);
     if original.deprecated {
         cw.set_deprecated();

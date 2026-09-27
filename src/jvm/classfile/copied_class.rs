@@ -2,6 +2,8 @@
 //! through ASM: each declaration is interned when it is visited, in the order the transformer
 //! visits it, rather than in the order kotlinc's `ClassCodegen` writes a class of its own.
 
+use std::rc::Rc;
+
 use super::constant_pool_queries::PoolLookup;
 use super::inner_classes::InnerClassTable;
 use super::method_rewrite::MethodIdentity;
@@ -9,6 +11,7 @@ use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::bytecode_passes::pipeline::{self, Outcome, PassContext};
+use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::{Annotation, ClassMethod, ElementValue, FieldNode};
 use crate::jvm::method_node::{AssembleError, Constant, MethodNode};
 use crate::jvm::source_map::SourceMap;
@@ -29,6 +32,11 @@ const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExten
 const ACC_STATIC: u16 = 0x0008;
 
 impl ClassWriter {
+    /// The value classes this class's code may box, which a class copied for its code shares.
+    pub(crate) fn value_classes(&self) -> Rc<ValueClassDescriptors> {
+        Rc::clone(&self.value_classes)
+    }
+
     /// What the pool relayout does with an entry nothing names: a copied class, whose table keeps
     /// the rows as they were visited, keeps what its visits interned.
     pub(super) fn unnamed_entries(&self) -> Unnamed {

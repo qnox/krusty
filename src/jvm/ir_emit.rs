@@ -9937,21 +9937,12 @@ impl<'a> Emitter<'a> {
                     let mut param_slots: Vec<(u16, Ty)> = cap_slots.clone();
                     param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                     for j in (0..arity).rev() {
-                        let jt = lam_tys[j];
-                        if jt.is_jvm_scalar() {
-                            // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
-                            // from the lambda's semantic parameter before using the physical carrier for
-                            // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
-                            unbox_prim_from(
-                                self.cw,
-                                &mut scratch,
-                                Ty::obj("java/lang/Object"),
-                                semantic_scalar_adapter(lam_semantic_tys[j], jt),
-                            );
-                        } else if let Some(internal) = checkcast_internal(jt) {
-                            let ci = self.cw.class_ref(&internal);
-                            scratch.checkcast(ci);
-                        }
+                        // A value class the implementation takes boxed, the inline body takes unboxed.
+                        let jt = self.coerce_invoke_argument(
+                            lam_semantic_tys[j],
+                            lam_tys[j],
+                            &mut scratch,
+                        );
                         let slot = lambda_slot;
                         lambda_slot += slot_words(jt);
                         self.frame.reserve_through(lambda_slot);

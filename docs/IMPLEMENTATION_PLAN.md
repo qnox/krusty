@@ -4828,7 +4828,7 @@ regress.
     hosts. A literal-lambda call's route is planned before it is emitted
     (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
-    coroutine transformer runs on inlined bytecode), value-class adapters, non-local returns,
+    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local returns,
     materialized lambdas and callee shapes of later stages; callable references are not ported.
 - ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
@@ -4852,7 +4852,12 @@ regress.
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
     route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge. ☐ Lambdas taking a value class (`Continuation.resumeWith`'s `Result`).
+    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
+    accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
+    `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
+    `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
+    the pairs then removed by RedundantBoxing with the caller's value-class descriptors.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
 - ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
