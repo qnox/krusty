@@ -4,9 +4,11 @@
 //! its `EnclosingMethod` at the calling method.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::*;
 use crate::backend::BackendClassifierSource;
+use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::ClassNode;
 use crate::jvm::inliner::{
     regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError, ObjectLambda,
@@ -82,6 +84,7 @@ pub(super) struct CallObjects<'a> {
     commit: bool,
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
     caller_lines: SourceMap,
+    value_classes: Rc<ValueClassDescriptors>,
 }
 
 impl<'a> Emitter<'a> {
@@ -105,6 +108,7 @@ impl<'a> Emitter<'a> {
             callee: callee.to_string(),
             commit,
             caller_lines,
+            value_classes: self.cw.value_classes(),
         }
     }
 }
@@ -179,6 +183,7 @@ impl AnonymousObjects for CallObjects<'_> {
             lambdas,
             caller_lines: &self.caller_lines,
             classes: &self.bodies,
+            value_classes: &self.value_classes,
         })
         .map_err(InlineError::Regeneration)?;
         if self.commit {

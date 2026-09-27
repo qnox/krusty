@@ -25,6 +25,7 @@ mod default_constructions;
 mod descriptor_parameters;
 mod equality;
 mod function_references;
+mod inline_body_slots;
 mod interface_entries;
 mod member_names;
 mod module_members;
@@ -702,10 +703,10 @@ pub(crate) fn lower_value_classes(
             // `Object` invoke slot, so a reference-underlying value-class parameter is BOXED there — type it
             // as the NULLABLE (boxed) value class so `repr` reads a boxed `X` and a value-class member/
             // extension call on it (`it.getOrThrow()`) unboxes it. This slot map describes the REAL lambda
-            // implementation. A retained inline-body copy is analyzed in the caller's specialized slot scope
-            // below and therefore does not share this `FunctionN` representation boundary. A scalar-underlying
-            // value class keeps its own handling. Value-class-ness is decided HERE (with `under`), not in the
-            // lambda-agnostic lowerer.
+            // implementation. A retained inline-body copy does not share this `FunctionN` representation
+            // boundary: like kotlinc's inlined lambda it takes the parameter unboxed, and whoever inlines
+            // it unboxes the incoming box (`inline_body_slots`). Value-class-ness is decided HERE
+            // (with `under`), not in the lambda-agnostic lowerer.
             let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
             let sam_params = own_from.and_then(|s| {
                 lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
@@ -756,6 +757,7 @@ pub(crate) fn lower_value_classes(
         .filter(|c| c.is_value && !c.type_params.is_empty())
         .map(|c| c.fq_name)
         .collect();
+    let inline_own_parameters = inline_body_slots::own_parameters(ir);
     let mut slot_types = slot_types;
     for c in &ir.classes {
         for b in &c.bridges {
@@ -1181,34 +1183,13 @@ pub(crate) fn lower_value_classes(
     // A reference-underlying lambda own-param arrives BOXED (`LX;`) at the REAL implementation's
     // `FunctionN.invoke(Object)` boundary, while its body was lowered against the erased convention
     // (the slot as the underlying). Rewrite every implementation-body read to `unbox-impl` so each use
-    // sees the underlying again. A retained inline-body used by the JVM bytecode splicer has the same
-    // boundary: it replaces a `FunctionN.invoke(Object)` site, narrows that Object to the value-class box,
-    // and then executes this body. Same-source FIR inlining cloned/re-homed its body before this backend
-    // pass, so adapting the retained template does not touch the carrier-specialized clone. In-place: the
-    // `GetValue` node itself becomes the unbox call over a fresh `GetValue`, so every reference to the node
-    // (including a nested lambda's capture list) picks up the unboxed value.
+    // sees the underlying again. A retained inline body takes the parameter unboxed and is left as it
+    // is (`inline_body_slots`). In-place: the `GetValue` node itself becomes the unbox call over a fresh
+    // `GetValue`, so every reference to the node (including a nested lambda's capture list) picks up
+    // the unboxed value.
     for (fid, slot, x, u) in boxed_own_reads {
         let mut reads = HashSet::new();
         if let Some(root) = ir.functions[fid as usize].body {
-            collect_reachable_scoped(&ir.exprs, root, &mut reads);
-        }
-        // Common inline expansion consumes/re-homes the template and clears the implementation body;
-        // that body already receives carrier-specialized operands. A still-live implementation body
-        // means the retained template can instead be substituted at a JVM `FunctionN.invoke` boundary.
-        let inline_roots = ir.functions[fid as usize].body.is_some().then(|| {
-            ir.exprs
-                .iter()
-                .filter_map(|expression| match expression {
-                    IrExpr::Lambda {
-                        impl_fn,
-                        inline_body: Some(body),
-                        ..
-                    } if *impl_fn == fid => Some(*body),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        });
-        for root in inline_roots.into_iter().flatten() {
             collect_reachable_scoped(&ir.exprs, root, &mut reads);
         }
         let targets: Vec<ExprId> = reads
@@ -2137,7 +2118,7 @@ pub(crate) fn lower_value_classes(
     for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
         s4_bodies.push((property.init, slots.clone()));
     }
-    append_inline_body_scopes(ir, &mut s4_bodies, &slot_types);
+    append_inline_body_scopes(ir, &mut s4_bodies, &slot_types, &inline_own_parameters);
     // Map each reachable target expr to its body's slot map. A real lambda body belongs only to its
     // lifted function; traversing it from the enclosing `Lambda` expression would interpret the same
     // slot indices in the wrong function scope.
@@ -2966,7 +2947,7 @@ pub(crate) fn lower_value_classes(
     for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
         bodies.push((property.init, slots.clone()));
     }
-    append_inline_body_scopes(ir, &mut bodies, &slot_types);
+    append_inline_body_scopes(ir, &mut bodies, &slot_types, &inline_own_parameters);
     for (root, slots) in &bodies {
         let root = *root;
         let repr_ctx = ReprCtx {
@@ -5767,6 +5748,7 @@ fn append_inline_body_scopes(
     ir: &IrFile,
     bodies: &mut Vec<(ExprId, HashMap<u32, Ty>)>,
     slot_types: &[HashMap<u32, Ty>],
+    own_parameters: &inline_body_slots::OwnParameters,
 ) {
     let mut known_roots: HashSet<ExprId> = bodies.iter().map(|(root, _)| *root).collect();
     let mut cursor = 0;
@@ -5786,7 +5768,8 @@ fn append_inline_body_scopes(
             };
             if known_roots.insert(*inline_body) {
                 if let Some(slots) = slot_types.get(*impl_fn as usize) {
-                    bodies.push((*inline_body, slots.clone()));
+                    let slots = own_parameters.unboxed(*impl_fn, slots.clone());
+                    bodies.push((*inline_body, slots));
                 }
             }
         }
