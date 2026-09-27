@@ -10272,6 +10272,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
+        debug_lines::begin_expression(self.ir, e, code);
         debug_lines::mark_expression_start(self.ir, e, code);
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
         // position, so an offset recorded before it would be worthless, whereas an instruction
