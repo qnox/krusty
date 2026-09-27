@@ -419,6 +419,14 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         return MemberRealization::Intrinsic(CompilerIntrinsic::NumericConversion);
     }
 
+    if facts.name == "hashCode"
+        && facts.params.is_empty()
+        && facts.ret == Ty::Int
+        && receiver.is_some()
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveHashCode);
+    }
+
     if facts.owner.matches("kotlin/Boolean")
         && facts.name == "not"
         && facts.is_operator

@@ -5136,20 +5136,28 @@ impl JvmLibraries {
                         // Normalize the exact Kotlin `Any` declaration while its provider identity
                         // and source member are still together. Later JVM passes consume this role
                         // from the selected callable; they never rediscover it from call spelling.
-                        let semantic_role =
-                            if builtin_cn == crate::types::wk::any() && params.is_empty() {
-                                match m.name.as_str() {
-                                    "hashCode" => {
-                                        Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
-                                    }
-                                    "toString" => {
-                                        Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
-                                    }
-                                    _ => None,
+                        // A builtin scalar whose metadata declares no `hashCode` (`Int`) inherits
+                        // `Any`'s; the wrapper method found for it realizes that same declaration.
+                        let inherits_any_member = builtin_cn == crate::types::wk::any()
+                            || (m.realization == crate::libraries::MemberRealization::Dispatch
+                                && m.name == "hashCode"
+                                && super::jvm_class_map::wrapper_internal(Ty::obj_name(
+                                    builtin_cn,
+                                ))
+                                .is_some());
+                        let semantic_role = if inherits_any_member && params.is_empty() {
+                            match m.name.as_str() {
+                                "hashCode" => {
+                                    Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
                                 }
-                            } else {
-                                None
-                            };
+                                "toString" => {
+                                    Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),

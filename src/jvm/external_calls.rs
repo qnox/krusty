@@ -435,13 +435,14 @@ pub(super) fn realize(
         // with no JVM method. Checked FIR publishes the operation for an ordinary call; a callable-
         // reference adapter body keeps the provider identity in an ordinary external-call node, so
         // realize that exact declaration with the common primitive operation at this target
-        // boundary. `String.get` keeps its own intrinsic call below.
+        // boundary. `String.get` and a scalar's `hashCode` keep their own calls below.
         if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
             if !matches!(
                 intrinsic,
                 crate::libraries::CompilerIntrinsic::StringGet
                     | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
+                    | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
             ) {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
@@ -819,6 +820,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
                 | crate::libraries::CompilerIntrinsic::BooleanNot
+                | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
                 | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                 | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_),
             )
@@ -880,6 +882,19 @@ pub(super) fn realize(
                             name: callable.name,
                             descriptor,
                             inline: callable.inline,
+                        };
+                    } else if let Some((owner, descriptor)) = (semantic_role
+                        == Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode))
+                    .then(|| ir.ext_call_source_receiver.get(&expression).copied())
+                    .flatten()
+                    .and_then(primitive_hash_code)
+                    {
+                        args.insert(0, dispatch_receiver.take().ok_or(target)?);
+                        *callee = Callee::Static {
+                            owner,
+                            name: callable.name,
+                            descriptor,
+                            inline: crate::libraries::InlineKind::None,
                         };
                     } else {
                         let semantic_array_declaration =
@@ -949,6 +964,37 @@ pub(super) fn realize(
                                 descriptor: crate::jvm::names::method_descriptor(&[], element),
                                 params: None,
                                 interface: false,
+                            }
+                        }
+                        None => {
+                            let (owner, interface) = call_site_owner(
+                                classpath,
+                                callable.owner,
+                                callable.owner_is_interface,
+                                receiver,
+                            );
+                            Callee::Virtual {
+                                owner,
+                                name: callable.name,
+                                descriptor,
+                                params: None,
+                                interface,
+                            }
+                        }
+                    };
+                }
+                crate::libraries::MemberRealization::Intrinsic(
+                    crate::libraries::CompilerIntrinsic::PrimitiveHashCode,
+                ) => {
+                    let receiver = ir.ext_call_source_receiver.get(&expression).copied();
+                    *callee = match receiver.and_then(primitive_hash_code) {
+                        Some((owner, descriptor)) => {
+                            args.insert(0, dispatch_receiver.take().ok_or(target)?);
+                            Callee::Static {
+                                owner,
+                                name: callable.name,
+                                descriptor,
+                                inline: crate::libraries::InlineKind::None,
                             }
                         }
                         None => {
@@ -1042,6 +1088,19 @@ pub(super) fn realize(
         )?);
     }
     Ok(())
+}
+
+/// The wrapper's static `hashCode` and its descriptor that hash a non-null scalar receiver
+/// (`Integer.hashCode(I)I`), as kotlinc's `HashCode` intrinsic calls it for a JVM 1.8+ target.
+/// A receiver without a primitive representation keeps the ordinary virtual `hashCode()`.
+fn primitive_hash_code(receiver: crate::types::Ty) -> Option<(crate::types::TypeName, String)> {
+    let scalar = receiver.scalar_value_repr()?;
+    if receiver.is_nullable() || scalar != receiver || receiver.is_unsigned() {
+        return None;
+    }
+    let wrapper = crate::jvm::jvm_class_map::wrapper_internal(receiver)?;
+    let descriptor = crate::jvm::names::method_descriptor(&[scalar], crate::types::Ty::Int);
+    Some((crate::types::type_name(wrapper), descriptor))
 }
 
 /// The class a virtual call names. kotlinc calls an inherited member through the dispatch
