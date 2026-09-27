@@ -7,13 +7,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{IrClass, IrFile};
-use crate::jvm::classfile::{ClassWriter, InnerClassSpec};
+use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec};
 use crate::types::{type_name, TypeName};
 
 /// The complete ordered candidate list for one IR file. Every class writer receives the same list;
 /// `ClassWriter::finish` retains only entries referenced by that classfile.
 pub(super) struct InnerClasses {
     specs: Vec<InnerClassSpec>,
+    paths: DeclarationPaths,
 }
 
 impl InnerClasses {
@@ -157,13 +158,22 @@ impl InnerClasses {
             });
         }
 
-        Self { specs }
+        let paths = ir
+            .declaration_paths
+            .iter()
+            .map(|(class, path)| (class.render(), path.clone()))
+            .collect::<HashMap<_, _>>();
+        Self {
+            specs,
+            paths: std::rc::Rc::new(paths),
+        }
     }
 
     pub(super) fn register(&self, writer: &mut ClassWriter) {
         for spec in &self.specs {
             writer.add_inner_class(spec.clone());
         }
+        writer.set_declaration_paths(self.paths.clone());
     }
 }
 
@@ -308,6 +318,10 @@ mod tests {
                 lexical_owner: Some(crate::ir::IrLocalClassOwner::Class(owner_id)),
                 segments: vec!["make".to_string(), "Local".to_string()].into_boxed_slice(),
                 ordinal: None,
+                parents: vec![crate::ir::EnclosingDeclaration::Function(
+                    "make".to_string(),
+                )]
+                .into_boxed_slice(),
             },
         );
         // The frontend marks a class nested in a local class local as well; it is still a member.

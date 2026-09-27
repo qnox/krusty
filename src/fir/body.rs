@@ -1,5 +1,6 @@
 use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
 use super::local_callables::BodyLocalCallableDeclarationId;
+use super::local_class_names::FirGeneratedClassProvenance;
 use std::collections::HashMap;
 
 mod context_parameters;
@@ -1782,16 +1783,6 @@ pub enum FirDestructureEntry {
 pub struct FirStatement {
     pub origin: OriginId,
     pub kind: FirStatementKind,
-}
-
-/// Exact lexical context a target needs to name the class it realizes for one expression: the
-/// stable source classifier that owns the executable context (`None` for the file), the source
-/// declaration names below it, and the shared generated-artifact ordinal.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirGeneratedClassProvenance {
-    pub lexical_owner: Option<DeclarationId>,
-    pub segments: Box<[String]>,
-    pub ordinal: Option<u32>,
 }
 
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;

@@ -1868,83 +1868,6 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
-/// How many SUSPEND functions sharing this one's continuation NAME the file declares before it.
-///
-/// A continuation class is named after the method it re-enters, so two overloads would share one —
-/// and they do not share a spill layout, so whichever class loses the name resumes against fields it
-/// does not have (`NoSuchFieldError`). Both machines number the later one.
-///
-/// This answers for a suspend function that has NO source declaration behind it — a lowering-made
-/// one, which no frontend pass could have reserved a position for. A declared function reads its
-/// position from [`continuation_ordinal`] instead of counting anything here.
-fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
-    let function = &ir.functions[fid as usize];
-    let name = continuation_source_name(ir, fid);
-    ir.functions
-        .iter()
-        .enumerate()
-        .take(fid as usize)
-        .filter(|(other_fid, other)| {
-            continuation_source_name(ir, *other_fid as u32) == name
-                && other.dispatch_receiver == function.dispatch_receiver
-                && ir.suspend_funs.contains(&(*other_fid as u32))
-        })
-        .count()
-}
-
-/// The source identity used in a generated continuation class name.
-///
-/// A source-declared function keeps this independently from its physical JVM method name, which
-/// may be value-class-mangled or changed by `@JvmName`. A lowering-made function has no source
-/// declaration and therefore owns its generated name directly. In particular, never split a JVM
-/// name on `-`: that character is valid inside a backticked Kotlin identifier.
-///
-/// A lifted lambda or local function records its enclosing callable as its source name, which is
-/// not its own identity: its continuation keeps the implementation name it was lifted under, so it
-/// cannot take the `<owner>$<enclosing>$N` name of the enclosing function's own classes.
-pub(crate) fn continuation_source_name(ir: &IrFile, fid: u32) -> &str {
-    if ir.lambda_origins.contains_key(&fid) || ir.lifted_functions.contains_key(&fid) {
-        return &ir.functions[fid as usize].name;
-    }
-    match ir.fn_source_names.get(&fid) {
-        Some(name) => name,
-        None => {
-            assert!(
-                !ir.fn_source_order.contains_key(&fid),
-                "source suspend function {fid} has no recorded source name"
-            );
-            &ir.functions[fid as usize].name
-        }
-    }
-}
-
-/// The 1-based `$N` the continuation class of `fid` takes in its `<owner>$<function>` sequence.
-///
-/// The sequence is shared with the anonymous objects those bodies declare, and the pass that names
-/// those objects is the one that leaves a position free for each suspend function, in declaration
-/// order. It publishes which position it left — `IrFile::fn_continuation_ordinal` — so there is one
-/// numbering, computed once. Nothing here re-derives it from a class name.
-pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
-    match ir.fn_continuation_ordinal.get(&fid) {
-        Some(&ordinal) => ordinal as usize,
-        None => {
-            assert!(
-                !ir.fn_source_order.contains_key(&fid),
-                "source suspend function {fid} has no published continuation ordinal"
-            );
-            // A lowering-made function has no source declaration, so no anonymous source object
-            // can consume its generated sequence. Its target-private overloads number themselves.
-            same_name_ordinal(ir, fid) + 1
-        }
-    }
-}
-
-/// The continuation class for an ordinal from [`continuation_ordinal`]. The one place a generated
-/// continuation class is spelled.
-pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
-    format!("{owner}${function}${ordinal}")
-}
-
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
 /// flattened into a state graph: each suspension point (including one inside an `if`/`when` branch value)
 /// ends a state and starts a resume state, and control flow becomes `label = next` transitions through a
@@ -2266,12 +2189,13 @@ fn build_state_machine(
     let cont_owner = semantic_owner
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
-    // The continuation class uses the recorded SOURCE method name, never the value-class-mangled
-    // JVM name. A backticked source identifier may itself contain `-`, so physical spelling cannot
-    // recover this identity.
-    let cont_fname = continuation_source_name(ir, fid);
-    let cont_internal =
-        continuation_class_name(&cont_owner, cont_fname, continuation_ordinal(ir, fid));
+    let cont_internal = crate::jvm::local_class_names::name_continuation(
+        ir,
+        fid,
+        &cont_owner,
+        semantic_owner,
+        facade,
+    );
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;

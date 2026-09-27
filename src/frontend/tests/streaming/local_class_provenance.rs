@@ -1,4 +1,7 @@
 use super::*;
+use crate::enclosing_declarations::EnclosingDeclaration::{
+    self, InstanceInitializer, StaticInitializer,
+};
 
 #[test]
 fn source_set_records_anonymous_source_provenance_without_a_backend_name() {
@@ -27,6 +30,7 @@ fn source_set_records_anonymous_source_provenance_without_a_backend_name() {
             lexical_owner: None,
             segments: vec!["build".to_string()],
             ordinal: Some(1),
+            parents: vec![EnclosingDeclaration::Function("build".to_string())],
         }
     );
     let enclosing = analysis.files[0]
@@ -102,6 +106,63 @@ fn stable_nested_classifier_provenance_keeps_exact_anonymous_ownership() {
             lexical_owner: Some(anonymous),
             segments: vec!["Nested".to_string()].into_boxed_slice(),
             ordinal: None,
+            parents: Box::default(),
         })
+    );
+}
+
+#[test]
+fn an_initializer_object_records_the_instance_or_static_initialization_it_runs_in() {
+    let source = "class Holder {\n\
+                  \x20   val kept = object {}\n\
+                  \x20   init { object {} }\n\
+                  \x20   companion object { val shared = object {} }\n\
+                  }\n\
+                  object Registry { init { object {} } }\n\
+                  val top = object {}\n";
+    let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    let file = &analysis.files[0];
+    let owner = |declaration| match declaration {
+        Some(declaration) => match file.decl(declaration) {
+            crate::ast::Decl::Class(class) => class.name.clone(),
+            _ => panic!("an anonymous object's owner is a class"),
+        },
+        None => "<file>".to_string(),
+    };
+    let mut recorded = file
+        .anonymous_object_classes
+        .values()
+        .map(|declaration| {
+            let provenance = &file.local_class_name_provenance[declaration];
+            (
+                owner(provenance.lexical_owner),
+                provenance.segments.clone(),
+                provenance.parents.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    recorded.sort();
+    let row = |owner: &str, segments: &[&str], parents: &[EnclosingDeclaration]| {
+        let segments = segments.iter().map(|name| name.to_string()).collect();
+        (owner.to_string(), segments, parents.to_vec())
+    };
+    assert_eq!(
+        recorded,
+        vec![
+            row("<file>", &["top"], &[StaticInitializer]),
+            row("Holder", &[], &[InstanceInitializer]),
+            row("Holder", &["kept"], &[InstanceInitializer]),
+            row("Holder.Companion", &["shared"], &[StaticInitializer]),
+            row("Registry", &[], &[StaticInitializer]),
+        ]
     );
 }

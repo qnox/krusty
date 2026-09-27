@@ -2,6 +2,7 @@
 
 use super::{DeclarationId, SourceFileId};
 use crate::ast::{DeclId, File};
+use crate::enclosing_declarations::EnclosingDeclaration;
 use crate::types::{type_name_child, TypeName};
 
 /// Root semantic identity for a classifier declared in executable code.
@@ -25,6 +26,20 @@ pub struct LocalClassNameProvenance {
     pub lexical_owner: Option<DeclarationId>,
     pub segments: Box<[String]>,
     pub ordinal: Option<u32>,
+    /// The declarations the classifier is nested in below `lexical_owner`, outermost first.
+    pub parents: Box<[EnclosingDeclaration]>,
+}
+
+/// Exact lexical context a target needs to name the class it realizes for one expression: the
+/// stable source classifier that owns the executable context (`None` for the file), the source
+/// declaration names below it, the shared generated-artifact ordinal, and the declarations the
+/// class is nested in below that owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirGeneratedClassProvenance {
+    pub lexical_owner: Option<DeclarationId>,
+    pub segments: Box<[String]>,
+    pub ordinal: Option<u32>,
+    pub parents: Box<[EnclosingDeclaration]>,
 }
 
 impl super::ResolvedModuleIndex {
@@ -67,6 +82,7 @@ pub(super) fn stabilize_local_class_names(
                     lexical_owner: provenance.lexical_owner.and_then(stable),
                     segments: provenance.segments.clone().into_boxed_slice(),
                     ordinal: provenance.ordinal,
+                    parents: provenance.parents.clone().into_boxed_slice(),
                 },
             ))
         })
@@ -108,6 +124,7 @@ pub(super) fn stabilize_local_class_names(
                     lexical_owner: Some(*owner),
                     segments: vec![(*source_name).clone()].into_boxed_slice(),
                     ordinal: None,
+                    parents: Box::default(),
                 },
             ));
             false

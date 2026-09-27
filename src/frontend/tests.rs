@@ -71,6 +71,11 @@ fun calculate() {
             lexical_owner: None,
             segments: vec!["calculate".to_string(), "Token".to_string()],
             ordinal: None,
+            parents: vec![
+                crate::enclosing_declarations::EnclosingDeclaration::Function(
+                    "calculate".to_string()
+                )
+            ],
         }
     );
 }
@@ -104,6 +109,9 @@ fn settled_conversions_take_sequence_positions_and_number_per_callable() {
         lexical_owner: None,
         segments: vec!["names".to_string()],
         ordinal: Some(ordinal),
+        parents: vec![
+            crate::enclosing_declarations::EnclosingDeclaration::Function("names".to_string()),
+        ],
     };
     assert_eq!(
         values

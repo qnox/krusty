@@ -1527,6 +1527,7 @@ impl BodyLowering<'_> {
                 lexical_owner,
                 segments: provenance.segments.clone(),
                 ordinal: provenance.ordinal,
+                parents: provenance.parents.clone(),
             },
         );
     }

@@ -41,6 +41,7 @@ mod constructors;
 mod default_arguments;
 mod expression_provenance;
 mod field_flags;
+mod function_scope;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
@@ -55,6 +56,7 @@ mod value_class_constructors;
 mod value_class_facts;
 mod when_facts;
 
+pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
@@ -67,6 +69,7 @@ pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
+pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use operators::{IrBinOp, IrTypeOp};
@@ -2143,6 +2146,9 @@ pub struct IrFile {
     /// The class name a target chose for each source callable reference and suspend lambda, by
     /// expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
+    /// The declaration path a target sorts each class it named from provenance by, keyed by that
+    /// name: kotlinc's `fqNameWhenAvailable`.
+    pub(crate) declaration_paths: std::collections::HashMap<TypeName, String>,
     /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
     /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
@@ -2790,46 +2796,6 @@ pub struct IrFile {
     /// realization so emission does not mistake a value-class spelling (`Token`) for the interface
     /// slot that actually exists (`String`, `int`, …).
     pub lambda_sam_jvm_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
-}
-
-/// Exact function body currently owned by lowering. `source_name` is only the naming stem for
-/// generated methods/classes; semantic properties are keyed by `function`, never reconstructed from
-/// that spelling. `None` represents a constructor, property initializer, or class initializer.
-#[derive(Clone, Debug, Default)]
-pub struct IrFunctionScope {
-    pub function: Option<u32>,
-    pub source_name: String,
-    /// Declaration-owned type-parameter identities whose class-literal operations may remain as
-    /// reified placeholders in this emitted method. Kept on the lexical function scope so nested
-    /// inline expansion saves/restores the fact with its owner instead of a parallel current-state
-    /// field recovering parameters from source spelling.
-    pub emitted_reified_parameters: std::collections::HashSet<String>,
-}
-
-impl IrFunctionScope {
-    pub fn declared(function: u32, source_name: String) -> Self {
-        Self {
-            function: Some(function),
-            source_name,
-            emitted_reified_parameters: Default::default(),
-        }
-    }
-
-    pub fn synthetic(source_name: String) -> Self {
-        Self {
-            function: None,
-            source_name,
-            emitted_reified_parameters: Default::default(),
-        }
-    }
-
-    pub fn with_emitted_reified_parameters(
-        mut self,
-        parameters: std::collections::HashSet<String>,
-    ) -> Self {
-        self.emitted_reified_parameters = parameters;
-        self
-    }
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future

@@ -23,11 +23,11 @@ use super::emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
-    continuation_class_name, continuation_ordinal, continuation_source_name, ensure_tail_return,
-    recorded_suspension_result, shift_locals, suspend_call_fid, value_class_suspension_result,
-    EmitTimeMachines, MachineContext,
+    ensure_tail_return, recorded_suspension_result, shift_locals, suspend_call_fid,
+    value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
+use crate::jvm::local_class_names::name_continuation;
 use crate::types::Ty;
 
 /// What a routed function needs from the rest of the pass.
@@ -95,14 +95,10 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
         ir.expr_source_lines.insert(unit, close);
     }
 
-    // The continuation is named from the recorded source identity, never reconstructed from a
-    // value-class-mangled JVM name (or truncated at a valid backticked `-`).
-    let source_name = continuation_source_name(ir, fid);
     // A member's continuation nests under its class, a top-level function's under the facade.
     let receiver = ir.functions[fid as usize].dispatch_receiver;
     let owner = receiver.map_or_else(|| route.facade.to_string(), |owner| owner.render());
-    let continuation_class =
-        continuation_class_name(&owner, source_name, continuation_ordinal(ir, fid));
+    let continuation_class = name_continuation(ir, fid, &owner, receiver, route.facade);
     build_continuation_class(
         ir,
         &continuation_class,

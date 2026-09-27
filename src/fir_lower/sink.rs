@@ -953,6 +953,7 @@ impl<'a> CommonIrBodySink<'a> {
                             lexical_owner,
                             segments: provenance.segments,
                             ordinal: provenance.ordinal,
+                            parents: provenance.parents,
                         },
                     )
                     .is_none(),
