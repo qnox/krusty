@@ -47,20 +47,15 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
     })
 }
 
-/// A default setter's access: `private set` and `protected set` narrow only the setter, which keeps
-/// that declaration fact rather than widen to its property's visibility. Only an overridable
-/// property's setter drops `final`, and a private one never does. A setter that merely shares a
-/// protected property's visibility stays public like that property's getter: publishing both
-/// accessors `protected` waits on the accessors a subclass in another package reaches them by.
-pub(super) fn default_setter_access(
-    setter_visibility: Visibility,
-    property_visibility: Visibility,
-    overridable: bool,
-) -> u16 {
-    let access = match setter_visibility {
+/// A default accessor's JVM access. Visibility is an exact checked declaration fact; the backend
+/// only maps it to classfile flags. Private accessors remain final, while an open property lets a
+/// public/protected accessor dispatch virtually.
+pub(super) fn default_accessor_access(visibility: Visibility, overridable: bool) -> u16 {
+    let access = match visibility {
         Visibility::Private => return 0x0012,
-        Visibility::Protected if property_visibility != Visibility::Protected => 0x0004,
-        _ => 0x0001,
+        Visibility::Protected => 0x0004,
+        Visibility::Internal | Visibility::Public => 0x0001,
+        Visibility::PackagePrivate => 0x0000,
     };
     if overridable {
         access

@@ -1023,7 +1023,7 @@ impl SerializationPlugin {
         // is what the delegating call has to become. That dispatch decision reads a RESOLVED
         // `IrExpr::MethodCall` (class + member index), so the delegation below cannot be a
         // by-name `Callee::Virtual`: that form emits `invokevirtual` and never consults the set.
-        ir.private_methods.insert(cached);
+        ir.set_method_visibility(cached, crate::types::Visibility::Private);
         // kotlinc marks the helper ACC_SYNTHETIC, which also keeps it OUT of `@Metadata`: it is a
         // compiler-invented member, not a declaration the reflection layer should see.
         ir.synthetic_methods.insert(cached);

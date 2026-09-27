@@ -58,7 +58,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        self.ir.private_methods.insert(implementation);
+        self.ir
+            .set_method_visibility(implementation, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(implementation, 1);
         self.ir.suspend_funs.push(implementation);
         let arity = target

@@ -8,6 +8,15 @@ use crate::jvm::classfile::{
 
 use super::{is_high_arity_function, IrExpr, LambdaMode, LambdaModes};
 
+fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
+    match visibility {
+        crate::types::Visibility::Private => ACC_PRIVATE,
+        crate::types::Visibility::Protected => ACC_PROTECTED,
+        crate::types::Visibility::Internal | crate::types::Visibility::Public => ACC_PUBLIC,
+        crate::types::Visibility::PackagePrivate => 0,
+    }
+}
+
 /// The access word of the method emitted for `fid`. `holder_static` is an interface member's body
 /// realized as a static on its holder class, which takes the receiver as its first parameter.
 pub(super) fn declared_method_access(
@@ -18,7 +27,8 @@ pub(super) fn declared_method_access(
     holder_static: bool,
     lambda_modes: LambdaModes,
 ) -> u16 {
-    let private = ir.private_methods.contains(&fid);
+    let visibility = ir.method_visibility(fid);
+    let private = visibility.is_private();
     let owner_is_iface = ir
         .classes
         .iter()
@@ -26,19 +36,14 @@ pub(super) fn declared_method_access(
     let access = if holder_static {
         // STATIC, with the member's own visibility: a private interface member's body is a PRIVATE
         // static on the holder, as kotlinc emits it.
-        if private {
-            ACC_PRIVATE | ACC_STATIC
-        } else {
-            ACC_PUBLIC | ACC_STATIC
-        }
+        jvm_visibility(visibility) | ACC_STATIC
     } else if instance {
         // `ACC_FINAL` follows the member's own Kotlin modality, whatever the class's: an `open`,
         // `abstract` or non-`final` `override` member stays overridable even in a final class, and
         // any other member is final even in an open one. A private member is final too. An
         // interface method is never final (the JVM rejects it: `illegal modifiers 0x12`).
         let fin = (private || !ir.open_methods.contains(&fid)) && !owner_is_iface;
-        // A `private set` setter is `private final` (kotlinc); else `public`.
-        let vis = if private { ACC_PRIVATE } else { ACC_PUBLIC };
+        let vis = jvm_visibility(visibility);
         vis | if fin { ACC_FINAL } else { 0 }
     } else {
         // A `static` method is `<vis> static final` (kotlinc) — EXCEPT on an interface, where a `final`
@@ -67,7 +72,7 @@ pub(super) fn declared_method_access(
                 (false, _) => ACC_PRIVATE,
             }
         } else {
-            ACC_PUBLIC
+            jvm_visibility(visibility)
         };
         if owner_is_iface || class_suspend_impl || ir.open_methods.contains(&fid) {
             vis | ACC_STATIC

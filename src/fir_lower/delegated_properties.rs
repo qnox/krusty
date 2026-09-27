@@ -26,8 +26,8 @@ use crate::types::{Ty, TypeName};
 
 use super::generics::declaration_type_parameters;
 use super::properties::{
-    add_accessor_function, set_accessor_parameter_identities, setter_visibility,
-    stamp_generated_property_nodes, AccessorResult,
+    add_accessor_function, record_accessor_visibilities, set_accessor_parameter_identities,
+    setter_visibility, stamp_generated_property_nodes, AccessorResult,
 };
 use super::FirFileLoweringFailure;
 
@@ -180,6 +180,14 @@ pub(super) fn materialize_top_level_delegate(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
     }
+    record_accessor_visibilities(
+        index,
+        property.declaration,
+        property.visibility,
+        Some(getter),
+        setter,
+        ir,
+    );
     ir.fn_source_order.insert(getter, source_order);
     if let Some(setter) = setter {
         ir.fn_source_order.insert(setter, source_order);
@@ -360,6 +368,14 @@ pub(super) fn materialize_member_delegate(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
     }
+    record_accessor_visibilities(
+        index,
+        property.declaration,
+        property.visibility,
+        Some(getter),
+        setter,
+        ir,
+    );
     ir.classes[class_id as usize].methods.push(getter);
     if let Some(setter) = setter {
         ir.classes[class_id as usize].methods.push(setter);
@@ -584,14 +600,19 @@ pub(super) fn materialize_member_extension_delegate(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
     }
+    record_accessor_visibilities(
+        index,
+        property.declaration,
+        property.visibility,
+        Some(getter),
+        setter,
+        ir,
+    );
 
     let type_params = declaration_type_parameters(index, property.declaration);
     for function in std::iter::once(getter).chain(setter) {
         ir.fn_source_order.insert(function, source_order);
         ir.fresh_method_decls.push(function);
-        if property.visibility.is_private() {
-            ir.private_methods.insert(function);
-        }
         if property.flags.has(DeclarationFlags::OPEN) {
             ir.open_methods.insert(function);
         }

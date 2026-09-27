@@ -135,7 +135,7 @@ pub(super) fn cross_owner_private_member_calls(
                 let target_class = &ir.classes[class as usize];
                 if target_class.fq_name() != owner
                     && (private_interface_bodies_are_members || !target_class.is_interface)
-                    && ir.private_methods.contains(&target)
+                    && ir.method_visibility(target).is_private()
                 {
                     result.insert(target);
                 }

@@ -111,6 +111,10 @@ pub(super) fn realize(
             return Err(PropertyReferenceRealizationTarget::Invalid);
         }
         let receiver = dispatch_receiver.or(extension_receiver);
+        let reference_owner = u32::try_from(raw)
+            .ok()
+            .and_then(|expression| ir.expression_owners.get(&expression))
+            .copied();
         let delegated_target = if delegated {
             match &target {
                 FirPropertyReferenceTarget::Module(target) => Some(*target),
@@ -142,6 +146,7 @@ pub(super) fn realize(
                     mutable,
                     declared_accessors(ir, target),
                     (&getter, setter.as_deref()),
+                    reference_owner,
                 )?
             }
             FirPropertyReferenceTarget::SpecializedModule {
@@ -158,6 +163,7 @@ pub(super) fn realize(
                 mutable,
                 declared_accessors(ir, property),
                 (getter_name.as_ref(), setter_name.as_deref()),
+                reference_owner,
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -361,6 +367,10 @@ fn classifier_property(
             accessor_names_are_physical: false,
             boxed_value_class: None,
             unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            protected_reflection_getter: None,
+            protected_bridge: None,
         },
     )
 }
@@ -539,6 +549,10 @@ fn external_property(
             accessor_names_are_physical: true,
             boxed_value_class: None,
             unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            protected_reflection_getter: None,
+            protected_bridge: None,
         },
     ))
 }
@@ -598,6 +612,7 @@ fn module_property(
     reference_mutable: bool,
     declared: DeclaredAccessors,
     selected_accessor_names: (&str, Option<&str>),
+    reference_owner: Option<TypeName>,
 ) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
@@ -618,6 +633,22 @@ fn module_property(
     let access_bridge = enclosing.is_some()
         && (property.visibility.is_private()
             || reference_mutable && property.setter_visibility.is_private());
+    let protected_bridge = enclosing
+        .zip(reference_owner)
+        .filter(|(declaring, caller)| declaring.namespace() != caller.namespace())
+        .filter(|_| property.extension_receiver.is_none() && !companion_associated)
+        .and_then(|(target_owner, bridge_owner)| {
+            let getter = property.visibility == crate::types::Visibility::Protected;
+            let setter = reference_mutable
+                && property.setter_visibility == crate::types::Visibility::Protected;
+            (getter || setter).then_some(realization::ProtectedReferenceBridgeIntent {
+                bridge_owner,
+                target_owner,
+                target_owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
+                getter,
+                setter,
+            })
+        });
     let owner = property
         .extension_receiver
         .and_then(Ty::kotlin_class_internal)
@@ -741,6 +772,10 @@ fn module_property(
             accessor_names_are_physical: false,
             boxed_value_class: None,
             unboxed_receiver_value_class: None,
+            getter_bridge_owner: None,
+            setter_bridge_owner: None,
+            protected_reflection_getter: None,
+            protected_bridge,
         },
     ))
 }

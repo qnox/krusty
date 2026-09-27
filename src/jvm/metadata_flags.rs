@@ -3,6 +3,18 @@
 
 use crate::ir::IrFile;
 
+pub(super) fn declaration_visibility_bits(visibility: crate::types::Visibility) -> u64 {
+    match visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+        crate::types::Visibility::PackagePrivate => {
+            unreachable!("package-private is not a Kotlin declaration visibility")
+        }
+    }
+}
+
 pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
@@ -64,13 +76,7 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
 /// (already kotlinc-verified) constants.
 pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
-    let visibility: u64 = if ir.private_methods.contains(&fid) {
-        1
-    } else if ir.internal_methods.contains(&fid) {
-        0 // INTERNAL — only metadata carries the module boundary
-    } else {
-        3
-    };
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
     let modality: u64 = if f.body.is_none() {
         2 // abstract (an interface method or an `abstract fun`)
     } else if ir.open_methods.contains(&fid) {

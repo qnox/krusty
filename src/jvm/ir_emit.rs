@@ -20,7 +20,7 @@ use crate::jvm::names::{
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
-use field_visibility::{default_setter_access, is_jvm_field, jvm_field_visibility};
+use field_visibility::{default_accessor_access, is_jvm_field, jvm_field_visibility};
 
 mod access_bridges;
 mod annotation_impl;
@@ -102,7 +102,9 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
-use super::metadata_flags::{class_metadata_flags, declared_value_parameters, function_flags};
+use super::metadata_flags::{
+    class_metadata_flags, declaration_visibility_bits, declared_value_parameters, function_flags,
+};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -851,14 +853,7 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     let Some(fid) = data_copy_fid(ir, c) else {
         return COPY_FN_FLAGS;
     };
-    // INTERNAL=0, PRIVATE=1, PUBLIC=3 in metadata's visibility enum, held in bits 1-3.
-    let visibility: u64 = if ir.private_methods.contains(&fid) {
-        1
-    } else if ir.internal_methods.contains(&fid) {
-        0
-    } else {
-        3
-    };
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
@@ -2887,7 +2882,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         // takes none either: kotlinc omits nullability annotations — return and parameters — on the
         // now-private method.
         let copy = data_copy_fid(ir, c);
-        let copy_is_private = copy.is_some_and(|fid| ir.private_methods.contains(&fid));
+        let copy_is_private = copy.is_some_and(|fid| ir.method_visibility(fid).is_private());
         if !data_fields.is_empty() && !copy_is_private {
             let fid = copy.expect("a non-singleton data class records its generated copy identity");
             let function = &ir.functions[fid as usize];
@@ -3701,7 +3696,7 @@ fn emit_pass(
                 ..
             } = &ir.exprs[cur as usize]
             {
-                if ir.private_methods.contains(fid) && !class_member_fids.contains(fid) {
+                if ir.method_visibility(*fid).is_private() && !class_member_fids.contains(fid) {
                     out.insert(*fid);
                 }
             }
@@ -3713,7 +3708,8 @@ fn emit_pass(
             if let Some(fr) = &c.func_ref {
                 if fr.call_owner_is_facade() {
                     if let Some(target) = function_reference_target(ir, fr).filter(|target| {
-                        ir.private_methods.contains(target) && !class_member_fids.contains(target)
+                        ir.method_visibility(*target).is_private()
+                            && !class_member_fids.contains(target)
                     }) {
                         out.insert(target);
                     }
@@ -4571,7 +4567,7 @@ fn emit_declared_property_accessor(
         emit_return(accessor_jt, &mut g);
         g.ensure_locals(1);
         g.link();
-        let access = if overridable { 0x0001 } else { 0x0011 };
+        let access = default_accessor_access(property.visibility, overridable);
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
     }
     if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
@@ -4635,8 +4631,7 @@ fn emit_declared_property_accessor(
             st.ret_void();
             st.ensure_locals(1 + words);
             st.link();
-            let access =
-                default_setter_access(property.setter_visibility, property.visibility, overridable);
+            let access = default_accessor_access(property.setter_visibility, overridable);
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
         }
     }
@@ -5822,6 +5817,11 @@ fn emit_class(
             &mut cw,
         );
     }
+    property_reference_class::emit_protected_reference_bridges(
+        c.fq_name_id(),
+        env.property_reference_realizations,
+        &mut cw,
+    );
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -6284,7 +6284,7 @@ fn emit_interface_class(
             // inline-only lambda impl is not a source member either.
             if enable_compat
                 && !f.is_static
-                && !ir.private_methods.contains(&fid)
+                && !ir.method_visibility(fid).is_private()
                 && !ir.bridge_methods.contains(&fid)
                 && !ir.inline_only_fns.contains(&fid)
             {
@@ -8139,7 +8139,7 @@ fn emit_method_inner_with_holder(
     // `@NotNull` nor `@Nullable`: the annotations exist for Java interop, which cannot see them.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
         && !method_access::is_reifiable(ir, fid)
-        && !ir.private_methods.contains(&fid)
+        && !ir.method_visibility(fid).is_private()
         && !ir.synthetic_methods.contains(&fid)
         && !ir.jvm_nullability_unannotated_methods.contains(&fid);
     // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
@@ -8281,8 +8281,8 @@ fn emit_method_inner_with_holder(
                         // A private method is not callable from the continuation class, whether it
                         // is a member or a top-level function; a synthetic static on the owner is.
                         bridge: ir
-                            .private_methods
-                            .contains(&fid)
+                            .method_visibility(fid)
+                            .is_private()
                             .then(|| coroutine_machine::access_bridge_name(&f.name)),
                     });
                     e.emit_machine_prologue(completion, &mut code)
@@ -9051,7 +9051,7 @@ fn emit_default_stub(
     }
     let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
     let desc = method_descriptor(&real_params, ret);
-    let is_private = ir.private_methods.contains(&fid);
+    let is_private = ir.method_visibility(fid).is_private();
     if is_interface {
         // The default stub is a STATIC interface method; it dispatches to the real (abstract) member via
         // `invokeinterface` on `$this`.
@@ -9154,13 +9154,12 @@ fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
 /// The access flags of a member's `$default` synthetic: kotlinc mirrors the origin's visibility —
 /// with PRIVATE demoted to package-private (the stub is invoked from call sites that could not reach the
 /// private member itself) — always `| STATIC | SYNTHETIC`. Keyed on the IR's visibility model in ONE
-/// place: it currently distinguishes public vs private (`ir.private_methods`); when the IR carries
-/// protected/internal, their mappings extend here.
+/// place from the declaration's exact language visibility.
 fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
-    let vis = if ir.private_methods.contains(&fid) {
-        0x0000 // package-private
-    } else {
-        0x0001 // ACC_PUBLIC
+    let vis = match ir.method_visibility(fid) {
+        crate::types::Visibility::Private | crate::types::Visibility::PackagePrivate => 0x0000,
+        crate::types::Visibility::Protected => 0x0004,
+        crate::types::Visibility::Internal | crate::types::Visibility::Public => 0x0001,
     };
     vis | 0x1008 // ACC_STATIC | ACC_SYNTHETIC
 }
@@ -12106,9 +12105,9 @@ impl<'a> Emitter<'a> {
                     "emit MethodCall {}.{} fid={fid} private={} iface={is_iface}",
                     owner,
                     name,
-                    self.ir.private_methods.contains(&fid)
+                    self.ir.method_visibility(fid).is_private()
                 );
-                if self.ir.private_methods.contains(&fid) {
+                if self.ir.method_visibility(fid).is_private() {
                     // A PRIVATE method is non-virtual — `invokespecial` (an interface private method uses an
                     // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
@@ -12178,7 +12177,8 @@ impl<'a> Emitter<'a> {
                     // its enclosing class, a continuation class, any class member) — kotlinc routes
                     // those callers through the `access$<name>` bridge (emitted by `emit_pass` when
                     // referenced; see `facade_access_bridges`).
-                    let name = if self.owner != self.facade && self.ir.private_methods.contains(fid)
+                    let name = if self.owner != self.facade
+                        && self.ir.method_visibility(*fid).is_private()
                     {
                         format!("access${}", f.name)
                     } else {

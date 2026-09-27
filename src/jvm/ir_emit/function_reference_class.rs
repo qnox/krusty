@@ -495,7 +495,7 @@ pub(super) fn emit_func_ref_class(
     // for exactly these referenced targets).
     let static_call_name = if fr.call_owner_is_facade()
         && function_reference_target(ir, fr)
-            .is_some_and(|target| ir.private_methods.contains(&target))
+            .is_some_and(|target| ir.method_visibility(target).is_private())
     {
         format!("access${}", fr.call_name)
     } else {

@@ -523,7 +523,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     function.is_static = false;
     function.dispatch_receiver = Some(class);
     function.param_checks = vec![None];
-    ir.private_methods.remove(&fid);
+    ir.set_method_visibility(fid, crate::types::Visibility::Public);
     ir.synthetic_methods.remove(&fid);
     ir.class_static_local_functions.remove(&fid);
     ir.lambda_own_params_from.remove(&fid);

@@ -163,7 +163,7 @@ fn realize_adapter_reference(
         // classfile access boundary even though both artifacts represent one Kotlin lexical scope.
         // The adapter has no source declaration or metadata entry, so expose it only physically and
         // mark it synthetic rather than leaking an access-bridge decision into common lowering.
-        ir.private_methods.remove(&reference.adapter);
+        ir.set_method_visibility(reference.adapter, crate::types::Visibility::Public);
         ir.synthetic_methods.insert(reference.adapter);
     }
     // Converting an ordinary function to a `suspend` function type adapts it even when nothing
@@ -582,7 +582,7 @@ fn realize_own_invoke(
     function.is_static = false;
     function.dispatch_receiver = Some(internal);
     function.param_checks = param_checks;
-    ir.private_methods.remove(&adapter);
+    ir.set_method_visibility(adapter, crate::types::Visibility::Public);
     ir.synthetic_methods.remove(&adapter);
     ir.class_static_local_functions.remove(&adapter);
     ir.lambda_own_params_from.remove(&adapter);

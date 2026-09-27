@@ -348,9 +348,9 @@ impl Emitter<'_> {
                 }
                 IrExpr::Call { callee, .. } => {
                     matches!(callee, Callee::Special { .. })
-                        || callee
-                            .source_function()
-                            .is_some_and(|function| self.ir.private_methods.contains(&function))
+                        || callee.source_function().is_some_and(|function| {
+                            self.ir.method_visibility(function).is_private()
+                        })
                 }
                 // A nested lambda may be materialized as a method of the caller, which the object
                 // could not reach and route planning cannot tell from its shape.

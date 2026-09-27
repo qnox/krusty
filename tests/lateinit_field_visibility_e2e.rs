@@ -19,13 +19,16 @@ const LATEINIT: &str = "open class Holder {\n\
         protected set\n\
     internal lateinit var shared: String\n\
         private set\n\
+    protected var calculated: String = \"\"\n\
+        get() = field\n\
+        set(value) { field = value }\n\
     var plain: String = \"\"\n\
     fun fill() { guarded = \"g\"; hidden = \"h\"; family = \"f\"; shared = \"s\" }\n\
     fun hiddenValue(): String = hidden\n\
     inner class Probe : Holder() {\n\
         fun read(): String {\n\
-            open = \"o\"; module = \"m\"; exposed = \"x\"; fill()\n\
-            return open + module + family + guarded + hiddenValue() + exposed + shared\n\
+            open = \"o\"; module = \"m\"; exposed = \"x\"; calculated = \"c\"; fill()\n\
+            return open + module + family + guarded + hiddenValue() + exposed + shared + calculated\n\
         }\n\
     }\n\
 }\n\
@@ -41,7 +44,7 @@ fun box(): String {\n\
     Registry.entry = \"e\"\n\
     Registry.lock()\n\
     val read = Holder().Probe().read() + Registry.entry + Registry.locked + Registry.kept\n\
-    return if (read == \"omfghxselk\") \"OK\" else \"fail: \" + read\n\
+    return if (read == \"omfghxscelk\") \"OK\" else \"fail: \" + read\n\
 }\n";
 
 #[test]
@@ -75,21 +78,73 @@ fn lateinit_fields_take_their_setters_visibility_like_kotlinc() {
             field_flags(&reference),
             "{class}: field access flags"
         );
-        // A narrowed setter keeps its own visibility. (kotlinc omits a private default setter,
-        // protects both accessors of a protected property and mangles an internal accessor's
-        // name; those method-shape gaps are not this fixture's subject.)
-        let setters = |bytes: &[u8]| {
+        // Both default and source-written accessors keep exact property/setter visibility.
+        let protected_accessors = |bytes: &[u8]| {
             method_flags(bytes)
                 .into_iter()
-                .filter(|(name, _, _)| ["setExposed"].contains(&name.as_str()))
+                .filter(|(name, _, _)| {
+                    [
+                        "getFamily",
+                        "setFamily",
+                        "getExposed",
+                        "setExposed",
+                        "getCalculated",
+                        "setCalculated",
+                    ]
+                    .contains(&name.as_str())
+                })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            setters(emitted),
-            setters(&reference),
-            "{class}: narrowed setter access flags"
+            protected_accessors(emitted),
+            protected_accessors(&reference),
+            "{class}: accessor access flags"
         );
     }
+}
+
+/// A generated property-reference carrier is not a subclass, so it cannot directly invoke a
+/// protected accessor declared in another package. The subclass that contains the reference owns
+/// the static bridge; getter and setter remain independent for a public property with a protected
+/// setter. The identifiers are deliberately repository-local rather than stdlib spellings so this
+/// exercises generic visibility realization.
+#[test]
+fn cross_package_subclass_property_references_bridge_only_protected_accessors() {
+    let declaration = r#"
+package sample.origin
+
+open class Vessel {
+    protected var signal: String = "initial"
+    var readable: String = "readable"
+        protected set
+}
+"#;
+    let subclass = r#"
+package sample.consumer
+
+class Receiver : sample.origin.Vessel() {
+    fun protectedReference() = this::signal
+    fun narrowedReference() = this::readable
+}
+"#;
+    let main = r#"
+fun box(): String {
+    val receiver = sample.consumer.Receiver()
+    val protected = receiver.protectedReference()
+    protected.set("protected")
+    val narrowed = receiver.narrowedReference()
+    narrowed.set("setter")
+    return if (protected.get() + ":" + narrowed.get() == "protected:setter") "OK" else "fail"
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Vessel.kt", declaration),
+            ("Receiver.kt", subclass),
+            ("Main.kt", main),
+        ],
+        "cross-package protected property references",
+    );
 }
 
 /// Each field's name, descriptor and access flags, in classfile order.

@@ -467,13 +467,18 @@ fn materialize_member_extension_property(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
     }
+    record_accessor_visibilities(
+        index,
+        property.declaration,
+        property.visibility,
+        Some(getter),
+        setter,
+        ir,
+    );
     let type_params = declaration_type_parameters(index, property.declaration);
     for function in std::iter::once(getter).chain(setter) {
         ir.fn_source_order.insert(function, source_order);
         ir.fresh_method_decls.push(function);
-        if property.visibility.is_private() {
-            ir.private_methods.insert(function);
-        }
         if property.flags.has(DeclarationFlags::OPEN)
             || property.flags.has(DeclarationFlags::ABSTRACT)
         {
@@ -620,6 +625,14 @@ fn materialize_top_level_property(
         if let Some(setter) = setter {
             set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
         }
+        record_accessor_visibilities(
+            index,
+            property.declaration,
+            property.visibility,
+            getter,
+            setter,
+            ir,
+        );
         if let Some(owner) = companion_block_owner {
             place_companion_block_accessors(ir, owner, getter.into_iter().chain(setter));
             record_companion_block_property(
@@ -712,6 +725,14 @@ fn materialize_top_level_property(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, declaration, true, setter, ir)?;
     }
+    record_accessor_visibilities(
+        index,
+        declaration,
+        property.visibility,
+        Some(getter),
+        setter,
+        ir,
+    );
     if let Some(owner) = companion_block_owner {
         place_companion_block_accessors(ir, owner, std::iter::once(getter).chain(setter));
         record_companion_block_property(
@@ -1155,25 +1176,20 @@ fn materialize_member_property(
     for function in getter.iter().chain(setter.iter()) {
         ir.fn_source_order.insert(*function, source_order);
     }
-    // A PRIVATE member property's accessors are private methods, exactly as a backing-field
-    // property's are — this path records only their source order, so a private property with a
-    // custom accessor was published `public` and every caller reached it directly instead of
-    // through the synthetic bridge the declaration is supposed to expose.
-    if property.visibility.is_private() {
-        ir.private_methods.extend(getter.iter().copied());
-    }
+    record_accessor_visibilities(
+        index,
+        property.declaration,
+        property.visibility,
+        getter,
+        setter,
+        ir,
+    );
     // An open or overriding property's custom accessors stay overridable, exactly as the default
     // accessors of a backing-field property do through `IrProperty::is_open`: kotlinc emits the
     // getter of `override val size: Int get() = 2` without `final` even in a final class.
     if property.flags.has(DeclarationFlags::OPEN) {
         ir.open_methods
             .extend(getter.iter().chain(setter.iter()).copied());
-    }
-    if let Some(setter) = setter.filter(|_| {
-        property.visibility.is_private()
-            || setter_visibility(index, property.declaration, property.visibility).is_private()
-    }) {
-        ir.private_methods.insert(setter);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
@@ -1392,6 +1408,27 @@ pub(super) fn setter_visibility(
         })
         .and_then(|setter| index.declaration_header(setter))
         .map_or(property_visibility, |header| header.visibility)
+}
+
+/// Record the exact language visibility of source property accessors on their method identities.
+/// A getter inherits the property visibility; a setter may narrow it on its own declaration.
+pub(super) fn record_accessor_visibilities(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    property_visibility: crate::types::Visibility,
+    getter: Option<crate::ir::FunId>,
+    setter: Option<crate::ir::FunId>,
+    ir: &mut IrFile,
+) {
+    if let Some(getter) = getter {
+        ir.set_method_visibility(getter, property_visibility);
+    }
+    if let Some(setter) = setter {
+        ir.set_method_visibility(
+            setter,
+            setter_visibility(index, declaration, property_visibility),
+        );
+    }
 }
 
 fn merge_class_initialization(
