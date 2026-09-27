@@ -11,7 +11,7 @@ use crate::types::{stored_value_ty, Ty};
 
 use super::{
     box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm,
-    semantic_scalar_adapter, type_descriptor, unbox_prim_from, Emitter,
+    semantic_scalar_adapter, type_descriptor, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
 };
 
 impl Emitter<'_> {
@@ -448,12 +448,21 @@ impl Emitter<'_> {
                 }
             }
         } else if physical_arg.is_reference() && target.is_jvm_scalar() {
-            unbox_prim_from(
-                self.cw,
-                code,
-                physical_arg,
-                semantic_scalar_adapter(type_operand, target),
+            // kotlinc's platform-type assertion hands on its checked value as an `Object`, so the
+            // unbox after it goes through `Number` even from a declared wrapper (`Integer!`).
+            let checked_platform_value = matches!(
+                self.ir.expr(arg),
+                IrExpr::NotNullAssert {
+                    message: Some(_),
+                    ..
+                }
             );
+            let adapter = semantic_scalar_adapter(type_operand, target);
+            if checked_platform_value {
+                unbox_prim_from_descriptor(self.cw, code, "Ljava/lang/Object;", adapter);
+            } else {
+                unbox_prim_from(self.cw, code, physical_arg, adapter);
+            }
         } else if physical_arg.is_jvm_scalar() && target.is_jvm_scalar() && physical_arg != target {
             emit_num_conv(physical_arg, target, code);
         } else {
