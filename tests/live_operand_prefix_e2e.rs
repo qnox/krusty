@@ -2,11 +2,11 @@
 //! only a handler, a suspension, or a loop transfer in the later operand moves them to locals.
 use super::common;
 
-const SOURCE: &str = "class Pair(val a: Int, val b: Int)\n\
+const SOURCE: &str = "class Operands(val a: Int, val b: Int)\n\
                       class Holder { var f: Int = 0 }\n\
                       fun take(a: Int, b: Int) = a + b\n\
                       fun call(s: String?) = take(1, s?.length ?: 0)\n\
-                      fun construct(s: String?) = Pair(2, s?.length ?: 0)\n\
+                      fun construct(s: String?) = Operands(2, s?.length ?: 0)\n\
                       fun concat(s: String?, x: Int) = \"a\" + x + (s?.length ?: 0)\n\
                       fun store(s: String?, a: IntArray) { a[0] = s?.length ?: 0 }\n\
                       fun set(s: String?, h: Holder) { h.f = s?.length ?: 0 }\n\

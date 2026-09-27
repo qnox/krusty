@@ -87,8 +87,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// Leave a new holder with its element set to `init`, if any, on the operand stack. A branchy
-    /// `init` is spilled first, so it runs with nothing of the holder's on the stack.
+    /// Leave a new holder with its element set to `init`, if any, on the operand stack. An `init`
+    /// that cannot carry the operand stack is spilled first, so it runs with nothing of the
+    /// holder's on the stack; other branching values run with the holder in place, as kotlinc's do.
     pub(super) fn emit_shared_cell(
         &mut self,
         elem: Ty,

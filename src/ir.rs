@@ -3153,8 +3153,7 @@ mod debug_lines;
 mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
-pub use debug_locals::IrCatchBinding;
-pub use debug_locals::IrLambdaOrigin;
+pub use debug_locals::{IrCatchBinding, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
@@ -3168,6 +3167,7 @@ mod clone;
 pub use clone::*;
 mod semantic_validation;
 pub use semantic_validation::UndeterminedIrType;
-
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

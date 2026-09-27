@@ -8,8 +8,10 @@ use super::*;
 
 impl Emitter<'_> {
     /// Push `this`, the forwarded owner prefix (an enum's `name, ordinal`), and the adapted
-    /// delegation arguments. A branchy argument cannot run with the uninitialized `this` on the
-    /// stack, so such an argument list is first spilled to temporaries.
+    /// delegation arguments. An argument that cannot carry the operand stack (a handler, a
+    /// suspension, a loop transfer, or a branching inline splice that takes a literal) cannot run
+    /// with the uninitialized `this` on it, so such an argument list is first spilled to
+    /// temporaries. Other branching arguments keep the prefix on the stack, as kotlinc does.
     pub(super) fn emit_constructor_delegation_arguments(
         &mut self,
         arguments: &[crate::ir::ExprId],
