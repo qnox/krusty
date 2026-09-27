@@ -792,6 +792,11 @@ fn walking_a_string_is_linear_and_yields_its_utf16_units() {
     run_driver("string_iterator_linear");
 }
 
+#[test]
+fn a_programs_own_text_is_asked_its_length_once_per_step() {
+    run_driver("program_text_walk_asks_length_once_per_step");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
