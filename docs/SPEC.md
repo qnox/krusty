@@ -3657,8 +3657,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Recorded gaps the same ledgers make visible, all outside this boundary and none affecting the
   adaptation instructions: a `var`'s delegate `KProperty` is a `PropertyReference*Impl` where
-  kotlinc uses `MutablePropertyReference*Impl`; a member-extension delegate's reference names the
-  EXTENSION receiver's class where kotlinc names the owner; the reference's signature string omits
+  kotlinc uses `MutablePropertyReference*Impl`; the reference's signature string omits
   a value class accessor's mangled name and carries the boxed return (`getId()LId;` where kotlinc
   writes `getId-eEFUqEU()I`); and a non-null reference setter parameter is not
   `checkNotNullParameter`-checked.
@@ -3668,6 +3667,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   both value-class carrier kinds; each either RUN or pinned instruction-for-instruction against
   kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
   The lowering lives in `src/fir_lower/delegated_properties.rs`.
+
+- **A delegate's `KProperty` is owned by the property's container.** kotlinc passes the class a
+  member (extension or not) is declared in, or the file facade of a top-level property, as the
+  owner of the `PropertyReferenceNImpl` it hands to `getValue`/`setValue`. An extension receiver's
+  classifier is not a container: naming it both disagreed with kotlinc and, for a receiver with no
+  class of its own (`val IntArray.second by …`), loaded `kotlin/IntArray` and failed with
+  `NoClassDefFoundError`. Tests: `tests/delegated_prop_e2e.rs`
+  (`a_delegated_extension_property_reference_is_owned_by_its_container`).
 
 - **A delegate convention resolves `kotlin.reflect.KProperty`; it does not assume it.** The operand
   type the `getValue`/`setValue` lookup passes is obtained from the symbol source that answers
