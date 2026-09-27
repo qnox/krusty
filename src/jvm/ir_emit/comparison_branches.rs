@@ -83,6 +83,14 @@ impl Emitter<'_> {
     }
 
     fn emit_comparison_value(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        // kotlinc's `Ieee754Equals` produces its Boolean itself, and `!=` is `Not` over it.
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs) {
+            self.emit_ieee754_equals(lhs, rhs, code);
+            if op == IrBinOp::Ne {
+                self.negate_material_bool(code);
+            }
+            return;
+        }
         let f = code.new_label();
         // Every comparison that needs a conditional branch goes through the same classifier and
         // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
@@ -96,12 +104,41 @@ impl Emitter<'_> {
 
         // The shared emitter returns false only for structural equality between two non-null
         // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
-        // position, so branching merely to reconstruct it would be longer and less faithful.
+        // position; `!=` is kotlinc's `Not` over it, which materializes the negation with a branch.
         self.emit_structural_equality(lhs, rhs, code);
         if op == IrBinOp::Ne {
-            code.push_int(1, self.cw);
-            code.ixor();
+            self.negate_material_bool(code);
         }
+    }
+
+    /// Negate the Boolean on the operand stack as kotlinc's `Not` materializes it:
+    /// `ifne F; iconst_1; goto E; F: iconst_0; E:`.
+    fn negate_material_bool(&mut self, code: &mut CodeBuilder) {
+        let f = code.new_label();
+        code.ifne(f);
+        self.materialize_cmp_bool(f, code);
+    }
+
+    /// `==`/`!=` between two non-null `Float`s or two non-null `Double`s: kotlinc's `Ieee754Equals`
+    /// on primitives. Identity (`===`) compares the primitives directly and is not this operation.
+    fn is_ieee754_equality(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        let left = self.value_ty(lhs);
+        matches!(left, Ty::Float | Ty::Double) && self.value_ty(rhs) == left
+    }
+
+    /// Put kotlinc's `Ieee754Equals` result for two primitive operands on the operand stack.
+    ///
+    /// The intrinsic marks the comparison's line before its `fcmpg`/`dcmpg` and always materializes
+    /// the Boolean (`ifne F; iconst_1; goto E; F: iconst_0; E:`); a condition then branches on it.
+    fn emit_ieee754_equals(&mut self, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder) {
+        self.emit_comparison_operands(lhs, rhs, code);
+        self.mark_comparison_decision(&[lhs, rhs], code);
+        if self.value_ty(lhs) == Ty::Double {
+            code.dcmpg();
+        } else {
+            code.fcmpg();
+        }
+        self.negate_material_bool(code);
     }
 
     /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
@@ -187,6 +224,15 @@ impl Emitter<'_> {
                 code.if_acmpeq(target);
             } else {
                 code.if_acmpne(target);
+            }
+            return true;
+        }
+        if matches!(op, Eq | Ne) && self.is_ieee754_equality(lhs, rhs) {
+            self.emit_ieee754_equals(lhs, rhs, code);
+            if (op == Eq) == jt {
+                code.ifne(target);
+            } else {
+                code.ifeq(target);
             }
             return true;
         }

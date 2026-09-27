@@ -8548,6 +8548,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member. A generic `Iterator<Int>` keeps `Iterator.next()` and its cast. Test:
   `tests/primitive_iterator_next_e2e.rs`.
 
+- **Floating `==` materializes its Boolean; `!=` negates a materialized equality** (kotlinc's
+  `Ieee754Equals` and `Not`). `==`/`!=` between two non-null `Float`s or two non-null `Double`s
+  (a smart-cast operand included) is IEEE equality that always produces its Boolean:
+  `dcmpg; ifne F; iconst_1; goto E; F: iconst_0; E:`, with the comparison's line marked before the
+  `dcmpg`. A condition branches on that value (`ifeq`/`ifne`); `!=` is `Not` over it, which in
+  value position materializes again (`ifne F'; iconst_1; goto E'; F': iconst_0`). Structural `!=`
+  on references is `Not` over `Intrinsics.areEqual` the same way — a branch, never `iconst_1; ixor`.
+  Identity (`===`) and ordering keep the direct compare-and-jump. Test:
+  `tests/ieee754_equality_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
