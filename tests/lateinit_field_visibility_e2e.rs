@@ -190,6 +190,49 @@ fun box(): String {
     );
 }
 
+/// A delegated property's generated accessors are ordinary selected member calls too. When the
+/// delegate is the containing subclass and its generic convention is protected in another package,
+/// an inner class must route both convention calls through the subclass's typed access bridge.
+#[test]
+fn cross_package_inner_delegate_calls_keep_typed_protected_member_bridges() {
+    let declaration = r#"
+package sample.origin
+
+open class Slot<T>(private var stored: T) {
+    protected operator fun getValue(owner: Any?, property: Any?): T = stored
+    protected operator fun setValue(owner: Any?, property: Any?, value: T) {
+        stored = value
+    }
+}
+"#;
+    let subclass = r#"
+package sample.consumer
+
+class Container : sample.origin.Slot<Long>(41L) {
+    inner class Nested {
+        var value by this@Container
+    }
+}
+"#;
+    let main = r#"
+fun box(): String {
+    val nested = sample.consumer.Container().Nested()
+    nested.value = 42L
+    return if (nested.value == 42L) "OK" else "fail: " + nested.value
+}
+"#;
+    let sources = [
+        ("Slot.kt", declaration),
+        ("Container.kt", subclass),
+        ("Main.kt", main),
+    ];
+    assert_eq!(common::kotlinc_box_files_result(&sources, "MainKt"), "OK");
+    common::expect_box_ok_files_with_stdlib(
+        &sources,
+        "cross-package typed protected delegate bridges",
+    );
+}
+
 /// Each field's name, descriptor and access flags, in classfile order.
 fn field_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");

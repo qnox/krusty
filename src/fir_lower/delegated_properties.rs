@@ -429,6 +429,7 @@ pub(super) fn materialize_member_delegate(
         },
     );
     stamp_generated_property_nodes(ir, first_generated, cause);
+    stamp_generated_delegate_owner(ir, first_generated, owner_type);
     Ok(())
 }
 
@@ -660,7 +661,18 @@ pub(super) fn materialize_member_extension_delegate(
         },
     );
     stamp_generated_property_nodes(ir, first_generated, cause);
+    stamp_generated_delegate_owner(ir, first_generated, owner);
     Ok(())
+}
+
+/// Generated member accessors remain lexically owned by their declaring classifier. Preserve that
+/// stable identity on every synthesized expression so backend access realization can walk typed
+/// containment (for example, from an inner class to the enclosing subclass that grants protected
+/// access) without reconstructing ownership from JVM names or generated method shape.
+fn stamp_generated_delegate_owner(ir: &mut IrFile, first: usize, owner: TypeName) {
+    for raw in first..ir.exprs.len() {
+        ir.expression_owners.insert(raw as ExprId, owner);
+    }
 }
 
 fn delegated_property_reference(
@@ -783,6 +795,16 @@ fn delegated_call(
                     receiver: dispatch,
                     args: arguments.into_iter().map(Some).collect(),
                 });
+                let mut selected_parameters = call
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
+                selected_parameters.insert(
+                    callable.shape.context_parameter_count as usize,
+                    call.receiver.get(),
+                );
+                record_delegated_member_access(ir, expression, *target, selected_parameters);
                 return Ok(materialize_delegated_result(
                     ir,
                     expression,
@@ -811,6 +833,15 @@ fn delegated_call(
                             receiver,
                             args: arguments.into_iter().map(Some).collect(),
                         });
+                        record_delegated_member_access(
+                            ir,
+                            expression,
+                            *target,
+                            call.parameters
+                                .iter()
+                                .map(|parameter| parameter.get())
+                                .collect(),
+                        );
                         return Ok(materialize_delegated_result(
                             ir,
                             expression,
@@ -839,6 +870,15 @@ fn delegated_call(
                         dispatch_receiver: Some(receiver),
                         args: arguments,
                     });
+                    record_delegated_member_access(
+                        ir,
+                        expression,
+                        *target,
+                        call.parameters
+                            .iter()
+                            .map(|parameter| parameter.get())
+                            .collect(),
+                    );
                     return Ok(materialize_delegated_result(
                         ir,
                         expression,
@@ -987,6 +1027,25 @@ fn delegated_call(
             Err(FirFileLoweringFailure::UnsupportedPropertyShape(property))
         }
     }
+}
+
+/// Publish a generated delegate convention through the same selected-member boundary as an
+/// ordinary checked call. The backend needs the stable declaration identity and its applied
+/// parameter shape to realize representation and access bridges; reconstructing either from the
+/// generated accessor's JVM owner/name would make delegated properties a parallel call path.
+fn record_delegated_member_access(
+    ir: &mut IrFile,
+    expression: ExprId,
+    target: crate::fir::CallableId,
+    selected_parameters: Vec<Ty>,
+) {
+    ir.module_member_accesses.insert(
+        expression,
+        crate::ir::IrModuleMemberAccess::Callable {
+            target,
+            selected_parameters: selected_parameters.into_boxed_slice(),
+        },
+    );
 }
 
 /// Preserve the selected call-site result separately from the declaration's erased result slot.
