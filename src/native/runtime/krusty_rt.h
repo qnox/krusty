@@ -135,7 +135,9 @@ void *kt_gc_allocate(const KType *type, uint32_t size);
 void kt_gc_collect(void);
 
 /* Register a global slot that may hold a reference, so it is treated as a root. Static storage
-   is not scanned — a freestanding program has no portable way to find its own data section. */
+   is not scanned — a freestanding program has no portable way to find its own data section. The
+   slot may be declared as any pointer type: the collector reads a root, a stack word, a field or
+   an element as bytes, never through an lvalue of a type the slot was not declared with. */
 void kt_gc_add_global_root(void **slot);
 
 /* Introspection, for tests: allocated objects, bytes mapped for the heap, and bytes held by

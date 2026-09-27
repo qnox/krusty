@@ -197,6 +197,11 @@ fn only_an_arrays_end_pointer_keeps_it_alive_and_no_neighbour_is_kept() {
 }
 
 #[test]
+fn references_kept_in_typed_fields_elements_and_globals_are_traced() {
+    run_driver("gc_typed_reference_slots");
+}
+
+#[test]
 fn a_collection_started_during_a_collection_fails() {
     run_driver_expecting_failure(
         "gc_reentrant_collection_fails",
