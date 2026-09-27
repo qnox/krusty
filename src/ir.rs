@@ -3477,10 +3477,7 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod function_parameters;
-pub use function_parameters::{
-    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
-    IrParameterProvenance, IrParameterRole, IrVarargParameter,
-};
+pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 mod clone;

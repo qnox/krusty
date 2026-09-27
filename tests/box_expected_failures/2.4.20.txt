@@ -21,7 +21,6 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/special.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
-callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
 callableReference/callableReferenceOnObjectTypealias.kt
@@ -29,8 +28,6 @@ callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorOfImplicitKFunctionType.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/local/closureWithSideEffect.kt
-callableReference/function/local/extensionWithClosure.kt
 callableReference/genericConstructorReference.kt
 callableReference/genericLocalClassConstructorReference.kt
 callableReference/kt21014.kt

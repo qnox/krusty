@@ -150,13 +150,14 @@ fn realize_adapter_reference(
     };
     let arity = u8::try_from(function_type.params.len())
         .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?;
-    let capture_types = function
-        .params
-        .get(..reference.captures.len())
-        .ok_or(FunctionReferenceRealizationTarget::Adapter(
-            reference.adapter,
-        ))?
-        .to_vec();
+    // A shared mutable capture travels as its JVM holder, as the adapter declares it.
+    let capture_types = holder_parameters(
+        ir,
+        reference.adapter,
+        function.params.get(..reference.captures.len()).ok_or(
+            FunctionReferenceRealizationTarget::Adapter(reference.adapter),
+        )?,
+    );
     if adapter_owner.is_some() {
         // The carrier is a separate JVM class. A class-owned common adapter therefore crosses a
         // classfile access boundary even though both artifacts represent one Kotlin lexical scope.
@@ -188,12 +189,16 @@ fn realize_adapter_reference(
             crate::ir::ReflectedCallable::Physical
         }
     };
+    // A local function is reflected by the physical signature it was lifted to, in which a
+    // shared mutable capture is its JVM holder.
     let lifted = match reference.target {
-        crate::ir::IrCallableReferenceTarget::Local { function, .. } => Some(
-            ir.functions
+        crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
+            let lifted = ir
+                .functions
                 .get(function as usize)
-                .ok_or(FunctionReferenceRealizationTarget::Adapter(function))?,
-        ),
+                .ok_or(FunctionReferenceRealizationTarget::Adapter(function))?;
+            Some((holder_parameters(ir, function, &lifted.params), lifted.ret))
+        }
         _ => None,
     };
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
@@ -229,7 +234,7 @@ fn realize_adapter_reference(
     let bound = reference.bound_receiver.is_some();
     let continuation = Ty::obj("kotlin/coroutines/Continuation");
     let mut invoke_parameters = function_type.params.clone();
-    let mut target_parameters = function.params.clone();
+    let mut target_parameters = holder_parameters(ir, reference.adapter, &function.params);
     let mut invoke_result = function_type.ret;
     let mut target_result = function.ret;
     if function_type.suspend {
@@ -239,7 +244,7 @@ fn realize_adapter_reference(
         target_result = Ty::obj("kotlin/Any");
     }
     let (mut reflection_parameters, mut reflection_result) = match lifted {
-        Some(lifted) => (lifted.params.clone(), lifted.ret),
+        Some(lifted) => lifted,
         None => (
             reference.declaration_parameters.into_vec(),
             reference.declaration_result,
@@ -350,9 +355,23 @@ fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function
     };
 }
 
+/// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.
+fn holder_parameters(ir: &IrFile, function: crate::ir::FunId, parameters: &[Ty]) -> Vec<Ty> {
+    parameters
+        .iter()
+        .enumerate()
+        .map(|(parameter, &ty)| {
+            let ordinal = u32::try_from(parameter).expect("a function has few parameters");
+            ir.shared_capture_parameters
+                .get(&(function, ordinal))
+                .map_or(ty, super::shared_captures::holder_ty)
+        })
+        .collect()
+}
+
 /// kotlinc's fields for the values a local function's reference captures: each is named after the
-/// captured value, as the lifted function's own parameter is. `None` for a capture kotlinc stores
-/// otherwise (a receiver, or a shared mutable cell), which keeps the dispatching `invoke`.
+/// captured value, as the lifted function's own parameter is, whether it holds the value or its
+/// shared mutable cell. `None` for a captured receiver, which keeps the dispatching `invoke`.
 fn local_capture_fields(
     ir: &IrFile,
     reference: &crate::ir::IrCallableReference,
@@ -366,17 +385,13 @@ fn local_capture_fields(
     let identities = ir.function_parameter_identities(function)?;
     (0..reference.captures.len())
         .map(|capture| {
-            let ordinal = u32::try_from(capture).ok()?;
             let identity = identities.get(capture)?;
-            let shared = ir
-                .shared_capture_parameters
-                .contains_key(&(reference.adapter, ordinal));
-            (matches!(
+            matches!(
                 identity.role,
                 crate::ir::IrParameterRole::CapturedValue { .. }
-            ) && !shared)
-                .then(|| super::parameter_names::local_variable(identity, ""))
-                .flatten()
+            )
+            .then(|| super::parameter_names::local_variable(identity, ""))
+            .flatten()
         })
         .collect()
 }
@@ -432,7 +447,12 @@ fn realize_own_invoke(
     }
     let mut fields = Vec::with_capacity(stored);
     for (capture, name) in capture_fields.into_iter().enumerate() {
-        let ty = ir.functions[adapter as usize].params[capture];
+        // A shared mutable capture's field holds its cell, which the adapter no longer declares.
+        let ordinal = u32::try_from(capture).expect("a reference has few captures");
+        let ty = match ir.shared_capture_parameters.remove(&(adapter, ordinal)) {
+            Some(element) => super::shared_captures::holder_ty(&element),
+            None => ir.functions[adapter as usize].params[capture],
+        };
         fields.push((ir.classes[class as usize].fields.len(), None));
         ir.classes[class as usize].fields.push(crate::ir::IrField {
             name,
@@ -670,6 +690,10 @@ mod tests {
             let mut identities = vec![crate::ir::IrParameterIdentity::captured_value(
                 Some("prefix".to_string()),
                 0,
+                crate::ir::IrValueCapture {
+                    declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                    capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                },
             )];
             identities.extend(
                 (0..signature.params.len())

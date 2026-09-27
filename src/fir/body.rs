@@ -19,7 +19,7 @@ use crate::kt_string::KtString;
 use crate::types::TypeName;
 
 use super::body_work::BodyWorkItem;
-use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
+use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture, FirLambdaForm};
 use super::header::{
     next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
     FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
@@ -1876,7 +1876,7 @@ pub struct FirBody {
     property_delegate: Option<FirPropertyDelegatePlan>,
     debug_name: Option<Box<str>>,
     vararg_parameter: Option<FirVarargParameter>,
-    source_lambda: bool,
+    source_lambda: Option<FirLambdaForm>,
     debug_binding_name: Option<Box<str>>,
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
@@ -1937,7 +1937,7 @@ impl FirBody {
             property_delegate: None,
             debug_name: None,
             vararg_parameter: None,
-            source_lambda: false,
+            source_lambda: None,
             debug_binding_name: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
@@ -2136,16 +2136,15 @@ impl FirBody {
         }
     }
 
-    pub fn mark_source_lambda(&mut self, binding_name: Option<impl Into<Box<str>>>) {
+    pub fn mark_source_lambda(&mut self, form: FirLambdaForm, name: Option<impl Into<Box<str>>>) {
         assert!(
-            !self.source_lambda,
+            self.source_lambda.replace(form).is_none(),
             "a FIR body may be marked as a source lambda only once"
         );
-        self.source_lambda = true;
-        self.debug_binding_name = binding_name.map(Into::into);
+        self.debug_binding_name = name.map(Into::into);
     }
 
-    pub const fn is_source_lambda(&self) -> bool {
+    pub const fn source_lambda(&self) -> Option<FirLambdaForm> {
         self.source_lambda
     }
 

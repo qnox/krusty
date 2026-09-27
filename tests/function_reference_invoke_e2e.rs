@@ -731,6 +731,182 @@ fn local_function_reference_carriers_store_named_captures() {
     });
 }
 
+const SHARED_CAPTURE_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+var total = 0L
+
+fun carriers(): Held {
+    var count = 0
+    var sum = 0L
+    var seen = "K"
+    fun note(value: String): String {
+        seen += value
+        return seen
+    }
+    fun bump(by: Int): Int {
+        count += by
+        return count
+    }
+    fun add(by: Long): Long {
+        sum += by
+        total = sum
+        return sum
+    }
+    val counter = ::bump
+    val adder = ::add
+    val noter = ::note
+    counter(1)
+    return Held(counter, adder, noter)
+}
+
+fun box(): String {
+    val all = carriers().all
+    if ((all[0] as (Int) -> Int)(2) != 3) return "counter"
+    if ((all[1] as (Long) -> Long)(40L) != 40L || total != 40L) return "adder"
+    if ((all[2] as (String) -> String)("!") != "K!") return "noter"
+    return "OK"
+}
+"##;
+
+/// A local function that writes a captured `var` shares the variable's cell with its reference:
+/// the carrier stores that cell in a field named after the variable and passes it to the lifted
+/// function, which names it after the variable too. An object cell's generic field signature is
+/// not yet written, so that carrier is only run.
+#[test]
+fn shared_capture_reference_carriers_store_the_cell() {
+    assert_carriers_match_and_run(&Fixture {
+        source: SHARED_CAPTURE_SOURCE,
+        stem: "SharedCaptureReferenceInvoke",
+        dependency: None,
+        carriers: &[
+            "SharedCaptureReferenceInvokeKt$carriers$counter$1",
+            "SharedCaptureReferenceInvokeKt$carriers$adder$1",
+        ],
+    });
+}
+
+const MIXED_CAPTURE_SOURCE: &str = r##"fun mixed(step: Int): Int {
+    var count = 0
+    fun bump(by: Int): Int {
+        count += by * step
+        return count
+    }
+    val counter = ::bump
+    return counter(1)
+}
+
+fun box(): String = if (mixed(2) == 2) "OK" else "fail"
+"##;
+
+const CAPTURE_NAMES_SOURCE: &str = r##"fun literal(): Int {
+    var c = 0
+    val l = { c += 1 }
+    l()
+    return c
+}
+
+fun anonymous(): Int {
+    var c = 0
+    val l = fun(): Int {
+        c += 1
+        return c
+    }
+    return l()
+}
+
+fun copied(): Int {
+    val step = 2
+    fun bump(by: Int): Int = by * step
+    return bump(1)
+}
+
+fun nested(): Int {
+    val a = 1
+    fun outer(): Int {
+        val b = 2
+        fun inner(): Int = a + b
+        return inner()
+    }
+    return outer()
+}
+
+fun looped(): Int {
+    var t = 0
+    for (i in 0..2) {
+        fun f(): Int = i
+        t += f()
+    }
+    return t
+}
+"##;
+
+/// kotlinc's `LocalDeclarationsLowering` names a lifted parameter after what it captures: a
+/// variable keeps its own name when a named local function or an anonymous function captures it,
+/// a shared cell included; a captured parameter, and whatever a lambda literal captures, gets a
+/// `$` prefix. A value captured from further out is named where it was declared. The lifted
+/// functions' code and `LocalVariableTable` match kotlinc for each form.
+#[test]
+fn lifted_functions_name_their_captures_like_kotlinc() {
+    let lifted = [
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "private static final int carriers$bump",
+        ),
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "private static final long carriers$add",
+        ),
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "private static final java.lang.String carriers$note",
+        ),
+        (
+            MIXED_CAPTURE_SOURCE,
+            "MixedCaptureLifted",
+            "private static final int mixed$bump",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final kotlin.Unit literal$lambda$0",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int anonymous$lambda$0",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int copied$bump",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int nested$outer",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int nested$outer$inner",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int looped$f",
+        ),
+    ];
+    for (source, stem, method) in lifted {
+        let class = format!("{stem}Kt");
+        common::method_code_diff_against_kotlinc(stem, &[], source, &class, method)
+            .expect("reference kotlinc is provisioned")
+            .unwrap_or_else(|diff| panic!("{diff}"));
+    }
+}
+
 const HIGH_ARITY_SOURCE: &str = r##"class Held(vararg val all: Any)
 
 fun wide(

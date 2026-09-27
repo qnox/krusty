@@ -1314,7 +1314,7 @@ impl BodyLowering<'_> {
                         *enclosing_depth,
                         crate::fir::FirCaptureSource::Value(*source),
                     ))
-                    .copied()
+                    .cloned()
                     .ok_or(FirLoweringFailure::MissingCapture {
                         enclosing_depth: *enclosing_depth,
                         source: crate::fir::FirCaptureSource::Value(*source),
@@ -1820,7 +1820,7 @@ impl BodyLowering<'_> {
         let capture = self
             .capture_slots
             .get(&(enclosing_depth, source))
-            .copied()
+            .cloned()
             .ok_or(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
                 source,

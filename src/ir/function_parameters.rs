@@ -10,13 +10,50 @@ use super::{ExprId, FunId, IrFile};
 pub enum IrParameterRole {
     Value,
     ContextValue,
-    AnonymousContextParameter { ordinal: u32 },
-    ContextReceiver { ordinal: u32 },
+    AnonymousContextParameter {
+        ordinal: u32,
+    },
+    ContextReceiver {
+        ordinal: u32,
+    },
     ExtensionReceiver,
-    CapturedValue { ordinal: u32 },
-    CapturedReceiver { ordinal: u32 },
+    CapturedValue {
+        ordinal: u32,
+        capture: IrValueCapture,
+    },
+    CapturedReceiver {
+        ordinal: u32,
+    },
     PropertySetterValue,
     Generated(IrGeneratedParameterRole),
+}
+
+/// What a lifted callable's captured value was declared as, and what kind of callable captures
+/// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
+/// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an
+/// anonymous function, and `$`-prefixes everything else) reads them here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrValueCapture {
+    pub declaration: IrCapturedDeclaration,
+    pub capturer: IrCapturingCallable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrCapturedDeclaration {
+    /// A local `val`/`var`, a loop or catch variable, or a destructured component.
+    Variable,
+    /// A value parameter of an enclosing callable, or a constructor's capture-prefix value.
+    Parameter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrCapturingCallable {
+    /// A named local function (`fun local() { … }`).
+    LocalFunction,
+    /// An anonymous function expression (`fun() { … }`).
+    AnonymousFunction,
+    /// A lambda literal (`{ … }`).
+    Lambda,
 }
 
 /// A compiler-created parameter's semantic job. Targets own any physical spelling and flags.
@@ -114,10 +151,14 @@ impl IrParameterIdentity {
         }
     }
 
-    pub fn captured_value(source_name: Option<String>, ordinal: u32) -> Self {
+    pub fn captured_value(
+        source_name: Option<String>,
+        ordinal: u32,
+        capture: IrValueCapture,
+    ) -> Self {
         Self {
             source_name,
-            role: IrParameterRole::CapturedValue { ordinal },
+            role: IrParameterRole::CapturedValue { ordinal, capture },
             provenance: IrParameterProvenance::CompilerGenerated,
         }
     }
@@ -346,11 +387,16 @@ mod tests {
         let _ = file.function_parameter_identities(function);
     }
 
+    const LOCAL_VARIABLE: IrValueCapture = IrValueCapture {
+        declaration: IrCapturedDeclaration::Variable,
+        capturer: IrCapturingCallable::LocalFunction,
+    };
+
     #[test]
     fn parameter_roles_carry_source_identity_without_target_spelling() {
         let identities = [
-            IrParameterIdentity::captured_value(Some("ledger".to_string()), 0),
-            IrParameterIdentity::captured_value(None, 1),
+            IrParameterIdentity::captured_value(Some("ledger".to_string()), 0, LOCAL_VARIABLE),
+            IrParameterIdentity::captured_value(None, 1, LOCAL_VARIABLE),
             IrParameterIdentity::captured_receiver(0),
             IrParameterIdentity::context_value("audit"),
             IrParameterIdentity::context_receiver(1),
@@ -380,8 +426,14 @@ mod tests {
                 .map(|identity| identity.role)
                 .collect::<Vec<_>>(),
             [
-                IrParameterRole::CapturedValue { ordinal: 0 },
-                IrParameterRole::CapturedValue { ordinal: 1 },
+                IrParameterRole::CapturedValue {
+                    ordinal: 0,
+                    capture: LOCAL_VARIABLE
+                },
+                IrParameterRole::CapturedValue {
+                    ordinal: 1,
+                    capture: LOCAL_VARIABLE
+                },
                 IrParameterRole::CapturedReceiver { ordinal: 0 },
                 IrParameterRole::ContextValue,
                 IrParameterRole::ContextReceiver { ordinal: 1 },
