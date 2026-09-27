@@ -4594,6 +4594,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is unchanged: `InnerClasses`, then `EnclosingMethod`. The post-metadata class-attribute step
   interns the enclosing refs first, as the class write already did. Test:
   `tests/inner_class_name_pool_order_e2e.rs::a_local_class_interns_its_enclosing_method_before_its_own_row`.
+- **A method's local-variable table interns after its whole body.** ASM visits a method's local
+  variables after its instructions and before its frames, so every `LocalVariableTable` name and
+  descriptor, a nested block's local included, follows the body's constants in table order. The
+  class writer interns the table when the method is added; nothing interns a local where its block
+  closes. Test: `tests/method_pool_order_e2e.rs::a_nested_block_local_interns_after_the_whole_body`.
 - **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
   interface's inherited members supertype by supertype in the order they are written, at every
   level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`

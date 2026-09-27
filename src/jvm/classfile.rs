@@ -20,6 +20,7 @@ mod descriptor_mentions;
 mod enclosing_method;
 mod inner_classes;
 mod line_numbers;
+mod local_variables;
 mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
@@ -1971,21 +1972,6 @@ impl ClassWriter {
         }
     }
 
-    /// Intern a method's `LocalVariableTable` names and descriptors BEFORE its code is added.
-    ///
-    /// ASM visits `visitLocalVariable` before `visitMaxs`, so kotlinc's pool carries a local's name
-    /// and descriptor ahead of every class constant the frame computation introduces. krusty builds
-    /// the `StackMapTable` inside `add_method`, which interns each parameter's verification type —
-    /// so without this reservation a parameter whose class appears NOWHERE else in the class file
-    /// (the serialization constructor's marker) lands ahead of the local names instead of behind
-    /// them.
-    pub fn reserve_method_lvt(&mut self, locals: &[(String, String, u16)]) {
-        for (name, descriptor, _) in locals {
-            self.cp.utf8(name);
-            self.cp.utf8(descriptor);
-        }
-    }
-
     pub fn add_method_sig(
         &mut self,
         access: u16,
@@ -2005,6 +1991,7 @@ impl ClassWriter {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));
+        self.intern_local_table(code);
         // The table the instructions imply: its classes intern now, where kotlinc's writer interns
         // them, and `finish` writes it computed over the final body. A non-empty emitted body must
         // be understood by the one authoritative frame computation.
