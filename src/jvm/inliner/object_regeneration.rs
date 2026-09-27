@@ -16,7 +16,7 @@ use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::anonymous_object::{MalformedType, TypeRemapper};
-use super::callee_shape::is_anonymous_class;
+use super::class_roles::ClassRoles;
 use super::RegenerationError;
 use super::{InlineError, Lambda, Parameters};
 
@@ -63,9 +63,10 @@ pub(super) fn regenerate_objects(
     node: &mut MethodNode,
     parameters: &Parameters,
     lambdas: &[Lambda],
+    classes: &dyn ClassRoles,
     objects: &mut dyn AnonymousObjects,
 ) -> Result<Vec<PendingConstructor>, InlineError> {
-    let constructions = pair_constructions(node, parameters)?;
+    let constructions = pair_constructions(node, parameters, classes)?;
     let mut remapper = TypeRemapper::default();
     let mut pending = Vec::new();
     // The copy and its constructor descriptor, by the index of the `new` that made it.
@@ -197,6 +198,7 @@ struct Constructions {
 fn pair_constructions(
     node: &MethodNode,
     parameters: &Parameters,
+    classes: &dyn ClassRoles,
 ) -> Result<Constructions, InlineError> {
     let unpaired = || InlineError::UnpairedAnonymousObject;
     let mut constructions = Constructions {
@@ -206,9 +208,9 @@ fn pair_constructions(
         lambdas: HashMap::new(),
     };
     let constructs = node.instructions().any(|insn| {
-        matches!(insn, Insn::Type { op: NEW, class } if is_anonymous_class(class))
+        matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class))
             || matches!(insn, Insn::Method { op: INVOKESPECIAL, owner, name, .. }
-                if name == "<init>" && is_anonymous_class(owner))
+                if name == "<init>" && classes.is_anonymous_object(owner))
     });
     if !constructs {
         return Ok(constructions);
@@ -221,7 +223,10 @@ fn pair_constructions(
     let frames = analyze_with(
         node,
         "fake",
-        &mut ConstructionInterpreter { parameters },
+        &mut ConstructionInterpreter {
+            parameters,
+            classes,
+        },
         &mut PlainFrames,
         options,
     )
@@ -233,7 +238,7 @@ fn pair_constructions(
             continue;
         };
         match entry {
-            Node::Insn(Insn::Type { op: NEW, class }) if is_anonymous_class(class) => {
+            Node::Insn(Insn::Type { op: NEW, class }) if classes.is_anonymous_object(class) => {
                 news.push(at);
             }
             Node::Insn(Insn::Method {
@@ -242,7 +247,7 @@ fn pair_constructions(
                 name,
                 desc,
                 ..
-            }) if name == "<init>" && is_anonymous_class(owner) => {
+            }) if name == "<init>" && classes.is_anonymous_object(owner) => {
                 let arguments = descriptors::argument_types(desc)
                     .ok_or_else(|| malformed(MalformedType(desc.clone())))?
                     .len();
@@ -316,6 +321,7 @@ fn plain(value: Option<BasicValue>) -> Option<ConstructionValue> {
 /// copies.
 struct ConstructionInterpreter<'a> {
     parameters: &'a Parameters,
+    classes: &'a dyn ClassRoles,
 }
 
 impl Interpreter for ConstructionInterpreter<'_> {
@@ -336,7 +342,7 @@ impl Interpreter for ConstructionInterpreter<'_> {
     fn new_operation(&mut self, at: &At) -> Result<ConstructionValue, AnalyzerError> {
         let value = BasicInterpreter.new_operation(at)?;
         Ok(match at.insn {
-            Insn::Type { op: NEW, class } if is_anonymous_class(class) => {
+            Insn::Type { op: NEW, class } if self.classes.is_anonymous_object(class) => {
                 ConstructionValue::Uninitialized(BTreeSet::from([at.index]), value)
             }
             _ => ConstructionValue::Basic(value),

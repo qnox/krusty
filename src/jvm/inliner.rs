@@ -19,6 +19,7 @@
 
 mod anonymous_object;
 mod callee_shape;
+mod class_roles;
 mod functional_arguments;
 mod lambda_expansion;
 mod local_sorter;
@@ -41,6 +42,7 @@ pub(crate) use callee_shape::{
     can_inline_arguments_in_place, constructs_anonymous_object, requires_empty_stack_on_entry,
     unsupported_shape, UnsupportedShape,
 };
+pub(crate) use class_roles::ClassRoles;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda};
@@ -77,9 +79,11 @@ pub(crate) enum InlineError {
 }
 
 /// What one call's inlining reports to its caller (kotlinc's `InliningContext`): where the body's
-/// lines are mapped and where the anonymous objects it constructs are regenerated.
+/// lines are mapped, which classes it names are anonymous objects, and where the ones it constructs
+/// are regenerated.
 pub(in crate::jvm) struct InliningContext<'a> {
     pub lines: &'a mut dyn SourceLines,
+    pub classes: &'a dyn ClassRoles,
     pub objects: &'a mut dyn AnonymousObjects,
 }
 
@@ -106,8 +110,13 @@ pub(in crate::jvm) fn inline(
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let constructors =
-        object_regeneration::regenerate_objects(&mut node, parameters, lambdas, call.objects)?;
+    let constructors = object_regeneration::regenerate_objects(
+        &mut node,
+        parameters,
+        lambdas,
+        call.classes,
+        call.objects,
+    )?;
     let invokes = functional_arguments::mark_places(&mut node, parameters)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {

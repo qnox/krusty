@@ -14,7 +14,7 @@ pub use relocation::{
     bootstrap_members, references_private_member, relocate_const, relocate_insns,
 };
 mod method_bodies;
-pub use method_bodies::{MethodBodies, PropertyAccess, StaticMemberRealization};
+pub use method_bodies::{MethodBodies, PropertyAccess, RegeneratedClass, StaticMemberRealization};
 mod continuation_flow;
 mod debug_lines;
 mod frame_layout;

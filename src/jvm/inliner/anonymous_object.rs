@@ -29,6 +29,7 @@ use crate::jvm::metadata::MetadataDecodeError;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 use crate::jvm::source_map::{DependencyMap, SourceMap};
 
+use super::class_roles::ClassRoles;
 use super::{InlineError, ObjectLambda};
 
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
@@ -102,6 +103,8 @@ pub(crate) struct Regeneration<'a> {
     pub lambdas: &'a [ObjectLambda<'a>],
     /// The caller's source map, which the lambdas' lines are lines of.
     pub caller_lines: &'a SourceMap,
+    /// Which classes the original names are regenerated in turn.
+    pub classes: &'a dyn ClassRoles,
 }
 
 /// The regenerated class.
@@ -126,7 +129,7 @@ pub(crate) fn regenerate(
     let original = regeneration.original;
     let old = original.name.as_str();
     let new = regeneration.new_class;
-    check_supported(original)?;
+    check_supported(original, regeneration.classes)?;
     let mut remapper = TypeRemapper::with_type_arguments(regeneration.type_arguments);
     remapper.add_mapping(old, new);
 
@@ -430,7 +433,10 @@ fn plan_lambdas<'a>(
 }
 
 /// Refuse what the ported stages do not regenerate yet.
-fn check_supported(original: &ClassNode) -> Result<(), RegenerationError> {
+fn check_supported(
+    original: &ClassNode,
+    classes: &dyn ClassRoles,
+) -> Result<(), RegenerationError> {
     if original
         .super_name
         .as_deref()
@@ -455,7 +461,10 @@ fn check_supported(original: &ClassNode) -> Result<(), RegenerationError> {
             return Err(RegenerationError::Unsupported("a static initializer"));
         }
         let Some(code) = &method.code else { continue };
-        if code.instructions().any(creates_anonymous_object) {
+        if code
+            .instructions()
+            .any(|insn| creates_anonymous_object(insn, classes))
+        {
             return Err(RegenerationError::Unsupported("a nested anonymous object"));
         }
     }
@@ -463,21 +472,21 @@ fn check_supported(original: &ClassNode) -> Result<(), RegenerationError> {
 }
 
 /// Whether `insn` constructs or loads an object a copy would regenerate in turn.
-fn creates_anonymous_object(insn: &Insn) -> bool {
+fn creates_anonymous_object(insn: &Insn, classes: &dyn ClassRoles) -> bool {
     match insn {
-        Insn::Type { op: NEW, class } => super::callee_shape::is_regenerated_class(class),
+        Insn::Type { op: NEW, class } => classes.is_regenerated(class),
         Insn::Method {
             op: INVOKESPECIAL,
             owner,
             name,
             ..
-        } => name == "<init>" && super::callee_shape::is_regenerated_class(owner),
+        } => name == "<init>" && classes.is_regenerated(owner),
         Insn::Field {
             op: GETSTATIC,
             owner,
             name,
             ..
-        } => name == "INSTANCE" && super::callee_shape::is_regenerated_class(owner),
+        } => name == "INSTANCE" && classes.is_regenerated(owner),
         _ => false,
     }
 }

@@ -178,6 +178,7 @@ impl AnonymousObjects for CallObjects<'_> {
             metadata_version: &METADATA_VERSION,
             lambdas,
             caller_lines: &self.caller_lines,
+            classes: &self.bodies,
         })
         .map_err(InlineError::Regeneration)?;
         if self.commit {

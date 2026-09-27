@@ -1,4 +1,5 @@
 use super::anonymous_object::MalformedType;
+use super::class_roles::RegeneratedClass;
 use super::*;
 use crate::jvm::method_node::{Category, Constant, LabelId, LocalVariable, TryCatchBlock};
 
@@ -39,6 +40,28 @@ impl AnonymousObjects for NoObjects {
     }
 }
 
+/// A classpath that declares none of the classes a body names an anonymous object.
+struct NoClasses;
+
+impl ClassRoles for NoClasses {
+    fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
+        None
+    }
+}
+
+/// A classpath whose class files declare exactly these classes anonymous.
+struct AnonymousClasses(&'static [&'static str]);
+
+impl ClassRoles for AnonymousClasses {
+    fn regenerated_class(&self, internal: &str) -> Option<RegeneratedClass> {
+        self.0
+            .contains(&internal)
+            .then_some(RegeneratedClass::AnonymousObject)
+    }
+}
+
+const OBJECTS: AnonymousClasses = AnonymousClasses(&["lib/A$f$1", "lib/B$f$2"]);
+
 /// Lines left as the callee's own.
 struct OwnLines;
 
@@ -71,6 +94,7 @@ fn inline_plain(
         reified_arguments,
         InliningContext {
             lines: &mut OwnLines,
+            classes: &NoClasses,
             objects: &mut NoObjects,
         },
     )
@@ -414,13 +438,13 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     let mut reified = MethodNode::new(ACC_STATIC, "r", "()V");
     reified.nodes = vec![method("needClassReification", "()V", false)];
     assert_eq!(
-        unsupported_shape(&reified),
+        unsupported_shape(&reified, &NoClasses),
         Some(super::callee_shape::UnsupportedShape::ClassReification),
     );
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![
@@ -551,6 +575,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         &Default::default(),
         InliningContext {
             lines: &mut OwnLines,
+            classes: &NoClasses,
             objects: &mut NoObjects,
         },
     )
@@ -679,8 +704,14 @@ fn a_nested_construction_pairs_each_new_with_the_call_that_initializes_it() {
         op(0xb1),
     ];
     let mut objects = NumberingObjects::default();
-    object_regeneration::regenerate_objects(&mut node, &Parameters::default(), &[], &mut objects)
-        .expect("regenerates");
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &OBJECTS,
+        &mut objects,
+    )
+    .expect("regenerates");
     assert_eq!(
         objects.asked,
         [
@@ -714,8 +745,14 @@ fn two_outstanding_instances_of_one_class_each_get_their_own_copy() {
         op(0xb1),
     ];
     let mut objects = NumberingObjects::default();
-    object_regeneration::regenerate_objects(&mut node, &Parameters::default(), &[], &mut objects)
-        .expect("regenerates");
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &OBJECTS,
+        &mut objects,
+    )
+    .expect("regenerates");
     assert_eq!(
         objects.asked,
         [
@@ -744,6 +781,7 @@ fn a_constructor_call_without_its_new_is_refused() {
             &mut node,
             &Parameters::default(),
             &[],
+            &OBJECTS,
             &mut NumberingObjects::default()
         ),
         Err(InlineError::UnpairedAnonymousObject)
@@ -759,6 +797,7 @@ fn a_new_no_constructor_call_initializes_is_refused() {
             &mut node,
             &Parameters::default(),
             &[],
+            &OBJECTS,
             &mut NumberingObjects::default()
         ),
         Err(InlineError::UnpairedAnonymousObject)
@@ -786,10 +825,37 @@ fn a_malformed_descriptor_at_the_call_site_declines_the_regeneration() {
             &mut node,
             &Parameters::default(),
             &[],
+            &OBJECTS,
             &mut NumberingObjects::default()
         ),
         Err(InlineError::Regeneration(RegenerationError::Malformed(
             MalformedType("Llib/A$f$1".to_string())
         )))
     );
+}
+
+/// A class is regenerated because its class file declares it anonymous, not because its name ends
+/// in `$<number>`: a body constructing a class the classpath declares otherwise keeps its `new`.
+#[test]
+fn a_class_spelled_like_an_anonymous_object_is_not_regenerated() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        new("lib/A$f$1"),
+        op(0x59),
+        init("lib/A$f$1", "()V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    assert!(!constructs_anonymous_object(&node, &NoClasses));
+    let mut objects = NumberingObjects::default();
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &NoClasses,
+        &mut objects,
+    )
+    .expect("keeps the construction");
+    assert!(objects.asked.is_empty());
+    assert_eq!(constructions(&node), ["new lib/A$f$1", "init lib/A$f$1()V"]);
 }

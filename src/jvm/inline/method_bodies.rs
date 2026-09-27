@@ -42,6 +42,16 @@ pub enum PropertyAccess {
     },
 }
 
+/// How a class an inlined body constructs or loads is declared, for the classes the call site
+/// regenerates (kotlinc's `isAnonymousClass || isSamWrapper`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegeneratedClass {
+    /// An anonymous object or lambda class: its `InnerClasses` self entry has no simple name.
+    AnonymousObject,
+    /// A SAM wrapper: a synthetic class that is not nested in another.
+    SamWrapper,
+}
+
 /// The bytecode and physical-realization capabilities needed by JVM emission.
 ///
 /// Whether a declaration is inline and which source declaration was selected are checked facts
@@ -52,6 +62,12 @@ pub trait MethodBodies {
 
     /// The class file of `internal`, for a class an inlined body's objects are copied from.
     fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// How the class file of `internal` declares it, when the call site regenerates it; `None` for
+    /// any other class, and for one whose class file is not available.
+    fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
         None
     }
 

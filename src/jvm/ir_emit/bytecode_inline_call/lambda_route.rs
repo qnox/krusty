@@ -88,7 +88,7 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
             return splice(SpliceReason::CalleeShape(shape));
         }
         if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
@@ -115,7 +115,7 @@ impl Emitter<'_> {
         }
         // Whether the call's objects regenerate is settled before any code is emitted: the body is
         // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
-        if inliner::constructs_anonymous_object(&callee) {
+        if inliner::constructs_anonymous_object(&callee, &self.bodies) {
             if lambda_arguments
                 .iter()
                 .any(|&argument| self.lambda_reaches_private_members(argument))
@@ -152,6 +152,7 @@ impl Emitter<'_> {
                 call.reified,
                 inliner::InliningContext {
                     lines: &mut UnmappedLines,
+                    classes: &self.bodies,
                     objects: &mut self.call_objects(
                         call_expression,
                         target.name,

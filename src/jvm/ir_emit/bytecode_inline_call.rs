@@ -77,7 +77,7 @@ impl Emitter<'_> {
         // is not function-typed, as `map[key] = { … }`).
         match self.lambda_call_route(inline_call, code) {
             Ok(LambdaCallRoute::MethodInliner(callee))
-                if crate::jvm::inliner::constructs_anonymous_object(&callee) =>
+                if crate::jvm::inliner::constructs_anonymous_object(&callee, &self.bodies) =>
             {
                 if let Err(reason) = self.inline_classpath_lambda_call(
                     inline_call,
@@ -265,7 +265,7 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
@@ -303,6 +303,7 @@ impl Emitter<'_> {
             reified,
             inliner::InliningContext {
                 lines: &mut UnmappedLines,
+                classes: &self.bodies,
                 objects: &mut self.call_objects(
                     call_expression,
                     target.name,
@@ -523,6 +524,7 @@ impl Emitter<'_> {
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
         let claimable = self.claimable_lines();
+        let bodies = self.bodies;
         let mut lines = CallLines {
             emitter: self,
             body,
@@ -543,6 +545,7 @@ impl Emitter<'_> {
             reified,
             inliner::InliningContext {
                 lines: &mut lines,
+                classes: &bodies,
                 objects: &mut objects,
             },
         );

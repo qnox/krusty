@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 
+use super::class_roles::{ClassRoles, RegeneratedClass};
 use super::preparation::label_positions;
 
 const ACC_STATIC: u16 = 0x0008;
@@ -29,12 +30,17 @@ pub(crate) enum UnsupportedShape {
 
 /// The first shape in `callee` that needs a later stage of the port, if any. The anonymous objects
 /// the body constructs are regenerated for the call site; a SAM wrapper is not yet.
-pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
+pub(crate) fn unsupported_shape(
+    callee: &MethodNode,
+    classes: &dyn ClassRoles,
+) -> Option<UnsupportedShape> {
+    let sam_wrapper =
+        |internal: &str| classes.regenerated_class(internal) == Some(RegeneratedClass::SamWrapper);
     callee.instructions().find_map(|insn| match insn {
-        Insn::Type { op: NEW, class } if is_sam_wrapper(class) => {
+        Insn::Type { op: NEW, class } if sam_wrapper(class) => {
             Some(UnsupportedShape::AnonymousObject)
         }
-        Insn::Method { name, owner, .. } if name == "<init>" && is_sam_wrapper(owner) => {
+        Insn::Method { name, owner, .. } if name == "<init>" && sam_wrapper(owner) => {
             Some(UnsupportedShape::AnonymousObject)
         }
         Insn::Field {
@@ -43,7 +49,7 @@ pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape>
             name,
             desc,
         } => {
-            if name == "INSTANCE" && is_anonymous_class(owner) {
+            if name == "INSTANCE" && classes.is_anonymous_object(owner) {
                 Some(UnsupportedShape::AnonymousObject)
             } else if name.starts_with("$EnumSwitchMapping$") && owner.ends_with("$WhenMappings") {
                 Some(UnsupportedShape::WhenMappings)
@@ -70,33 +76,11 @@ pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape>
     })
 }
 
-/// Whether a body that constructs or loads `internal` has it regenerated for its call site:
-/// an anonymous object or a SAM wrapper (`isAnonymousClass || isSamWrapper`).
-pub(super) fn is_regenerated_class(internal: &str) -> bool {
-    is_anonymous_class(internal) || is_sam_wrapper(internal)
-}
-
-/// kotlinc's `isAnonymousClass`: a class whose simple name ends in `$<number>`, SAM wrappers aside.
-pub(super) fn is_anonymous_class(internal: &str) -> bool {
-    if internal.contains("$sam$") {
-        return false;
-    }
-    let simple = internal.rsplit('/').next().unwrap_or(internal);
-    simple
-        .rsplit_once('$')
-        .is_some_and(|(_, suffix)| suffix.parse::<i32>().is_ok())
-}
-
 /// Whether `callee` constructs an anonymous object, which the call site regenerates.
-pub(crate) fn constructs_anonymous_object(callee: &MethodNode) -> bool {
-    callee
-        .instructions()
-        .any(|insn| matches!(insn, Insn::Type { op: NEW, class } if is_anonymous_class(class)))
-}
-
-/// kotlinc's `isSamWrapper`, current and pre-1.2.30 templates alike.
-fn is_sam_wrapper(internal: &str) -> bool {
-    internal.contains("$sam$")
+pub(crate) fn constructs_anonymous_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
+    callee.instructions().any(
+        |insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class)),
+    )
 }
 
 /// `requiresEmptyStackOnEntry`: a body with try/catch blocks or a backward jump (a loop) is entered
