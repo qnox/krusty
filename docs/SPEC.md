@@ -8999,8 +8999,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
-  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`), each compared with its Kotlin
-  program as below.
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`, `range_kotlinc_oracle`), each
+  compared with its Kotlin program as below.
 - **A native range, a progression and their iterators are Kotlin's classes.** `..` and `until`
   answer `kotlin.ranges.IntRange` (and `LongRange`, `CharRange`, `UIntRange`, `ULongRange`), whose
   superclass is the element's progression; `step`, `downTo` and `reversed()` answer

@@ -719,6 +719,11 @@ fn a_spread_of_something_other_than_the_varargs_array_kind_fails() {
 }
 
 #[test]
+fn range_behavior_matches_an_executable_kotlinc_oracle() {
+    run_driver_against_kotlin("range_kotlinc_oracle");
+}
+
+#[test]
 fn a_step_of_something_other_than_a_range_fails() {
     run_driver_expecting_failure(
         "range_step_not_a_range",
@@ -731,31 +736,6 @@ fn a_reversal_of_something_other_than_a_range_fails() {
     run_driver_expecting_failure(
         "range_reversed_not_a_range",
         "krusty: a step or reversal of a value that is not a range\n",
-    );
-}
-
-#[test]
-fn range_behavior_matches_an_executable_kotlinc_oracle() {
-    const KOTLIN_ORACLE: &str = "fun bit(value: Boolean) = if (value) \"1\" else \"0\"\n\
-fun box(): String {\n\
-    val stepped = 1..10 step 2\n\
-    val reversed = (1..9 step 3).reversed()\n\
-    val progression = 1..3 step 1\n\
-    val range = 1..3\n\
-    val unsigned = Long.MAX_VALUE.toULong() - 1uL..Long.MAX_VALUE.toULong() + 5uL step 3\n\
-    return bit(stepped.first == 1) + bit(stepped.last == 9) +\n\
-        bit(reversed.first == 7) + bit(reversed.last == 1) +\n\
-        bit(progression == range) + bit(range != progression) +\n\
-        bit(Long.MAX_VALUE.toULong() + 2uL in unsigned)\n\
-}\n";
-    let Some(native) = run_payload_driver("range_kotlinc_oracle") else {
-        return;
-    };
-    let native = String::from_utf8(native).expect("the native range transcript is ASCII");
-    assert_eq!(
-        native,
-        common::kotlinc_box_result(KOTLIN_ORACLE),
-        "the native range transcript differs from the same program run by kotlinc"
     );
 }
 
