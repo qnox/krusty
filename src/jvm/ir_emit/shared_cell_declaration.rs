@@ -160,43 +160,57 @@ impl Emitter<'_> {
 
 /// Whether every use of local `index` under `root` reads or writes its holder's element, or is a
 /// capture of a lambda an inline call expands: a literal argument of a call with published inline
-/// parameter modifiers, for a parameter that is not `noinline`. A lambda's body is its own scope,
-/// so only its captures are searched.
+/// parameter modifiers, for a parameter that is not `noinline`. Such a lambda's body is spliced
+/// into the caller, so the search follows the holder into it: the body numbers its captures first,
+/// and the capture at position `k` is that body's value `k`. Any other lambda's body is its own
+/// function, so only its captures are searched, and capturing the holder there lets it escape.
 fn only_inlined_captures(ir: &crate::ir::IrFile, root: ExprId, index: u32) -> bool {
-    let is_local = |expression: ExprId| matches!(*ir.expr(expression), IrExpr::GetValue(read) if read == index);
-    let mut pending = vec![root];
-    while let Some(expression) = pending.pop() {
-        if is_local(expression) {
+    let is_local = |expression: ExprId, local: u32| matches!(*ir.expr(expression), IrExpr::GetValue(read) if read == local);
+    let mut pending = vec![(root, index)];
+    while let Some((expression, local)) = pending.pop() {
+        if is_local(expression, local) {
             return false;
         }
         match ir.expr(expression) {
-            IrExpr::RefGet { holder, .. } if is_local(*holder) => {}
-            IrExpr::RefSet { holder, value, .. } if is_local(*holder) => pending.push(*value),
+            IrExpr::RefGet { holder, .. } if is_local(*holder, local) => {}
+            IrExpr::RefSet { holder, value, .. } if is_local(*holder, local) => {
+                pending.push((*value, local))
+            }
             IrExpr::Call {
                 dispatch_receiver,
                 args,
                 ..
             } if ir.call_inline_modifiers.contains_key(&expression) => {
-                pending.extend(*dispatch_receiver);
+                pending.extend(dispatch_receiver.map(|receiver| (receiver, local)));
                 let modifiers = &ir.call_inline_modifiers[&expression];
                 for (position, &argument) in args.iter().enumerate() {
                     match ir.expr(argument) {
                         IrExpr::Lambda {
                             captures,
-                            inline_body: Some(_),
+                            inline_body: Some(body),
                             ..
                         } if modifiers.get(position).is_some_and(|modifier| {
                             *modifier != crate::types::InlineParameterModifier::Noinline
                         }) =>
                         {
-                            pending.extend(captures.iter().copied().filter(|&c| !is_local(c)))
+                            for (slot, &capture) in captures.iter().enumerate() {
+                                if is_local(capture, local) {
+                                    pending.push((*body, slot as u32));
+                                } else {
+                                    pending.push((capture, local));
+                                }
+                            }
                         }
-                        _ => pending.push(argument),
+                        _ => pending.push((argument, local)),
                     }
                 }
             }
-            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
-            _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
+            IrExpr::Lambda { captures, .. } => {
+                pending.extend(captures.iter().map(|&capture| (capture, local)))
+            }
+            _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                pending.push((child, local))
+            }),
         }
     }
     true
