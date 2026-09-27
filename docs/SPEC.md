@@ -7455,6 +7455,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its carrier whatever it holds, since `X(null)` is a value. Tests:
   `tests/value_class_nullable_bridge_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/overrideNullableInlineClassWithNonNullNullableAnyNull`.
+- **A primitive override of a non-primitive result returns the wrapper.** kotlinc's signature
+  mapper boxes a function's primitive result when any declaration it overrides returns something
+  else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is `echo(I)Ljava/lang/Integer;`, and
+  `invoke` of a `() -> Boolean` object is `invoke()Ljava/lang/Boolean;`. Each return boxes, a call
+  through the class (a `super` call too) unboxes with `intValue()`, and the bridge to the erased
+  declaration returns the box without converting it. krusty takes this only for classes declared in
+  executable code (local classes, anonymous objects), whose callers and subclasses are all in the
+  same file; a member other files can see keeps its primitive result until they can see the
+  choice. Tests: `tests/local_override_boxed_result_e2e.rs`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

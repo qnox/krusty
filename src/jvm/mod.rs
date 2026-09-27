@@ -52,6 +52,8 @@ pub mod method_node;
 mod method_parameters;
 mod module_calls;
 pub mod names;
+mod operation_relocation;
+mod override_results;
 mod parameter_assertions;
 mod parameter_names;
 mod private_static_access;

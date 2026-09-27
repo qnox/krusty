@@ -169,7 +169,15 @@ fn run_backend_passes_after_plugins(
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    crate::jvm::bridges::derive_bridges(ir, classpath, &mut facts.function_argument_arrays)?;
+    // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
+    let boxed_results =
+        crate::jvm::override_results::box_primitive_override_results(ir, classpath)?;
+    crate::jvm::bridges::derive_bridges(
+        ir,
+        classpath,
+        &boxed_results,
+        &mut facts.function_argument_arrays,
+    )?;
     apply_collection_bridge_barriers(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend

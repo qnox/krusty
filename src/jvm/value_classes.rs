@@ -31,7 +31,6 @@ mod interface_entries;
 mod member_names;
 mod module_members;
 mod operand_nullness;
-mod operation_relocation;
 mod property_references;
 mod representation;
 mod result_tail_boxing;
@@ -42,13 +41,13 @@ mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
+use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};
-use operation_relocation::clone_below_representation_wrapper;
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
     is_boxed_value_class,
