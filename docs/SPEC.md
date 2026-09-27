@@ -4676,6 +4676,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
   package-private class itself. Test:
   `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
+- **A method's catch types precede its code's constants in the pool.** ASM's `MethodWriter`
+  visits a method's try-catch blocks before its instructions, so kotlinc's pool holds every catch
+  type a method's exception table names ahead of the constants its code introduces. krusty
+  interns a catch type when it emits the handler; a method that catches is laid out again when its
+  class is written, in ASM's order, like a method a bytecode rewrite changed. Test:
+  `tests/catch_type_pool_order_e2e.rs`.
 - **A string template's concat call site is interned after its operands.** From JVM 9 kotlinc
   compiles a template to one `invokedynamic makeConcatWithConstants`, and its writer interns
   constants in instruction order: every entry the operands introduce comes first, then the recipe
