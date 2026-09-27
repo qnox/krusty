@@ -26,7 +26,7 @@ mod method_rewrite;
 mod pool_layout;
 mod stack_maps;
 
-use descriptor_mentions::{record_mentioned_names, DescriptorMentionCache};
+use descriptor_mentions::DescriptorMentionCache;
 
 pub(crate) use copied_class::CopyError;
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
@@ -590,8 +590,8 @@ pub(crate) fn split_declaration_annotations(
 
 pub struct ClassWriter {
     cp: ConstPool,
-    /// Every internal class name mentioned in class-type position by a field/method descriptor or a
-    /// pool descriptor, with the (fields, methods, pool) sizes it was computed from.
+    /// Every internal class name mentioned in class-type position by a field/method descriptor, a
+    /// pool descriptor, or a generic signature, with the sizes it was computed from.
     ///
     /// `InnerClasses` retention asks "does any descriptor mention this class?" once per candidate
     /// row, inside a FIXPOINT loop, and the old answer re-scanned every descriptor with a freshly
@@ -677,45 +677,6 @@ pub struct InnerClassDetails {
 pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
-    /// Whether a declared member or typed constant-pool descriptor references `internal`.
-    ///
-    /// Equivalent to searching every descriptor for the literal `L<internal>;`, which is what this
-    /// did before: [`Self::mentioned_names`] records exactly the slices such a search could match —
-    /// every run from an `L` to the next `;` — so the two agree on well-formed and malformed
-    /// descriptors alike, without re-scanning per candidate.
-    fn descriptor_mentions(&self, internal: &str) -> bool {
-        self.mentioned_names(|names| names.contains_key(internal))
-    }
-
-    /// Run `read` against the memoized mention set, rebuilding it when anything has been appended.
-    fn mentioned_names<T>(
-        &self,
-        read: impl Fn(&crate::name_tree::FxHashMap<String, ()>) -> T,
-    ) -> T {
-        let sizes = (self.fields.len(), self.methods.len(), self.cp.entries.len());
-        if let Some(cached) = self.mentioned_names.borrow().as_ref() {
-            if cached.matches(sizes) {
-                return read(&cached.names);
-            }
-        }
-        let mut names = crate::name_tree::FxHashMap::default();
-        let mut record = |value: &str| record_mentioned_names(value, &mut names);
-        for descriptor in self
-            .fields
-            .iter()
-            .map(|field| field.desc)
-            .chain(self.methods.iter().map(|method| method.desc))
-        {
-            if let Some(value) = self.cp.utf8_value(descriptor) {
-                record(value);
-            }
-        }
-        self.cp.record_typed_descriptor_names(&mut record);
-        let answer = read(&names);
-        *self.mentioned_names.borrow_mut() = Some(DescriptorMentionCache::new(sizes, names));
-        answer
-    }
-
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
         ClassWriter::new_generic(internal_name, None, super_internal)
     }
@@ -3955,86 +3916,5 @@ mod tests {
         cw.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
         cw.rewrite_methods(); // the empty entry goes as the method is written
         assert!(cw.methods[0].lvt.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod mentioned_name_tests {
-    use super::record_mentioned_names;
-
-    fn mentioned(values: &[&str]) -> Vec<String> {
-        let mut names = crate::name_tree::FxHashMap::default();
-        for value in values {
-            record_mentioned_names(value, &mut names);
-        }
-        let mut found = names.into_keys().collect::<Vec<_>>();
-        found.sort();
-        found
-    }
-
-    /// The contract is a literal `contains("L<name>;")` search, NOT descriptor parsing. Anything
-    /// that search would have matched must still be recorded, or `InnerClasses` retention changes.
-    /// A conventional parser is the tempting "cleanup" that these cases exist to block.
-    #[test]
-    fn a_field_descriptor_records_its_class() {
-        assert_eq!(mentioned(&["Ljava/lang/String;"]), ["java/lang/String"]);
-    }
-
-    /// An ARRAY descriptor's element class is mentioned exactly as the old search saw it.
-    #[test]
-    fn an_array_descriptor_records_its_element_class() {
-        assert_eq!(mentioned(&["[[Lpkg/Elem;"]), ["pkg/Elem"]);
-    }
-
-    /// A method descriptor mentions every class in its parameters AND its result.
-    #[test]
-    fn a_method_descriptor_records_every_class_it_names() {
-        assert_eq!(
-            mentioned(&["(Lpkg/A;ILpkg/B;)Lpkg/C;"]),
-            ["pkg/A", "pkg/B", "pkg/C"]
-        );
-    }
-
-    /// Text with no `;` after an `L` matched nothing before and must still match nothing — the
-    /// extractor has to tolerate malformed input rather than assume a well-formed descriptor.
-    #[test]
-    fn unterminated_text_records_nothing() {
-        assert_eq!(mentioned(&["Lpkg/Unterminated"]), Vec::<String>::new());
-        assert_eq!(mentioned(&["no descriptor here"]), Vec::<String>::new());
-    }
-
-    /// The case that rules out a descriptor parser: an internal name CONTAINING `L`.
-    ///
-    /// `contains("L…;")` could match at either `L` in `Lpkg/LOuter;`, so both runs are recorded —
-    /// the properly declared `pkg/LOuter` and the interior `Outer`. A parser would record only the
-    /// first, and a class genuinely named `Outer` would then lose its retention.
-    #[test]
-    fn an_interior_l_records_both_match_points() {
-        assert_eq!(mentioned(&["Lpkg/LOuter;"]), ["Outer", "pkg/LOuter"]);
-    }
-
-    /// Only the first `;` closes a run, exactly as the substring search bound it.
-    #[test]
-    fn a_run_stops_at_the_first_semicolon() {
-        assert_eq!(mentioned(&["Lpkg/A;Lpkg/B;"]), ["pkg/A", "pkg/B"]);
-    }
-
-    /// The constant-pool boundary: only descriptors in a TYPED position are scanned.
-    ///
-    /// A bare `CONSTANT_Utf8` — a string literal, an attribute name, anything — can spell something
-    /// that looks exactly like a descriptor. The old predicate never saw those, because it read
-    /// only field/method descriptors and `NameAndType`/`MethodType` entries, and neither does this
-    /// one. Widening to every Utf8 in the pool would retain `InnerClasses` rows for classes a
-    /// string constant merely mentions.
-    #[test]
-    fn a_bare_pool_string_is_not_a_mention() {
-        let mut writer = super::ClassWriter::new("pkg/Owner", "java/lang/Object");
-        writer.cp.utf8("Lpkg/OnlyInAStringLiteral;");
-        assert!(!writer.descriptor_mentions("pkg/OnlyInAStringLiteral"));
-
-        // The same spelling in a real field descriptor IS a mention, so the exclusion above is the
-        // pool position doing the work rather than the name being unreachable.
-        writer.add_field(super::ACC_PUBLIC, "field", "Lpkg/OnlyInAStringLiteral;");
-        assert!(writer.descriptor_mentions("pkg/OnlyInAStringLiteral"));
     }
 }
