@@ -111,8 +111,10 @@ typedef struct KMutableList {
     /* Structural changes so far. An iterator records this when it is made and compares on every
        `next`, which is how a list notices being written through while it is being walked — Kotlin
        raises `ConcurrentModificationException` there, and the count is the only evidence: after
-       `remove` the cursor and the size can agree again and nothing else would look wrong. */
-    kt_int modifications;
+       `remove` the cursor and the size can agree again and nothing else would look wrong. Counted
+       on the unsigned ring, as the JVM's `modCount` wraps: only equality is ever asked of it, and a
+       signed count past `Int.MAX_VALUE` would be undefined. */
+    uint32_t modifications;
 } KMutableList;
 
 static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
@@ -149,7 +151,7 @@ typedef struct KListIterator {
     kt_int at;
     /* The list's modification count when this iterator was made; see `KMutableList`. An immutable
        list never changes, so this stays zero and the comparison always holds. */
-    kt_int modifications;
+    uint32_t modifications;
 } KListIterator;
 
 static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
@@ -244,6 +246,27 @@ KRef kt_list_last(KRef list) {
 static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
 
 static kt_boolean kt_more(KRef iterator);
+
+/* Kotlin's `checkIndexOverflow` and `checkCountOverflow`: an `Int` index or count that has passed
+   `Int.MAX_VALUE` is an `ArithmeticException` with Kotlin's own message, not a wrap. The walks count
+   on the unsigned ring, where going past the maximum is defined, and ask these whether they have;
+   each raises and answers true when so. */
+static kt_boolean kt_index_overflowed(uint32_t index) {
+    if (index <= 0x7fffffffu) {
+        return false;
+    }
+    kt_throw_index_overflow();
+    return true;
+}
+
+static kt_boolean kt_count_overflowed(uint32_t count) {
+    if (count <= 0x7fffffffu) {
+        return false;
+    }
+    kt_throw(kt_throwable_new(&kt_type_arithmetic_exception,
+                              kt_string_utf8("Count overflow has happened.", 28)));
+    return true;
+}
 
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
@@ -1031,7 +1054,8 @@ kt_boolean kt_is_sequence(KRef value) {
 typedef struct KIndexingIterator {
     KObjectHeader header;
     KRef source;
-    kt_int at;
+    /* The next index, on the unsigned ring; see `kt_index_overflowed`. */
+    uint32_t at;
 } KIndexingIterator;
 
 static const uint32_t kt_indexing_iterator_offsets[] = {offsetof(KIndexingIterator, source)};
@@ -1432,30 +1456,27 @@ kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empt
    walk is the only thing every iterable has. */
 kt_int kt_iterable_count(KRef iterable) {
     KRef iterator = kt_iterable_iterator(iterable);
-    kt_int counted = 0;
+    uint32_t counted = 0;
     while (kt_more(iterator)) {
         (void)kt_iterator_next(iterator);
-        if (kt_raised()) {
+        if (kt_raised() || kt_count_overflowed(++counted)) {
             return 0;
         }
-        counted++;
     }
-    return kt_raised() ? 0 : counted;
+    return kt_raised() ? 0 : (kt_int)counted;
 }
 
 kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
-    kt_int counted = 0;
+    uint32_t counted = 0;
     while (kt_more(iterator)) {
         KRef element = NULL;
-        if (kt_next_holds(iterator, predicate, &element)) {
-            counted++;
-        }
-        if (kt_raised()) {
+        kt_boolean holds = kt_next_holds(iterator, predicate, &element);
+        if (kt_raised() || (holds && kt_count_overflowed(++counted))) {
             return 0;
         }
     }
-    return kt_raised() ? 0 : counted;
+    return kt_raised() ? 0 : (kt_int)counted;
 }
 
 /* Every element a walk yields, collected without asking the iterable for a SIZE.
@@ -1598,13 +1619,13 @@ KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
    takes references; the lambda's own prologue unboxes it. */
 void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
     KRef iterator = kt_iterable_iterator(iterable);
-    kt_int index = 0;
+    uint32_t index = 0;
     while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
-        if (kt_raised()) {
+        if (kt_raised() || kt_index_overflowed(index)) {
             return;
         }
-        (void)kt_invoke_two(action, kt_box_int(index), element);
+        (void)kt_invoke_two(action, kt_box_int((kt_int)index), element);
         if (kt_raised()) {
             return;
         }
@@ -1663,10 +1684,10 @@ KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
    numbers it yields. */
 kt_int kt_iterable_index_of(KRef iterable, KRef value) {
     KRef iterator = kt_iterable_iterator(iterable);
-    kt_int at = 0;
+    uint32_t at = 0;
     while (kt_more(iterator)) {
         KRef element = kt_iterator_next(iterator);
-        if (kt_raised()) {
+        if (kt_raised() || kt_index_overflowed(at)) {
             return -1;
         }
         /* The ARGUMENT's `equals`, as Kotlin's `element == item` asks. As in `kt_list_index_of`, an
@@ -1676,7 +1697,7 @@ kt_int kt_iterable_index_of(KRef iterable, KRef value) {
             return -1;
         }
         if (equal) {
-            return at;
+            return (kt_int)at;
         }
         at++;
     }
@@ -1802,15 +1823,19 @@ KRef kt_iterator_next(KRef iterator) {
     }
     if (iterator->header.type == &kt_type_indexing_iterator) {
         KIndexingIterator *counting = (KIndexingIterator *)iterator;
-        /* The element is fetched BEFORE the index is bumped, and it stays in a local across the
-           allocation below so the collector sees it as a root. */
+        /* Kotlin's `IndexedValue(checkIndexOverflow(index++), iterator.next())`: the index is
+           checked and bumped before the element is fetched. The element stays in a local across
+           the allocation below so the collector sees it as a root. */
+        uint32_t at = counting->at;
+        if (kt_index_overflowed(at)) {
+            return NULL;
+        }
+        counting->at = at + 1;
         KRef element = kt_iterator_next(counting->source);
         if (kt_raised()) {
             return NULL;
         }
-        kt_int at = counting->at;
-        counting->at = at + 1;
-        return kt_indexed_value(at, element);
+        return kt_indexed_value((kt_int)at, element);
     }
     if (iterator->header.type->walk_next != NULL) {
         return iterator->header.type->walk_next(iterator);

@@ -107,6 +107,11 @@ fn build_and_run(driver: &str) -> Option<Output> {
             // Runtime descriptors name the fields they define and intentionally leave the rest
             // zero-initialized. Keep every other warning an error.
             "-Wno-missing-field-initializers",
+            // Signed overflow is undefined in C, and Kotlin's `Int` and `Long` wrap or raise; a
+            // driver that drives a runtime counter past its maximum must see an overflow the
+            // runtime left signed, so every one traps (SIGILL) instead of wrapping quietly.
+            "-fsanitize=signed-integer-overflow",
+            "-fsanitize-trap=signed-integer-overflow",
         ])
         .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
         .args(if RUNTIME_COMPLETE {
@@ -815,6 +820,16 @@ fn a_list_is_the_collection_interfaces_and_equals_a_program_list() {
 #[test]
 fn a_walk_stops_at_a_throwing_iterator_or_has_next_of_the_program() {
     run_driver("walk_polls_program_calls");
+}
+
+#[test]
+fn a_list_modification_count_wraps_and_is_still_noticed() {
+    run_driver("list_modification_count_wraps");
+}
+
+#[test]
+fn a_walk_counter_past_the_largest_int_raises_kotlins_overflow() {
+    run_driver("walk_count_overflow");
 }
 
 fn compiled_build_script() -> PathBuf {

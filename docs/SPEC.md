@@ -9098,6 +9098,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   raises, `IndexOutOfBoundsException`, because Kotlin's `CharSequence.iterator()` is
   `get(index++)` with no check of its own (kotlinc 2.4.10 throws `StringIndexOutOfBoundsException`).
   Tests: `tests/native_runtime_e2e.rs` (`iterator_exhausted`).
+- **Native walk counters raise Kotlin's overflow, and no runtime counter overflows signed.** A walk
+  counting with an `Int` raises what Kotlin's `checkIndexOverflow`/`checkCountOverflow` raise when
+  the count passes `Int.MAX_VALUE`: `count()` and `count { }` raise `ArithmeticException("Count
+  overflow has happened.")` at the 2^31st counted element, and `indexOf`, `forEachIndexed` and
+  `withIndex()`'s iterator raise `ArithmeticException("Index overflow has happened.")` at index
+  2^31, before comparing, acting on or fetching that element (kotlinc 2.4.10 on the JVM, for the
+  program recorded in the driver). A list's modification count wraps, as the JVM's `modCount` does,
+  and an iterator made before the wrap still sees the change. The driver harness builds with signed
+  overflow trapping (`-fsanitize=signed-integer-overflow -fsanitize-trap=...`), so a counter left
+  signed fails its driver with SIGILL.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_count_overflow`, `list_modification_count_wraps`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
