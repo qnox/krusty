@@ -43,13 +43,36 @@ fn lambda_frame(capture_types: &[Ty], parameter_types: &[Ty]) -> LambdaFrame {
     }
 }
 
+/// How a value crosses the `Object` an `invoke` passes or returns.
+pub(super) enum InvokeCoercion {
+    /// A cast, a primitive's wrapper, or nothing.
+    Plain,
+    /// The unboxed representation of this value class, through its `unbox-impl` and `box-impl`.
+    ValueClass(String),
+    /// A representation the port does not coerce yet.
+    Unported,
+}
+
+impl InvokeCoercion {
+    fn value_class(&self) -> Option<String> {
+        match self {
+            InvokeCoercion::ValueClass(class) => Some(class.clone()),
+            InvokeCoercion::Plain | InvokeCoercion::Unported => None,
+        }
+    }
+}
+
 /// The parts of a literal lambda argument both route planning and compilation read.
 struct LiteralLambda {
     impl_fn: u32,
     captures: Vec<u32>,
     inline_body: u32,
     capture_types: Vec<Ty>,
+    /// What the inline body carries each parameter as: a value class unboxed, as kotlinc's inlined
+    /// lambda takes it, where the implementation method takes it boxed through `invoke`.
     parameter_types: Vec<Ty>,
+    /// How each parameter crosses the `Object` of `invoke` (`invokeMethodParameters`).
+    parameter_coercions: Vec<InvokeCoercion>,
 }
 
 impl Emitter<'_> {
@@ -66,16 +89,27 @@ impl Emitter<'_> {
         };
         let physical = jvm_function_params(self.ir, impl_fn);
         let split = captures.len().min(physical.len());
-        let (capture_types, parameter_types) = physical.split_at(split);
+        let (capture_types, physical_parameters) = physical.split_at(split);
+        let arity = usize::from(arity);
+        let semantic = match self.ir.logical_types.get(&argument).map(|ty| ty.non_null()) {
+            Some(Ty::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
+            _ => physical_parameters.to_vec(),
+        };
+        let (parameter_types, parameter_coercions) = physical_parameters
+            .iter()
+            .zip(semantic.iter().chain(std::iter::repeat(&Ty::Error)))
+            .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
+            .unzip();
         (
             LiteralLambda {
                 impl_fn,
                 captures,
                 inline_body,
                 capture_types: capture_types.to_vec(),
-                parameter_types: parameter_types.to_vec(),
+                parameter_types,
+                parameter_coercions,
             },
-            usize::from(arity),
+            arity,
         )
     }
 
@@ -93,34 +127,15 @@ impl Emitter<'_> {
         if leaves_by_non_local_jump(self.ir, lambda.inline_body) {
             return Some(SpliceReason::NonLocalJump);
         }
-        let semantic: Vec<Ty> = match self.ir.logical_types.get(&argument).map(|ty| ty.non_null()) {
-            Some(Ty::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
-            _ => lambda.parameter_types.clone(),
-        };
         if lambda
-            .parameter_types
+            .parameter_coercions
             .iter()
-            .zip(&semantic)
-            .any(|(&carrier, semantic)| {
-                self.is_value_class_ty(semantic)
-                    || semantic_scalar_adapter(*semantic, carrier) != carrier
-            })
+            .any(|coercion| matches!(coercion, InvokeCoercion::Unported))
         {
             return Some(SpliceReason::ValueClassAdapter);
         }
         let declared_result = self.ir.functions[lambda.impl_fn as usize].ret;
         let result_semantic = self.lambda_result_semantic(&lambda);
-        let declared = &self.ir.functions[lambda.impl_fn as usize];
-        if self.is_value_class_ty(&result_semantic)
-            || self.is_value_class_ty(&declared.ret)
-            || declared
-                .params
-                .iter()
-                .skip(lambda.captures.len())
-                .any(|ty| self.is_value_class_ty(ty))
-        {
-            return Some(SpliceReason::ValueClassAdapter);
-        }
         if declared_result.is_jvm_scalar()
             && semantic_scalar_adapter(result_semantic, declared_result) != declared_result
         {
@@ -128,10 +143,95 @@ impl Emitter<'_> {
         }
         let frame = lambda_frame(&lambda.capture_types, &lambda.parameter_types);
         let result = self.inline_body_result_ty(lambda.inline_body, &frame.slots);
-        if semantic_scalar_adapter(result_semantic, result) != result {
+        if matches!(
+            self.invoke_coercion(result_semantic, result),
+            InvokeCoercion::Unported
+        ) {
             return Some(SpliceReason::ValueClassAdapter);
         }
         None
+    }
+
+    /// What a lambda's inline body carries its parameter of Kotlin type `semantic` as, which the
+    /// implementation method takes as `physical`, and how that crosses `invoke`: a non-null value
+    /// class the implementation takes boxed through `invoke`, the inline body takes unboxed.
+    fn inline_parameter(&self, semantic: Ty, physical: Ty) -> (Ty, InvokeCoercion) {
+        let unboxed = self
+            .is_value_class_ty(&semantic)
+            .then(|| semantic.non_null().obj_internal())
+            .flatten()
+            .filter(|&class| {
+                !semantic.is_nullable()
+                    && type_descriptor(physical) == type_descriptor(Ty::obj_name(class))
+            })
+            .and_then(|class| {
+                crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
+            });
+        let carrier = unboxed.map_or(physical, |underlying| ir_ty_to_jvm(&underlying));
+        (carrier, self.invoke_coercion(semantic, carrier))
+    }
+
+    /// `StackValue.coerce` of the `Object` an `invoke` passes to a lambda parameter of Kotlin type
+    /// `semantic`, which the implementation takes as `physical`, as the byte splice places it before
+    /// the inline body's parameter store: the carrier the body stores.
+    pub(in crate::jvm::ir_emit) fn coerce_invoke_argument(
+        &mut self,
+        semantic: Ty,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        let (carrier, coercion) = self.inline_parameter(semantic, physical);
+        if let InvokeCoercion::ValueClass(class) = coercion {
+            let box_class = self.cw.class_ref(&class);
+            code.checkcast(box_class);
+            let unbox = self.cw.methodref(
+                &class,
+                "unbox-impl",
+                &format!("(){}", type_descriptor(carrier)),
+            );
+            code.invokevirtual(unbox, 0, i32::from(slot_words(carrier)));
+        } else if carrier.is_jvm_scalar() {
+            // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter from the
+            // lambda's semantic parameter before using the physical carrier for the local slot;
+            // otherwise `UInt` is mistaken for boxed `Int` here.
+            unbox_prim_from(
+                self.cw,
+                code,
+                Ty::obj("java/lang/Object"),
+                semantic_scalar_adapter(semantic, carrier),
+            );
+        } else if let Some(internal) = checkcast_internal(carrier) {
+            let ci = self.cw.class_ref(&internal);
+            code.checkcast(ci);
+        }
+        carrier
+    }
+
+    /// How a lambda's value of Kotlin type `semantic`, which the lambda's node carries as
+    /// `carrier`, crosses the `Object` of `invoke`: kotlinc's `StackValue.coerce` over the Kotlin
+    /// types.
+    fn invoke_coercion(&self, semantic: Ty, carrier: Ty) -> InvokeCoercion {
+        if !self.is_value_class_ty(&semantic) {
+            return if semantic_scalar_adapter(semantic, carrier) == carrier {
+                InvokeCoercion::Plain
+            } else {
+                InvokeCoercion::Unported
+            };
+        }
+        let Some(class) = semantic.non_null().obj_internal() else {
+            return InvokeCoercion::Unported;
+        };
+        let carried = type_descriptor(carrier);
+        if carried == type_descriptor(Ty::obj_name(class)) {
+            return InvokeCoercion::Plain;
+        }
+        let unboxed = crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
+            .map(|underlying| type_descriptor(ir_ty_to_jvm(&underlying)));
+        if !semantic.is_nullable() && unboxed.as_deref() == Some(carried.as_str()) {
+            InvokeCoercion::ValueClass(class.render())
+        } else {
+            InvokeCoercion::Unported
+        }
     }
 
     /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
@@ -163,8 +263,10 @@ impl Emitter<'_> {
         node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
         let shape = inliner::Lambda {
             node,
+            value_class_parameters: vec![None; parameter_types.len()],
             parameter_types,
             return_type: "V".to_string(),
+            value_class_return: None,
             captured: 0..0,
             capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
         };
@@ -258,12 +360,19 @@ impl Emitter<'_> {
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
         let (lambda, _) = self.literal_lambda(argument);
+        let value_class_parameters = lambda
+            .parameter_coercions
+            .iter()
+            .map(InvokeCoercion::value_class)
+            .collect();
+        let result_semantic = self.lambda_result_semantic(&lambda);
         let LiteralLambda {
             impl_fn,
             captures,
             inline_body,
             capture_types,
             parameter_types,
+            ..
         } = lambda;
         let LambdaFrame {
             slots: parameter_slots,
@@ -383,6 +492,8 @@ impl Emitter<'_> {
                     .map(|&ty| type_descriptor(ty))
                     .collect(),
                 return_type,
+                value_class_parameters,
+                value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
                 capture_names: self.capture_names(impl_fn, captures.len()),
             },
