@@ -414,3 +414,48 @@ fn disassemble_with(name: &str, bytes: &[u8], flags: &[&str]) -> String {
     let _ = std::fs::remove_dir_all(dir);
     text
 }
+
+/// Compile `source` with both compilers and require `class` to be kotlinc's: its header, every
+/// member with its code and debug tables, and its `@Metadata`.
+pub fn assert_class_matches_kotlinc(stem: &str, source: &str, class: &str) -> ReferenceComparison {
+    let comparison = compare_with_kotlinc_plugin(
+        stem,
+        source,
+        class,
+        &[super::common_core::stdlib_jar()],
+        "17",
+        &super::common_core::language_directives::kotlinc_args(source),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let header = |bytes: &[u8]| {
+        let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
+        (
+            info.access,
+            info.this_class,
+            info.super_class,
+            info.interfaces(),
+            info.signature.clone(),
+        )
+    };
+    assert_eq!(
+        header(&comparison.krusty_bytes),
+        header(&comparison.reference_bytes),
+        "{class}: kotlinc's class header"
+    );
+    assert_eq!(
+        member_table(&comparison.krusty_bytes),
+        member_table(&comparison.reference_bytes),
+        "{class}: kotlinc's member table"
+    );
+    assert_eq!(
+        member_blocks(&comparison.krusty),
+        member_blocks(&comparison.reference),
+        "{class}: kotlinc's members"
+    );
+    assert_eq!(
+        super::common_core::raw_kotlin_metadata(&comparison.krusty_bytes),
+        super::common_core::raw_kotlin_metadata(&comparison.reference_bytes),
+        "{class}: kotlinc's @Metadata"
+    );
+    comparison
+}
