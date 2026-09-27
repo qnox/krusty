@@ -1415,6 +1415,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     surrogate too. Names and descriptors still require scalar text; an invalid name fails soft rather
     than leaking a replacement value into resolution. Likewise `@JvmName("…")` falls back to the
     declared name if given an unpaired surrogate — a JVM method name has no such spelling.
+  - The **native runtime** (`src/native/runtime/krusty_rt.c`) stores text as UTF-8 and answers in
+    UTF-16 units. Its whitespace table is the JVM set above (no `U+0085`). A lone surrogate — what a
+    single surrogate `Char` renders to — is stored as the three bytes its unit encodes to, and
+    concatenation joins a high half followed by a low half into the four-byte character they spell,
+    so `"" + '\uD83D' + '\uDE00' == "😀"` as on the JVM. A `substring` bound between the halves of a
+    pair answers the half on its side, in that same three-byte form: `"😀".substring(0, 1)` is the
+    lone high surrogate `\uD83D`, `substring(1, 2)` and `substring(1)` the lone low `\uDE00`,
+    `"a😀b".substring(2, 4)` is `"\uDE00b"`, and the two halves concatenated are `"😀"` again. The
+    searches compare by UTF-16 unit, so text holding a pair whole holds, starts with and ends with
+    its halves as the JVM says (`"😀".contains("\uD83D")`, `.startsWith("\uD83D")`,
+    `.endsWith("\uDE00")`), and `"😀".removeSuffix("\uDE00")` is `"\uD83D"`; bytes still settle a
+    search in which neither text holds a lone half. `substring`, `removeSuffix` and the searches
+    read a `StringBuilder` receiver or argument as text, and a string cut from a builder is a copy,
+    which the builder's next change leaves alone. A concatenation stops at the first operand whose
+    `toString` throws: the other operand is not rendered and no text is built. A concatenation whose
+    text would be longer than an array can hold ends the program as out of memory, as `repeat` does.
+    The length is summed in 64 bits before either text is read: two lengths that each fit can wrap
+    together. Tests: `string_whitespace`, `string_plus_surrogates`, `string_surrogate_halves`,
+    `string_builder_receivers`, `string_plus_throwing_to_string`, `string_plus_overflow` under
+    `tests/native_runtime/`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.

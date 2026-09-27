@@ -22,6 +22,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+/// Whether every function the runtime sources on this branch call is defined by them. The runtime
+/// lands in tiers, and a tier below the last one calls functions a later tier defines; those links
+/// leave the missing symbols unresolved (a driver that reaches one crashes, it does not pass). The
+/// tier that completes the runtime turns this on, and from then on a missing definition fails the
+/// link.
+const RUNTIME_COMPLETE: bool = false;
+
+/// Warnings a tier below the last one cannot help giving. Such a tier DECLARES the internal
+/// functions a later tier defines, and defines helpers only a later tier's code calls; the tier that
+/// completes the runtime turns `RUNTIME_COMPLETE` on and with it every one of these back into an
+/// error.
+const INCOMPLETE_RUNTIME_WARNINGS: &[&str] = &[
+    "-Wno-undefined-internal",
+    "-Wno-unused-function",
+    "-Wno-unused-const-variable",
+];
+
 fn runtime_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native/runtime")
 }
@@ -85,6 +102,12 @@ fn build_and_run(driver: &str) -> Option<Output> {
             // zero-initialized. Keep every other warning an error.
             "-Wno-missing-field-initializers",
         ])
+        .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
+        .args(if RUNTIME_COMPLETE {
+            &[][..]
+        } else {
+            INCOMPLETE_RUNTIME_WARNINGS
+        })
         .arg("-I")
         .arg(runtime_dir())
         .args(&sources)
@@ -174,6 +197,11 @@ fn only_an_arrays_end_pointer_keeps_it_alive_and_no_neighbour_is_kept() {
 }
 
 #[test]
+fn references_kept_in_typed_fields_elements_and_globals_are_traced() {
+    run_driver("gc_typed_reference_slots");
+}
+
+#[test]
 fn a_collection_started_during_a_collection_fails() {
     run_driver_expecting_failure(
         "gc_reentrant_collection_fails",
@@ -189,6 +217,56 @@ fn a_double_or_float_renders_as_the_jvm_renders_it() {
 #[test]
 fn a_floating_remainder_is_exact_and_a_nan_comes_back_quiet() {
     run_driver("fp_remainder_known_answers");
+}
+
+#[test]
+fn an_array_too_large_for_the_allocator_is_out_of_memory() {
+    run_driver_expecting_failure("array_new_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn a_negative_string_index_is_out_of_bounds() {
+    run_driver("string_get_negative_index");
+}
+
+#[test]
+fn a_substring_outside_the_text_is_out_of_bounds() {
+    run_driver("string_substring_bounds");
+}
+
+#[test]
+fn whitespace_is_the_jvm_set() {
+    run_driver("string_whitespace");
+}
+
+#[test]
+fn a_repeat_too_long_for_memory_is_out_of_memory() {
+    run_driver_expecting_failure("string_repeat_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn a_concatenation_too_long_for_memory_is_out_of_memory() {
+    run_driver_expecting_failure("string_plus_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn surrogate_halves_concatenate_into_their_character() {
+    run_driver("string_plus_surrogates");
+}
+
+#[test]
+fn a_bound_between_surrogate_halves_cuts_the_pair_and_a_search_finds_either_half() {
+    run_driver("string_surrogate_halves");
+}
+
+#[test]
+fn a_builder_receiver_or_suffix_is_read_as_text_and_sliced_into_a_copy() {
+    run_driver("string_builder_receivers");
+}
+
+#[test]
+fn a_concatenation_stops_at_the_first_throwing_to_string() {
+    run_driver("string_plus_throwing_to_string");
 }
 
 fn compiled_build_script() -> PathBuf {
@@ -236,7 +314,8 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+            "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
@@ -277,14 +356,15 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` failed compiling `krusty_fp.c` for \
+            "native runtime: `{}` failed compiling `krusty_rt.c` for \
              `x86_64-unknown-linux-gnu` (exit status: 1)\n",
             compiler.display()
         )
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
-        "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+        "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\

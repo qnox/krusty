@@ -191,6 +191,21 @@ static void kt_mark_candidate(uintptr_t address) {
     kt_mark_push(chunk->objects + (size_t)index * chunk->object_size);
 }
 
+/* The pointer-sized word stored at `at`, read as bytes.
+
+   The collector reads memory whose declared type it does not know: a stack slot that holds an
+   `int` or a spilled register, an object's field whose type is `KRef` (a pointer to a struct the
+   collector never names), a program's global slot declared as some `KRef`. Reading any of those
+   through a `uintptr_t *` or `void **` lvalue is undefined under C's effective-type rules, and at
+   -O2 a compiler may assume such a read cannot see a store made through the real type — so a live
+   reference could be missed. A fixed-size `__builtin_memcpy` reads the bytes whatever their type,
+   and compiles to the same single load. */
+static uintptr_t kt_load_word(const void *at) {
+    uintptr_t word;
+    __builtin_memcpy(&word, at, sizeof word);
+    return word;
+}
+
 /* Drain the mark stack, tracing each object's reference fields PRECISELY from its type. */
 static void kt_trace(void) {
     while (kt_mark_top > 0) {
@@ -200,9 +215,9 @@ static void kt_trace(void) {
             continue;
         }
         for (uint32_t i = 0; i < type->reference_count; i++) {
-            void *field = *(void **)(object + type->reference_offsets[i]);
-            if (field != NULL) {
-                kt_mark_candidate((uintptr_t)field);
+            uintptr_t field = kt_load_word(object + type->reference_offsets[i]);
+            if (field != 0) {
+                kt_mark_candidate(field);
             }
         }
         /* An array of references: its elements are as precisely traced as a field is. The count is
@@ -210,10 +225,10 @@ static void kt_trace(void) {
         if (type->element_references) {
             const KArray *array = (const KArray *)object;
             for (kt_int i = 0; i < array->length; i++) {
-                void *element =
-                    *(void **)(object + type->instance_size + (uint32_t)i * type->element_size);
-                if (element != NULL) {
-                    kt_mark_candidate((uintptr_t)element);
+                uintptr_t element =
+                    kt_load_word(object + type->instance_size + (uint32_t)i * type->element_size);
+                if (element != 0) {
+                    kt_mark_candidate(element);
                 }
             }
         }
@@ -299,7 +314,7 @@ void kt_runtime_init(void *stack_bottom) { kt_stack_bottom = (uintptr_t)stack_bo
 static void kt_scan_range(uintptr_t low, uintptr_t high) {
     low = (low + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
     for (uintptr_t at = low; at + sizeof(void *) <= high; at += sizeof(void *)) {
-        kt_mark_scanned(*(uintptr_t *)at);
+        kt_mark_scanned(kt_load_word((const void *)at));
     }
 }
 
@@ -404,9 +419,9 @@ void kt_gc_collect(void) {
     }
     kt_collecting = true;
     for (size_t i = 0; i < kt_global_count; i++) {
-        void *value = *kt_globals[i];
-        if (value != NULL) {
-            kt_mark_candidate((uintptr_t)value);
+        uintptr_t value = kt_load_word(kt_globals[i]);
+        if (value != 0) {
+            kt_mark_candidate(value);
         }
     }
     kt_scan_registers_and_stack();
