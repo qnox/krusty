@@ -30,9 +30,9 @@ mod stack_maps;
 
 use descriptor_mentions::DescriptorMentionCache;
 
-pub(crate) use copied_class::CopyError;
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
+pub(crate) use {copied_class::CopyError, inner_classes::DeclarationPaths};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;

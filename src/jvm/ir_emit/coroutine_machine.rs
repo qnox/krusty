@@ -325,8 +325,8 @@ pub(super) fn continuation_internal(
     owner: &str,
     function: &str,
 ) -> String {
-    let ordinal = crate::jvm::suspend::continuation_ordinal(ir, fid);
-    crate::jvm::suspend::continuation_class_name(owner, function, ordinal)
+    let ordinal = crate::jvm::local_class_names::continuation_ordinal(ir, fid);
+    crate::jvm::local_class_names::continuation_class_name(owner, function, ordinal)
 }
 
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";

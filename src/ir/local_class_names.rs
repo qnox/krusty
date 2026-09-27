@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use crate::types::{Ty, TypeName};
 
 use super::{
-    Callee, ClassId, IrCallableReferenceTarget, IrCheckedArgument, IrCheckedOperation, IrExpr,
+    Callee, ClassId, EnclosingDeclaration, IrCallableReferenceTarget, IrCheckedArgument,
+    IrCheckedOperation, IrExpr,
 };
 
 /// The classifier that lexically owns a local classifier's executable context.
@@ -29,6 +30,8 @@ pub(crate) struct IrLocalClassNameProvenance {
     pub segments: Box<[String]>,
     /// Shared generated-artifact position for an unnamed classifier.
     pub ordinal: Option<u32>,
+    /// The declarations the classifier is nested in below `lexical_owner`, outermost first.
+    pub parents: Box<[EnclosingDeclaration]>,
 }
 
 fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
