@@ -197,9 +197,7 @@ fn body(dump: &str, needle: &str) -> Vec<String> {
 
 /// A MEMBER `var` of scalar type over a generic delegate: the read unboxes the operator's erased
 /// result, the write boxes the value into its erased parameter. Both compilers' ledgers are spelled
-/// out — they differ only in how the `KProperty` is reached (kotlinc interns one
-/// `$$delegatedProperties` array, krusty a field per property), which is a separate representation
-/// difference and is visible here rather than normalised away. The erased numeric result itself
+/// out, the `KProperty` read from `$$delegatedProperties` included. The erased numeric result itself
 /// follows kotlinc through `Number`, not through a wrapper guessed from the accessor's carrier.
 #[test]
 fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
@@ -235,13 +233,15 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
             "aload_0".to_string(),
             "getfield Field x$delegate:LPVar;".to_string(),
             "aload_0".to_string(),
-            "getstatic Field x$kprop:Lkotlin/reflect/KProperty;".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "invokevirtual Method PVar.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
             "checkcast class java/lang/Number".to_string(),
             "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
             "lreturn".to_string(),
         ],
-        "krusty's getX ledger: kotlinc's unbox; only the independently owned KProperty carrier differs"
+        "krusty's getX ledger is kotlinc's"
     );
     assert_eq!(
         body(&ours, "void setX(long)"),
@@ -249,7 +249,9 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
             "aload_0".to_string(),
             "getfield Field x$delegate:LPVar;".to_string(),
             "aload_0".to_string(),
-            "getstatic Field x$kprop:Lkotlin/reflect/KProperty;".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "lload_1".to_string(),
             "invokestatic Method java/lang/Long.valueOf:(J)Ljava/lang/Long;".to_string(),
             "invokevirtual Method PVar.setValue:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V".to_string(),
@@ -258,17 +260,9 @@ fn a_member_accessor_pair_crosses_the_boundary_like_kotlinc() {
         "krusty's setX ledger: the value is boxed into the erased parameter"
     );
     assert_eq!(
-        body(&reference, "void setX(long)")
-            .into_iter()
-            .filter(|row| !row.contains("delegatedProperties")
-                && row != "iconst_0"
-                && row != "aaload")
-            .collect::<Vec<_>>(),
-        body(&ours, "void setX(long)")
-            .into_iter()
-            .filter(|row| !row.contains("$kprop"))
-            .collect::<Vec<_>>(),
-        "setX agrees with kotlinc once the KProperty carrier is set aside"
+        body(&reference, "void setX(long)"),
+        body(&ours, "void setX(long)"),
+        "setX agrees with kotlinc"
     );
 }
 
@@ -395,7 +389,9 @@ fn a_written_value_the_operator_declares_stays_unboxed() {
             "aload_0".to_string(),
             "getfield Field x$delegate:LLongCell;".to_string(),
             "aload_0".to_string(),
-            "getstatic Field x$kprop:Lkotlin/reflect/KProperty;".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "lload_1".to_string(),
             "invokevirtual Method LongCell.setValue:(Ljava/lang/Object;Ljava/lang/Object;J)V"
                 .to_string(),
@@ -416,26 +412,6 @@ const CELL: &str = "class Cell<T> {\n\
                     \x20   }\n\
                     }\n\n";
 
-/// Drop how the `KProperty` is reached, which is a separate representation difference: kotlinc
-/// interns one `$$delegatedProperties` array (a `getstatic`, an index push and an `aaload`), krusty
-/// a static field per property (one `getstatic`). What is left is the adaptation ledger.
-fn without_kproperty_carrier(rows: Vec<String>) -> Vec<String> {
-    let indexed_load = |position: usize| {
-        rows[position].starts_with("iconst_")
-            && rows.get(position + 1).is_some_and(|next| next == "aaload")
-    };
-    rows.iter()
-        .enumerate()
-        .filter(|(position, row)| {
-            !row.contains("delegatedProperties")
-                && !row.contains("$kprop")
-                && row.as_str() != "aaload"
-                && !indexed_load(*position)
-        })
-        .map(|(_, row)| row.clone())
-        .collect()
-}
-
 /// A MEMBER EXTENSION delegate: `var Int.ext: Long by …` has TWO receivers reaching the operator,
 /// and both cross the boundary — the extension receiver as the operator's `thisRef` argument, the
 /// written value as its `newValue`. The whole ledger agrees with kotlinc.
@@ -448,12 +424,15 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
     );
     let (reference, ours) = javap_both("DelegateMemberExtension", &source, "Holder");
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "long getExt(int)")),
+        body(&ours, "long getExt(int)"),
         vec![
             "aload_0".to_string(),
             "getfield Field ext$delegate:LCell;".to_string(),
             "iload_1".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "invokevirtual Method Cell.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
             "checkcast class java/lang/Number".to_string(),
             "invokevirtual Method java/lang/Number.longValue:()J".to_string(),
@@ -462,12 +441,15 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
         "the scalar extension receiver is boxed into the operator's thisRef slot"
     );
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "void setExt(int, long)")),
+        body(&ours, "void setExt(int, long)"),
         vec![
             "aload_0".to_string(),
             "getfield Field ext$delegate:LCell;".to_string(),
             "iload_1".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "lload_2".to_string(),
             "invokestatic Method java/lang/Long.valueOf:(J)Ljava/lang/Long;".to_string(),
             "invokevirtual Method Cell.setValue:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V".to_string(),
@@ -477,13 +459,13 @@ fn a_member_extension_delegate_crosses_both_receivers_like_kotlinc() {
     );
     // kotlinc's own ledgers.
     assert_eq!(
-        without_kproperty_carrier(body(&reference, "long getExt(int)")),
-        without_kproperty_carrier(body(&ours, "long getExt(int)")),
+        body(&reference, "long getExt(int)"),
+        body(&ours, "long getExt(int)"),
         "getExt uses the same erased numeric adapter as kotlinc"
     );
     assert_eq!(
-        without_kproperty_carrier(body(&reference, "void setExt(int, long)")),
-        without_kproperty_carrier(body(&ours, "void setExt(int, long)")),
+        body(&reference, "void setExt(int, long)"),
+        body(&ours, "void setExt(int, long)"),
         "setExt agrees with kotlinc"
     );
 }
@@ -500,11 +482,14 @@ fn a_nullable_scalar_carrier_is_passed_through() {
     );
     let (reference, ours) = javap_both("DelegateNullableCarrier", &source, "Holder");
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "java.lang.Integer getX()")),
+        body(&ours, "java.lang.Integer getX()"),
         vec![
             "aload_0".to_string(),
             "getfield Field x$delegate:LCell;".to_string(),
             "aload_0".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "invokevirtual Method Cell.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
             "checkcast class java/lang/Integer".to_string(),
             "areturn".to_string(),
@@ -512,11 +497,14 @@ fn a_nullable_scalar_carrier_is_passed_through() {
         "a nullable read narrows and does not unbox"
     );
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "void setX(java.lang.Integer)")),
+        body(&ours, "void setX(java.lang.Integer)"),
         vec![
             "aload_0".to_string(),
             "getfield Field x$delegate:LCell;".to_string(),
             "aload_0".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "aload_1".to_string(),
             "invokevirtual Method Cell.setValue:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V".to_string(),
             "return".to_string(),
@@ -525,8 +513,8 @@ fn a_nullable_scalar_carrier_is_passed_through() {
     );
     for member in ["java.lang.Integer getX()", "void setX(java.lang.Integer)"] {
         assert_eq!(
-            without_kproperty_carrier(body(&reference, member)),
-            without_kproperty_carrier(body(&ours, member)),
+            body(&reference, member),
+            body(&ours, member),
             "{member} agrees with kotlinc"
         );
     }
@@ -548,11 +536,14 @@ fn a_value_class_carrier_crosses_the_boundary_like_kotlinc() {
     );
     let (reference, ours) = javap_both("DelegateValueClassCarrier", &source, "Holder");
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "int getId-")),
+        body(&ours, "int getId-"),
         vec![
             "aload_0".to_string(),
             "getfield Field id$delegate:LCell;".to_string(),
             "aload_0".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_0".to_string(),
+            "aaload".to_string(),
             "invokevirtual Method Cell.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
             "checkcast class Id".to_string(),
             "invokevirtual Method Id.\"unbox-impl\":()I".to_string(),
@@ -561,11 +552,14 @@ fn a_value_class_carrier_crosses_the_boundary_like_kotlinc() {
         "a scalar-carrier value class unboxes through its own accessor"
     );
     assert_eq!(
-        without_kproperty_carrier(body(&ours, "java.lang.String getName-")),
+        body(&ours, "java.lang.String getName-"),
         vec![
             "aload_0".to_string(),
             "getfield Field name$delegate:LCell;".to_string(),
             "aload_0".to_string(),
+            "getstatic Field $$delegatedProperties:[Lkotlin/reflect/KProperty;".to_string(),
+            "iconst_1".to_string(),
+            "aaload".to_string(),
             "invokevirtual Method Cell.getValue:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
             "checkcast class Name".to_string(),
             "invokevirtual Method Name.\"unbox-impl\":()Ljava/lang/String;".to_string(),
@@ -575,14 +569,14 @@ fn a_value_class_carrier_crosses_the_boundary_like_kotlinc() {
     );
     for member in ["int getId-", "void setId-", "java.lang.String getName-"] {
         assert_eq!(
-            without_kproperty_carrier(body(&reference, member)),
-            without_kproperty_carrier(body(&ours, member)),
+            body(&reference, member),
+            body(&ours, member),
             "{member} agrees with kotlinc"
         );
     }
     assert_eq!(
-        without_kproperty_carrier(body(&reference, "void setName-")),
-        without_kproperty_carrier(body(&ours, "void setName-")),
+        body(&reference, "void setName-"),
+        body(&ours, "void setName-"),
         "setName agrees with kotlinc, including the typed setter parameter guard"
     );
 }
