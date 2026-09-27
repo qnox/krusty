@@ -37,6 +37,7 @@ mod comparison_branches;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
+use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod coroutine_machine;
 mod data_class_value_classes;
 mod debug_lines;
@@ -2376,8 +2377,8 @@ fn instance_field_jvm_name(
         .iter()
         .position(|candidate| std::ptr::eq(candidate, field))
         .expect("an instance field name must belong to its class");
-    if let Some(capture) = super::method_parameters::capture_field_name(class, field_index) {
-        return capture;
+    if let Some(capture) = super::capture_names::field_capture(class, field_index) {
+        return super::capture_names::capture_name(capture);
     }
     let owner = class.fq_name();
     let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
@@ -5503,14 +5504,11 @@ fn emit_class(
             // Debug metadata consumes the position emission actually reached. Reconstructing this
             // later from constructor parameters, constant-pool widths, or assertion policy makes a
             // semantic description masquerade as bytecode layout and can point inside an opcode.
-            primary_ctor_debug = Some((
-                ctor_desc.clone(),
-                u16::try_from(ctor.bytes.len()).expect("a JVM method body fits in u16"),
-            ));
+            let mut debug_start = ctor.bytes.len();
             let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
-            // Store only constructor fields explicitly marked as pre-super. A language-level inner
-            // class marks its enclosing-instance field because a superclass argument may read it; an
-            // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
+            // Store only constructor fields explicitly marked as pre-super: an inner class's
+            // enclosing instance and a local class's captured values, which a superclass argument
+            // may read. Keeping this as ordering metadata avoids interpreting a JVM
             // field name as source semantics. A `putfield` of the current class's own field on the
             // still-uninitialized `this` is legal per JVMS 4.10.2.4.
             for &(param_i, field_i) in &c.pre_super_param_fields {
@@ -5528,6 +5526,15 @@ fn emit_class(
                     e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(field.ty));
                 ctor.putfield(fref, slot_words(field.ty) as i32);
             }
+            // A local class's captured values are stored without a line; its first line is the
+            // delegation that follows them. An inner class's enclosing-instance store has one.
+            if c.is_local_class {
+                debug_start = ctor.bytes.len();
+            }
+            primary_ctor_debug = Some((
+                ctor_desc.clone(),
+                u16::try_from(debug_start).expect("a JVM method body fits in u16"),
+            ));
             for &statement in &c.super_arg_prelude {
                 e.emit(statement, &mut ctor);
             }
@@ -9040,34 +9047,6 @@ fn full_default_masks(param_count: usize) -> Vec<i32> {
             (start..end).fold(0i32, |mask, i| mask | default_mask_bit(i))
         })
         .collect()
-}
-
-fn emit_constructor_default_arguments(
-    omitted: &[u32],
-    parameter_count: usize,
-    code: &mut CodeBuilder,
-    cw: &mut ClassWriter,
-) {
-    if omitted.is_empty() {
-        return;
-    }
-    let masks = constructor_default_masks(omitted, parameter_count);
-    for mask in masks {
-        code.push_int(mask, cw);
-    }
-    code.aconst_null();
-}
-
-fn constructor_default_masks(omitted: &[u32], parameter_count: usize) -> Vec<i32> {
-    if omitted.is_empty() {
-        return Vec::new();
-    }
-    let mut masks = vec![0; default_mask_count(parameter_count)];
-    for &parameter in omitted {
-        let parameter = parameter as usize;
-        masks[parameter / 32] |= default_mask_bit(parameter);
-    }
-    masks
 }
 
 /// A value class's (erased) underlying JVM type — its single field's type.

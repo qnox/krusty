@@ -142,6 +142,7 @@ mod tests {
                 is_vararg: false,
                 type_param: None,
                 check: Some("shared".to_string()),
+                capture: None,
             },
             IrCtorArg {
                 name: Some("plain".to_string()),
@@ -154,6 +155,7 @@ mod tests {
                 is_vararg: false,
                 type_param: None,
                 check: Some("plain".to_string()),
+                capture: None,
             },
         ];
         let class = ir.add_class(class);

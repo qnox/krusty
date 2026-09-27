@@ -400,6 +400,7 @@ impl BodyLowering<'_> {
                                     is_vararg: false,
                                     type_param: None,
                                     check: None,
+                                    capture: None,
                                 }),
                         );
                     class.constructor_prefix_count = class

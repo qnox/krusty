@@ -15,23 +15,6 @@ fn parameter(name: impl Into<String>, flags: u16) -> MethodParameter {
     (Some(name.into()), flags)
 }
 
-/// JVM storage spelling for a lexical capture. Common IR retains the source spelling; local and
-/// anonymous classes prefix captured fields with `$`, while an inner-class receiver already has its
-/// explicit `this$0` identity.
-pub(super) fn capture_field_name(class: &IrClass, index: usize) -> Option<String> {
-    if class.is_inner_class && index == 0 {
-        return None;
-    }
-    (class.is_local_class && index < class.constructor_prefix_count as usize).then(|| {
-        let source = &class.fields[index].name;
-        if source.starts_with('$') {
-            source.clone()
-        } else {
-            format!("${source}")
-        }
-    })
-}
-
 /// Record parameter 0 of a value-class member lowered to a static `-impl`: the former receiver,
 /// compiler-generated and — like kotlinc's — without a nullability annotation.
 pub(super) fn prepend_value_class_receiver(ir: &mut IrFile, function: u32, name: &str) {
@@ -158,14 +141,12 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
                 return parameter("this$0", MANDATED);
             }
             let name = argument
-                .field_index
-                .and_then(|field| {
-                    capture_field_name(class, field as usize).or_else(|| {
-                        class
-                            .fields
-                            .get(field as usize)
-                            .map(|field| field.name.clone())
-                    })
+                .capture
+                .as_ref()
+                .map(crate::jvm::capture_names::capture_name)
+                .or_else(|| {
+                    let field = argument.field_index?;
+                    Some(class.fields.get(field as usize)?.name.clone())
                 })
                 .or_else(|| argument.name.clone())
                 .expect("a captured constructor prefix needs an exact storage name");

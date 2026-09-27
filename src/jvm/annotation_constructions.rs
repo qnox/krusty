@@ -136,6 +136,7 @@ fn annotation_implementation(
                 is_vararg: false,
                 type_param: None,
                 check: None,
+                capture: None,
             })
             .collect(),
         ctor_param_annotations: Vec::new(),

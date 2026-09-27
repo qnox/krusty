@@ -313,3 +313,34 @@ pub(super) fn emit_ctor_marker_accessor(
     ));
     cw.set_method_debug("<init>", &desc, None, &locals);
 }
+
+/// Push the `int` masks of the omitted parameters and the `DefaultConstructorMarker` that select a
+/// constructor's default-argument overload; nothing when no argument is omitted.
+pub(super) fn emit_constructor_default_arguments(
+    omitted: &[u32],
+    parameter_count: usize,
+    code: &mut CodeBuilder,
+    cw: &mut ClassWriter,
+) {
+    if omitted.is_empty() {
+        return;
+    }
+    let masks = constructor_default_masks(omitted, parameter_count);
+    for mask in masks {
+        code.push_int(mask, cw);
+    }
+    code.aconst_null();
+}
+
+/// The `int` masks with a bit set for each omitted parameter.
+pub(super) fn constructor_default_masks(omitted: &[u32], parameter_count: usize) -> Vec<i32> {
+    if omitted.is_empty() {
+        return Vec::new();
+    }
+    let mut masks = vec![0; default_mask_count(parameter_count)];
+    for &parameter in omitted {
+        let parameter = parameter as usize;
+        masks[parameter / 32] |= default_mask_bit(parameter);
+    }
+    masks
+}
