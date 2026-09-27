@@ -668,6 +668,8 @@ mod expression_line_marks_e2e;
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
 mod ext_receiver_tparam_binding_e2e;
+#[path = "extension_call_operands_e2e.rs"]
+mod extension_call_operands_e2e;
 #[path = "extension_default_args_e2e.rs"]
 mod extension_default_args_e2e;
 #[path = "extension_default_stub_e2e.rs"]
@@ -1014,6 +1016,8 @@ mod labeled_this_e2e;
 mod lambda_e2e;
 #[path = "lambda_exit_join_e2e.rs"]
 mod lambda_exit_join_e2e;
+#[path = "lambda_receiver_label_e2e.rs"]
+mod lambda_receiver_label_e2e;
 #[path = "lambda_result_inference_e2e.rs"]
 mod lambda_result_inference_e2e;
 #[path = "lambda_result_type_variable_e2e.rs"]
@@ -1794,6 +1798,8 @@ mod suspend_interface_delegation_e2e;
 mod suspend_interface_impl_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
+#[path = "suspend_lambda_metadata_e2e.rs"]
+mod suspend_lambda_metadata_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]

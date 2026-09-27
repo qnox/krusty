@@ -19,6 +19,7 @@ mod declaration_modifiers;
 mod declaration_stream;
 mod expressions;
 mod incdec;
+mod lambda_literals;
 mod lexical_type_parameters;
 mod nesting;
 mod properties;
@@ -978,6 +979,7 @@ struct Parser<'a> {
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
     parenthesized_expressions: std::collections::HashSet<u32>,
+    lambda_label_scopes: lambda_literals::LambdaLabelScopes,
 }
 
 /// Semantic parser-recursion funnels governed by one depth/recovery mechanism.
@@ -1077,6 +1079,7 @@ impl<'a> Parser<'a> {
             stmt_depth: 0,
             parsing_anonymous_function_receiver: false,
             parenthesized_expressions: Default::default(),
+            lambda_label_scopes: Default::default(),
         }
     }
 
@@ -4792,200 +4795,6 @@ impl<'a> Parser<'a> {
     }
 
     // ---- statements ----
-    /// Parse a lambda literal `{ [param ->] stmts }` (single optional parameter; the body is a block).
-    fn parse_lambda(&mut self) -> ExprId {
-        let start = self.tok().span;
-        self.expect(TokenKind::LBrace, "'{'");
-        self.skip_newlines();
-        // Optional parameter list ending in `->`: `it ->`, `x: T ->`, `a, b ->` (types discarded; the
-        // parameter types come from the declared function type via `check_lambda_with_types`). Detect
-        // by scanning for a top-level `->` before the lambda's closing `}`.
-        let has_params = self.lambda_arrow_before_close(self.i);
-        // Parameter type annotations, parallel to `params` — kept (in a side-table) so a bare-value
-        // lambda `{ x: Int -> … }` types its own parameters even without an expected function type.
-        let mut param_types: Vec<Option<TypeRef>> = Vec::new();
-        // A destructured lambda parameter `{ (a, b) -> … }` binds ONE (synthetic) parameter, then
-        // `val (a, b) = <synthetic>` is prepended to the body — reusing the `Stmt::Destructure`
-        // machinery. Collected here, spliced after the body statements are parsed.
-        // (synthetic param name, destructured entries `(name, is_var)`, span) per `(a, b)` param.
-        type LambdaDestructure = (
-            String,
-            Vec<DestructureEntry>,
-            Vec<Option<String>>,
-            Vec<Option<TypeRef>>,
-            Span,
-        );
-        let mut destructures: Vec<LambdaDestructure> = Vec::new();
-        let params = if has_params {
-            let mut ps = Vec::new();
-            loop {
-                self.skip_newlines();
-                if self.at(TokenKind::LParen) {
-                    let sp = self.tok().span;
-                    self.bump();
-                    let mut entries = Vec::new();
-                    let mut source_props: Vec<Option<String>> = Vec::new();
-                    let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
-                    loop {
-                        // Full form (`{ (val a, val b) -> … }`): each component carries its own
-                        // `val`/`var` and binds by property name. Keyword-less short form is positional
-                        // unless the short-form flag is on.
-                        let is_var = self.at(TokenKind::KwVar);
-                        let had_kw = is_var || self.at(TokenKind::KwVal);
-                        if had_kw {
-                            self.bump();
-                        }
-                        let ignored = self.at(TokenKind::Ident)
-                            && self.text() == "_"
-                            && !self.escaped_ident();
-                        let n = self.ident_or_error("variable name");
-                        let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-                        // By-name entry (`(a = prop) ->`) or short-form (`(a, b) ->` binds by own name).
-                        let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
-                            let src = self.ident_or_error("property name");
-                            if self.eat(TokenKind::Colon) {
-                                entry_type = Some(self.parse_type());
-                            }
-                            Some(src)
-                        } else if self.short_form_destructuring || had_kw {
-                            Some(n.clone())
-                        } else {
-                            None
-                        };
-                        entries.push(DestructureEntry {
-                            name: n,
-                            mutable: is_var,
-                            ignored,
-                        });
-                        source_props.push(source);
-                        entry_types.push(entry_type);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        if self.at(TokenKind::RParen) {
-                            break; // trailing comma
-                        }
-                    }
-                    self.expect(TokenKind::RParen, "')'");
-                    // A type annotation on the whole destructured parameter (`(a, b): T ->`) is ignored.
-                    if self.eat(TokenKind::Colon) {
-                        let _ = self.parse_type();
-                    }
-                    let synth = format!("$dstr{}", destructures.len());
-                    ps.push(synth.clone());
-                    param_types.push(None);
-                    destructures.push((synth, entries, source_props, entry_types, sp));
-                } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
-                    // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
-                    // identical to the `(a, b)` form, just with `[ ]`.
-                    let sp = self.tok().span;
-                    self.bump();
-                    let mut entries = Vec::new();
-                    let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
-                    loop {
-                        // Full-form bracket (`{ [val a, val b] -> … }`) — component keyword optional,
-                        // positional either way.
-                        let is_var = self.at(TokenKind::KwVar);
-                        if is_var || self.at(TokenKind::KwVal) {
-                            self.bump();
-                        }
-                        let ignored = self.at(TokenKind::Ident)
-                            && self.text() == "_"
-                            && !self.escaped_ident();
-                        let n = self.ident_or_error("variable name");
-                        let entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-                        entries.push(DestructureEntry {
-                            name: n,
-                            mutable: is_var,
-                            ignored,
-                        });
-                        entry_types.push(entry_type);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        if self.at(TokenKind::RBracket) {
-                            break; // trailing comma
-                        }
-                    }
-                    self.expect(TokenKind::RBracket, "']'");
-                    if self.eat(TokenKind::Colon) {
-                        let _ = self.parse_type();
-                    }
-                    let synth = format!("$dstr{}", destructures.len());
-                    ps.push(synth.clone());
-                    param_types.push(None);
-                    // The `[a, b]` bracket form is positional (`componentN`), never by-name.
-                    let source_props = vec![None; entries.len()];
-                    destructures.push((synth, entries, source_props, entry_types, sp));
-                } else if self.at(TokenKind::Ident) {
-                    ps.push(self.text().to_string());
-                    self.bump();
-                    if self.at(TokenKind::Colon) {
-                        self.bump();
-                        param_types.push(Some(self.parse_type()));
-                    } else {
-                        param_types.push(None);
-                    }
-                }
-                if self.at(TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
-            }
-            self.expect(TokenKind::Arrow, "'->'");
-            ps
-        } else {
-            Vec::new()
-        };
-        let mut stmts = Vec::new();
-        let saved_block_value = self.block_trailing_is_value;
-        self.block_trailing_is_value = true;
-        loop {
-            self.skip_newlines();
-            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
-                break;
-            }
-            stmts.push(self.parse_stmt());
-        }
-        self.block_trailing_is_value = saved_block_value;
-        // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
-        // first parameter's binding ends up first).
-        for (synth, entries, source_props, entry_types, sp) in destructures.into_iter().rev() {
-            let init = self.file.add_expr(Expr::Name(synth), sp);
-            let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
-            if source_props.iter().any(|s| s.is_some()) {
-                self.file.destructure_source_props.insert(d.0, source_props);
-            }
-            if entry_types.iter().any(Option::is_some) {
-                self.file.destructure_entry_types.insert(d.0, entry_types);
-            }
-            stmts.insert(0, d);
-        }
-        let end = self.tok().span;
-        self.expect(TokenKind::RBrace, "'}'");
-        let mut trailing = None;
-        if let Some(&last) = stmts.last() {
-            if let Stmt::Expr(e) = self.file.stmt(last) {
-                trailing = Some(*e);
-                stmts.pop();
-            }
-        }
-        let body = self
-            .file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi));
-        let lam = self
-            .file
-            .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));
-        if has_params {
-            self.file.lambda_explicit_arrows.insert(lam.0);
-        }
-        if param_types.iter().any(|t| t.is_some()) {
-            self.file.lambda_param_types.insert(lam.0, param_types);
-        }
-        lam
-    }
-
     /// Anonymous function expression: `fun (params): T = expr` / `fun (params): T { … }`. Desugars to a
     /// lambda (`Expr::Lambda`) carrying each parameter's declared type in the `lambda_param_types`
     /// side-table, so the value types even without an expected function type. An expression body
@@ -5648,7 +5457,7 @@ impl<'a> Parser<'a> {
                     let by_span = self.tok().span;
                     self.bump(); // 'by'
                     self.skip_newlines();
-                    let delegate = self.parse_expr();
+                    let delegate = self.parse_unlabelled_expr();
                     return self.finish_stmt(
                         Stmt::LocalDelegate {
                             is_var,
@@ -5682,7 +5491,7 @@ impl<'a> Parser<'a> {
                     self.default_init_expr(ty.as_ref().unwrap(), sp)
                 } else {
                     self.skip_newlines();
-                    self.parse_expr()
+                    self.parse_unlabelled_expr()
                 };
                 if let Some(operator) = init_operator {
                     self.file.value_operator_spans.insert(init.0, operator);
@@ -5843,7 +5652,7 @@ impl<'a> Parser<'a> {
                         Expr::Name(n) => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
-                            let value = self.parse_expr();
+                            let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
                                 Stmt::Assign { name: n, value },
@@ -5854,7 +5663,7 @@ impl<'a> Parser<'a> {
                         Expr::Member { receiver, name } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
-                            let value = self.parse_expr();
+                            let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
                                 Stmt::AssignMember {
@@ -5870,7 +5679,7 @@ impl<'a> Parser<'a> {
                         Expr::Index { array, indices } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
-                            let value = self.parse_expr();
+                            let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
                                 Stmt::AssignIndex {
@@ -5889,7 +5698,7 @@ impl<'a> Parser<'a> {
                         } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
-                            let value = self.parse_expr();
+                            let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_assignment_stmt(
                                 Stmt::AssignMember {
@@ -5915,7 +5724,7 @@ impl<'a> Parser<'a> {
                         Expr::Name(n) => {
                             self.bump();
                             self.skip_newlines();
-                            let rhs = self.parse_expr();
+                            let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_expr(Expr::Name(n.clone()), op_span);
                             let value = self.file.add_expr(
                                 Expr::Binary {
@@ -5935,7 +5744,7 @@ impl<'a> Parser<'a> {
                         Expr::Member { receiver, name } => {
                             self.bump();
                             self.skip_newlines();
-                            let rhs = self.parse_expr();
+                            let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_expr(
                                 Expr::Member {
                                     receiver,
@@ -5970,7 +5779,7 @@ impl<'a> Parser<'a> {
                         } => {
                             self.bump();
                             self.skip_newlines();
-                            let rhs = self.parse_expr();
+                            let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_expr(
                                 Expr::SafeCall {
                                     receiver,
@@ -6002,7 +5811,7 @@ impl<'a> Parser<'a> {
                         Expr::Index { array, indices } => {
                             self.bump();
                             self.skip_newlines();
-                            let rhs = self.parse_expr();
+                            let rhs = self.parse_unlabelled_expr();
                             let lhs = self.file.add_expr(
                                 Expr::Index {
                                     array,
@@ -6037,7 +5846,7 @@ impl<'a> Parser<'a> {
                         _ => {
                             self.bump();
                             self.skip_newlines();
-                            let value = self.parse_expr();
+                            let value = self.parse_unlabelled_expr();
                             return self.finish_assignment_stmt(
                                 Stmt::CompoundAssign {
                                     target: e,
