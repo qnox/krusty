@@ -1557,6 +1557,8 @@ pub struct ResolvedModuleIndex {
     /// Package identity for each source unit. This is declaration-header context, not a path or
     /// body coordinate; common lowering copies it only for referenced cross-file declarations.
     source_packages: HashMap<SourceFileId, TypeName>,
+    /// Each source unit's Kotlin `main`, selected once by the frontend (`fir::entry_point`).
+    pub(super) source_entry_points: HashMap<SourceFileId, super::ResolvedEntryPoint>,
     /// Every package some source unit publishes, with all of its enclosing packages: the
     /// namespaces the source module contributes. Derived from `source_packages` as each identity
     /// is published, so a package-child probe is one lookup instead of a walk of every source
@@ -2166,10 +2168,6 @@ impl ResolvedModuleIndex {
             .get(&source)
             .map(Box::as_ref)
             .unwrap_or_default()
-    }
-
-    pub fn source_package(&self, source: SourceFileId) -> Option<TypeName> {
-        self.source_packages.get(&source).copied()
     }
 
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
@@ -3255,6 +3253,8 @@ impl ResolvedModuleIndex {
             + self.source_packages.len()
                 * (std::mem::size_of::<SourceFileId>() + std::mem::size_of::<TypeName>())
             + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
+            + self.source_entry_points.len()
+                * std::mem::size_of::<(SourceFileId, super::ResolvedEntryPoint)>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())

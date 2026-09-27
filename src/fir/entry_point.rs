@@ -1,9 +1,12 @@
-//! Kotlin's program entry-point rule over one finalized top-level function header.
+//! Kotlin's program entry-point rule over one finalized top-level function header, and the entry
+//! the frontend selected with it for each source unit.
 //!
-//! The resolver applies this rule when it classifies top-level overload conflicts (an entry point
-//! is file-local), and common lowering applies the same rule to publish each file's selected entry.
-//! The rule genuinely names a declaration (`main`), so it is stated once, here.
+//! The resolver applies the rule once, after signatures are final: it keeps an entry point
+//! file-local when it classifies top-level overload conflicts, and it records the entry it selects
+//! for each source unit in the module index. Common lowering maps that recorded identity; it never
+//! applies the rule again. The rule genuinely names a declaration (`main`), so it is stated here.
 
+use super::{CallableId, ResolvedModuleIndex, SourceFileId};
 use crate::types::Ty;
 
 /// The parameter form of a Kotlin `main` entry point.
@@ -46,5 +49,32 @@ impl MainEntryShape<'_> {
             }
             _ => None,
         }
+    }
+}
+
+/// The Kotlin `main` the frontend selected for one source unit. When the unit declares both
+/// forms, `main(args: Array<String>)` is the entry and the parameterless `main()` is an ordinary
+/// function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedEntryPoint {
+    pub callable: CallableId,
+    pub parameters: MainEntryParameters,
+}
+
+impl ResolvedModuleIndex {
+    /// The entry point the frontend selected for `source`, if it declares one.
+    pub fn source_entry_point(&self, source: SourceFileId) -> Option<ResolvedEntryPoint> {
+        self.source_entry_points.get(&source).copied()
+    }
+
+    pub(crate) fn publish_source_entry_point(
+        &mut self,
+        source: SourceFileId,
+        entry: ResolvedEntryPoint,
+    ) {
+        assert!(
+            self.source_entry_points.insert(source, entry).is_none(),
+            "a source unit selects one entry point"
+        );
     }
 }
