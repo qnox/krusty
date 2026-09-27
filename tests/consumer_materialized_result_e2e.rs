@@ -2,7 +2,7 @@
 //! as kotlinc materializes it at the consumer's type: an `Any?` parameter, an `Any` local, or a
 //! structural or identity comparison takes the erased `Object` as it is, and a `CharSequence` local
 //! casts to `CharSequence`, not to the substituted `String`. Provider (Java) results follow the same
-//! rule as source declarations.
+//! rule as source declarations, and so does a function value's `invoke`.
 use super::common::{self, compare_with_kotlinc_plugin};
 use std::path::PathBuf;
 
@@ -31,7 +31,10 @@ const SOURCE: &str = "import fixtures.Holder\n\
     fun widened(b: Box<String>): CharSequence { val c: CharSequence = b.get(); return c }\n\
     fun member(b: Box<Named>) = b.get().n\n\
     fun javaArgument(r: Holder<String>) = take(r.get())\n\
-    fun javaEquality(r: Holder<String>) = r.get() == \"a\"\n";
+    fun javaEquality(r: Holder<String>) = r.get() == \"a\"\n\
+    fun invoked(g: () -> String) = take(g())\n\
+    fun invokedEquality(g: () -> String) = \"a\" == g()\n\
+    fun invokedLocal(g: () -> String): CharSequence { val c: CharSequence = g(); return c }\n";
 
 #[test]
 fn an_erased_result_is_cast_only_to_its_consumers_type() {
@@ -69,6 +72,10 @@ fn an_erased_result_reaches_its_consumer_intact() {
          \x20   javaArgument(r)\n\
          \x20   if (sink !== r.get()) return \"javaArgument\"\n\
          \x20   if (!javaEquality(r)) return \"javaEquality\"\n\
+         \x20   invoked {{ \"i\" }}\n\
+         \x20   if (sink != \"i\") return \"invoked\"\n\
+         \x20   if (!invokedEquality {{ \"a\" }}) return \"invokedEquality\"\n\
+         \x20   if (invokedLocal {{ \"c\" }} != \"c\") return \"invokedLocal\"\n\
          \x20   return \"OK\"\n\
          }}\n"
     );
