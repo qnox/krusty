@@ -330,68 +330,6 @@ impl PropertyCallTarget<'_> {
     }
 }
 
-/// Emit the static accessors a generated property-reference carrier needs in order to reach a
-/// protected member from a subclass in another package. The carrier itself is not a subclass; the
-/// bridge owner is, and every target below was captured from the selected accessor before the
-/// reference was redirected to the bridge.
-pub(super) fn emit_protected_reference_bridges(
-    owner: TypeName,
-    realizations: &crate::jvm::property_references::PropertyReferenceRealizations,
-    cw: &mut ClassWriter,
-) {
-    for bridge in realizations.protected_bridges(owner) {
-        let (parameters, ret) = parse_physical_method_desc(&bridge.target_descriptor)
-            .expect("a protected reference bridge retains a selected accessor descriptor");
-        cw.reserve_method_pool(&bridge.name, &bridge.descriptor, None, &[]);
-        let mut code = CodeBuilder::new(
-            1 + parameters
-                .iter()
-                .map(|parameter| slot_words(ir_ty_to_jvm(parameter)))
-                .sum::<u16>(),
-        );
-        code.aload(0);
-        let mut slot = 1;
-        for parameter in &parameters {
-            let physical = ir_ty_to_jvm(parameter);
-            load(physical, slot, &mut code);
-            slot += slot_words(physical);
-        }
-        let target_owner = bridge.target_owner.render();
-        let target = if bridge.target_owner_is_interface {
-            cw.interface_methodref(
-                &target_owner,
-                &bridge.target_name,
-                &bridge.target_descriptor,
-            )
-        } else {
-            cw.methodref(
-                &target_owner,
-                &bridge.target_name,
-                &bridge.target_descriptor,
-            )
-        };
-        let argument_words = parameters
-            .iter()
-            .map(|parameter| slot_words(ir_ty_to_jvm(parameter)) as i32)
-            .sum();
-        let physical_ret = ir_ty_to_jvm(&ret);
-        if bridge.target_owner_is_interface {
-            code.invokeinterface(target, argument_words, slot_words(physical_ret) as i32);
-        } else {
-            code.invokevirtual(target, argument_words, slot_words(physical_ret) as i32);
-        }
-        emit_return(physical_ret, &mut code);
-        code.ensure_locals(slot);
-        code.link();
-        cw.add_method(
-            0x0001 | 0x0008 | 0x0010 | crate::jvm::classfile::ACC_SYNTHETIC,
-            &bridge.name,
-            &bridge.descriptor,
-            &code,
-        );
-    }
-}
-
 /// Bring an erased `Object` on the stack to the accessor's PHYSICAL parameter type: a value class's
 /// boxed object is cast and unboxed to its carrier, anything else is cast or unboxed as usual.
 fn adapt_property_reference_value(

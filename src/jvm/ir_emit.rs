@@ -3614,7 +3614,7 @@ fn emit_pass(
     let member_access_bridges = access_bridges::cross_owner_member_calls(
         ir,
         facade,
-        &class_member_fids,
+        &contexts,
         opts.jvm_default != JvmDefaultMode::Disable,
     );
     env.run
@@ -5780,7 +5780,6 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
-    access_bridges::emit_protected_member_access_bridges(c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     static_accessors::emit(
@@ -5814,11 +5813,6 @@ fn emit_class(
             &mut cw,
         );
     }
-    property_reference_class::emit_protected_reference_bridges(
-        c.fq_name_id(),
-        env.property_reference_realizations,
-        &mut cw,
-    );
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
