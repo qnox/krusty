@@ -244,9 +244,19 @@ Decoded from kotlinc output over a top-level property shape matrix (`Package.pro
 | `val String.doubled get()` | omitted | f5 receiver; f7 = 70; NO field entry |
 | `val lz by lazy { … }` | 33286 | + `isDelegated`(1<<15); field entry `{name="lz$delegate", desc="Lkotlin/Lazy;"}` |
 
-Still open (kotlinc 2.4.20): a private property's declared accessor is a private method, so its
-accessor word is 66 (private, `isNotDefault`); krusty emits it public and writes 70. A bodiless
-`private set` on a public `var` generates no setter method, while f6 and f8 = 66 are still recorded.
+Accessor words (f7/f8) follow the class-property rule: each is written only when it differs from
+the default word the property implies (its visibility, final modality). A declared or delegated
+accessor sets `isNotDefault`, so a private property's declared getter writes 66 and a public one's
+70. A `private set` writes the setter as private (66, `isNotDefault` when the property itself is
+not private). A private property's declared accessors are private methods. The setter's value
+parameter (f6) is recorded exactly when the setter is not the default one, under `value` or
+`<set-?>` when no name was written, and it interns before the property's name. Test:
+`tests/metadata_property_flags_e2e.rs`.
+
+Still open (kotlinc 2.4.20): a property with one declared accessor still gets the other as a
+default method (`var x = 0; set(v) {…}` has a public `getX`), which krusty does not emit. A
+bodiless `private set` generates no setter method. A delegated top-level property records
+`isDelegated` and its `x$delegate` field.
 
 Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
 8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.

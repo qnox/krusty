@@ -149,3 +149,21 @@ fn a_private_top_level_property_with_default_accessors_names_none() {
         }\n";
     assert_identical("PrivateAccessors", SRC, "app/PrivateAccessorsKt");
 }
+
+#[test]
+fn a_package_accessor_word_carries_the_property_visibility() {
+    const SRC: &str = "package app\n\
+        \n\
+        private val computed: Int get() = 2\n\
+        private var guarded = 0\n\
+        \x20   set(value) { field = value + 1 }\n\
+        private val Int.twice: Int get() = this * 2\n\
+        internal val scoped: Int get() = 3\n\
+        val open: Int get() = 4\n\
+        \n\
+        fun touch(): Int {\n\
+        \x20   guarded = 1\n\
+        \x20   return computed + 3.twice\n\
+        }\n";
+    assert_identical("AccessorWords", SRC, "app/AccessorWordsKt");
+}

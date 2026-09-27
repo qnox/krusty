@@ -53,10 +53,6 @@ pub(crate) mod property_flags {
     /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an
     /// accessor's default is derived from its property.
     pub const MODALITY_MASK: u64 = 0b11_0000;
-    /// `Property.getter_flags`/`setter_flags` for a DECLARED accessor: public (visibility 3 in bits
-    /// 1-3) · final · `isNotDefault` (bit 6). The accessor flag word has its own layout — bit 0
-    /// `hasAnnotations`, bits 1-3 visibility, bits 4-5 modality, bit 6 `isNotDefault`.
-    pub const DECLARED_ACCESSOR: u64 = 70;
     /// A companion-associated property (`companion { val … }` or `companion val C.name`): kotlinc
     /// sets this bit on both, the extension additionally recording its classifier receiver.
     pub const IS_COMPANION: u64 = 1 << 19;

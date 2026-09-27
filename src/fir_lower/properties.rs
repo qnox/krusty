@@ -620,6 +620,9 @@ fn materialize_top_level_property(
         if let Some(setter) = setter {
             set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
         }
+        if companion_block_owner.is_none() {
+            mark_private_package_accessors(index, &property, getter, setter, ir);
+        }
         if let Some(owner) = companion_block_owner {
             place_companion_block_accessors(ir, owner, getter.into_iter().chain(setter));
             record_companion_block_property(
@@ -712,6 +715,9 @@ fn materialize_top_level_property(
     if let Some(setter) = setter {
         set_accessor_parameter_identities(index, declaration, true, setter, ir)?;
     }
+    if companion_block_owner.is_none() {
+        mark_private_package_accessors(index, &property, Some(getter), setter, ir);
+    }
     if let Some(owner) = companion_block_owner {
         place_companion_block_accessors(ir, owner, std::iter::once(getter).chain(setter));
         record_companion_block_property(
@@ -738,6 +744,24 @@ fn materialize_top_level_property(
         },
     );
     Ok(())
+}
+
+/// A declared accessor of a private package property is a private method, and so is the setter a
+/// `private set` narrows.
+fn mark_private_package_accessors(
+    index: &ResolvedModuleIndex,
+    property: &IrCheckedProperty,
+    getter: Option<FunId>,
+    setter: Option<FunId>,
+    ir: &mut IrFile,
+) {
+    let private = property.visibility.is_private();
+    if private {
+        ir.private_methods.extend(getter);
+    }
+    if private || setter_is_private(index, property.declaration) {
+        ir.private_methods.extend(setter);
+    }
 }
 
 /// The class whose `companion { … }` block declared this top-level-shaped property, if any: the

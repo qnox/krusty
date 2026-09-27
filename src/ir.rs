@@ -3044,7 +3044,10 @@ pub struct IrPackageProperty {
     pub flags: crate::fir::DeclarationFlags,
     pub spellings: crate::spelling::DeclaredSpellings,
     pub has_backing_field: bool,
-    pub has_declared_getter: bool,
+    /// How the accessors are declared: source-written, delegated, or the compiler default.
+    pub modifiers: IrPropertyModifiers,
+    /// The setter is narrowed to `private` (`private set`) on a property that is not itself private.
+    pub setter_is_private: bool,
     pub source_order: u32,
 }
 

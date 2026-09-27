@@ -37,3 +37,16 @@ fn inner_class_calls_outer_private() {
         "Inner",
     );
 }
+
+#[test]
+fn a_class_reaches_a_private_top_level_declared_accessor() {
+    // A private property's declared accessors are private facade methods, so a class in the same
+    // file calls them through the facade's `access$` accessors.
+    common::expect_box_ok_with_stdlib(
+        "private val computed: String get() = \"O\"\n\
+         private var stored = \"\"\n  set(value) { field = value + \"K\" }\n\
+         class Reader {\n  fun read(): String {\n    stored = \"\"\n    return computed\n  }\n}\n\
+         fun box(): String {\n  val first = Reader().read()\n  return first + stored\n}\n",
+        "PrivateAccessor",
+    );
+}

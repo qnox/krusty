@@ -233,8 +233,14 @@ pub(super) fn publish(
                             || header
                                 .flags
                                 .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)),
-                    has_declared_getter: value_receiver.is_some()
-                        || header.flags.has(DeclarationFlags::CUSTOM_GETTER),
+                    modifiers: {
+                        let mut modifiers =
+                            super::properties::member_property_modifiers(header.flags, false);
+                        // An extension property's getter is always declared.
+                        modifiers.declared_getter |= value_receiver.is_some();
+                        modifiers
+                    },
+                    setter_is_private: super::properties::setter_is_private(index, declaration),
                     source_order,
                 });
             }

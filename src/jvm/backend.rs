@@ -1258,7 +1258,8 @@ pub fn facade_package_metadata_from_ir(
                 visibility: declaration.visibility,
                 spellings: declaration.spellings.clone(),
                 has_backing_field: declaration.has_backing_field,
-                has_declared_getter: declaration.has_declared_getter,
+                modifiers: declaration.modifiers,
+                setter_is_private: declaration.setter_is_private,
                 companion,
             }
         })
@@ -1508,7 +1509,11 @@ mod tests {
             flags: crate::fir::DeclarationFlags::default(),
             spellings: crate::spelling::DeclaredSpellings::default(),
             has_backing_field: true,
-            has_declared_getter: false,
+            modifiers: crate::ir::IrPropertyModifiers {
+                declared_setter: true,
+                ..Default::default()
+            },
+            setter_is_private: false,
             source_order: 0,
         });
 
