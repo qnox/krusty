@@ -145,8 +145,6 @@ initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
-inlineClasses/anySuperCall.kt
-inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunction.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric2.kt
@@ -169,8 +167,6 @@ inlineClasses/inlineClassCollection/inlineListOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
-inlineClasses/interfaceMethodCalls/interfaceSuperCall.kt
-inlineClasses/interfaceMethodCalls/interfaceSuperCallGeneric.kt
 inlineClasses/jvmInline.kt
 inlineClasses/kt25771.kt
 inlineClasses/kt27096_enum.kt
