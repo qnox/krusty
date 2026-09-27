@@ -67,33 +67,39 @@ pub(crate) struct BackendPassFacts {
 /// 3. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
 ///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
 ///
-/// 4. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
+/// 4. `check_before_result_coercion` — move a `!!` or platform assertion over the coercion that
+///    narrows an erased call result beneath that coercion, so the check reads the slot the call
+///    produced and the cast follows, as kotlinc emits it. Runs while that coercion is still the
+///    checked one: before generic erasure and call-result boundary realization rewrite the slot
+///    and fold the conversion chain it belongs to.
+///
+/// 5. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
 ///    and fold its marked conversion chain; later representation passes may refine the slot.
 ///
-/// 5. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 6. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 7. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
 ///
-/// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
 ///
-/// 8. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
+/// 9. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization, judged by each field's physical slot now that carriers are realized. Common
 ///    IR retains them for targets without zero-initialized fields.
 ///
-/// 9. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
-///    value-class lowering has fixed their physical carriers.
+/// 10. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
+///     value-class lowering has fixed their physical carriers.
 ///
-/// 10. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+/// 11. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
 ///
-/// 11. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 12. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
 ///
-/// 12. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 13. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///     (`require`/`check`) message lambda; it is spliced at the call site.
 ///
-/// 13. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 14. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///     its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///     be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///     ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -153,6 +159,9 @@ fn run_backend_passes_after_plugins(
     // Common IR retains source type-parameter identities and complete intersections. Select the JVM
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
     crate::jvm::reified_operations::realize(ir);
+    // A null check over an erased call result reads the call's own slot, ahead of the coercion
+    // that narrows it; erasure and call-result boundaries below rewrite that coercion.
+    crate::jvm::result_null_checks::check_before_result_coercion(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
@@ -1552,6 +1561,10 @@ mod tests {
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
             ),
             ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
+            (
+                "check_before_result_coercion(",
+                &["src/jvm/result_null_checks.rs", "src/jvm/backend.rs"],
+            ),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut offenders = Vec::new();
