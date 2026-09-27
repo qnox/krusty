@@ -89,54 +89,6 @@ pub struct MemberSignatures<'a> {
     pub ctor: Option<&'a str>,
 }
 
-/// One declared data-class property accessor at its JVM method-header interning position.
-pub struct DataAccessorInfo {
-    pub name: String,
-    pub desc: String,
-    /// 0 = getter, 1 = unguarded setter, 2 = non-null reference setter.
-    pub setter_kind: u8,
-    pub signature: Option<String>,
-}
-
-/// A property's `$annotations` marker at its interning position: the method's own name, and the
-/// annotations whose pool entries it brings with it.
-///
-/// The annotations are carried whole rather than pre-rendered to strings, so the seeder interns them
-/// through the SAME encoder the real emission uses. A hand-listed set of utf8s would be a second
-/// answer to what an annotation puts in the pool, and would drift the first time one gained an
-/// element kind.
-pub struct PropertyMarkerSeed {
-    pub name: String,
-    pub annotations: crate::ir::DeclarationAnnotations,
-}
-
-/// One declared data-class property event in JVM emission order. A marker is its own event because
-/// a private property emits no accessor but still emits its `$annotations` method.
-pub enum DataDeclaredMemberSeed {
-    Accessor(DataAccessorInfo),
-    PropertyMarker(PropertyMarkerSeed),
-}
-
-/// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
-/// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
-pub struct DataMemberInfo<'a> {
-    /// Declared property accessors and annotation markers in exact emission order. These precede
-    /// `componentN` in a data class; a private property contributes only its marker event.
-    pub declared_members: &'a [DataDeclaredMemberSeed],
-    /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
-    /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
-    pub hashcode_owners: &'a [Option<String>],
-    /// The `copy` method's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)Ldemo/D;`),
-    /// interned right after the erased `copy` descriptor.
-    pub copy_sig: Option<&'a str>,
-    /// Whether `copy` is PRIVATE (its ctor's visibility under
-    /// `DataClassCopyRespectsConstructorVisibility`) — kotlinc then omits the method's nullability
-    /// annotations, so its `@NotNull` utf8 must not be seeded either.
-    pub copy_is_private: bool,
-    /// Per-field generic `Signature`, interned LATE (after all data-method entries, before `@Metadata`).
-    pub field_sigs: &'a [Option<String>],
-}
-
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
     Utf8(String),
@@ -493,11 +445,6 @@ struct FieldInfo {
     /// `RuntimeVisibleAnnotations` (RUNTIME retention) and `RuntimeInvisibleAnnotations` (BINARY).
     visible_anns: Vec<Vec<u8>>,
     invisible_anns: Vec<Vec<u8>>,
-    /// User annotations kept UNENCODED until the field-table window (see
-    /// [`ClassWriter::set_last_field_annotations_deferred`]): an enum constant's annotation types
-    /// intern there, after every method, not where the constant's field was added.
-    pending_visible: Vec<crate::ir::AppliedAnnotation>,
-    pending_invisible: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
@@ -522,12 +469,9 @@ struct LateField {
 }
 
 /// Position in the finished field table, independent from the constant-pool interning window.
-/// Keeping this as one value prevents contradictory "leading at an explicit index" states.
 enum LateFieldPlacement {
     Trailing,
     Leading,
-    /// An enum's generated serializer delegate follows its eagerly-added constructor properties.
-    At(usize),
 }
 
 impl LateField {
@@ -935,8 +879,6 @@ impl ClassWriter {
             const_value: None,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
-            pending_visible: Vec::new(),
-            pending_invisible: Vec::new(),
         });
     }
 
@@ -955,8 +897,6 @@ impl ClassWriter {
                 const_value: None,
                 visible_anns: Vec::new(),
                 invisible_anns: Vec::new(),
-                pending_visible: Vec::new(),
-                pending_invisible: Vec::new(),
             },
         );
     }
@@ -993,28 +933,6 @@ impl ClassWriter {
             const_value,
             ann,
             LateFieldPlacement::Trailing,
-        ));
-    }
-
-    /// Add a deferred field at an explicit position in the finished field table, carrying an
-    /// optional generic `Signature` and nullability annotation.
-    pub fn add_field_late_at_sig(
-        &mut self,
-        access: u16,
-        name: &str,
-        desc: &str,
-        signature: Option<&str>,
-        ann: Option<&str>,
-        at: usize,
-    ) {
-        self.late_fields.push(LateField::new(
-            access,
-            name,
-            desc,
-            signature,
-            None,
-            ann,
-            LateFieldPlacement::At(at),
         ));
     }
 
@@ -1093,8 +1011,6 @@ impl ClassWriter {
                 const_value: cv,
                 visible_anns,
                 invisible_anns,
-                pending_visible: Vec::new(),
-                pending_invisible: Vec::new(),
             };
             match lf.placement {
                 LateFieldPlacement::Trailing => self.fields.push(info),
@@ -1102,30 +1018,7 @@ impl ClassWriter {
                     self.fields.insert(lead_at, info);
                     lead_at += 1;
                 }
-                LateFieldPlacement::At(at) => self.fields.insert(at.min(self.fields.len()), info),
             }
-        }
-        // An EAGER field may also have deferred its annotations to this window — an enum constant's
-        // field is added early (its `<clinit>` `putstatic` interleaves with the entry names), while
-        // kotlinc interns the annotation's type here, beside the late fields' `Signature` strings and
-        // just before the class's own annotations. Encoding it at the field's `add_field` put the
-        // descriptor near the entry names and shifted every later index.
-        for index in 0..self.fields.len() {
-            let visible = std::mem::take(&mut self.fields[index].pending_visible);
-            let invisible = std::mem::take(&mut self.fields[index].pending_invisible);
-            if visible.is_empty() && invisible.is_empty() {
-                continue;
-            }
-            let encoded_visible: Vec<Vec<u8>> = visible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            let encoded_invisible: Vec<Vec<u8>> = invisible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            self.fields[index].visible_anns.extend(encoded_visible);
-            self.fields[index].invisible_anns.extend(encoded_invisible);
         }
     }
 
@@ -1143,24 +1036,7 @@ impl ClassWriter {
             const_value: Some(const_idx),
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
-            pending_visible: Vec::new(),
-            pending_invisible: Vec::new(),
         });
-    }
-
-    /// [`Self::set_last_field_annotations`], but the annotation TYPES intern in the field-table
-    /// window rather than at the field's own `add_field` — kotlinc's order for an enum constant,
-    /// whose field must be added early (its `<clinit>` store interleaves with the entry names) while
-    /// its annotation descriptor interns with the other field-table strings.
-    pub fn set_last_field_annotations_deferred(
-        &mut self,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) {
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        if let Some(field) = self.fields.last_mut() {
-            field.pending_visible = visible;
-            field.pending_invisible = invisible;
-        }
     }
 
     /// Attach user annotations to the most recently added field. The JVM representation boundary
@@ -1391,308 +1267,6 @@ impl ClassWriter {
         }
         if let Some(desc) = default_marker_desc {
             self.cp.utf8(desc);
-        }
-    }
-
-    /// Seed a `data class`'s synthesized-method constant-pool entries in kotlinc's first-use order,
-    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>` and its field stores). It first seeds the
-    /// data class's declared property accessors, then mirrors the synthesized bodies kotlinc emits for
-    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals`. `fields` is
-    /// `(name, jvm_descriptor)` in declaration order; `simple` is the class's simple name.
-    pub fn seed_data_class_pool(
-        &mut self,
-        this_internal: &str,
-        ctor_desc: &str,
-        simple: &str,
-        fields: &[(String, String)],
-        info: &DataMemberInfo,
-    ) {
-        let self_ref = format!("L{this_internal};");
-        // The primary-ctor parameter descriptors (between the parens of `ctor_desc`).
-        let params = &ctor_desc[1..ctor_desc.rfind(')').unwrap_or(1)];
-        // The StringBuilder.append overload + the boxing-class hashCode for a field JVM descriptor.
-        let append_desc = |d: &str| -> &'static str {
-            match d {
-                "I" | "S" | "B" => "(I)Ljava/lang/StringBuilder;",
-                "J" => "(J)Ljava/lang/StringBuilder;",
-                "F" => "(F)Ljava/lang/StringBuilder;",
-                "D" => "(D)Ljava/lang/StringBuilder;",
-                "Z" => "(Z)Ljava/lang/StringBuilder;",
-                "C" => "(C)Ljava/lang/StringBuilder;",
-                "Ljava/lang/String;" => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-                _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
-            }
-        };
-        // The `x.hashCode()` for a primitive field is `<Box>.hashCode(prim)`; for a reference it is a
-        // virtual `hashCode()` on the field's own class.
-        let hashcode_ref = |d: &str| -> Option<(&'static str, &'static str)> {
-            match d {
-                "I" => Some(("java/lang/Integer", "(I)I")),
-                "J" => Some(("java/lang/Long", "(J)I")),
-                "D" => Some(("java/lang/Double", "(D)I")),
-                "F" => Some(("java/lang/Float", "(F)I")),
-                "Z" => Some(("java/lang/Boolean", "(Z)I")),
-                "C" => Some(("java/lang/Character", "(C)I")),
-                "B" => Some(("java/lang/Byte", "(B)I")),
-                "S" => Some(("java/lang/Short", "(S)I")),
-                _ => None, // reference: `field.hashCode()` interned via its own class below
-            }
-        };
-        let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
-
-        // Declared property accessors precede the synthesized data members. Ordinary classes intern
-        // accessors at their exact declaration sites, but a data class's synthetic-member seeder must
-        // preserve this boundary before it interns `componentN`/`copy`/the Object overrides.
-        for member in info.declared_members {
-            match member {
-                DataDeclaredMemberSeed::Accessor(accessor) => {
-                    self.cp.utf8(&accessor.name);
-                    self.cp.utf8(&accessor.desc);
-                    if let Some(signature) = &accessor.signature {
-                        self.cp.utf8(signature);
-                    }
-                    if accessor.setter_kind >= 1 {
-                        self.cp.utf8("<set-?>");
-                    }
-                    if accessor.setter_kind == 2 {
-                        self.cp.string("<set-?>");
-                    }
-                }
-                // kotlinc visits the property's `$annotations` marker as soon as it has finished
-                // that property's accessors — or directly at the property for a private one.
-                // Encoding through the real annotation encoder keeps this from becoming a second
-                // description of an annotation's pool footprint.
-                DataDeclaredMemberSeed::PropertyMarker(marker) => {
-                    self.cp.utf8(&marker.name);
-                    self.cp.utf8("()V");
-                    let annotations = marker.annotations.clone();
-                    let _ = self.encode_declaration_annotations(&annotations);
-                }
-            }
-        }
-
-        // componentN — each body is a field read; only the method name is new.
-        for i in 1..=fields.len() {
-            self.cp.utf8(&format!("component{i}"));
-        }
-        // copy — name, descriptor, its generic Signature (a parameterized ctor param — right after the
-        // erased descriptor, kotlinc's order), @NotNull (return), then `new <self>(...)` (ctor Methodref).
-        // A `data object` gets none of it: kotlinc synthesizes no `copy`/`copy$default` for a singleton,
-        // and seeding the names alone would leave them in the constant pool of a class that has no such
-        // method. `fields` here is already sliced to the PRIMARY-CONSTRUCTOR properties, so an empty
-        // list is exactly a data declaration with none — which can only be an object.
-        if !fields.is_empty() {
-            self.cp.utf8("copy");
-            let copy_desc = format!("({}){self_ref}", params);
-            self.cp.utf8(&copy_desc);
-            if let Some(s) = info.copy_sig {
-                self.cp.utf8(s);
-            }
-            // A private `copy` carries no `@NotNull` (kotlinc drops nullability annotations on it).
-            if !info.copy_is_private && self.nullability_annotations {
-                self.cp.utf8(NOT_NULL);
-            }
-            self.cp.methodref(this_internal, "<init>", ctor_desc);
-            // copy$default — its descriptor, then the Methodref back to `copy`.
-            self.cp.utf8("copy$default");
-            let copy_default_desc = format!("({self_ref}{}ILjava/lang/Object;){self_ref}", params);
-            self.cp.utf8(&copy_default_desc);
-            self.cp.methodref(this_internal, "copy", &copy_desc);
-        }
-        // toString. kotlinc's shape depends on the target: `invokedynamic makeConcatWithConstants`
-        // (JVM 9+) or a `StringBuilder` chain (below). The body emitter picks the same fork on the
-        // class major; seed to match so the pool positions line up.
-        self.cp.utf8("toString");
-        self.cp.utf8("()Ljava/lang/String;");
-        let arrays_to_string_desc = |d: &str| -> &'static str {
-            match d {
-                "[Z" => "([Z)Ljava/lang/String;",
-                "[C" => "([C)Ljava/lang/String;",
-                "[B" => "([B)Ljava/lang/String;",
-                "[S" => "([S)Ljava/lang/String;",
-                "[I" => "([I)Ljava/lang/String;",
-                "[J" => "([J)Ljava/lang/String;",
-                "[F" => "([F)Ljava/lang/String;",
-                "[D" => "([D)Ljava/lang/String;",
-                _ => "([Ljava/lang/Object;)Ljava/lang/String;",
-            }
-        };
-        if self.major >= 53 {
-            // The recipe: literal segments with a `\u{1}` where each field value interpolates. An
-            // array field is rendered by `Arrays.toString` first (interned in field order, before the
-            // bootstrap), so its argument type is `String` like any other value.
-            let mut recipe = String::new();
-            let mut arg_descs = String::new();
-            for (i, (name, desc)) in fields.iter().enumerate() {
-                recipe.push_str(&if i == 0 {
-                    format!("{simple}({name}=")
-                } else {
-                    format!(", {name}=")
-                });
-                recipe.push('\u{1}');
-                if desc.starts_with('[') {
-                    self.cp
-                        .methodref("java/util/Arrays", "toString", arrays_to_string_desc(desc));
-                    arg_descs.push_str("Ljava/lang/String;");
-                } else {
-                    arg_descs.push_str(desc);
-                }
-            }
-            recipe.push(')');
-            let recipe_idx = self.const_string(&recipe);
-            let mh = self.method_handle_static(
-                "java/lang/invoke/StringConcatFactory",
-                "makeConcatWithConstants",
-                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;\
-                 Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)\
-                 Ljava/lang/invoke/CallSite;",
-            );
-            let bsm = self.add_bootstrap(mh, vec![recipe_idx]);
-            self.invoke_dynamic(
-                bsm,
-                "makeConcatWithConstants",
-                &format!("({arg_descs})Ljava/lang/String;"),
-            );
-        } else {
-            self.cp
-                .methodref("java/lang/StringBuilder", "<init>", "()V");
-            for (i, (name, desc)) in fields.iter().enumerate() {
-                let prefix = if i == 0 {
-                    format!("{simple}({name}=")
-                } else {
-                    format!(", {name}=")
-                };
-                self.cp.string(&prefix);
-                self.cp.methodref(
-                    "java/lang/StringBuilder",
-                    "append",
-                    append_desc("Ljava/lang/String;"),
-                );
-                if desc.starts_with('[') {
-                    // An ARRAY field content-prints via `java.util.Arrays.toString`; its `String`
-                    // result reuses the `append(String)` methodref above.
-                    self.cp
-                        .methodref("java/util/Arrays", "toString", arrays_to_string_desc(desc));
-                } else {
-                    self.cp
-                        .methodref("java/lang/StringBuilder", "append", append_desc(desc));
-                }
-            }
-            self.cp.methodref(
-                "java/lang/StringBuilder",
-                "append",
-                "(C)Ljava/lang/StringBuilder;",
-            );
-            self.cp.methodref(
-                "java/lang/StringBuilder",
-                "toString",
-                "()Ljava/lang/String;",
-            );
-        }
-        // hashCode — kotlinc interns the method NAME and its `()I` descriptor together at method
-        // entry (both no-ops when an `Int` getter already interned them), then the per-field hash
-        // refs in body order: a primitive via its boxing class's static, an ARRAY via
-        // `java.util.Arrays.hashCode` (content hash — kotlinc's data-class shape), a BOXED nullable
-        // primitive via `Object.hashCode()` (its Kotlin type has no JVM class to name as owner),
-        // and any other reference via a virtual `hashCode()` on the field's own class. A nullable
-        // field's null guard is branches only — it interns nothing extra.
-        self.cp.utf8("hashCode");
-        self.cp.utf8("()I");
-        // The `Arrays.hashCode` overload for an array field descriptor.
-        let arrays_hash_desc = |d: &str| -> &'static str {
-            match d {
-                "[Z" => "([Z)I",
-                "[C" => "([C)I",
-                "[B" => "([B)I",
-                "[S" => "([S)I",
-                "[I" => "([I)I",
-                "[J" => "([J)I",
-                "[F" => "([F)I",
-                "[D" => "([D)I",
-                _ => "([Ljava/lang/Object;)I", // reference/nested arrays share the Object[] overload
-            }
-        };
-        // A boxed-primitive field (`Int?` → `Ljava/lang/Integer;`) dispatches `Object.hashCode()`.
-        let is_boxed_prim = |d: &str| {
-            matches!(
-                d,
-                "Ljava/lang/Integer;"
-                    | "Ljava/lang/Long;"
-                    | "Ljava/lang/Double;"
-                    | "Ljava/lang/Float;"
-                    | "Ljava/lang/Short;"
-                    | "Ljava/lang/Byte;"
-                    | "Ljava/lang/Character;"
-                    | "Ljava/lang/Boolean;"
-            )
-        };
-        for (i, (_, desc)) in fields.iter().enumerate() {
-            match hashcode_ref(desc) {
-                Some((cls, d)) => {
-                    self.cp.methodref(cls, "hashCode", d);
-                }
-                None if desc.starts_with('[') => {
-                    self.cp
-                        .methodref("java/util/Arrays", "hashCode", arrays_hash_desc(desc));
-                }
-                None if is_boxed_prim(desc) => {
-                    self.cp.methodref("java/lang/Object", "hashCode", "()I");
-                }
-                None if is_ref(desc) => {
-                    // The owner `field_hash` chose (interface/collection → `java/lang/Object`); fall back
-                    // to the descriptor's class when unrecorded (a concrete class owns its `hashCode`).
-                    let owner = info
-                        .hashcode_owners
-                        .get(i)
-                        .and_then(|o| o.as_deref())
-                        .unwrap_or(&desc[1..desc.len() - 1]);
-                    self.cp.methodref(owner, "hashCode", "()I");
-                }
-                None => {}
-            }
-        }
-        // A ≥2-field `hashCode` folds into a `result` accumulator local (kotlinc names it in the LVT,
-        // typed `I`); a single-field `hashCode` is a bare `return h(f0)` with no local. Intern the name
-        // and its descriptor here, right after the hash refs and before `equals`, to match kotlinc's
-        // first-use position.
-        if fields.len() >= 2 {
-            self.cp.utf8("result");
-            self.cp.utf8("I");
-        }
-        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's per-field
-        // comparison refs BEFORE the `other`/`Object` LVT names, in field order: a `Double`/`Float` field
-        // compares via the IEEE-aware `<Box>.compare` (so `NaN`/`-0.0` match kotlinc), a reference via
-        // `Intrinsics.areEqual`; the other primitives compare directly (`if_icmp*`/`lcmp`, no ref).
-        self.cp.utf8("equals");
-        self.cp.utf8("(Ljava/lang/Object;)Z");
-        if self.nullability_annotations {
-            self.cp.utf8(NULLABLE);
-        }
-        for (_, desc) in fields {
-            match desc.as_str() {
-                "D" => {
-                    self.cp.methodref("java/lang/Double", "compare", "(DD)I");
-                }
-                "F" => {
-                    self.cp.methodref("java/lang/Float", "compare", "(FF)I");
-                }
-                d if is_ref(d) => {
-                    self.cp.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "areEqual",
-                        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-                    );
-                }
-                _ => {}
-            }
-        }
-        self.cp.utf8("other");
-        self.cp.utf8("Ljava/lang/Object;");
-        // Each parameterized-type FIELD's `Signature` value, LATE — after every data-method entry, right
-        // before the class's `@Metadata` (kotlinc interns a data class's field signatures here, not with
-        // the field/accessors like a plain class).
-        for s in info.field_sigs.iter().flatten() {
-            self.cp.utf8(s);
         }
     }
 
@@ -2155,31 +1729,6 @@ impl ClassWriter {
         self.cp
             .lookup_string(s)
             .map(|i| if i <= 255 { 2 } else { 3 })
-    }
-
-    pub fn set_hashcode_result_debug(&mut self, this_desc: &str) {
-        let hn = self.cp.utf8("hashCode");
-        let hd = self.cp.utf8("()I");
-        let result_n = self.cp.utf8("result");
-        let result_d = self.cp.utf8("I");
-        let this_n = self.cp.utf8("this");
-        let this_d = self.cp.utf8(this_desc);
-        if let Some(m) = self
-            .methods
-            .iter_mut()
-            .find(|m| m.name == hn && m.desc == hd)
-        {
-            let start = m
-                .code
-                .as_deref()
-                .and_then(|c| first_store_end(c, 1))
-                .unwrap_or(0) as u16;
-            m.lnt = Vec::new();
-            m.lvt = vec![
-                (result_n, result_d, 1, Some(start), None),
-                (this_n, this_d, 0, None, None),
-            ];
-        }
     }
 
     pub fn finish(self) -> Vec<u8> {
@@ -2807,36 +2356,6 @@ fn u2(out: &mut Vec<u8>, v: u16) {
 fn u4(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
-
-/// The pc just past the FIRST store instruction that writes local `slot` — i.e. where a variable stored
-/// there becomes live. Walks the bytecode opcode-by-opcode via [`super::bytecode::instruction_len`] (so
-/// an operand byte that happens to equal a store opcode is skipped). `None` if no such store exists.
-/// Covers both the compact (`istore_1`) and indexed (`istore <slot>`, `wide istore <slot>`) store forms.
-fn first_store_end(code: &[u8], slot: u16) -> Option<usize> {
-    let mut pc = 0usize;
-    while pc < code.len() {
-        let op = code[pc];
-        let len = super::bytecode::instruction_len(code, pc)?;
-        let stored = match op {
-            // Indexed stores: `istore/lstore/fstore/dstore/astore <u1 index>`.
-            0x36..=0x3a => u16::from(code[pc + 1]) == slot,
-            // Compact stores: istore_0..3 (0x3b-0x3e), lstore_0..3 (0x3f-0x42), fstore_0..3 (0x43-0x46),
-            // dstore_0..3 (0x47-0x4a), astore_0..3 (0x4b-0x4e) — slot = (op - base) % 4.
-            0x3b..=0x4e => u16::from((op - 0x3b) % 4) == slot,
-            // Wide store: `wide <istore..astore> <u2 index>`.
-            0xc4 if matches!(code.get(pc + 1), Some(0x36..=0x3a)) => {
-                u16::from_be_bytes(code.get(pc + 2..pc + 4)?.try_into().ok()?) == slot
-            }
-            _ => false,
-        };
-        if stored {
-            return Some(pc + len);
-        }
-        pc += len;
-    }
-    None
-}
-
 /// Write a `Runtime[In]VisibleAnnotations` attribute: `name_index`, `length`, `num_annotations`, then
 /// the pre-encoded `annotation` structures. No-op when there are no annotations.
 fn write_annotation_attr(out: &mut Vec<u8>, name_index: Option<u16>, anns: &[Vec<u8>]) {

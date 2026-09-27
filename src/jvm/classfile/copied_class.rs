@@ -62,8 +62,6 @@ impl ClassWriter {
             const_value,
             visible_anns,
             invisible_anns,
-            pending_visible: Vec::new(),
-            pending_invisible: Vec::new(),
         });
         Ok(())
     }
