@@ -17,32 +17,57 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::anonymous_object::{MalformedType, TypeRemapper};
 use super::callee_shape::is_anonymous_class;
-use super::InlineError;
 use super::RegenerationError;
+use super::{InlineError, Lambda, Parameters};
 
 const NEW: u8 = 0xbb;
 const INVOKESPECIAL: u8 = 0xb7;
 
+/// An inline lambda one of an object's constructor arguments passes, which the copy inlines
+/// (kotlinc's `capturedLambdasToInline`).
+pub(crate) struct ObjectLambda<'a> {
+    /// The constructor argument it is passed as, by index.
+    pub argument: usize,
+    pub lambda: &'a Lambda,
+}
+
 /// Where the objects of one inlined call are regenerated.
 pub(crate) trait AnonymousObjects {
-    /// Regenerate `class`, which the body constructs through `constructor_desc`, for this call:
-    /// the copy's name and the descriptor of its constructor.
+    /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`:
+    /// the copy's name and the descriptor of its constructor. The copy takes each lambda's
+    /// captured values, in order, after the arguments that are not lambdas.
     fn regenerate(
         &mut self,
         class: &str,
         constructor_desc: &str,
+        lambdas: &[ObjectLambda<'_>],
     ) -> Result<(String, String), InlineError>;
+}
+
+/// A constructor call whose object takes lambdas: the call is completed once the lambdas' loads are
+/// gone ([`complete_constructor_calls`]), since until then the body passes them as the original
+/// constructor takes them.
+#[derive(Debug, PartialEq)]
+pub(super) struct PendingConstructor {
+    class: String,
+    desc: String,
+    captured_loads: Vec<Insn>,
 }
 
 /// Regenerate every anonymous object `node` constructs and rename the references to it. Each
 /// `new`, in instruction order as kotlinc visits them, takes a fresh copy; its own constructor
 /// call is renamed to that copy, and every other reference names the latest copy of its class.
+/// A constructor call that passes some of `lambdas` keeps its descriptor until
+/// [`complete_constructor_calls`].
 pub(super) fn regenerate_objects(
     node: &mut MethodNode,
+    parameters: &Parameters,
+    lambdas: &[Lambda],
     objects: &mut dyn AnonymousObjects,
-) -> Result<(), InlineError> {
-    let constructions = pair_constructions(node)?;
+) -> Result<Vec<PendingConstructor>, InlineError> {
+    let constructions = pair_constructions(node, parameters)?;
     let mut remapper = TypeRemapper::default();
+    let mut pending = Vec::new();
     // The copy and its constructor descriptor, by the index of the `new` that made it.
     let mut copies: HashMap<usize, (String, String)> = HashMap::new();
     for at in 0..node.nodes.len() {
@@ -53,8 +78,26 @@ pub(super) fn regenerate_objects(
             let Insn::Type { class, .. } = insn else {
                 unreachable!("a construction starts at a `new`")
             };
-            let (name, desc) =
-                objects.regenerate(class, &constructions.descriptors[&constructor])?;
+            let passed = &constructions.lambdas[&constructor];
+            let object_lambdas: Vec<ObjectLambda<'_>> = passed
+                .iter()
+                .map(|&(argument, lambda)| ObjectLambda {
+                    argument,
+                    lambda: &lambdas[lambda],
+                })
+                .collect();
+            let (name, desc) = objects.regenerate(
+                class,
+                &constructions.descriptors[&constructor],
+                &object_lambdas,
+            )?;
+            if !passed.is_empty() {
+                pending.push(PendingConstructor {
+                    class: name.clone(),
+                    desc: desc.clone(),
+                    captured_loads: captured_loads(parameters, lambdas, passed),
+                });
+            }
             remapper.add_mapping(class, &name);
             *class = name.clone();
             copies.insert(at, (name, desc));
@@ -64,7 +107,9 @@ pub(super) fn regenerate_objects(
             };
             let (name, new_desc) = &copies[new];
             *owner = name.clone();
-            *desc = new_desc.clone();
+            if constructions.lambdas[&at].is_empty() {
+                *desc = new_desc.clone();
+            }
         } else {
             remapper.remap_insn(insn).map_err(malformed)?;
         }
@@ -76,6 +121,57 @@ pub(super) fn regenerate_objects(
     }
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
+    }
+    Ok(pending)
+}
+
+/// The loads of every value the `passed` lambdas capture, from the body's captured parameters, in
+/// the order the copy's constructor takes them.
+fn captured_loads(
+    parameters: &Parameters,
+    lambdas: &[Lambda],
+    passed: &[(usize, usize)],
+) -> Vec<Insn> {
+    let mut loads = Vec::new();
+    for &(_, lambda) in passed {
+        for index in lambdas[lambda].captured.clone() {
+            let slot = parameters.real_size()
+                + parameters.captured[..index]
+                    .iter()
+                    .map(|parameter| parameter.category.words() as u16)
+                    .sum::<u16>();
+            loads.push(Insn::Var {
+                op: parameters.captured[index].category.load_op(),
+                slot,
+            });
+        }
+    }
+    loads
+}
+
+/// kotlinc's constructor call of a copy that inlines lambdas, once the lambdas' loads are gone:
+/// the lambdas' captured values are loaded in their place and the copy's own constructor is called.
+pub(super) fn complete_constructor_calls(
+    node: &mut MethodNode,
+    pending: Vec<PendingConstructor>,
+) -> Result<(), InlineError> {
+    for constructor in pending {
+        let at = node
+            .nodes
+            .iter()
+            .position(|entry| {
+                matches!(entry, Node::Insn(Insn::Method { op: INVOKESPECIAL, owner, name, .. })
+                    if name == "<init>" && *owner == constructor.class)
+            })
+            .ok_or(InlineError::UnpairedAnonymousObject)?;
+        let Node::Insn(Insn::Method { desc, .. }) = &mut node.nodes[at] else {
+            unreachable!("the position is a constructor call");
+        };
+        *desc = constructor.desc;
+        node.nodes.splice(
+            at..at,
+            constructor.captured_loads.into_iter().map(Node::Insn),
+        );
     }
     Ok(())
 }
@@ -90,17 +186,24 @@ struct Constructions {
     by_constructor: HashMap<usize, usize>,
     /// The descriptor each constructor call is made through.
     descriptors: HashMap<usize, String>,
+    /// The inline lambdas each constructor call passes, as `(argument, lambda)`.
+    lambdas: HashMap<usize, Vec<(usize, usize)>>,
 }
 
 /// Pair every reachable anonymous `new` in `node` with the one `<init>` call whose receiver is the
 /// value it pushed. A constructor call whose receiver may come from another `new` (or none), a
-/// `new` initialized by two calls, and a `new` no call initializes are all refused.
-fn pair_constructions(node: &MethodNode) -> Result<Constructions, InlineError> {
+/// `new` initialized by two calls, and a `new` no call initializes are all refused, as is a lambda
+/// passed to one constructor twice.
+fn pair_constructions(
+    node: &MethodNode,
+    parameters: &Parameters,
+) -> Result<Constructions, InlineError> {
     let unpaired = || InlineError::UnpairedAnonymousObject;
     let mut constructions = Constructions {
         by_new: HashMap::new(),
         by_constructor: HashMap::new(),
         descriptors: HashMap::new(),
+        lambdas: HashMap::new(),
     };
     let constructs = node.instructions().any(|insn| {
         matches!(insn, Insn::Type { op: NEW, class } if is_anonymous_class(class))
@@ -118,7 +221,7 @@ fn pair_constructions(node: &MethodNode) -> Result<Constructions, InlineError> {
     let frames = analyze_with(
         node,
         "fake",
-        &mut ConstructionInterpreter,
+        &mut ConstructionInterpreter { parameters },
         &mut PlainFrames,
         options,
     )
@@ -157,8 +260,18 @@ fn pair_constructions(node: &MethodNode) -> Result<Constructions, InlineError> {
                 if constructions.by_new.insert(new, at).is_some() {
                     return Err(unpaired());
                 }
+                let mut passed: Vec<(usize, usize)> = Vec::new();
+                for (argument, value) in stack[stack.len() - arguments..].iter().enumerate() {
+                    if let ConstructionValue::Lambda(lambda, _) = value {
+                        if passed.iter().any(|&(_, known)| known == *lambda) {
+                            return Err(InlineError::LambdaParameterAccess);
+                        }
+                        passed.push((argument, *lambda));
+                    }
+                }
                 constructions.by_constructor.insert(at, new);
                 constructions.descriptors.insert(at, desc.clone());
+                constructions.lambdas.insert(at, passed);
             }
             _ => {}
         }
@@ -169,18 +282,22 @@ fn pair_constructions(node: &MethodNode) -> Result<Constructions, InlineError> {
     Ok(constructions)
 }
 
-/// A value of the body: a plain value, or the uninitialized result of one of the anonymous
-/// `new`s at these indices (more than one only where paths from different `new`s join).
+/// A value of the body: a plain value, the uninitialized result of one of the anonymous `new`s at
+/// these indices (more than one only where paths from different `new`s join), or one of the call's
+/// inline lambdas.
 #[derive(Clone, Debug, PartialEq)]
 enum ConstructionValue {
     Basic(BasicValue),
     Uninitialized(BTreeSet<usize>, BasicValue),
+    Lambda(usize, BasicValue),
 }
 
 impl ConstructionValue {
     fn basic(&self) -> &BasicValue {
         match self {
-            ConstructionValue::Basic(value) | ConstructionValue::Uninitialized(_, value) => value,
+            ConstructionValue::Basic(value)
+            | ConstructionValue::Uninitialized(_, value)
+            | ConstructionValue::Lambda(_, value) => value,
         }
     }
 }
@@ -195,10 +312,13 @@ fn plain(value: Option<BasicValue>) -> Option<ConstructionValue> {
     value.map(ConstructionValue::Basic)
 }
 
-/// A `BasicInterpreter` that follows each anonymous `new`'s value through copies.
-struct ConstructionInterpreter;
+/// A `BasicInterpreter` that follows each anonymous `new`'s value and each inline lambda through
+/// copies.
+struct ConstructionInterpreter<'a> {
+    parameters: &'a Parameters,
+}
 
-impl Interpreter for ConstructionInterpreter {
+impl Interpreter for ConstructionInterpreter<'_> {
     type V = ConstructionValue;
 
     fn new_value(&mut self, ty: Option<&str>) -> Option<ConstructionValue> {
@@ -206,7 +326,11 @@ impl Interpreter for ConstructionInterpreter {
     }
 
     fn new_parameter_value(&mut self, slot: usize, ty: &str) -> ConstructionValue {
-        ConstructionValue::Basic(BasicInterpreter.new_parameter_value(slot, ty))
+        let value = BasicInterpreter.new_parameter_value(slot, ty);
+        match self.parameters.lambda_at(slot) {
+            Some(lambda) => ConstructionValue::Lambda(lambda, value),
+            None => ConstructionValue::Basic(value),
+        }
     }
 
     fn new_operation(&mut self, at: &At) -> Result<ConstructionValue, AnalyzerError> {
@@ -292,6 +416,11 @@ impl Interpreter for ConstructionInterpreter {
                 ConstructionValue::Uninitialized(first, _),
                 ConstructionValue::Uninitialized(second, _),
             ) => ConstructionValue::Uninitialized(first | second, basic),
+            (ConstructionValue::Lambda(first, _), ConstructionValue::Lambda(second, _))
+                if first == second =>
+            {
+                ConstructionValue::Lambda(*first, basic)
+            }
             _ => ConstructionValue::Basic(basic),
         }
     }

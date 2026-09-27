@@ -38,12 +38,12 @@ use crate::jvm::method_node::{Insn, MethodNode, Node, ShapeError};
 
 pub(crate) use anonymous_object::{regenerate, CallSite, Regeneration, RegenerationError};
 pub(crate) use callee_shape::{
-    can_inline_arguments_in_place, requires_empty_stack_on_entry, unsupported_shape,
-    ObjectRegeneration, UnsupportedShape,
+    can_inline_arguments_in_place, constructs_anonymous_object, requires_empty_stack_on_entry,
+    unsupported_shape, UnsupportedShape,
 };
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
-pub(crate) use object_regeneration::AnonymousObjects;
+pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda};
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(in crate::jvm) use reified::has_reified_markers;
 
@@ -56,7 +56,9 @@ pub(crate) enum InlineError {
     MixedReturns,
     /// A parameter null check is not the `aload; ldc; invokestatic` triple kotlinc writes.
     MalformedNullCheck,
-    /// An `iinc` names a parameter that lives in a caller local of another kind.
+    /// The body writes a captured value a regenerated object keeps in a field.
+    StoreToCapturedField,
+    /// An `iinc` names a parameter that lives in a caller local of another kind, or in a field.
     IncrementOfCallerValue,
     /// A reified marker did not have kotlinc's exact operation/name/call shape.
     MalformedReifiedMarker,
@@ -104,12 +106,15 @@ pub(in crate::jvm) fn inline(
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    object_regeneration::regenerate_objects(&mut node, call.objects)?;
+    let constructors =
+        object_regeneration::regenerate_objects(&mut node, parameters, lambdas, call.objects)?;
     let invokes = functional_arguments::mark_places(&mut node, parameters)?;
+    object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {
         parameters,
         lambdas,
         inline_only,
+        inline_markers: false,
     };
     let mut node = lambda_expansion::expand(&node, &context, invokes, call.lines)?;
     preparation::remove_closure_assertions(&mut node)?;

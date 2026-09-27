@@ -134,6 +134,49 @@ impl Emitter<'_> {
         None
     }
 
+    /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
+    /// captured values and names, with a body that only returns; and the caller values it captures.
+    pub(super) fn lambda_shape(&self, argument: u32) -> (inliner::Lambda, Vec<(u32, Ty)>) {
+        let (lambda, _) = self.literal_lambda(argument);
+        let parameter_types: Vec<String> = lambda
+            .parameter_types
+            .iter()
+            .map(|&ty| type_descriptor(ty))
+            .collect();
+        let descriptor = format!(
+            "({}{})V",
+            parameter_types.concat(),
+            lambda
+                .capture_types
+                .iter()
+                .map(|&ty| type_descriptor(ty))
+                .collect::<String>(),
+        );
+        let mut node = MethodNode::new(ACC_STATIC, "invoke", &descriptor);
+        node.max_locals = lambda
+            .parameter_types
+            .iter()
+            .chain(&lambda.capture_types)
+            .map(|&ty| slot_words(ty))
+            .sum();
+        let start = node.new_label();
+        node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
+        let shape = inliner::Lambda {
+            node,
+            parameter_types,
+            return_type: "V".to_string(),
+            captured: 0..0,
+            capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
+        };
+        let captures = lambda
+            .captures
+            .iter()
+            .copied()
+            .zip(lambda.capture_types.iter().copied())
+            .collect();
+        (shape, captures)
+    }
+
     /// Whether every value the lambda `argument` captures is a caller local the inlined body can
     /// read as it is: kotlinc binds a capture to the caller's slot only without a cast.
     pub(super) fn lambda_captures_caller_locals(&self, argument: u32) -> bool {
@@ -297,6 +340,7 @@ impl Emitter<'_> {
                     .collect(),
                 return_type,
                 captured: 0..0,
+                capture_names: self.capture_names(impl_fn, captures.len()),
             },
             captures: captures
                 .iter()
@@ -304,6 +348,23 @@ impl Emitter<'_> {
                 .zip(capture_types.iter().copied())
                 .collect(),
         })
+    }
+
+    /// The names kotlinc's `capturedVars` give the lambda `impl_fn`'s first `count` parameters, its
+    /// captured values: `$x` for a captured local `x`. A captured receiver is not named yet.
+    fn capture_names(&self, impl_fn: u32, count: usize) -> Vec<Option<String>> {
+        let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+        (0..count)
+            .map(|index| {
+                let identity = identities?.get(index)?;
+                match identity.role {
+                    crate::ir::IrParameterRole::CapturedValue { .. } => {
+                        Some(format!("${}", identity.source_name.as_ref()?))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// Whether `root`'s subtree holds one of the current function's suspension points.

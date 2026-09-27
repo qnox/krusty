@@ -8,13 +8,16 @@
 //! still names the original's source. Its members are written in the order the transformer visits
 //! them, which is what fixes the order of the copy's constant pool.
 //!
-//! This stage copies objects none of whose constructor arguments is an inline lambda and whose
-//! bodies create no anonymous object of their own; an object capturing a `crossinline` lambda,
-//! whose body the copy inlines, is the next stage (see "JVM unified inliner" in
-//! `docs/IMPLEMENTATION_PLAN.md`).
+//! An object whose constructor is passed one of the call's inline lambdas (a `crossinline` one)
+//! inlines it: the copy keeps the lambda's captured values instead of the lambda, and each of its
+//! methods that called the lambda runs the lambda's body in its place (see `lambda_inlining`).
+//! Objects whose bodies create anonymous objects of their own are a later stage (see "JVM unified
+//! inliner" in `docs/IMPLEMENTATION_PLAN.md`).
 
 mod constructor;
 use constructor::DeclaredCapture;
+mod lambda_inlining;
+use lambda_inlining::FieldLambda;
 mod type_remapper;
 
 use std::collections::HashMap;
@@ -25,6 +28,8 @@ use crate::jvm::metadata::anonymous_origin::{record_origin_name, MetadataStrings
 use crate::jvm::metadata::MetadataDecodeError;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 use crate::jvm::source_map::{DependencyMap, SourceMap};
+
+use super::{InlineError, ObjectLambda};
 
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
@@ -57,6 +62,10 @@ pub(crate) enum RegenerationError {
     Metadata(MetadataDecodeError),
     /// A descriptor or signature of the original does not parse.
     Malformed(MalformedType),
+    /// A lambda could not be inlined into a method of the copy.
+    Inlining(Box<InlineError>),
+    /// The stack a lambda was inlined over could not be saved around it.
+    FixStack(crate::jvm::bytecode_passes::fix_stack::FixStackError),
 }
 
 impl From<MalformedType> for RegenerationError {
@@ -89,6 +98,10 @@ pub(crate) struct Regeneration<'a> {
     pub major: u16,
     /// The `@Metadata` version the caller writes.
     pub metadata_version: &'a [i32],
+    /// The call's inline lambdas the constructor call passes, which the copy inlines.
+    pub lambdas: &'a [ObjectLambda<'a>],
+    /// The caller's source map, which the lambdas' lines are lines of.
+    pub caller_lines: &'a SourceMap,
 }
 
 /// The regenerated class.
@@ -208,12 +221,13 @@ pub(crate) fn regenerate(
             desc: &field.desc,
         })
         .collect();
-    let plan = constructor::extract(
+    let mut plan = constructor::extract(
         constructor_code,
         old,
         &declared,
         regeneration.constructor_desc,
     )?;
+    let lambdas = plan_lambdas(&mut plan, regeneration)?;
     // `generateConstructorAndFields`: the constructor is declared, then each captured field, then
     // the constructor's body is written.
     cw.seed_utf8("<init>");
@@ -252,32 +266,26 @@ pub(crate) fn regenerate(
     for method in methods {
         let mut method = method.clone();
         check_captured_field_accesses(&method, old, &declared)?;
-        method.desc = remapper.map_desc(&method.desc)?;
-        method.signature = method
-            .signature
-            .map(|s| remapper.map_signature(&s))
-            .transpose()?;
-        for annotation in method
-            .visible_annotations
-            .iter_mut()
-            .chain(&mut method.invisible_annotations)
-            .chain(
-                method
-                    .visible_parameter_annotations
-                    .iter_mut()
-                    .flatten()
-                    .flatten(),
-            )
-            .chain(
-                method
-                    .invisible_parameter_annotations
-                    .iter_mut()
-                    .flatten()
-                    .flatten(),
-            )
+        if let Some(code) = method
+            .code
+            .as_ref()
+            .filter(|code| lambda_inlining::reads_lambda(code, &lambdas))
         {
-            remapper.remap_annotation(annotation)?;
+            let mut code = code.clone();
+            remap_declaration(&mut method, &mut remapper)?;
+            remapper.remap_method(&mut code)?;
+            method.code = Some(lambda_inlining::inline_into(
+                &code,
+                new,
+                &lambdas,
+                &mut lines,
+                regeneration.caller_lines,
+            )?);
+            cw.add_copied_method(&method)
+                .map_err(RegenerationError::Copy)?;
+            continue;
         }
+        remap_declaration(&mut method, &mut remapper)?;
         if let Some(code) = &method.code {
             method.code = Some(copy_body(code, &remapper, &mut lines)?);
         }
@@ -323,6 +331,102 @@ pub(crate) fn regenerate(
         bytes: cw.finish(),
         constructor_desc: plan.desc,
     })
+}
+
+/// A method's descriptor, signature and annotations as the copy declares them.
+fn remap_declaration(
+    method: &mut ClassMethod,
+    remapper: &mut TypeRemapper,
+) -> Result<(), RegenerationError> {
+    method.desc = remapper.map_desc(&method.desc)?;
+    method.signature = method
+        .signature
+        .take()
+        .map(|s| remapper.map_signature(&s))
+        .transpose()?;
+    for annotation in method
+        .visible_annotations
+        .iter_mut()
+        .chain(&mut method.invisible_annotations)
+        .chain(
+            method
+                .visible_parameter_annotations
+                .iter_mut()
+                .flatten()
+                .flatten(),
+        )
+        .chain(
+            method
+                .invisible_parameter_annotations
+                .iter_mut()
+                .flatten()
+                .flatten(),
+        )
+    {
+        remapper.remap_annotation(annotation)?;
+    }
+    Ok(())
+}
+
+/// The lambdas the copy inlines, each with the original's field for it and the copy's fields for
+/// its captured values, which `plan` now takes in the lambdas' place
+/// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
+/// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`).
+fn plan_lambdas<'a>(
+    plan: &mut constructor::Constructor,
+    regeneration: &Regeneration<'a>,
+) -> Result<Vec<FieldLambda<'a>>, RegenerationError> {
+    if regeneration.lambdas.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut taken: HashMap<String, usize> = HashMap::new();
+    let mut lambdas = Vec::with_capacity(regeneration.lambdas.len());
+    for passed in regeneration.lambdas {
+        let types = passed
+            .lambda
+            .captured_types()
+            .ok_or(RegenerationError::Unsupported(
+                "a malformed lambda descriptor",
+            ))?;
+        if types.len() != passed.lambda.capture_names.len() {
+            return Err(RegenerationError::Unsupported(
+                "a lambda whose captured values are not all named",
+            ));
+        }
+        let mut captured = Vec::with_capacity(types.len());
+        for (name, desc) in passed.lambda.capture_names.iter().zip(types) {
+            let name = name.as_deref().ok_or(RegenerationError::Unsupported(
+                "a lambda capturing a value the port does not name",
+            ))?;
+            let base = format!("{name}$inlined");
+            let seen = taken.entry(base.clone()).or_default();
+            let unique = match *seen {
+                0 => base,
+                count => format!("{base}${count}"),
+            };
+            *seen += 1;
+            captured.push((unique, desc));
+        }
+        lambdas.push(FieldLambda {
+            field: String::new(),
+            lambda: passed.lambda,
+            captured,
+        });
+    }
+    let arguments: Vec<usize> = regeneration
+        .lambdas
+        .iter()
+        .map(|passed| passed.argument)
+        .collect();
+    let recaptured: Vec<(String, String)> = lambdas
+        .iter()
+        .flat_map(|lambda| lambda.captured.iter().cloned())
+        .collect();
+    let fields = plan.inline_lambdas(regeneration.constructor_desc, &arguments, &recaptured)?;
+    for (lambda, field) in lambdas.iter_mut().zip(fields) {
+        lambda.field = field;
+    }
+    Ok(lambdas)
 }
 
 /// Refuse what the ported stages do not regenerate yet.

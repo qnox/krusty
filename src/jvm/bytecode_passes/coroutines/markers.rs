@@ -41,7 +41,6 @@ pub(crate) fn mark(marker: SuspendMarker) -> Vec<Node> {
 }
 
 /// A call of `InlineMarker.beforeInlineCall` or `afterInlineCall`.
-#[cfg(test)]
 pub(crate) fn inline_call_marker(before: bool) -> Node {
     Node::Insn(Insn::Method {
         op: INVOKESTATIC,

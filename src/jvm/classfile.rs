@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod annotation_values;
 pub(crate) mod bytecode_analysis;
+mod checkpoint;
 mod codegen_markers;
 mod constant_pool_queries;
 mod control_flow;

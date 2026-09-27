@@ -27,28 +27,14 @@ pub(crate) enum UnsupportedShape {
     ClassReification,
 }
 
-/// Whether the call site regenerates the anonymous objects a body constructs, or declines them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ObjectRegeneration {
-    Regenerated,
-    Declined,
-}
-
-/// The first shape in `callee` that needs a later stage of the port, if any. An anonymous object
-/// the body constructs needs one unless the call site regenerates it.
-pub(crate) fn unsupported_shape(
-    callee: &MethodNode,
-    objects: ObjectRegeneration,
-) -> Option<UnsupportedShape> {
-    let regenerated = |class: &str| {
-        is_sam_wrapper(class)
-            || (is_anonymous_class(class) && objects == ObjectRegeneration::Declined)
-    };
+/// The first shape in `callee` that needs a later stage of the port, if any. The anonymous objects
+/// the body constructs are regenerated for the call site; a SAM wrapper is not yet.
+pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
     callee.instructions().find_map(|insn| match insn {
-        Insn::Type { op: NEW, class } if regenerated(class) => {
+        Insn::Type { op: NEW, class } if is_sam_wrapper(class) => {
             Some(UnsupportedShape::AnonymousObject)
         }
-        Insn::Method { name, owner, .. } if name == "<init>" && regenerated(owner) => {
+        Insn::Method { name, owner, .. } if name == "<init>" && is_sam_wrapper(owner) => {
             Some(UnsupportedShape::AnonymousObject)
         }
         Insn::Field {
@@ -99,6 +85,13 @@ pub(super) fn is_anonymous_class(internal: &str) -> bool {
     simple
         .rsplit_once('$')
         .is_some_and(|(_, suffix)| suffix.parse::<i32>().is_ok())
+}
+
+/// Whether `callee` constructs an anonymous object, which the call site regenerates.
+pub(crate) fn constructs_anonymous_object(callee: &MethodNode) -> bool {
+    callee
+        .instructions()
+        .any(|insn| matches!(insn, Insn::Type { op: NEW, class } if is_anonymous_class(class)))
 }
 
 /// kotlinc's `isSamWrapper`, current and pre-1.2.30 templates alike.
