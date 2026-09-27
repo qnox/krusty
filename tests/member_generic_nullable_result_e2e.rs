@@ -192,8 +192,8 @@ class Probe {{\n\
         (
             1,
             format!(
-                "{krusty_path}:6:48: error: type mismatch: inferred type is Status? but Status was \
-                 expected\nkrusty: 1 error(s)\n"
+                "{krusty_path}:6:50: error: return type mismatch: expected 'Status', actual \
+                 'Status?'.\nkrusty: 1 error(s)\n"
             )
             .as_str()
         )

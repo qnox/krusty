@@ -397,14 +397,14 @@ fn incomparable_literal_overloads_are_ambiguous() {
     let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
     assert_eq!(
         diagnostics,
-        ["type mismatch: inferred type is String but Int was expected"],
+        ["return type mismatch: expected 'Int', actual 'String'."],
         "the lambda body, not the call, is what disagrees"
     );
     let source = "import fixtures.NumericApi\nfun f(): String = NumericApi.supplyText { 1 }\n";
     let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
     assert_eq!(
         diagnostics,
-        ["type mismatch: inferred type is Int but String! was expected"],
+        ["return type mismatch: expected 'String!', actual 'Int'."],
         "the lambda body, not the call, is what disagrees"
     );
     let _ = std::fs::remove_dir_all(temp_root);

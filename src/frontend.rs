@@ -13,6 +13,7 @@ use crate::plugins::registry::NativePlugins;
 mod header_validation;
 mod inline_preparation;
 mod local_class_names;
+pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
 mod no_expect_for_actual;
 mod retained_syntax;
@@ -1544,6 +1545,8 @@ fn record_local_class_name_provenance_with_counters(
             .into_iter()
             .map(|(expression, provenance)| (expression.0, provenance)),
     );
+    file.generated_class_sequence_starts
+        .extend(invented.sequence_starts);
 }
 
 #[cfg(test)]

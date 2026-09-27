@@ -67,10 +67,21 @@ impl Shape {
             .parameters
             .iter()
             .enumerate()
-            .map(|(index, &(ty, stored))| Parameter {
-                semantic: signature.params.get(index).copied().unwrap_or(ty),
-                physical: jvm_declared_ty(&ty),
-                field: stored.map(field),
+            .map(|(index, &(ty, stored))| {
+                // A parameter never has a `void` type: a `Unit` one is the `Unit` object.
+                let [physical] = jvm_tys(&[ty])[..] else {
+                    unreachable!("one type maps to one JVM type")
+                };
+                let semantic = signature.params.get(index).copied().unwrap_or(ty);
+                Parameter {
+                    semantic: if semantic == Ty::Unit {
+                        physical
+                    } else {
+                        semantic
+                    },
+                    physical,
+                    field: stored.map(field),
+                }
             })
             .collect::<Vec<_>>();
         Shape {
@@ -181,6 +192,7 @@ pub(super) fn emit_suspend_lambda_class(
     emit_method(
         ir,
         lambda.invoke_suspend,
+        StaticOwner::Class(c.fq_name),
         &shape.class,
         facade,
         &mut cw,
@@ -202,8 +214,46 @@ pub(super) fn emit_suspend_lambda_class(
     emit_invoke(&mut cw, &formatter, &shape, &result);
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
-    cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &[], &[]);
+    let (d1, d2) = lambda_metadata(ir, lambda);
+    cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &d1, &d2);
     env.run.finish_class(cw)
+}
+
+/// The lambda's function, which kotlinc records in the class's `@Metadata` for reflection: its
+/// receiver, value parameters and result, without its context parameters.
+fn lambda_metadata(ir: &IrFile, lambda: &SuspendLambdaClass) -> (Vec<String>, Vec<String>) {
+    let Ty::Fun(signature) = lambda.function_type.non_null() else {
+        unreachable!("a suspend lambda has a function type")
+    };
+    let own = &signature.params[signature.context_count..];
+    let (receiver, values) = match signature.has_receiver {
+        true => (Some(own[0]), &own[1..]),
+        false => (None, own),
+    };
+    assert_eq!(
+        values.len(),
+        lambda.metadata_names.len(),
+        "a suspend lambda names each value parameter of its function type"
+    );
+    let parameters: Vec<(&str, Ty)> = lambda
+        .metadata_names
+        .iter()
+        .map(String::as_str)
+        .zip(values.iter().copied())
+        .collect();
+    let local_classifiers = crate::jvm::local_classifiers::names(ir);
+    let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let (bytes, strings) = crate::metadata::lambda_function::build(
+        &crate::metadata::lambda_function::LambdaFunction {
+            receiver,
+            parameters: &parameters,
+            result: signature.ret,
+            type_parameters: &lambda.type_parameters,
+            local_classifiers: &local_classifiers,
+            enum_entry_bodies: &enum_entry_bodies,
+        },
+    );
+    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.

@@ -244,6 +244,8 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     match (sub, sup) {
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.params.len() == b.params.len()
+                // A `suspend` function is never a regular one: nothing converts that way.
+                && (!a.suspend || b.suspend)
                 // Parameters are CONTRAVARIANT: the supertype function's parameter must be assignable to
                 // the subtype's (a function taking `Any` is-a function taking `String`).
                 && a.params

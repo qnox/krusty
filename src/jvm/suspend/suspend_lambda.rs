@@ -19,7 +19,10 @@ use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed,
 use super::cps::{
     SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, TransformedMachine,
 };
-use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
+use super::{
+    append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty,
+    rewrite_current_continuation,
+};
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
@@ -48,6 +51,9 @@ struct Parameter {
     ty: Ty,
     /// The local-variable name its read-back takes.
     name: Option<String>,
+    /// The name Kotlin metadata records, for a value parameter: neither the receiver nor a
+    /// context parameter.
+    metadata_name: Option<String>,
     /// The field it is kept in, when the body reads it.
     field: Option<SpillName>,
 }
@@ -112,6 +118,8 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
             };
         }
     }
+    // The lambda is its own continuation: `coroutineContext` reads `this`'s context.
+    rewrite_current_continuation(ir, body, 0);
     let parameter_reads = read_parameters(ir, class, body, first_parameter, &captures, &parameters);
     for suspension in &suspensions {
         // The lambda is the continuation its suspension points pass on.
@@ -196,6 +204,11 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
                     (parameter.ty, field)
                 })
                 .collect(),
+            metadata_names: parameters
+                .iter()
+                .filter_map(|parameter| parameter.metadata_name.clone())
+                .collect(),
+            type_parameters: ir.lambda_type_parameters(fid).to_vec(),
         },
     );
     route.machines.record_transformed(
@@ -212,16 +225,53 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
     Routed::Taken
 }
 
+/// `fids` with every lambda before the function whose body declares it, and otherwise in their
+/// order. An enclosing body is reshaped when its own machine is built, which can copy the lambda
+/// node that builds a nested lambda's value; realizing the nested lambda's class first leaves one
+/// node to replace, and the enclosing body then builds an ordinary object.
+pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
+    let mut enclosing = std::collections::HashMap::new();
+    for (function, declaration) in ir.functions.iter().enumerate() {
+        let Some(body) = declaration.body else {
+            continue;
+        };
+        for expression in crate::ir::value_namespace_expressions(ir, body) {
+            if let IrExpr::Lambda { impl_fn, .. } = ir.exprs[expression as usize] {
+                enclosing.entry(impl_fn).or_insert(function as u32);
+            }
+        }
+    }
+    let depth = |mut fid: u32| {
+        let mut depth = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(&outer) = enclosing.get(&fid) {
+            if !seen.insert(outer) {
+                break;
+            }
+            depth += 1;
+            fid = outer;
+        }
+        depth
+    };
+    let mut ordered = fids;
+    ordered.sort_by_key(|&fid| std::cmp::Reverse(depth(fid)));
+    ordered
+}
+
 /// The one expression that builds `fid`'s lambda value, when the lambda compiles to a class of its
 /// own: a plain Kotlin function value the source's naming walk named, not one an inline call's
 /// splice consumes.
 fn site(ir: &IrFile, fid: u32) -> Option<Site> {
-    let mut sites = ir.exprs.iter().enumerate().filter(
-        |(_, expression)| matches!(expression, IrExpr::Lambda { impl_fn, .. } if *impl_fn == fid),
-    );
-    let (Some((node, lambda)), None) = (sites.next(), sites.next()) else {
+    let mut sites = reachable_lambdas(ir, fid).into_iter();
+    let (Some(node), None) = (sites.next(), sites.next()) else {
+        crate::trace_compiler!(
+            "suspend",
+            "suspend lambda fid={fid}: reachable lambda nodes {:?}",
+            reachable_lambdas(ir, fid)
+        );
         return None;
     };
+    let lambda = &ir.exprs[node as usize];
     let IrExpr::Lambda {
         arity,
         captures,
@@ -231,7 +281,6 @@ fn site(ir: &IrFile, fid: u32) -> Option<Site> {
     else {
         return None;
     };
-    let node = ExprId::try_from(node).ok()?;
     let class = crate::jvm::local_class_names::callable_reference_name(ir, node)?;
     let function_type = ir.logical_types.get(&node).copied()?;
     let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
@@ -241,6 +290,24 @@ fn site(ir: &IrFile, fid: u32) -> Option<Site> {
         function_type,
         captures: captures.clone(),
     })
+}
+
+/// The `Lambda` nodes building `fid`'s value that some function body still reaches. Earlier
+/// passes rebuild a body into fresh nodes and leave the old ones behind in the arena, so a node
+/// that no body reaches builds no value.
+fn reachable_lambdas(ir: &IrFile, fid: u32) -> Vec<ExprId> {
+    let mut nodes = ir
+        .functions
+        .iter()
+        .filter_map(|function| function.body)
+        .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
+        .filter(|&node| {
+            matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
 }
 
 /// Whether the body declares a lambda or local function of its own. Its lifted function would have
@@ -330,7 +397,14 @@ fn layout(
         let receiver = identity.role == IrParameterRole::ExtensionReceiver;
         let name = match (&identity.source_name, receiver) {
             (Some(name), _) => Some(name.clone()),
-            (None, true) => Some("<this>".to_string()),
+            (None, true) => Some(crate::jvm::parameter_names::lambda_receiver(
+                ir.lambda_origins
+                    .get(&fid)
+                    .expect("a suspend lambda class is a source lambda's"),
+            )),
+            (None, false) if identity.role == IrParameterRole::DestructuredValue => {
+                Some(crate::jvm::parameter_names::DESTRUCTURED.to_string())
+            }
             (None, false) => None,
         };
         let field = if read(parameter) {
@@ -354,7 +428,25 @@ fn layout(
         } else {
             None
         };
-        parameters.push(Parameter { ty, name, field });
+        let value_parameter = !matches!(
+            identity.role,
+            IrParameterRole::ExtensionReceiver
+                | IrParameterRole::ContextValue
+                | IrParameterRole::AnonymousContextParameter { .. }
+                | IrParameterRole::ContextReceiver { .. }
+        );
+        // A value parameter no declaration names (a destructuring one) has no metadata name to
+        // record yet, so the lambda keeps the IR machine.
+        let metadata_name = match value_parameter {
+            true => Some(crate::jvm::parameter_names::metadata(identity)?.to_owned()),
+            false => None,
+        };
+        parameters.push(Parameter {
+            ty,
+            name,
+            metadata_name,
+            field,
+        });
     }
     Some((captures, parameters))
 }

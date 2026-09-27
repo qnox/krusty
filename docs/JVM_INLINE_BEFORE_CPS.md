@@ -153,11 +153,29 @@ Known gaps, both byte differences in the function's own method (the continuation
   A call to a same-file member suspend function is a plain call, whether its receiver is explicit,
   `this`, or the lambda's own extension receiver. Invoking a suspend function value is not a plain
   call yet. The rest keep the lifted function with an IR-machine continuation.
-* A receiver lambda passed straight to a call names its receiver local after the call's label,
-  `$this$builder` for `builder { … }`; krusty still writes `<this>`, which is right only for a lambda
-  that is not a call argument.
+* A lambda with no suspension point is taken too: kotlinc's transformer still builds its
+  single-state `tableswitch`. Its site is the one `Lambda` node a function body reaches; the
+  arena keeps stale copies a body rebuild left behind, which name no site. Lambdas are taken
+  innermost first, so an enclosing lambda sees a nested class already built as an object. One
+  whose nested lambda stays a plain lambda (too wide for a numbered function type) still keeps
+  its lifted function, and that plain lambda's class takes the naming walk's name where it
+  nests (`Kt$box$1$1`), never a sibling's.
+* The lambda is its own continuation: `coroutineContext` in its body is `this.getContext()`, and
+  a `Unit` parameter (a `suspend Unit.() -> Unit` receiver) is the `Unit` object in `invoke`.
+* A receiver lambda names its receiver local `$this$<label>` after kotlinc's label of the literal
+  (`$this$builder` for `builder { … }`), and `<this>` when it has none. The parser records that
+  label as kotlinc's raw-FIR builder assigns it; `docs/SPEC.md` has the rule.
 
-Known gaps: the class's `@Metadata` has no lambda `d1`/`d2`, the pool interns the transformer's
+The class's `@Metadata` records the lambda's function as kotlinc does: `<anonymous>`, local
+visibility, its receiver, each value parameter under its source name (`_` as `<unused var>`, a
+destructuring one as `<destruct>`, which the body also reads back into a local of that name), and
+its result, but no context parameters. The type parameters its result, receiver and value
+parameters name become the function's own, numbered in that order of first use, named in its
+types and written with their bounds and variance; one that only a bound names keeps an id after
+them. Lowering records their declarations for each suspend lambda
+(`IrFile::lambda_type_parameters`), and a local classifier is written by its local class id.
+
+Known gaps: the pool interns the transformer's
 constants last (as for named functions), and a local declared in the lambda's body ends its range
 before the final `areturn` (the body lowers as `return <block>`; plain lambdas share this).
 

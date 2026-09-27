@@ -12,7 +12,8 @@ use super::{
     CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::IrFile;
-use crate::types::Ty;
+use crate::jvm::private_static_access::StaticOwner;
+use crate::types::{Ty, TypeName};
 
 /// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for a class whose
 /// primary constructor has defaulted parameters. Unlike a `$default` method this is a CONSTRUCTOR: `this`
@@ -23,6 +24,7 @@ use crate::types::Ty;
 pub(super) fn emit_ctor_default_stub(
     ir: &IrFile,
     owner: &str,
+    owner_identity: TypeName,
     facade: &str,
     real_params: &[Ty],
     defaults: &[Option<u32>],
@@ -36,6 +38,7 @@ pub(super) fn emit_ctor_default_stub(
     emit_ctor_default_stub_with_prefix(
         ir,
         owner,
+        owner_identity,
         facade,
         &[],
         0,
@@ -57,6 +60,7 @@ pub(super) fn emit_ctor_default_stub(
 pub(super) fn emit_ctor_default_stub_with_prefix(
     ir: &IrFile,
     owner: &str,
+    owner_identity: TypeName,
     facade: &str,
     physical_prefix: &[Ty],
     logical_prefix_count: usize,
@@ -84,6 +88,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         ir,
         cw,
         env,
+        Some(StaticOwner::Class(owner_identity)),
         owner,
         facade,
         Ty::Unit,

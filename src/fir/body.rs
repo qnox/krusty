@@ -3,7 +3,7 @@ use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
 mod context_parameters;
-mod value_parameters;
+pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
@@ -23,7 +23,7 @@ use crate::kt_string::KtString;
 use crate::types::TypeName;
 
 use super::body_work::BodyWorkItem;
-use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture, FirLambdaForm};
+use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
 use super::header::{
     next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
     FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
@@ -34,6 +34,7 @@ use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
 use super::retained_bodies::InlineBodyStore;
 use super::signature::ResolvedTy;
+use super::source_lambda::FirSourceLambda;
 
 /// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
 /// not decide assignability, boxing, coercion, or smart-cast eligibility again.
@@ -59,12 +60,12 @@ pub enum FirConversionKind {
         narrowing: FirPlatformNarrowingId,
         to: ResolvedTy,
     },
-    /// Kotlin's one-way adaptation of an already-materialized regular function value to a suspend
-    /// function value. Both complete callable shapes were selected by the frontend; lowering only
-    /// synthesizes the forwarding closure.
-    SuspendFunction {
+    /// A regular function value converted to a suspend and/or `Unit`-returning function type, both
+    /// shapes selected by the frontend; `ordinal` is its source-order place in its innermost callable.
+    FunctionValue {
         from: ResolvedTy,
         to: ResolvedTy,
+        ordinal: u32,
     },
     CoerceToUnit,
 }
@@ -1818,18 +1819,12 @@ pub struct FirBody {
     property_delegate: Option<FirPropertyDelegatePlan>,
     debug_name: Option<Box<str>>,
     vararg_parameter: Option<FirVarargParameter>,
-    source_lambda: Option<FirLambdaForm>,
-    debug_binding_name: Option<Box<str>>,
+    source_lambda: Option<FirSourceLambda>,
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
-    /// Physical source-line count for debug output; it carries no source lookup capability.
-    source_line_count: u32,
-    /// Line-only debug fact: the closing `}` line of a local callable's block body (or of a
-    /// lambda), 0 when there is none.
-    close_line: u32,
-    expression_debug_lines: Vec<FirExpressionDebugLines>,
-    statement_debug_lines: Vec<FirStatementDebugLines>,
+    /// Line-only source metadata for debug output; see `debug_lines`.
+    debug_lines: debug_lines::FirBodyDebugLines,
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
@@ -1883,13 +1878,9 @@ impl FirBody {
             debug_name: None,
             vararg_parameter: None,
             source_lambda: None,
-            debug_binding_name: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
-            source_line_count: 0,
-            close_line: 0,
-            expression_debug_lines: Vec::new(),
-            statement_debug_lines: Vec::new(),
+            debug_lines: Default::default(),
             generated_class_provenance: HashMap::new(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
@@ -2082,20 +2073,15 @@ impl FirBody {
         }
     }
 
-    pub fn mark_source_lambda(&mut self, form: FirLambdaForm, name: Option<impl Into<Box<str>>>) {
+    pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
         assert!(
-            self.source_lambda.replace(form).is_none(),
+            self.source_lambda.replace(lambda).is_none(),
             "a FIR body may be marked as a source lambda only once"
         );
-        self.debug_binding_name = name.map(Into::into);
     }
 
-    pub const fn source_lambda(&self) -> Option<FirLambdaForm> {
-        self.source_lambda
-    }
-
-    pub fn debug_binding_name(&self) -> Option<&str> {
-        self.debug_binding_name.as_deref()
+    pub const fn source_lambda(&self) -> Option<&FirSourceLambda> {
+        self.source_lambda.as_ref()
     }
 
     pub fn set_debug_value_name(&mut self, value: LocalValueId, name: impl Into<Box<str>>) {
@@ -2517,7 +2503,7 @@ impl FirBody {
     pub fn add_expr(&mut self, expression: FirExpr) -> FirExprId {
         let id = FirExprId::from_raw(next_id(self.expressions.len(), "FIR expressions"));
         self.expressions.push(expression);
-        self.expression_debug_lines.push(Default::default());
+        self.debug_lines.add_expression();
         id
     }
 
@@ -2552,8 +2538,7 @@ impl FirBody {
     pub fn add_statement(&mut self, statement: FirStatement) -> FirStatementId {
         let id = FirStatementId::from_raw(next_id(self.statements.len(), "FIR statements"));
         self.statements.push(statement);
-        self.statement_debug_lines
-            .push(FirStatementDebugLines::default());
+        self.debug_lines.add_statement();
         id
     }
 
@@ -2741,14 +2726,16 @@ impl FirBody {
                 .property_storage_type
                 .map_or(0, |_| std::mem::size_of::<ResolvedTy>())
             + self.debug_name.as_deref().map_or(0, str::len)
-            + self.debug_binding_name.as_deref().map_or(0, str::len)
+            + self
+                .source_lambda
+                .as_ref()
+                .map_or(0, FirSourceLambda::text_bytes)
             + self
                 .debug_value_names
                 .values()
                 .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
                 .sum::<usize>()
-            + self.expression_debug_lines.len() * std::mem::size_of::<FirExpressionDebugLines>()
-            + self.statement_debug_lines.len() * std::mem::size_of::<FirStatementDebugLines>()
+            + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
