@@ -42,6 +42,7 @@ mod module_declarations;
 mod package_declarations;
 mod properties;
 mod property_references;
+mod protected_calls;
 mod ranges;
 mod sam_conversions;
 mod sink;

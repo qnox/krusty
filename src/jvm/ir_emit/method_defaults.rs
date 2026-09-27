@@ -233,8 +233,11 @@ pub(super) fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
 pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     let visibility = match ir.method_visibility(fid) {
         crate::types::Visibility::Private | crate::types::Visibility::PackagePrivate => 0x0000,
-        crate::types::Visibility::Protected => 0x0004,
-        crate::types::Visibility::Internal | crate::types::Visibility::Public => 0x0001,
+        // A protected member's stub stays public: kotlinc calls it from any subclass code, an
+        // inner class or a lambda there included, without an accessor.
+        crate::types::Visibility::Protected
+        | crate::types::Visibility::Internal
+        | crate::types::Visibility::Public => 0x0001,
     };
     visibility | 0x1008
 }

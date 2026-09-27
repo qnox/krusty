@@ -210,6 +210,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_interface_delegations(index, self.ir)?;
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
+        super::protected_calls::record_protected_property_calls(index, self.ir);
         super::companion_blocks::realize_companion_block_calls(self.ir);
         self.ir
             .validate_determined_types()

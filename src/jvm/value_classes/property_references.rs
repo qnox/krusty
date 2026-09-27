@@ -356,7 +356,7 @@ pub(super) fn realize(
         realization.unboxed_receiver_value_class = Some(receiver);
     }
     ir.function_reference_access_bridges.extend(access_bridges);
-    realizations.finalize_protected_bridges(ir);
+    realizations.redirect_protected_accessors(ir);
     true
 }
 
@@ -425,7 +425,8 @@ mod tests {
                 getter_bridge_owner: None,
                 setter_bridge_owner: None,
                 protected_reflection_getter: None,
-                protected_bridge: None,
+                protected_getter: None,
+                protected_setter: None,
             },
         );
         let under = Under::from_iter([(vault, Ty::Int)]);

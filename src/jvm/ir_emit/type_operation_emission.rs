@@ -525,9 +525,13 @@ impl Emitter<'_> {
         operand: ExprId,
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
-        // A suspension point the transformer takes leaves its callee's declared result, not the
-        // erased result the common IR records.
-        let physical = match self.transformed_result(operand) {
+        // A suspension point the transformer takes leaves its callee's declared result, and a
+        // protected member's accessor the member's result as the receiver sees it, not the erased
+        // result the common IR records.
+        let physical = match self.transformed_result(operand).or_else(|| {
+            self.protected_accessor(operand)
+                .map(|accessor| accessor.result)
+        }) {
             Some(_) => self.value_ty(operand),
             None => self
                 .ir

@@ -839,6 +839,9 @@ fn delegated_call(
                         dispatch_receiver: Some(receiver),
                         args: arguments,
                     });
+                    record_delegated_protected_call(index, ir, *target, expression, call).ok_or(
+                        FirFileLoweringFailure::MissingCallable(callable.declaration),
+                    )?;
                     return Ok(materialize_delegated_result(
                         ir,
                         expression,
@@ -1000,6 +1003,31 @@ fn delegated_call(
 /// `Object`, which does not verify. The comparison is against the DECLARED slot, so an operator
 /// declared on the scalar itself (`operator fun Int.getValue(…)`) states no boundary and the value
 /// stays as it is.
+/// Record a delegate convention call of a protected member with the delegate as its receiver.
+fn record_delegated_protected_call(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    target: crate::fir::CallableId,
+    expression: ExprId,
+    call: &FirDelegateCall,
+) -> Option<()> {
+    let declaration = index.callable(target)?.declaration;
+    let visibility = index.declaration_header(declaration)?.visibility;
+    if visibility != crate::types::Visibility::Protected {
+        return Some(());
+    }
+    let member = super::protected_calls::MemberCall {
+        call: expression,
+        declaration,
+        visibility,
+        receiver: Some(call.receiver.get()),
+        parameter_identities: index
+            .callable_parameter_identities(target, call.declared_parameters.len())?
+            .into_vec(),
+    };
+    super::protected_calls::record_protected_member_call(index, ir, member)
+}
+
 fn materialize_delegated_receiver(
     ir: &mut IrFile,
     receiver: ExprId,

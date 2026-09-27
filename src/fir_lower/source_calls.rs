@@ -14,6 +14,7 @@ use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
 use super::inline_body::ExternalInlineCallRequest;
+use super::protected_calls::{record_protected_member_call, MemberCall};
 use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
@@ -1379,6 +1380,8 @@ impl BodyLowering<'_> {
             })
             .collect::<std::collections::HashMap<_, _>>();
 
+        let protected_receiver =
+            dispatch_receiver.and_then(|receiver| self.ir.logical_types.get(&receiver).copied());
         let dispatch_receiver = match dispatch_receiver {
             Some(receiver) if direct => {
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
@@ -1576,7 +1579,8 @@ impl BodyLowering<'_> {
             Some(receiver) if !has_defaults => {
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
                 let flags = self.index.declaration_header(classifier.declaration)?.flags;
-                self.ir.add_expr(IrExpr::Call {
+                let declaration_parameter_count = declaration_parameter_types.len();
+                let call = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
                         owner: classifier.classifier,
                         name: self.index.callable_name(target)?.to_owned(),
@@ -1586,7 +1590,27 @@ impl BodyLowering<'_> {
                     },
                     dispatch_receiver: Some(receiver),
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,
-                })
+                });
+                let visibility = self
+                    .index
+                    .declaration_header(callable.declaration)?
+                    .visibility;
+                let parameter_identities = if visibility == crate::types::Visibility::Protected {
+                    self.index
+                        .callable_parameter_identities(target, declaration_parameter_count)?
+                        .into_vec()
+                } else {
+                    Vec::new()
+                };
+                let member = MemberCall {
+                    call,
+                    declaration: callable.declaration,
+                    visibility,
+                    receiver: protected_receiver,
+                    parameter_identities,
+                };
+                record_protected_member_call(self.index, self.ir, member)?;
+                call
             }
             Some(receiver)
                 if physical_function.is_none() || inherited_default_provider.is_some() =>

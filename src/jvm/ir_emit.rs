@@ -75,6 +75,7 @@ mod primary_constructor_parameters;
 mod property_access;
 mod property_reference_class;
 mod property_reference_values;
+pub(in crate::jvm) mod protected_access;
 mod return_emission;
 mod safe_calls;
 mod scalar_coercion;
@@ -3718,7 +3719,7 @@ fn emit_pass(
             opts.jvm_default != JvmDefaultMode::Disable,
         ));
     *env.run.static_accessor_plan.borrow_mut() =
-        static_accessors::plan(ir, env, &contexts, &class_member_fids);
+        static_accessors::plan(ir, env, facade, &contexts, &class_member_fids);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -5899,11 +5900,6 @@ fn emit_class(
             &mut cw,
         );
     }
-    property_reference_class::emit_protected_reference_bridges(
-        c.fq_name_id(),
-        env.property_reference_realizations,
-        &mut cw,
-    );
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -12465,6 +12461,10 @@ impl<'a> Emitter<'a> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
+                        if let Some(accessor) = self.protected_accessor(e) {
+                            return self
+                                .emit_protected_accessor_call(e, recv, args, &accessor, code);
+                        }
                         let owner = owner.render();
                         let name = name.clone();
                         let ptys = jvm_tys(param_tys);
@@ -14222,7 +14222,7 @@ impl<'a> Emitter<'a> {
                         Callee::Virtual {
                             descriptor, params, ..
                         } => match params {
-                            Some((_, ret)) => call_ret_ty(ret),
+                            Some((_, ret)) => call_ret_ty(&self.member_call_result(e, ret)),
                             None if descriptor.ends_with(")Ljava/lang/Void;") => Ty::Nothing,
                             None => ty_from_descriptor_ret(descriptor),
                         },

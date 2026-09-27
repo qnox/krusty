@@ -285,14 +285,22 @@ impl BodyLowering<'_> {
 
         let mut captures = Vec::new();
         let mut capture_types = Vec::new();
+        // The bound receiver keeps its checked type, which kotlinc casts the captured receiver to
+        // and which selects the class of a protected member's accessor.
         let dispatch_capture_slot = dispatch_capture.map(|value| {
             let slot = captures.len() as u32;
             captures.push(value);
-            capture_types.push(crate::types::Ty::obj_name(
+            let declaring = crate::types::Ty::obj_name(
                 enclosing
                     .expect("a checked dispatch receiver has a classifier")
                     .classifier,
-            ));
+            );
+            capture_types.push(
+                self.ir
+                    .logical_types
+                    .get(&value)
+                    .map_or(declaring, |receiver| receiver.non_null()),
+            );
             slot
         });
         let extension_capture_slot = extension_capture.map(|value| {
@@ -311,8 +319,13 @@ impl BodyLowering<'_> {
         let own_start = captures.len() as u32;
         let mut own_parameters = reference.params.clone();
         let mut own_parameter_slots = (0..reference.params.len() as u32).collect::<Vec<_>>();
-        let mut dispatch_receiver =
-            dispatch_capture_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
+        let mut dispatch_receiver = dispatch_capture_slot.map(|slot| {
+            let receiver = self.ir.add_expr(IrExpr::GetValue(slot));
+            self.ir
+                .logical_types
+                .insert(receiver, capture_types[slot as usize]);
+            receiver
+        });
         let mut extension_receiver =
             extension_capture_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
         if binding == crate::fir::FirCallableReferenceBinding::Unbound {

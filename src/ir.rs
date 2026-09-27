@@ -44,6 +44,7 @@ mod field_flags;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
+mod member_access;
 mod operators;
 mod overrides;
 mod progression;
@@ -70,6 +71,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use member_access::IrProtectedMemberCall;
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
@@ -2351,6 +2353,8 @@ pub struct IrFile {
     pub method_visibilities: std::collections::HashMap<FunId, crate::types::Visibility>,
     /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
     pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Checked calls of protected members, keyed by the call.
+    pub protected_member_calls: std::collections::HashMap<ExprId, IrProtectedMemberCall>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
@@ -2916,23 +2920,6 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
-    /// A method's Kotlin declaration visibility. Public is the compact default for generated and
-    /// ordinary declarations; every non-public source or generated method is recorded explicitly.
-    pub fn method_visibility(&self, function: FunId) -> crate::types::Visibility {
-        self.method_visibilities
-            .get(&function)
-            .copied()
-            .unwrap_or(crate::types::Visibility::Public)
-    }
-
-    pub fn set_method_visibility(&mut self, function: FunId, visibility: crate::types::Visibility) {
-        if visibility.is_public() {
-            self.method_visibilities.remove(&function);
-        } else {
-            self.method_visibilities.insert(function, visibility);
-        }
-    }
-
     pub(crate) fn record_generated_secondary_constructor(
         &mut self,
         class: ClassId,
