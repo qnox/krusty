@@ -3668,6 +3668,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
   The lowering lives in `src/fir_lower/delegated_properties.rs`.
 
+- **Signature inference selects a member extension by its arguments' types.** A declaration whose
+  result type is inferred (`fun viaLong() = 1L.pick(2L)`) and a delegated property whose type comes
+  from its `getValue` select member extensions while signatures are still being solved. That
+  selection mapped arguments to parameters by count and name only, so `Long.pick(slot: IntArray)`
+  and `Long.pick(slot: Long)` were always ambiguous. Each argument must now fit the parameter it
+  maps to under the same per-argument rule ordinary candidate selection uses
+  (`CallArgKind::fits_parameter`: an integer literal adapts to `Long`, an unchecked lambda needs a
+  parameter that can host a function, a vararg takes its element unless spread). When no `getValue`
+  applies, the signature phase names the same candidate families as the body check — every rung
+  since Kotlin 2.4.20, the earliest non-empty one before — so the two reports collapse into one.
+  Tests: `tests/member_extension_function_e2e.rs`
+  (`member_extension_overloads_differing_in_a_value_parameter_type_are_selected_by_it`),
+  `tests/delegate_scalar_boundary_e2e.rs`
+  (`inferred_delegate_failure_reports_the_earliest_candidate_family`). Corpus:
+  `delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt`.
+
 - **A delegate's `KProperty` is owned by the property's container.** kotlinc passes the class a
   member (extension or not) is declared in, or the file facade of a top-level property, as the
   owner of the `PropertyReferenceNImpl` it hands to `getValue`/`setValue`. An extension receiver's

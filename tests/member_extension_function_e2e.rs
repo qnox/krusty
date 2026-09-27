@@ -739,3 +739,48 @@ fn member_extension_dispatch_and_erasure_run() {
 
     common::expect_box_ok_with_stdlib(SOURCE, "S");
 }
+
+/// A member extension whose declaring function's result type is inferred is selected while that
+/// signature is being computed, and a delegated member extension property's type comes from the
+/// `getValue` it selects. Both selections apply each argument to the parameter it maps to, so
+/// overloads told apart only by a value parameter's type are not ambiguous: `IntArray` and `Long`
+/// never fit each other's parameter, and an integer literal fits a `Long` parameter.
+const MEMBER_EXTENSION_OVERLOADS: &str = "class Scale(val factor: Int) {\n\
+    \x20   fun Long.pick(slot: IntArray): Int = slot[0] * factor\n\
+    \x20   fun Long.pick(slot: Long): Int = slot.toInt() + factor\n\
+    \x20   fun String.width(x: Long): Int = 1\n\
+    \x20   fun String.width(x: String): Int = 2\n\
+    \x20   fun viaArray(values: IntArray) = 1L.pick(values)\n\
+    \x20   fun viaLong() = 1L.pick(2L)\n\
+    \x20   fun viaLiteral() = \"\".width(3)\n\
+    }\n\
+    class Delegates(val factor: Int) {\n\
+    \x20   operator fun Long.getValue(thisRef: IntArray, property: Any?): Int = thisRef[toInt()] * factor\n\
+    \x20   operator fun Long.getValue(thisRef: Long, property: Any?): Int = toInt() + thisRef.toInt() * factor\n\
+    \x20   val IntArray.second by 1L\n\
+    \x20   val Long.shifted by 1L\n\
+    \x20   fun viaArray(values: IntArray) = values.second\n\
+    \x20   fun viaLong() = 2L.shifted\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val values = IntArray(2)\n\
+    \x20   values[0] = 7\n\
+    \x20   values[1] = 5\n\
+    \x20   val scale = Scale(10)\n\
+    \x20   if (scale.viaArray(values) != 70) return \"array\"\n\
+    \x20   if (scale.viaLong() != 12) return \"long\"\n\
+    \x20   if (scale.viaLiteral() != 1) return \"literal\"\n\
+    \x20   val delegates = Delegates(10)\n\
+    \x20   if (delegates.viaArray(values) != 50) return \"array delegate\"\n\
+    \x20   if (delegates.viaLong() != 21) return \"long delegate\"\n\
+    \x20   return \"OK\"\n\
+    }\n";
+
+/// The classes are compared by behavior only: krusty spills a member extension call's receivers and
+/// arguments to locals where kotlinc passes them on the stack, and kotlinc stores a constant
+/// delegate in no field (`getSecond$delegate` recomputes it). Neither is overload selection.
+#[test]
+fn member_extension_overloads_differing_in_a_value_parameter_type_are_selected_by_it() {
+    common::assert_accepted_like_kotlinc(MEMBER_EXTENSION_OVERLOADS);
+    common::expect_box_same_as_kotlinc(MEMBER_EXTENSION_OVERLOADS, "MemberExtensionOverloadsRun");
+}
