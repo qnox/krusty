@@ -140,7 +140,7 @@ pub(super) fn emit_default_stub(
     };
     if is_interface {
         code.invokeinterface(method, argument_words, slot_words(ret) as i32);
-    } else if ir.private_methods.contains(&fid) {
+    } else if ir.method_visibility(fid).is_private() {
         code.invokespecial(method, argument_words, slot_words(ret) as i32);
     } else {
         code.invokevirtual(method, argument_words, slot_words(ret) as i32);
@@ -228,10 +228,13 @@ pub(super) fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
 }
 
 pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
-    let visibility = if ir.private_methods.contains(&fid) {
-        0x0000
-    } else {
-        0x0001
+    let visibility = match ir.method_visibility(fid) {
+        crate::types::Visibility::Private | crate::types::Visibility::PackagePrivate => 0x0000,
+        // Generated nested and lambda classes invoke this helper directly; kotlinc therefore
+        // exposes a protected declaration's `$default` stub publicly.
+        crate::types::Visibility::Protected
+        | crate::types::Visibility::Internal
+        | crate::types::Visibility::Public => 0x0001,
     };
     visibility | 0x1008
 }

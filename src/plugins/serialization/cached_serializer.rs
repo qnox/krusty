@@ -58,7 +58,7 @@ pub(super) fn add_cached_serializer_delegate(
     });
     // kotlinc emits every standalone lambda impl `private static final` — reachable only through
     // the same-class `invokedynamic`, never part of the public ABI.
-    ir.private_methods.insert(anonymous);
+    ir.set_method_visibility(anonymous, crate::types::Visibility::Private);
     // Compiler-invented, like the cached-serializer helper: ACC_SYNTHETIC, and therefore absent
     // from `@Metadata`.
     ir.synthetic_methods.insert(anonymous);
@@ -221,7 +221,7 @@ pub(super) fn add_object_serializer(
     });
     // `private` makes the emitter mark it ACC_PRIVATE and reach it with `invokespecial`; that
     // dispatch reads a RESOLVED `IrExpr::MethodCall`, which is why `serializer()` calls it by index.
-    ir.private_methods.insert(cached);
+    ir.set_method_visibility(cached, crate::types::Visibility::Private);
     ir.synthetic_methods.insert(cached);
     if owner_line != 0 {
         ir.fn_decl_lines.insert(cached, owner_line);

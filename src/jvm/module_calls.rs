@@ -686,20 +686,33 @@ pub(super) fn realize(
                 let property = ir
                     .referenced_module_properties
                     .get(&target)
+                    .cloned()
                     .ok_or(ModuleRealizationTarget::Property(target))?;
-                if let Some(access) = jvm_field_access(property, stems) {
+                let mut selected_parameters = property.context_parameters.clone();
+                if let Some(receiver) = property.extension_receiver {
+                    selected_parameters.push(receiver);
+                }
+                ir.module_member_accesses.insert(
+                    raw as ExprId,
+                    crate::ir::IrModuleMemberAccess::Property {
+                        target,
+                        write: false,
+                        selected_parameters: selected_parameters.into_boxed_slice(),
+                    },
+                );
+                if let Some(access) = jvm_field_access(&property, stems) {
                     property_realizations.record_physical(raw as ExprId, access);
                     Some(IrExpr::PropertyRead {
                         receiver: dispatch_receiver,
                         owner: property.owner.unwrap_or(TypeName::ROOT),
                         name: property.name.clone(),
                         ty: property.ty,
-                        interface: owner_is_jvm_interface(property),
+                        interface: owner_is_jvm_interface(&property),
                         operation: Some(raw as ExprId),
                     })
                 } else {
                     let (call, parameters) = realize_property(
-                        property,
+                        &property,
                         stems,
                         target,
                         dispatch_receiver,
@@ -722,8 +735,22 @@ pub(super) fn realize(
                 let property = ir
                     .referenced_module_properties
                     .get(&target)
+                    .cloned()
                     .ok_or(ModuleRealizationTarget::Property(target))?;
-                if let Some(access) = jvm_field_access(property, stems) {
+                let mut selected_parameters = property.context_parameters.clone();
+                if let Some(receiver) = property.extension_receiver {
+                    selected_parameters.push(receiver);
+                }
+                selected_parameters.push(property.ty);
+                ir.module_member_accesses.insert(
+                    raw as ExprId,
+                    crate::ir::IrModuleMemberAccess::Property {
+                        target,
+                        write: true,
+                        selected_parameters: selected_parameters.into_boxed_slice(),
+                    },
+                );
+                if let Some(access) = jvm_field_access(&property, stems) {
                     if !property.mutable {
                         return Err(ModuleRealizationTarget::Property(target));
                     }
@@ -734,12 +761,12 @@ pub(super) fn realize(
                         name: property.name.clone(),
                         value,
                         ty: property.ty,
-                        interface: owner_is_jvm_interface(property),
+                        interface: owner_is_jvm_interface(&property),
                         operation: Some(raw as ExprId),
                     })
                 } else {
                     let (call, parameters) = realize_property(
-                        property,
+                        &property,
                         stems,
                         target,
                         dispatch_receiver,

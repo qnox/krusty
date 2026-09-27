@@ -112,7 +112,7 @@ pub(super) fn build_continuation_class(
                     args,
                 })
             } else if let (true, Some(cid), Some(midx)) = (
-                ir.private_methods.contains(&outer_fid),
+                ir.method_visibility(outer_fid).is_private(),
                 owner_cid,
                 owner_midx,
             ) {

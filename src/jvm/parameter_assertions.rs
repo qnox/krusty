@@ -14,7 +14,7 @@ fn requires_reference_guard(ty: Ty) -> bool {
 }
 
 fn realize_function(ir: &mut IrFile, function: FunId) {
-    if ir.private_methods.contains(&function) {
+    if ir.method_visibility(function).is_private() {
         return;
     }
     let Some(parameters) = ir

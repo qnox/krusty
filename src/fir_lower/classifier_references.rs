@@ -91,7 +91,8 @@ impl BodyLowering<'_> {
                 dispatch_receiver: None,
                 param_checks: Vec::new(),
             });
-            self.ir.private_methods.insert(function);
+            self.ir
+                .set_method_visibility(function, crate::types::Visibility::Private);
 
             return Ok(self.structural_constructor_reference(
                 classifier,
@@ -223,7 +224,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        self.ir.private_methods.insert(function);
+        self.ir
+            .set_method_visibility(function, crate::types::Visibility::Private);
         if reflective {
             let capture = match captures.as_slice() {
                 [] => None,
@@ -429,7 +431,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        self.ir.private_methods.insert(function);
+        self.ir
+            .set_method_visibility(function, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(function, 0);
         Ok(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,

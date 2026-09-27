@@ -20,6 +20,7 @@ use crate::jvm::names::{
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use field_visibility::{default_accessor_access, is_jvm_field, jvm_field_visibility};
 
 mod access_bridges;
 mod annotation_impl;
@@ -47,6 +48,7 @@ mod declared_nullability;
 mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
+mod field_visibility;
 mod field_write;
 mod frame_map;
 mod function_debug;
@@ -108,7 +110,9 @@ mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 
-use super::metadata_flags::{class_metadata_flags, declared_value_parameters, function_flags};
+use super::metadata_flags::{
+    class_metadata_flags, declaration_visibility_bits, declared_value_parameters, function_flags,
+};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
@@ -268,6 +272,12 @@ pub(crate) struct EmitRun {
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
     private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Protected member calls emitted outside the checked receiver subclass that grants access.
+    /// The selected declaration and semantic receiver determine the bridge; emission performs no
+    /// name lookup or subtype reconstruction.
+    protected_member_access_bridges: std::cell::RefCell<
+        std::collections::HashMap<crate::ir::ExprId, access_bridges::ProtectedMemberAccessBridge>,
+    >,
     /// The synthetic accessors each static owner declares for its private static declarations
     /// used from other classes; see [`static_accessors`].
     static_accessor_plan: std::cell::RefCell<static_accessors::StaticAccessorPlan>,
@@ -866,14 +876,7 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     let Some(fid) = data_copy_fid(ir, c) else {
         return COPY_FN_FLAGS;
     };
-    // INTERNAL=0, PRIVATE=1, PUBLIC=3 in metadata's visibility enum, held in bits 1-3.
-    let visibility: u64 = if ir.private_methods.contains(&fid) {
-        1
-    } else if ir.internal_methods.contains(&fid) {
-        0
-    } else {
-        3
-    };
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
@@ -1236,7 +1239,7 @@ fn build_class_metadata(
                         }),
                     is_const: false,
                     modifiers: property.modifiers,
-                    setter_is_private: property.setter_is_private,
+                    setter_visibility: property.setter_visibility,
                     has_backing_field: !c.is_annotation
                         && (backing.is_some()
                             || delegate.is_some()
@@ -1327,7 +1330,7 @@ fn build_class_metadata(
                 has_constant: true,
                 is_const: true,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: prop.visibility,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1384,7 +1387,7 @@ fn build_class_metadata(
             has_constant: false,
             is_const: false,
             modifiers: ext.modifiers,
-            setter_is_private: false,
+            setter_visibility: ext.visibility,
             has_backing_field: ext_delegate.is_some(),
             tparam: None,
             receiver: Some(ext.receiver),
@@ -2903,7 +2906,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         // takes none either: kotlinc omits nullability annotations — return and parameters — on the
         // now-private method.
         let copy = data_copy_fid(ir, c);
-        let copy_is_private = copy.is_some_and(|fid| ir.private_methods.contains(&fid));
+        let copy_is_private = copy.is_some_and(|fid| ir.method_visibility(fid).is_private());
         if !data_fields.is_empty() && !copy_is_private {
             let fid = copy.expect("a non-singleton data class records its generated copy identity");
             let function = &ir.functions[fid as usize];
@@ -3608,14 +3611,20 @@ fn emit_pass(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let contexts = static_accessors::emission_contexts(ir, &class_member_fids);
+    let member_access_bridges = access_bridges::cross_owner_member_calls(
+        ir,
+        facade,
+        &class_member_fids,
+        opts.jvm_default != JvmDefaultMode::Disable,
+    );
     env.run
         .private_member_access_bridges
         .borrow_mut()
-        .clone_from(&access_bridges::cross_owner_private_member_calls(
-            ir,
-            &contexts,
-            opts.jvm_default != JvmDefaultMode::Disable,
-        ));
+        .clone_from(&member_access_bridges.private);
+    env.run
+        .protected_member_access_bridges
+        .borrow_mut()
+        .clone_from(&member_access_bridges.protected);
     *env.run.static_accessor_plan.borrow_mut() =
         static_accessors::plan(ir, env, &contexts, &class_member_fids);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
@@ -4117,38 +4126,6 @@ fn property_backing_field_annotations(
         .unwrap_or_default()
 }
 
-/// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
-/// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
-/// declared visibility, so every read and write — inside the class and out — is a field access, and
-/// the `@Metadata` record describes only the field.
-///
-/// Read off the resolved application rather than the spelling: `@JvmField` reaches the FIELD use
-/// site by its own declared `@Target` (see `class_field_annotations`), so it is already interned
-/// here under its exact identity, and an unrelated user annotation that happens to be spelled
-/// `JvmField` resolves to a different one.
-///
-/// A companion is excluded here because the companion-storage pass hoists its field to the enclosing
-/// classifier. A named object's `@JvmField`, by contrast, is a public static on that object class and
-/// uses this rule together with the object's backend-selected static storage.
-fn is_jvm_field(c: &crate::ir::IrClass, property: &str) -> bool {
-    !c.is_companion && c.property_has_jvm_field(property)
-}
-
-fn jvm_field_visibility(c: &crate::ir::IrClass, property: &str) -> Option<u16> {
-    is_jvm_field(c, property)
-        .then(|| {
-            c.properties
-                .iter()
-                .find(|declaration| declaration.name == property)
-        })
-        .flatten()
-        .map(|declaration| match declaration.visibility {
-            crate::types::Visibility::Protected => 0x0004,
-            crate::types::Visibility::Private => 0x0002,
-            _ => 0x0001,
-        })
-}
-
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(annotations) = c.field_annotations.iter().find(|a| a.field == field) {
         cw.set_last_late_field_annotations(&annotations.annotations);
@@ -4515,7 +4492,7 @@ fn emit_declared_property_accessor(
         emit_return(accessor_jt, &mut g);
         g.ensure_locals(1);
         g.link();
-        let access = if overridable { 0x0001 } else { 0x0011 };
+        let access = default_accessor_access(property.visibility, overridable);
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
     }
     if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
@@ -4579,15 +4556,7 @@ fn emit_declared_property_accessor(
             st.ret_void();
             st.ensure_locals(1 + words);
             st.link();
-            // `private set` narrows only the setter. Accessor synthesis owns the method flags now,
-            // so it must preserve that declaration fact instead of widening the setter to public.
-            let access = if property.setter_is_private {
-                0x0012 // PRIVATE | FINAL
-            } else if overridable {
-                0x0001
-            } else {
-                0x0011 // PUBLIC | FINAL
-            };
+            let access = default_accessor_access(property.setter_visibility, overridable);
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
         }
     }
@@ -5232,8 +5201,9 @@ fn emit_class(
         //
         // A `@JvmField` property has no accessor, so the field IS the declaration's visible face and
         // takes the PROPERTY's declared visibility instead — `protected val` stays `ACC_PROTECTED`,
-        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact).
-        let jvm_field_visibility = jvm_field_visibility(c, name);
+        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact). A
+        // `lateinit` field likewise takes its setter's visibility.
+        let jvm_field_visibility = jvm_field_visibility(c, field_index);
         let private = field.is_private();
         let acc = if is_continuation {
             // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
@@ -5810,6 +5780,7 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
+    access_bridges::emit_protected_member_access_bridges(c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     static_accessors::emit(
@@ -5843,6 +5814,11 @@ fn emit_class(
             &mut cw,
         );
     }
+    property_reference_class::emit_protected_reference_bridges(
+        c.fq_name_id(),
+        env.property_reference_realizations,
+        &mut cw,
+    );
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -6314,7 +6290,7 @@ fn emit_interface_class(
             // inline-only lambda impl is not a source member either.
             if enable_compat
                 && !f.is_static
-                && !ir.private_methods.contains(&fid)
+                && !ir.method_visibility(fid).is_private()
                 && !ir.bridge_methods.contains(&fid)
                 && !ir.inline_only_fns.contains(&fid)
             {
@@ -8224,7 +8200,7 @@ fn emit_method_inner_with_holder(
     // `@NotNull` nor `@Nullable`: the annotations exist for Java interop, which cannot see them.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
         && !method_access::is_reifiable(ir, fid)
-        && !ir.private_methods.contains(&fid)
+        && !ir.method_visibility(fid).is_private()
         && !ir.synthetic_methods.contains(&fid)
         && !ir.jvm_nullability_unannotated_methods.contains(&fid);
     // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
@@ -8366,8 +8342,8 @@ fn emit_method_inner_with_holder(
                         // A private method is not callable from the continuation class, whether it
                         // is a member or a top-level function; a synthetic static on the owner is.
                         bridge: ir
-                            .private_methods
-                            .contains(&fid)
+                            .method_visibility(fid)
+                            .is_private()
                             .then(|| coroutine_machine::access_bridge_name(&f.name)),
                     });
                     e.emit_machine_prologue(completion, &mut code)
@@ -10570,6 +10546,8 @@ impl<'a> Emitter<'a> {
                 is_interface: operation.interface
                     || self.bodies.owner_is_interface(operation.owner),
             });
+        let access =
+            access_bridges::protected_property_access(self.run, operation.expression, access);
         let access_owner = match &access {
             PropertyAccess::Field { owner, .. }
             | PropertyAccess::Accessor { owner, .. }
@@ -11689,36 +11667,69 @@ impl<'a> Emitter<'a> {
                     return;
                 }
                 let call_args: Vec<u32> = args.iter().map(|a| a.unwrap()).collect();
+                let protected_bridge = self
+                    .run
+                    .protected_member_access_bridges
+                    .borrow()
+                    .get(&e)
+                    .cloned();
+                let call_param_tys = protected_bridge
+                    .as_ref()
+                    .map_or(param_tys.as_slice(), |bridge| {
+                        bridge.bridge_parameters.as_slice()
+                    });
                 // An argument-count/descriptor mismatch can only come from a pass that rewrote the
                 // callee's ABI without fixing this call site (a suspend call the coroutine flattener
                 // failed to thread a continuation into — an unmodeled shape). Never emit the
                 // unverifiable call: the operand contract refuses, this arm bails the file (the gate
                 // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
                 let desc = method_descriptor(&param_tys, ret);
-                if let Err(mismatch) = self.emit_descriptor_virtual_operands(
-                    e,
-                    crate::jvm::ir_emit::call_operands::VirtualCallTarget {
-                        owner: &owner,
-                        name: &name,
-                        descriptor: &desc,
-                    },
-                    *receiver,
-                    &call_args,
-                    &param_tys,
-                    code,
-                ) {
+                let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
+                    let mut operands = Vec::with_capacity(call_args.len() + 1);
+                    operands.push(*receiver);
+                    operands.extend(call_args.iter().copied());
+                    let mut physical = Vec::with_capacity(call_param_tys.len() + 1);
+                    physical.push(Ty::obj_name(bridge.owner));
+                    physical.extend(call_param_tys.iter().copied());
+                    self.emit_source_access_bridge_operands(&operands, &physical, code)
+                } else {
+                    self.emit_descriptor_virtual_operands(
+                        e,
+                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                            owner: &owner,
+                            name: &name,
+                            descriptor: &desc,
+                        },
+                        *receiver,
+                        &call_args,
+                        call_param_tys,
+                        code,
+                    )
+                };
+                if let Err(mismatch) = operand_result {
                     self.bail_descriptor_arity(&mismatch, ret, code);
                     return;
                 }
-                let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let aw: i32 = call_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 crate::trace_compiler!(
                     "resolve",
                     "emit MethodCall {}.{} fid={fid} private={} iface={is_iface}",
                     owner,
                     name,
-                    self.ir.private_methods.contains(&fid)
+                    self.ir.method_visibility(fid).is_private()
                 );
-                if self.ir.private_methods.contains(&fid) {
+                if let Some(bridge) = protected_bridge {
+                    let mut bridge_params = Vec::with_capacity(bridge.bridge_parameters.len() + 1);
+                    bridge_params.push(Ty::obj_name(bridge.owner));
+                    bridge_params.extend(bridge.bridge_parameters.iter().copied());
+                    let bridge_desc = method_descriptor(&bridge_params, ret);
+                    let bridge_name = format!("access${name}");
+                    let method =
+                        self.cw
+                            .methodref(&bridge.owner.render(), &bridge_name, &bridge_desc);
+                    self.mark_call_start(e, code);
+                    code.invokestatic(method, aw + 1, physical_call_result_words(ret));
+                } else if self.ir.method_visibility(fid).is_private() {
                     // A PRIVATE method is non-virtual — `invokespecial` (an interface private method uses an
                     // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
@@ -12351,16 +12362,45 @@ impl<'a> Emitter<'a> {
                         ops.extend(args.iter().copied());
                         // The receiver is already of the class the call names; only the arguments
                         // are materialized at the parameter types.
-                        let mut physical = vec![self.value_ty(recv)];
-                        physical.extend(ptys.iter().copied());
-                        if let Err(mismatch) =
+                        let bridge = self
+                            .run
+                            .protected_member_access_bridges
+                            .borrow()
+                            .get(&e)
+                            .cloned();
+                        let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
+                            bridge.bridge_parameters.as_slice()
+                        });
+                        let mut physical = vec![bridge.as_ref().map_or_else(
+                            || self.value_ty(recv),
+                            |bridge| Ty::obj_name(bridge.owner),
+                        )];
+                        physical.extend(call_parameters.iter().copied());
+                        let operand_result = if bridge.is_some() {
+                            self.emit_source_access_bridge_operands(&ops, &physical, code)
+                        } else {
                             self.emit_source_call_operands(e, 1, &ops, &physical, code)
-                        {
+                        };
+                        if let Err(mismatch) = operand_result {
                             self.bail_descriptor_arity(&mismatch, ret, code);
                             return;
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
-                        if interface {
+                        if let Some(bridge) = bridge {
+                            let mut bridge_params =
+                                Vec::with_capacity(bridge.bridge_parameters.len() + 1);
+                            bridge_params.push(Ty::obj_name(bridge.owner));
+                            bridge_params.extend(bridge.bridge_parameters.iter().copied());
+                            let bridge_descriptor = method_descriptor(&bridge_params, ret);
+                            let bridge_name = format!("access${name}");
+                            let method = self.cw.methodref(
+                                &bridge.owner.render(),
+                                &bridge_name,
+                                &bridge_descriptor,
+                            );
+                            self.mark_call_start(e, code);
+                            code.invokestatic(method, aw + 1, physical_call_result_words(ret));
+                        } else if interface {
                             let m = self.cw.interface_methodref(&owner, &name, &descriptor);
                             self.mark_call_start(e, code);
                             code.invokeinterface(m, aw, physical_call_result_words(ret));
@@ -12448,6 +12488,17 @@ impl<'a> Emitter<'a> {
                     }
                     let physical_params = parse_descriptor_params(&descriptor)
                         .expect("virtual call descriptor must be valid");
+                    let protected_bridge = self
+                        .run
+                        .protected_member_access_bridges
+                        .borrow()
+                        .get(&e)
+                        .cloned();
+                    let call_parameters = protected_bridge
+                        .as_ref()
+                        .map_or(physical_params.as_slice(), |bridge| {
+                            bridge.bridge_parameters.as_slice()
+                        });
                     crate::trace_compiler!(
                         "emit",
                         "virtual {owner}.{name}{descriptor} receiver={recv} {:?} receiver_ty={:?} args={args:?}",
@@ -12456,23 +12507,48 @@ impl<'a> Emitter<'a> {
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
                     let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
-                    if let Err(mismatch) = self.emit_descriptor_virtual_operands(
-                        e,
-                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
-                            owner: &owner,
-                            name: jvm_name,
-                            descriptor: &descriptor,
-                        },
-                        recv,
-                        &args,
-                        &physical_params,
-                        code,
-                    ) {
+                    let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
+                        let mut operands = Vec::with_capacity(args.len() + 1);
+                        operands.push(recv);
+                        operands.extend(args.iter().copied());
+                        let mut physical = Vec::with_capacity(call_parameters.len() + 1);
+                        physical.push(Ty::obj_name(bridge.owner));
+                        physical.extend(call_parameters.iter().copied());
+                        self.emit_source_access_bridge_operands(&operands, &physical, code)
+                    } else {
+                        self.emit_descriptor_virtual_operands(
+                            e,
+                            crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                                owner: &owner,
+                                name: jvm_name,
+                                descriptor: &descriptor,
+                            },
+                            recv,
+                            &args,
+                            call_parameters,
+                            code,
+                        )
+                    };
+                    if let Err(mismatch) = operand_result {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
-                    let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    if interface {
+                    let aw: i32 = call_parameters.iter().map(|t| slot_words(*t) as i32).sum();
+                    if let Some(bridge) = protected_bridge {
+                        let mut bridge_params =
+                            Vec::with_capacity(bridge.bridge_parameters.len() + 1);
+                        bridge_params.push(Ty::obj_name(bridge.owner));
+                        bridge_params.extend(bridge.bridge_parameters.iter().copied());
+                        let bridge_descriptor = method_descriptor(&bridge_params, ret);
+                        let bridge_name = format!("access${jvm_name}");
+                        let method = self.cw.methodref(
+                            &bridge.owner.render(),
+                            &bridge_name,
+                            &bridge_descriptor,
+                        );
+                        self.mark_call_start(e, code);
+                        code.invokestatic(method, aw + 1, slot_words(ret) as i32);
+                    } else if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         self.mark_call_start(e, code);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);

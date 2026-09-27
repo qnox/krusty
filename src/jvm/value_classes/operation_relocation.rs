@@ -42,6 +42,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(semantic_call_roles);
     move_fact!(call_declared_ret);
     move_fact!(call_declared_params);
+    move_fact!(module_member_accesses);
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
 

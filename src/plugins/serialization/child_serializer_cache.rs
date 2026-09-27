@@ -317,7 +317,7 @@ pub(super) fn add_child_serializer_cache(
             // PRIVATE, as kotlinc emits it: nothing outside the class initializer that binds it may
             // call the factory, and publishing it would put a method on the class's ABI that the
             // reference compiler does not have.
-            ir.private_methods.insert(factory);
+            ir.set_method_visibility(factory, crate::types::Visibility::Private);
             ir.classes[class_id as usize].methods.push(factory);
             let supplier = ir.add_expr(IrExpr::Lambda {
                 impl_fn: factory,

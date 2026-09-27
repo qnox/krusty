@@ -1282,12 +1282,7 @@ impl<'a> CommonIrBodySink<'a> {
                 {
                     self.ir.open_methods.insert(function);
                 }
-                if header.visibility.is_private() {
-                    self.ir.private_methods.insert(function);
-                }
-                if header.visibility == crate::types::Visibility::Internal {
-                    self.ir.internal_methods.insert(function);
-                }
+                self.ir.set_method_visibility(function, header.visibility);
                 if callable.is_inline() {
                     if class.is_none() {
                         self.ir.top_level_inline_functions.insert(function);

@@ -74,7 +74,7 @@ pub(super) fn push_property_metadata(
                 has_constant: property.has_constant,
                 is_const: property.is_const,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: property.visibility,
                 has_backing_field: storage.is_some(),
                 tparam: None,
                 receiver: None,

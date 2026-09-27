@@ -56,7 +56,9 @@ struct PropertyCallTarget<'a> {
 struct PropertyReferenceTarget {
     owner: String,
     call_owner: String,
-    facade: Option<String>,
+    reflection_facade: Option<String>,
+    getter_facade: Option<String>,
+    setter_facade: Option<String>,
     array_length: bool,
     getter_descriptor: String,
     getter_params: Vec<Ty>,
@@ -86,16 +88,31 @@ impl PropertyReferenceTarget {
             .unwrap_or_else(|| {
                 crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
             });
-        let facade = property.ext_facade_or_facade(facade);
-        let getter_descriptor = property_getter_descriptor(property, facade.is_some());
+        let reflection_facade = property.ext_facade_or_facade(facade);
+        let getter_facade = realization
+            .getter_bridge_owner
+            .map(TypeName::render)
+            .or_else(|| reflection_facade.clone());
+        let setter_facade = realization
+            .setter_bridge_owner
+            .map(TypeName::render)
+            .or_else(|| reflection_facade.clone());
+        let getter_descriptor = property_getter_descriptor(property, getter_facade.is_some());
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
             .expect("validated property getter descriptor");
+        let signature = realization
+            .protected_reflection_getter
+            .as_ref()
+            .map(|(name, descriptor)| format!("{name}{descriptor}"))
+            .unwrap_or_else(|| format!("{}{getter_descriptor}", property.getter_name));
         Self {
             owner,
             call_owner,
-            array_length: array_owner.is_some() && facade.is_none(),
-            signature: format!("{}{}", property.getter_name, getter_descriptor),
-            facade,
+            array_length: array_owner.is_some() && reflection_facade.is_none(),
+            signature,
+            reflection_facade,
+            getter_facade,
+            setter_facade,
             getter_descriptor,
             getter_params,
             getter_ret: ir_ty_to_jvm(&getter_ret),
@@ -109,7 +126,7 @@ impl PropertyReferenceTarget {
     fn getter<'a>(&'a self, property: &'a crate::ir::PropRef) -> PropertyCallTarget<'a> {
         PropertyCallTarget {
             owner: &self.call_owner,
-            facade: self.facade.as_deref(),
+            facade: self.getter_facade.as_deref(),
             array_length: self.array_length,
             name: &property.getter_name,
             descriptor: &self.getter_descriptor,
@@ -130,7 +147,7 @@ impl PropertyReferenceTarget {
     ) -> PropertyCallTarget<'a> {
         PropertyCallTarget {
             owner: &self.call_owner,
-            facade: self.facade.as_deref(),
+            facade: self.setter_facade.as_deref(),
             array_length: false,
             name,
             descriptor,
@@ -162,10 +179,13 @@ fn emit_property_reference_constructor(
     if bound {
         code.aload(1);
     }
-    code.ldc_class(target.facade.as_deref().unwrap_or(&target.owner), cw);
+    code.ldc_class(
+        target.reflection_facade.as_deref().unwrap_or(&target.owner),
+        cw,
+    );
     code.push_string(&property.prop_name, cw);
     code.push_string(&target.signature, cw);
-    code.push_int(target.facade.is_some() as i32, cw);
+    code.push_int(target.reflection_facade.is_some() as i32, cw);
     let descriptor = if bound {
         "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
     } else {
@@ -310,6 +330,68 @@ impl PropertyCallTarget<'_> {
     }
 }
 
+/// Emit the static accessors a generated property-reference carrier needs in order to reach a
+/// protected member from a subclass in another package. The carrier itself is not a subclass; the
+/// bridge owner is, and every target below was captured from the selected accessor before the
+/// reference was redirected to the bridge.
+pub(super) fn emit_protected_reference_bridges(
+    owner: TypeName,
+    realizations: &crate::jvm::property_references::PropertyReferenceRealizations,
+    cw: &mut ClassWriter,
+) {
+    for bridge in realizations.protected_bridges(owner) {
+        let (parameters, ret) = parse_physical_method_desc(&bridge.target_descriptor)
+            .expect("a protected reference bridge retains a selected accessor descriptor");
+        cw.reserve_method_pool(&bridge.name, &bridge.descriptor, None, &[]);
+        let mut code = CodeBuilder::new(
+            1 + parameters
+                .iter()
+                .map(|parameter| slot_words(ir_ty_to_jvm(parameter)))
+                .sum::<u16>(),
+        );
+        code.aload(0);
+        let mut slot = 1;
+        for parameter in &parameters {
+            let physical = ir_ty_to_jvm(parameter);
+            load(physical, slot, &mut code);
+            slot += slot_words(physical);
+        }
+        let target_owner = bridge.target_owner.render();
+        let target = if bridge.target_owner_is_interface {
+            cw.interface_methodref(
+                &target_owner,
+                &bridge.target_name,
+                &bridge.target_descriptor,
+            )
+        } else {
+            cw.methodref(
+                &target_owner,
+                &bridge.target_name,
+                &bridge.target_descriptor,
+            )
+        };
+        let argument_words = parameters
+            .iter()
+            .map(|parameter| slot_words(ir_ty_to_jvm(parameter)) as i32)
+            .sum();
+        let physical_ret = ir_ty_to_jvm(&ret);
+        if bridge.target_owner_is_interface {
+            code.invokeinterface(target, argument_words, slot_words(physical_ret) as i32);
+        } else {
+            code.invokevirtual(target, argument_words, slot_words(physical_ret) as i32);
+        }
+        emit_return(physical_ret, &mut code);
+        code.ensure_locals(slot);
+        code.link();
+        cw.add_method(
+            0x0001 | 0x0008 | 0x0010 | crate::jvm::classfile::ACC_SYNTHETIC,
+            &bridge.name,
+            &bridge.descriptor,
+            &code,
+        );
+    }
+}
+
 /// Bring an erased `Object` on the stack to the accessor's PHYSICAL parameter type: a value class's
 /// boxed object is cast and unboxed to its carrier, anything else is cast or unboxed as usual.
 fn adapt_property_reference_value(
@@ -390,7 +472,7 @@ pub(super) fn emit_prop_ref_class(
     );
 
     if pr.mutable {
-        let (setter, setter_desc) = property_setter_target(pr, target.facade.is_some());
+        let (setter, setter_desc) = property_setter_target(pr, target.setter_facade.is_some());
         let (setter_params, _) =
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V");
@@ -470,7 +552,7 @@ fn emit_bound_prop_ref_class(
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
     if pr.mutable {
-        let (setter, setter_desc) = property_setter_target(pr, target.facade.is_some());
+        let (setter, setter_desc) = property_setter_target(pr, target.setter_facade.is_some());
         let (setter_params, _) =
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;)V");

@@ -89,7 +89,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        self.ir.private_methods.insert(wrapper);
+        self.ir
+            .set_method_visibility(wrapper, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(wrapper, 2);
         if suspend {
             self.ir.suspend_funs.push(wrapper);
@@ -173,7 +174,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        self.ir.private_methods.insert(wrapper);
+        self.ir
+            .set_method_visibility(wrapper, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(wrapper, 1);
         if suspend {
             self.ir.suspend_funs.push(wrapper);

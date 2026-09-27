@@ -351,6 +351,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(ext_call_source_receiver);
     copy_map!(call_declared_ret);
     copy_map!(call_declared_params);
+    copy_map!(module_member_accesses);
     copy_map!(construction_declared_params);
     copy_map!(construction_targets);
     copy_map!(static_extension_receivers);

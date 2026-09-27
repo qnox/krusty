@@ -538,13 +538,8 @@ pub(in crate::resolve) fn legacy_property_header(property: &PropDecl) -> Streame
         setter_visibility: property
             .setter
             .as_ref()
-            .map_or(property.visibility, |setter| {
-                if setter.is_private {
-                    Visibility::Private
-                } else {
-                    property.visibility
-                }
-            }),
+            .and_then(|setter| setter.visibility)
+            .unwrap_or(property.visibility),
         setter_parameter_name: property
             .setter
             .as_ref()

@@ -106,6 +106,38 @@ pub(crate) struct PropertyReferenceRealization {
     /// The reference receiver is this value class's boxed object while the selected static
     /// accessor consumes its erased carrier.
     pub unboxed_receiver_value_class: Option<TypeName>,
+    /// Per-accessor static call owners selected for cross-package protected bridges. These stay
+    /// separate because a public getter may be paired with a protected setter.
+    pub getter_bridge_owner: Option<TypeName>,
+    pub setter_bridge_owner: Option<TypeName>,
+    /// The selected getter signature reported to Kotlin reflection when the physical call is
+    /// redirected through a protected bridge.
+    pub protected_reflection_getter: Option<(String, String)>,
+    /// A protected accessor referenced from a subclass in another package needs a static bridge on
+    /// that subclass: the generated reference carrier is not itself a subclass and therefore
+    /// cannot issue the protected call. Getter and setter are independent because Kotlin permits a
+    /// public property with a protected setter.
+    pub protected_bridge: Option<ProtectedReferenceBridgeIntent>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProtectedReferenceBridgeIntent {
+    pub bridge_owner: TypeName,
+    pub target_owner: TypeName,
+    pub target_owner_is_interface: bool,
+    pub getter: bool,
+    pub setter: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProtectedReferenceBridgeMethod {
+    pub owner: TypeName,
+    pub name: String,
+    pub descriptor: String,
+    pub target_owner: TypeName,
+    pub target_name: String,
+    pub target_descriptor: String,
+    pub target_owner_is_interface: bool,
 }
 
 /// A field a property reference accesses directly.
@@ -122,6 +154,7 @@ pub(crate) struct PropertyFieldAccess {
 #[derive(Default)]
 pub(crate) struct PropertyReferenceRealizations {
     by_reference: HashMap<TypeName, PropertyReferenceRealization>,
+    protected_bridges: Vec<ProtectedReferenceBridgeMethod>,
 }
 
 impl PropertyReferenceRealizations {
@@ -156,4 +189,101 @@ impl PropertyReferenceRealizations {
             .flat_map(|realization| [realization.getter_function, realization.setter_function])
             .flatten()
     }
+
+    pub(crate) fn protected_bridges(
+        &self,
+        owner: TypeName,
+    ) -> impl Iterator<Item = &ProtectedReferenceBridgeMethod> {
+        self.protected_bridges
+            .iter()
+            .filter(move |bridge| bridge.owner == owner)
+    }
+
+    /// Freeze cross-package protected-reference bridges after value-class realization has fixed
+    /// every target accessor name and descriptor. The intent was recorded at selection time; this
+    /// step only chooses the JVM call shape and never searches for a declaration by spelling.
+    pub(crate) fn finalize_protected_bridges(&mut self, ir: &mut crate::ir::IrFile) {
+        for class in &mut ir.classes {
+            let Some(reference) = class.prop_ref.as_mut() else {
+                continue;
+            };
+            let Some(realization) = self.by_reference.get_mut(&class.fq_name) else {
+                continue;
+            };
+            let Some(intent) = realization.protected_bridge.take() else {
+                continue;
+            };
+            let target_owner = reference
+                .call_owner_internal
+                .expect("a protected member reference has a selected call owner");
+            debug_assert_eq!(target_owner, intent.target_owner);
+
+            // Reflection and ordinary inherited calls name the subclass on which the reference was
+            // written. A bridge body still calls the exact declaring owner recorded above.
+            reference.owner_internal = Some(intent.bridge_owner);
+            reference.call_owner_internal = Some(intent.bridge_owner);
+            reference.owner_is_interface = false;
+
+            if intent.getter {
+                let target_name = reference.getter_name.clone();
+                let target_descriptor = reference.getter_descriptor.clone().unwrap_or_else(|| {
+                    let ret = realization.physical_getter_ret.unwrap_or(reference.prop_ty);
+                    crate::jvm::names::method_descriptor(&[], ret)
+                });
+                let bridge_name = format!("access${target_name}");
+                let bridge_descriptor = prepend_receiver(&target_descriptor, intent.bridge_owner);
+                let bridge = ProtectedReferenceBridgeMethod {
+                    owner: intent.bridge_owner,
+                    name: bridge_name.clone(),
+                    descriptor: bridge_descriptor.clone(),
+                    target_owner,
+                    target_name: target_name.clone(),
+                    target_descriptor: target_descriptor.clone(),
+                    target_owner_is_interface: intent.target_owner_is_interface,
+                };
+                if !self.protected_bridges.contains(&bridge) {
+                    self.protected_bridges.push(bridge);
+                }
+                reference.getter_name = bridge_name;
+                reference.getter_descriptor = Some(bridge_descriptor);
+                realization.getter_bridge_owner = Some(intent.bridge_owner);
+                realization.protected_reflection_getter = Some((target_name, target_descriptor));
+            }
+            if intent.setter {
+                let Some(target_name) = reference.setter_name.clone() else {
+                    continue;
+                };
+                let target_descriptor = reference.setter_descriptor.clone().unwrap_or_else(|| {
+                    let value = realization
+                        .physical_setter_value
+                        .unwrap_or(reference.prop_ty);
+                    crate::jvm::names::method_descriptor(&[value], Ty::Unit)
+                });
+                let bridge_name = format!("access${target_name}");
+                let bridge_descriptor = prepend_receiver(&target_descriptor, intent.bridge_owner);
+                let bridge = ProtectedReferenceBridgeMethod {
+                    owner: intent.bridge_owner,
+                    name: bridge_name.clone(),
+                    descriptor: bridge_descriptor.clone(),
+                    target_owner,
+                    target_name,
+                    target_descriptor,
+                    target_owner_is_interface: intent.target_owner_is_interface,
+                };
+                if !self.protected_bridges.contains(&bridge) {
+                    self.protected_bridges.push(bridge);
+                }
+                reference.setter_name = Some(bridge_name);
+                reference.setter_descriptor = Some(bridge_descriptor);
+                realization.setter_bridge_owner = Some(intent.bridge_owner);
+            }
+        }
+    }
+}
+
+fn prepend_receiver(descriptor: &str, receiver: TypeName) -> String {
+    let parameters = descriptor
+        .strip_prefix('(')
+        .expect("a selected accessor has a method descriptor");
+    format!("(L{};{parameters}", receiver.render())
 }
