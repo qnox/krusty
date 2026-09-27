@@ -358,12 +358,14 @@ fn synthesize_hash_code(
         [hash] => *hash,
         [first, rest @ ..] => {
             const RESULT: u32 = 1;
-            statements.push(ir.add_expr(IrExpr::Variable {
+            let result = ir.add_expr(IrExpr::Variable {
                 index: RESULT,
                 ty: Ty::Int,
                 init: Some(*first),
-                named: false,
-            }));
+                named: true,
+            });
+            ir.value_names.insert(result, "result".to_owned());
+            statements.push(result);
             for hash in rest {
                 let previous = ir.add_expr(IrExpr::GetValue(RESULT));
                 let factor = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(31)));

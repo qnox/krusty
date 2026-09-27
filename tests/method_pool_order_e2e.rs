@@ -26,6 +26,9 @@
 //!   every constant of the body, not where its block closes.
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
+//! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
+//!   `toString`/`hashCode`/`equals`, whose bodies and local-variable tables intern where they are
+//!   emitted.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
 //!
@@ -298,5 +301,18 @@ fn an_enum_declared_function_interns_before_its_synthesized_members() {
          \x20   fun pick(level: Int): Int = level\n\
          }\n",
         &["Mode"],
+    );
+}
+
+/// A data class's synthesized `componentN`/`copy`/`toString`/`hashCode`/`equals` are emitted after
+/// its declared functions, and they intern their pool entries there too.
+#[test]
+fn a_data_class_declared_function_interns_before_its_synthesized_members() {
+    assert_identical(
+        "DataDeclaredFunction",
+        "data class Cell(val level: Int) {\n\
+         \x20   fun merge(other: Cell): Cell = other\n\
+         }\n",
+        &["Cell"],
     );
 }

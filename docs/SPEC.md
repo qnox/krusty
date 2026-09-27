@@ -4529,7 +4529,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after `this` lists every named parameter, plain ones included. The `$default` overload is written
   right after the primary, so its body (`String.valueOf` for `val b: String = "$a"`, the delegating
   `<init>`) interns there; only its header descriptor is seeded, and a data class's synthesized
-  members are seeded after it rather than before. Tests:
+  members intern after it. Tests:
   `tests/method_pool_order_e2e.rs::a_plain_constructor_parameter_is_in_the_constructor_header` and
   `::a_default_constructor_body_interns_before_data_members`.
 - **A plain constructor parameter is annotated like a property-backed one.** kotlinc writes
@@ -4604,6 +4604,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a property, entry constant, `$VALUES` or `$ENTRIES` name interns where a body first references
   it, and the rest at the field visit. A declared function therefore precedes `values`. Test:
   `tests/method_pool_order_e2e.rs::an_enum_declared_function_interns_before_its_synthesized_members`.
+- **A data class's synthesized members intern where they are emitted.** kotlinc writes
+  `componentN`, `copy`, `copy$default`, `toString`, `hashCode` and `equals` after the declared
+  members, and each interns its header, body and LocalVariableTable there, so a declared
+  `hashCode` override or other function precedes `component1` in the pool. Their bodies are
+  lowered like any other, and the multi-property `hashCode` accumulator is a named local
+  `result`, which its LocalVariableTable lists after the body's constants. Test:
+  `tests/method_pool_order_e2e.rs::a_data_class_declared_function_interns_before_its_synthesized_members`.
 - **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
   interface's inherited members supertype by supertype in the order they are written, at every
   level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`

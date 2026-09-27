@@ -37,7 +37,6 @@ mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod coroutine_machine;
-mod data_class_pool_seed;
 mod data_class_value_classes;
 mod debug_lines;
 mod declaration_types;
@@ -82,8 +81,8 @@ use annotation_impl::emit_annotation_impl_class;
 mod value_class_descriptors;
 mod value_class_signatures;
 use class_pool_seed::{
-    seed_data_class_pool, seed_enum_constructor_locals, seed_plain_class_pool,
-    seed_plain_constructor_tail, PlainClassPoolSeed,
+    seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
+    PlainClassPoolSeed,
 };
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
@@ -2503,7 +2502,6 @@ fn attach_synth_debug_tables(
     // A data class's `copy` parameters are exactly its property-backed constructor parameters.
     // This is not the primary constructor's physical descriptor (plain parameters may also exist
     // there), so keep the two identities deliberately separate.
-    let data_copy_desc = format!("({})V", ctor_field_descs(c));
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
     // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
     // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
@@ -2768,56 +2766,6 @@ fn attach_synth_debug_tables(
                 cw.set_method_debug(name, d, None, locals);
             }
         }
-    }
-    // A `data class`'s synthesized methods carry a LocalVariableTable (this + params) but NO
-    // LineNumberTable (kotlinc gives them none). componentN/hashCode/toString/equals have only `this`
-    // (equals also `other`); `copy` has the ctor parameters.
-    if c.is_data {
-        let self_ref = format!("L{};", c.fq_name());
-        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
-        for (i, f) in data_fields.iter().enumerate() {
-            cw.set_method_debug(
-                &format!("component{}", i + 1),
-                &format!("(){}", desc(f.ty)),
-                None,
-                &this_only,
-            );
-        }
-        // A `data object` synthesizes no `copy` (see the metadata assembly), so it has no table either.
-        if !data_fields.is_empty() {
-            let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
-            let mut slot = 1u16;
-            for f in data_fields {
-                copy_locals.push((f.name.clone(), desc(f.ty), slot));
-                slot += slot_size(f.ty);
-            }
-            cw.set_method_debug(
-                "copy",
-                &format!(
-                    "{copy_desc_no_v}{self_ref}",
-                    copy_desc_no_v = &data_copy_desc[..data_copy_desc.len() - 1]
-                ),
-                None,
-                &copy_locals,
-            );
-        }
-        cw.set_method_debug(
-            "equals",
-            "(Ljava/lang/Object;)Z",
-            None,
-            &[
-                ("this".to_string(), this_desc.clone(), 0),
-                ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
-            ],
-        );
-        // hashCode: a ≥2-field data class folds into a `result` accumulator local — kotlinc lists it
-        // (partial live-range) before `this`. A single-field hashCode is a bare `return h(f0)` (this only).
-        if c.fields.len() >= 2 {
-            cw.set_hashcode_result_debug(&this_desc);
-        } else {
-            cw.set_method_debug("hashCode", "()I", None, &this_only);
-        }
-        cw.set_method_debug("toString", "()Ljava/lang/String;", None, &this_only);
     }
 }
 
@@ -5346,9 +5294,7 @@ fn emit_class(
         && opts.emit_class_metadata
         && (c.is_anonymous_object || build_class_metadata(ir, c, opts).is_some());
     let pool_seed = || PlainClassPoolSeed {
-        formatter: &signature_formatter,
         ir,
-        bodies: env.bodies,
         class: c,
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
@@ -5862,9 +5808,6 @@ fn emit_class(
                 &mut cw,
                 env,
             );
-        }
-        if byte_parity {
-            seed_data_class_pool(pool_seed(), &mut cw);
         }
     } // end `if c.has_primary_ctor`
 
