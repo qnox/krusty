@@ -63291,9 +63291,8 @@ impl<'a> Checker<'a> {
     /// is where the source picks the non-null bound and every later consumer — Kotlin call sites that
     /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
     /// entitled to rely on it. kotlinc guards exactly this transition (see
-    /// [`TypeInfo::platform_narrowings`]), including a platform value unboxed into a primitive
-    /// (`val i: Int = javaInteger()`); positions that keep the flexibility (`T?`, another `T!`) are
-    /// left alone.
+    /// [`TypeInfo::platform_narrowings`]), unboxing into a primitive included; positions that keep
+    /// the flexibility (`T?`, another `T!`) are left alone.
     ///
     /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
     /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
