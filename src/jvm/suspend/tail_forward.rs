@@ -143,9 +143,12 @@ fn tail_expression(
 ) -> Option<ExprId> {
     let tail = match &ir.exprs[expression as usize] {
         IrExpr::Return(Some(expression)) => *expression,
+        // An intrinsic suspension point is a block too, and its own statements are not the tail.
         IrExpr::Block {
             value: Some(value), ..
-        } if matches!(ir.exprs[*value as usize], IrExpr::Block { .. }) => {
+        } if matches!(ir.exprs[*value as usize], IrExpr::Block { .. })
+            && !is_suspension_point(ir, *value, suspend_functions) =>
+        {
             return tail_expression(ir, *value, suspend_functions, unit_return, original_returns);
         }
         IrExpr::Block {

@@ -1329,6 +1329,11 @@ fn diverging_value_consumer_statements(ir: &IrFile, consumer: &IrExpr) -> Option
 
 /// If `e` is a value-bearing `Block`, return `(its statements, its value)`; else `None`.
 fn value_block(ir: &mut IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
+    // A `suspendCoroutineUninterceptedOrReturn` block is a registered suspension point, not an
+    // evaluation-order wrapper: lifting its statements would orphan the suspension-point id.
+    if ir.intrinsic_suspension_points.contains_key(&e) {
+        return None;
+    }
     match ir.exprs[e as usize].clone() {
         IrExpr::Block {
             stmts,
