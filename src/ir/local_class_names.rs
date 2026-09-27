@@ -189,8 +189,8 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
                 | super::IrIntrinsic::PrimitiveArrayNew {
                     element: classifier,
                 }
-                | super::IrIntrinsic::DataClassFieldEquals { ty: classifier }
-                | super::IrIntrinsic::DataClassFieldHash { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyHash { ty: classifier }
                 | super::IrIntrinsic::DataClassArrayToString { ty: classifier } => {
                     *classifier = ty(*classifier, names)
                 }

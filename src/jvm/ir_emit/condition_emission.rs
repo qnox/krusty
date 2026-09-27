@@ -117,7 +117,7 @@ impl Emitter<'_> {
         if let IrExpr::Call {
             callee:
                 Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::DataClassFieldEquals { ty },
+                    operation: crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty },
                     ..
                 },
             args,

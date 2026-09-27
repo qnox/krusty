@@ -41,7 +41,6 @@ mod constructor_defaults;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod copied_code;
 mod coroutine_machine;
-mod data_class_value_classes;
 mod debug_lines;
 mod declaration_types;
 mod declared_nullability;
@@ -55,6 +54,7 @@ mod function_debug;
 mod function_invocation;
 mod function_reference_class;
 mod function_reference_invoke;
+mod generated_property_operations;
 mod implicit_reference_coercion;
 mod in_place_arguments;
 mod inline_body_emission;
@@ -2423,35 +2423,6 @@ fn primary_ctor_annotations(c: &crate::ir::IrClass) -> Vec<crate::ir::AppliedAnn
     let (visible, invisible) =
         crate::jvm::classfile::split_declaration_annotations(&c.primary_ctor_annotations);
     visible.into_iter().chain(invisible).collect()
-}
-
-/// JVM dispatch owner for a data-class field's reference `hashCode` call. Common IR carries only
-/// the declared Kotlin type; interface dispatch and boxed scalar ownership are representation facts
-/// derived here by the backend. `None` means the classfile seeder can use its primitive/array rule.
-fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> Option<String> {
-    if ty.is_array() || (ty.non_null().is_jvm_scalar() && !ty.is_nullable()) {
-        return None;
-    }
-    if let Some(owner) = ty.non_null().obj_internal() {
-        if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
-            return Some(owner.render());
-        }
-    }
-    let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
-        "java/lang/Object".to_owned()
-    } else {
-        crate::jvm::names::instanceof_internal_name(ty.non_null())
-    };
-    if ty
-        .non_null()
-        .obj_internal()
-        .and_then(|name| ir.class_id_by_name(name))
-        .is_some_and(|class| ir.classes[class as usize].is_interface)
-        || bodies.owner_is_interface(&owner)
-    {
-        owner = "java/lang/Object".to_owned();
-    }
-    Some(owner)
 }
 
 /// One synthesized value-class member's JVM name, descriptor, and local-variable table entries.
@@ -12030,10 +12001,10 @@ impl<'a> Emitter<'a> {
                         self.emit_value(args[0], code);
                         code.newarray(prim_newarray_atype(*element));
                     }
-                    crate::ir::IrIntrinsic::DataClassFieldEquals { ty } => {
+                    crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty } => {
                         let left = args[0];
                         let right = args[1];
-                        if self.emit_data_class_value_equals(*ty, left, right, code) {
+                        if self.emit_value_class_property_equals(*ty, left, right, code) {
                             return;
                         }
                         self.emit_value(left, code);
@@ -12047,8 +12018,8 @@ impl<'a> Emitter<'a> {
                         );
                         code.invokestatic(method, 2, 1);
                     }
-                    crate::ir::IrIntrinsic::DataClassFieldHash { ty } => {
-                        self.emit_data_class_field_hash(*ty, args[0], code)
+                    crate::ir::IrIntrinsic::GeneratedPropertyHash { ty } => {
+                        self.emit_generated_property_hash(*ty, args[0], code)
                     }
                     crate::ir::IrIntrinsic::Ieee754Equals { operand } => {
                         self.emit_nullable_ieee754_equals(e, *operand, args, code)
