@@ -3732,7 +3732,9 @@ pub(crate) fn lower_value_classes(
                 // cell's pre-erasure element is the BOXED nullable `X?` form — a NON-null element is
                 // the value's own unboxed underlying (even an `Object` underlying: the cell is the
                 // vc's native slot, not a generic supertype slot), where boxing would corrupt reads.
-                IrExpr::RefNew { init, .. } => match orig_ref_elems.get(&id) {
+                IrExpr::RefNew {
+                    init: Some(init), ..
+                } => match orig_ref_elems.get(&id) {
                     Some(t) if t.is_nullable() => vec![(*init, *t)],
                     _ => continue,
                 },

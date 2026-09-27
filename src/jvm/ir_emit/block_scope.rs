@@ -20,6 +20,7 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
+        self.note_inlined_only_cells(&stmts, value);
         for (index, statement) in stmts.into_iter().enumerate() {
             self.mark_statement_line(statement, code);
             let base = code.stack_height();

@@ -75,6 +75,7 @@ mod property_reference_values;
 mod return_emission;
 mod safe_calls;
 mod scalar_coercion;
+mod shared_cell_declaration;
 mod signature_formatter;
 mod suspend_lambda_class;
 mod transformed_suspensions;
@@ -9550,6 +9551,9 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    /// Captured-local declarations whose holder only inlined lambdas capture: see
+    /// `shared_cell_declaration`.
+    inlined_only_cells: HashSet<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -9650,6 +9654,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: HashMap::new(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
+            inlined_only_cells: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -10663,6 +10668,14 @@ impl<'a> Emitter<'a> {
                 let entered = reuse.or_else(|| {
                     (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
+                if let Some(cell) = init.and_then(|i| self.stored_shared_cell(e, i)) {
+                    let slot = entered
+                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
+                    self.unassigned_values.remove(&index);
+                    self.slots.insert(index, (slot, jt));
+                    self.emit_shared_cell_declaration(e, slot, cell, code);
+                    return;
+                }
                 let slot = if let Some(i) = init {
                     let source = self.emit_consumed_operand(i, code);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
@@ -10687,21 +10700,7 @@ impl<'a> Emitter<'a> {
                 // one (`lateinit var`) still has a lexical lifetime: its declaration emits no
                 // store, so its debug range opens here, and the later checked assignment only
                 // initializes the already-live slot.
-                if let Some(name) = self
-                    .record_locals
-                    .then(|| super::debug_local_names::name(self.ir, e))
-                    .flatten()
-                {
-                    if code.bytes.len() <= u16::MAX as usize {
-                        self.open_locals.push((
-                            self.block_depth,
-                            slot,
-                            code.bytes.len() as u16,
-                            name,
-                            local_variable_desc(jt),
-                        ));
-                    }
-                }
+                self.open_declared_local(e, slot, jt, code);
             }
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
@@ -13614,34 +13613,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.emit_try(e, parts, false, code);
             }
-            IrExpr::RefNew { elem, init } => {
-                let (cls, fdesc) = ref_class(elem);
-                let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
-                // A branchy initializer can't run with `[holder, holder]` on the stack — spill it.
-                if self.emits_control_flow(*init) {
-                    let temps = self.spill_to_temps(&[*init], code);
-                    let ci = self.cw.class_ref(cls);
-                    code.new_obj(ci);
-                    code.dup();
-                    let m = self.cw.methodref(cls, "<init>", "()V");
-                    code.invokespecial(m, 0, 0);
-                    code.dup();
-                    for &(slot, t, _) in &temps {
-                        load(t, slot, code);
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    let ci = self.cw.class_ref(cls);
-                    code.new_obj(ci);
-                    code.dup();
-                    let m = self.cw.methodref(cls, "<init>", "()V");
-                    code.invokespecial(m, 0, 0);
-                    code.dup();
-                    self.emit_value(*init, code);
-                }
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                code.putfield(f, ew);
-            }
+            IrExpr::RefNew { elem, init } => self.emit_shared_cell(*elem, *init, code),
             IrExpr::RefGet { holder, elem } => {
                 self.emit_value(*holder, code);
                 let (cls, fdesc) = ref_class(elem);
@@ -14049,7 +14021,7 @@ impl<'a> Emitter<'a> {
             IrExpr::RefSet { holder, value, .. } => {
                 self.emits_control_flow(*holder) || self.emits_control_flow(*value)
             }
-            IrExpr::RefNew { init, .. } => self.emits_control_flow(*init),
+            IrExpr::RefNew { init, .. } => init.is_some_and(|init| self.emits_control_flow(init)),
             IrExpr::Throw { operand } => self.emits_control_flow(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.emits_control_flow(a)),
             IrExpr::NewArray { size, .. } => self.emits_control_flow(*size),

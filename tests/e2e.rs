@@ -1673,6 +1673,8 @@ mod serializer_operand_cast_e2e;
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
 mod shadowed_method_tparam_e2e;
+#[path = "shared_cell_declaration_e2e.rs"]
+mod shared_cell_declaration_e2e;
 #[path = "short_circuit_condition_e2e.rs"]
 mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]
