@@ -493,11 +493,6 @@ struct FieldInfo {
     /// `RuntimeVisibleAnnotations` (RUNTIME retention) and `RuntimeInvisibleAnnotations` (BINARY).
     visible_anns: Vec<Vec<u8>>,
     invisible_anns: Vec<Vec<u8>>,
-    /// User annotations kept UNENCODED until the field-table window (see
-    /// [`ClassWriter::set_last_field_annotations_deferred`]): an enum constant's annotation types
-    /// intern there, after every method, not where the constant's field was added.
-    pending_visible: Vec<crate::ir::AppliedAnnotation>,
-    pending_invisible: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
@@ -522,12 +517,9 @@ struct LateField {
 }
 
 /// Position in the finished field table, independent from the constant-pool interning window.
-/// Keeping this as one value prevents contradictory "leading at an explicit index" states.
 enum LateFieldPlacement {
     Trailing,
     Leading,
-    /// An enum's generated serializer delegate follows its eagerly-added constructor properties.
-    At(usize),
 }
 
 impl LateField {
@@ -935,8 +927,6 @@ impl ClassWriter {
             const_value: None,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
-            pending_visible: Vec::new(),
-            pending_invisible: Vec::new(),
         });
     }
 
@@ -955,8 +945,6 @@ impl ClassWriter {
                 const_value: None,
                 visible_anns: Vec::new(),
                 invisible_anns: Vec::new(),
-                pending_visible: Vec::new(),
-                pending_invisible: Vec::new(),
             },
         );
     }
@@ -993,28 +981,6 @@ impl ClassWriter {
             const_value,
             ann,
             LateFieldPlacement::Trailing,
-        ));
-    }
-
-    /// Add a deferred field at an explicit position in the finished field table, carrying an
-    /// optional generic `Signature` and nullability annotation.
-    pub fn add_field_late_at_sig(
-        &mut self,
-        access: u16,
-        name: &str,
-        desc: &str,
-        signature: Option<&str>,
-        ann: Option<&str>,
-        at: usize,
-    ) {
-        self.late_fields.push(LateField::new(
-            access,
-            name,
-            desc,
-            signature,
-            None,
-            ann,
-            LateFieldPlacement::At(at),
         ));
     }
 
@@ -1093,8 +1059,6 @@ impl ClassWriter {
                 const_value: cv,
                 visible_anns,
                 invisible_anns,
-                pending_visible: Vec::new(),
-                pending_invisible: Vec::new(),
             };
             match lf.placement {
                 LateFieldPlacement::Trailing => self.fields.push(info),
@@ -1102,30 +1066,7 @@ impl ClassWriter {
                     self.fields.insert(lead_at, info);
                     lead_at += 1;
                 }
-                LateFieldPlacement::At(at) => self.fields.insert(at.min(self.fields.len()), info),
             }
-        }
-        // An EAGER field may also have deferred its annotations to this window — an enum constant's
-        // field is added early (its `<clinit>` `putstatic` interleaves with the entry names), while
-        // kotlinc interns the annotation's type here, beside the late fields' `Signature` strings and
-        // just before the class's own annotations. Encoding it at the field's `add_field` put the
-        // descriptor near the entry names and shifted every later index.
-        for index in 0..self.fields.len() {
-            let visible = std::mem::take(&mut self.fields[index].pending_visible);
-            let invisible = std::mem::take(&mut self.fields[index].pending_invisible);
-            if visible.is_empty() && invisible.is_empty() {
-                continue;
-            }
-            let encoded_visible: Vec<Vec<u8>> = visible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            let encoded_invisible: Vec<Vec<u8>> = invisible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            self.fields[index].visible_anns.extend(encoded_visible);
-            self.fields[index].invisible_anns.extend(encoded_invisible);
         }
     }
 
@@ -1143,24 +1084,7 @@ impl ClassWriter {
             const_value: Some(const_idx),
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
-            pending_visible: Vec::new(),
-            pending_invisible: Vec::new(),
         });
-    }
-
-    /// [`Self::set_last_field_annotations`], but the annotation TYPES intern in the field-table
-    /// window rather than at the field's own `add_field` — kotlinc's order for an enum constant,
-    /// whose field must be added early (its `<clinit>` store interleaves with the entry names) while
-    /// its annotation descriptor interns with the other field-table strings.
-    pub fn set_last_field_annotations_deferred(
-        &mut self,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) {
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        if let Some(field) = self.fields.last_mut() {
-            field.pending_visible = visible;
-            field.pending_invisible = invisible;
-        }
     }
 
     /// Attach user annotations to the most recently added field. The JVM representation boundary
