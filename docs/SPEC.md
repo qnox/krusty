@@ -8569,6 +8569,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with `===`. A nullable integral equality keeps its null tests (kotlinc's
   `PrimitiveToObjectComparison` is a separate rule). Test: `tests/ieee754_equality_e2e.rs`.
 
+- **`toString()` on a primitive is `String.valueOf`** (kotlinc's `FlattenStringConcatenationLowering`,
+  which makes a primitive receiver's `toString()` a one-argument string concatenation, and
+  `JvmStringConcatenationLowering`, which realizes that as `String.valueOf`). The provider marks each
+  builtin primitive's own `toString(): String` as the value's string conversion, the operation
+  `Any?.toString()` already is; the JVM calls `String.valueOf` overloaded by the primitive (`(I)` for
+  `Byte`/`Short`) and marks the call's line there, in a source call and in a callable reference's
+  adapter body alike, where krusty boxed the value and called the box's `toString()`. Test:
+  `tests/primitive_to_string_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare

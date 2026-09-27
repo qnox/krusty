@@ -11988,20 +11988,7 @@ impl<'a> Emitter<'a> {
                         self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::NullableAnyToString => {
-                        let receiver = dispatch_receiver.unwrap();
-                        let ty = self.value_ty(receiver);
-                        self.emit_value(receiver, code);
-                        let descriptor = match ty {
-                            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
-                            Ty::Long => "(J)Ljava/lang/String;",
-                            Ty::Boolean => "(Z)Ljava/lang/String;",
-                            Ty::Char => "(C)Ljava/lang/String;",
-                            Ty::Double => "(D)Ljava/lang/String;",
-                            Ty::Float => "(F)Ljava/lang/String;",
-                            _ => "(Ljava/lang/Object;)Ljava/lang/String;",
-                        };
-                        let method = self.cw.methodref("java/lang/String", "valueOf", descriptor);
-                        code.invokestatic(method, slot_words(ty) as i32, 1);
+                        self.emit_string_conversion(e, dispatch_receiver.unwrap(), code)
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
                         // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows

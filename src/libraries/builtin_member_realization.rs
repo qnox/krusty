@@ -449,6 +449,16 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         return MemberRealization::Intrinsic(CompilerIntrinsic::StringGet);
     }
 
+    // kotlinc's `FlattenStringConcatenationLowering` turns `toString()` on a primitive receiver into
+    // a one-argument string concatenation: the value's string conversion, as `Any?.toString()` is.
+    if facts.name == "toString"
+        && facts.params.is_empty()
+        && facts.ret == Ty::String
+        && receiver.is_some()
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::NullableAnyToString);
+    }
+
     if let Some(realization) = primitive_iterator_next(&facts) {
         return realization;
     }

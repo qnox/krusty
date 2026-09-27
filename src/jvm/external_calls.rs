@@ -441,6 +441,7 @@ pub(super) fn realize(
                 intrinsic,
                 crate::libraries::CompilerIntrinsic::StringGet
                     | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString
             ) {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
@@ -922,11 +923,16 @@ pub(super) fn realize(
                     };
                 }
                 crate::libraries::MemberRealization::Intrinsic(
-                    crate::libraries::CompilerIntrinsic::StringGet,
+                    intrinsic @ (crate::libraries::CompilerIntrinsic::StringGet
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString),
                 ) => {
                     physical_result = semantic_ret;
                     *callee = Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringGet,
+                        operation: if intrinsic == crate::libraries::CompilerIntrinsic::StringGet {
+                            crate::ir::IrIntrinsic::StringGet
+                        } else {
+                            crate::ir::IrIntrinsic::NullableAnyToString
+                        },
                         ret: semantic_ret,
                     };
                 }

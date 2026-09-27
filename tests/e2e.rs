@@ -1487,6 +1487,8 @@ mod primitive_iterator_next_e2e;
 mod primitive_operator_extension_e2e;
 #[path = "primitive_spread_e2e.rs"]
 mod primitive_spread_e2e;
+#[path = "primitive_to_string_e2e.rs"]
+mod primitive_to_string_e2e;
 #[path = "private_classifier_access_e2e.rs"]
 mod private_classifier_access_e2e;
 #[path = "private_constructor_access_e2e.rs"]
