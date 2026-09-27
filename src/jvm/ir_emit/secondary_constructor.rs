@@ -7,6 +7,7 @@ use super::{
 };
 use crate::ir::{IrClass, IrConstructorTarget, IrFile, IrSecondaryCtor};
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
+use crate::jvm::private_static_access::StaticOwner;
 use crate::types::Ty;
 
 pub(super) fn defer_serialization_constructor(
@@ -95,6 +96,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 ir,
                 cw,
                 env,
+                Some(StaticOwner::Class(c.fq_name)),
                 fq_name,
                 facade,
                 Ty::Unit,
@@ -490,6 +492,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             super::constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
                 fq_name,
+                c.fq_name,
                 facade,
                 &forwarded_prefix_tys,
                 sc_prefix_tys.len(),

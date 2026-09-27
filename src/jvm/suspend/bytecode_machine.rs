@@ -263,7 +263,9 @@ pub(super) fn eligible_points(
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };
-    if points.is_empty() {
+    // kotlinc's transformer builds a lambda's `invokeSuspend` state machine even with no
+    // suspension point in it; a named function without one stays a plain method.
+    if points.is_empty() && subject == Subject::NamedFunction {
         crate::trace_compiler!(
             "suspend",
             "transformer declines {}: it has no suspension point",

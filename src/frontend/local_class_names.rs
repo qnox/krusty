@@ -45,6 +45,65 @@ pub(super) struct InventedLocalNames {
     /// Callable reference or suspend lambda (each compiled to a class of its own) → its
     /// target-neutral lexical provenance.
     pub references: HashMap<ExprId, LocalClassNameProvenance>,
+    /// Each sequence this walk numbered in → its value before the walk numbered anything in it.
+    pub sequence_starts: HashMap<Vec<String>, u32>,
+    /// Converted function value → the class its conversion compiles to. Only a walk that knows
+    /// the resolver's selected conversions records these.
+    conversions: HashMap<ExprId, FunctionValueConversionName>,
+}
+
+/// The class a function-value conversion (a suspend and/or `Unit` conversion of an arbitrary
+/// function value at a call argument) compiles to: its position in the walk's sequences, and its
+/// place among the conversions of its innermost enclosing callable, which kotlinc numbers apart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionValueConversionName {
+    pub provenance: LocalClassNameProvenance,
+    pub ordinal: u32,
+}
+
+/// A file's generated-class names once resolution has selected its function-value conversions.
+/// kotlinc names every conversion in the same walk as the lambdas and references around it, so a
+/// conversion shifts every later position of its sequence and names what its operand declares.
+/// Empty when the file converts no value: the naming walk's own provenance is then final.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SettledGeneratedClassNames {
+    pub references: HashMap<ExprId, LocalClassNameProvenance>,
+    pub conversions: HashMap<ExprId, FunctionValueConversionName>,
+}
+
+impl SettledGeneratedClassNames {
+    /// The provenance of the callable reference or lambda `expression`: the settled walk's when
+    /// the file converts a value, else the naming walk's own.
+    pub fn reference<'a>(
+        &'a self,
+        file: &'a File,
+        expression: ExprId,
+    ) -> Option<&'a LocalClassNameProvenance> {
+        if self.conversions.is_empty() {
+            file.callable_reference_provenance.get(&expression.0)
+        } else {
+            self.references.get(&expression)
+        }
+    }
+}
+
+/// Replay the naming walk of `file` knowing which values resolution converted, from the sequence
+/// positions its first walk started at. Local and anonymous classifiers keep the names the first
+/// walk gave them: their identities are published with the file's declarations before any body is
+/// resolved.
+pub(crate) fn settle_generated_class_names(
+    file: &File,
+    converted: &std::collections::HashSet<ExprId>,
+) -> SettledGeneratedClassNames {
+    if converted.is_empty() {
+        return SettledGeneratedClassNames::default();
+    }
+    let mut counters = file.generated_class_sequence_starts.clone();
+    let names = walk(file, &mut counters, Some(converted));
+    SettledGeneratedClassNames {
+        references: names.references,
+        conversions: names.conversions,
+    }
 }
 
 /// One chain of enclosing names, and the source function it lies in.
@@ -132,16 +191,31 @@ struct Inventor<'a> {
     counters: &'a mut HashMap<Vec<String>, u32>,
     names: InventedLocalNames,
     expression_depth: u32,
+    /// The function values resolution converted, once it has run.
+    converted: Option<&'a std::collections::HashSet<ExprId>>,
+    /// Conversions numbered so far in each enclosing callable, innermost last.
+    conversion_scopes: Vec<u32>,
 }
 
 /// Record the provenance of every local node `file` declares. `counters` carries the per-chain
 /// sequences across the declaration units of one file.
 pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> InventedLocalNames {
+    walk(file, counters, None)
+}
+
+fn walk<'a>(
+    file: &'a File,
+    counters: &'a mut HashMap<Vec<String>, u32>,
+    converted: Option<&'a std::collections::HashSet<ExprId>>,
+) -> InventedLocalNames {
     let mut inventor = Inventor {
         file,
         counters,
         names: InventedLocalNames::default(),
         expression_depth: 0,
+        converted,
+        // A script's top-level statements convert in the file's own scope.
+        conversion_scopes: vec![0],
     };
     let file_chain = Chain::classifier(None, "file".to_string());
     let anonymous = file
@@ -149,20 +223,37 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
         .values()
         .copied()
         .collect::<std::collections::HashSet<_>>();
+    let class_chain = |declaration: DeclId, class: &ClassDecl| Chain {
+        owner: Some(declaration),
+        counter_owner: format!("class:{}", class.name),
+        segments: Vec::new(),
+        enclosing_function: None,
+        parents: Vec::new(),
+    };
+    // A `companion { … }` member is hoisted to file level, but the classifier that declared its
+    // block stays its lexical owner: what its body declares is named in that class's chain.
+    let mut block_chains = HashMap::new();
+    for &declaration in &file.decls {
+        if let Decl::Class(class) = file.decl(declaration) {
+            for member in &class.companion_block_members {
+                block_chains.insert(member.declaration, class_chain(declaration, class));
+            }
+        }
+    }
     for &declaration in &file.decls {
         if anonymous.contains(&declaration) || file.is_local_declaration(declaration) {
             continue;
         }
+        let chain = block_chains.get(&declaration).unwrap_or(&file_chain);
         match file.decl(declaration) {
             Decl::Fun(function) => inventor.function(
                 function,
-                &file_chain,
+                chain,
                 Some(AnonymousEnclosingFunction::TopLevel(declaration)),
             ),
-            Decl::Property(property) => inventor.property(property, &file_chain, StaticInitializer),
+            Decl::Property(property) => inventor.property(property, chain, StaticInitializer),
             Decl::Class(class) => {
-                let chain = Chain::classifier(Some(declaration), format!("class:{}", class.name));
-                inventor.class_body(declaration, class, &chain, false);
+                inventor.class_body(declaration, class, &class_chain(declaration, class), false);
             }
         }
     }
@@ -184,13 +275,31 @@ impl Inventor<'_> {
     }
 
     fn next(&mut self, chain: &Chain) -> Chain {
-        let counter = self.counters.entry(chain.counter_key()).or_insert(0);
+        let key = chain.counter_key();
+        let counter = self.counters.entry(key.clone()).or_insert(0);
+        self.names.sequence_starts.entry(key).or_insert(*counter);
         *counter += 1;
         let ordinal = *counter;
         chain.named(&ordinal.to_string())
     }
 
+    /// Walk `visit` as one callable whose conversions are numbered apart from its surroundings'.
+    fn in_callable(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.conversion_scopes.push(0);
+        visit(self);
+        self.conversion_scopes.pop();
+    }
+
     fn function(
+        &mut self,
+        function: &FunDecl,
+        outer: &Chain,
+        identity: Option<AnonymousEnclosingFunction>,
+    ) {
+        self.in_callable(|inventor| inventor.function_in_scope(function, outer, identity));
+    }
+
+    fn function_in_scope(
         &mut self,
         function: &FunDecl,
         outer: &Chain,
@@ -239,9 +348,11 @@ impl Inventor<'_> {
             self.next(&chain);
         }
         let initializer_chain = chain.clone().inside(initializer);
-        for initializer in property.init.iter().chain(property.delegate.iter()) {
-            self.expr(*initializer, &initializer_chain);
-        }
+        self.in_callable(|inventor| {
+            for initializer in property.init.iter().chain(property.delegate.iter()) {
+                inventor.expr(*initializer, &initializer_chain);
+            }
+        });
         if delegated {
             // The accessors pass a reference to the property itself to `getValue`/`setValue`.
             self.next(&chain);
@@ -250,20 +361,36 @@ impl Inventor<'_> {
             }
         }
         if let Some(getter) = &property.getter {
-            self.body(getter, &chain.clone().inside(Getter(property.name.clone())));
+            let getter_chain = chain.clone().inside(Getter(property.name.clone()));
+            self.in_callable(|inventor| inventor.body(getter, &getter_chain));
         }
         if let Some(body) = property
             .setter
             .as_ref()
             .and_then(|setter| setter.body.as_ref())
         {
-            self.body(body, &chain.clone().inside(Setter(property.name.clone())));
+            let setter_chain = chain.clone().inside(Setter(property.name.clone()));
+            self.in_callable(|inventor| inventor.body(body, &setter_chain));
         }
     }
 
     /// Walk a classifier's members in `chain`. `anonymous` is set for an anonymous object, whose
     /// super-constructor arguments its construction site has already walked in the outer chain.
+    /// Its initializers share one conversion scope; each property, function and secondary
+    /// constructor has its own.
     fn class_body(
+        &mut self,
+        declaration: DeclId,
+        class: &ClassDecl,
+        chain: &Chain,
+        anonymous: bool,
+    ) {
+        self.in_callable(|inventor| {
+            inventor.class_body_in_scope(declaration, class, chain, anonymous);
+        });
+    }
+
+    fn class_body_in_scope(
         &mut self,
         declaration: DeclId,
         class: &ClassDecl,
@@ -363,6 +490,14 @@ impl Inventor<'_> {
     }
 
     fn secondary_constructor(&mut self, constructor: &crate::ast::SecondaryCtor, outer: &Chain) {
+        self.in_callable(|inventor| inventor.secondary_constructor_in_scope(constructor, outer));
+    }
+
+    fn secondary_constructor_in_scope(
+        &mut self,
+        constructor: &crate::ast::SecondaryCtor,
+        outer: &Chain,
+    ) {
         let chain = &outer.clone().inside(InstanceInitializer);
         for default in constructor
             .params
@@ -401,8 +536,37 @@ impl Inventor<'_> {
         self.expression_depth -= 1;
     }
 
+    /// Name the conversion resolution selected for the value `expression`, if any. Like a bound
+    /// reference, the conversion takes the next position of `chain` and its operand is walked
+    /// inside it; the returned chain is where the operand is walked.
+    fn function_value_conversion(&mut self, expression: ExprId, chain: &Chain) -> Option<Chain> {
+        if !self
+            .converted
+            .is_some_and(|converted| converted.contains(&expression))
+        {
+            return None;
+        }
+        let own = self.next(chain);
+        let scope = self
+            .conversion_scopes
+            .last_mut()
+            .expect("the walk always has an enclosing callable");
+        let ordinal = *scope;
+        *scope += 1;
+        self.names.conversions.insert(
+            expression,
+            FunctionValueConversionName {
+                provenance: chain.provenance(Some(Self::ordinal(&own))),
+                ordinal,
+            },
+        );
+        Some(own)
+    }
+
     fn expr_inner(&mut self, expression: ExprId, chain: &Chain) {
         let file = self.file;
+        let converted = self.function_value_conversion(expression, chain);
+        let chain = converted.as_ref().unwrap_or(chain);
         match file.expr(expression) {
             Expr::Lambda { body, .. } => {
                 let own = self.next(chain);
@@ -412,7 +576,8 @@ impl Inventor<'_> {
                 self.names
                     .references
                     .insert(expression, chain.provenance(Some(Self::ordinal(&own))));
-                self.expr(*body, &own.inside(Lambda));
+                let lambda_chain = own.inside(Lambda);
+                self.in_callable(|inventor| inventor.expr(*body, &lambda_chain));
             }
             // A class literal has no generated callable-reference class and therefore consumes no
             // position. Its bound expression, when present, remains in the surrounding chain.
