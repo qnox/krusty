@@ -7247,6 +7247,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   since an omitted `n` arrives as a null placeholder, and the call site boxes a supplied `n`.
   Constructors follow the same rule. Tests: `tests/nullable_vc_default_stub_e2e.rs`,
   `tests/value_class_secondary_constructor_default_e2e.rs`.
+- **A `return` in a value class's secondary constructor returns the constructed value.** The
+  secondary constructor is a static `constructor-impl` returning the carrier, so `return` and
+  `return Unit` in its body become `return <constructed value>`; any other `Unit` operand
+  (`return note()`) is evaluated first. Its line table follows kotlinc: the delegation on its own
+  line, each body statement on its line, and every `areturn` (explicit or falling off the end) on
+  the `constructor` declaration's line; its local table names the declared parameters. A secondary
+  constructor's body statements carry source lines like a function body's. Tests:
+  `tests/value_class_secondary_constructor_return_e2e.rs`.
 - **A generic result specialized to an `Object`-carried value class is unboxed once.** A call to a
   dependency's `fun <T> pass(value: T): T` with `b: Box` returns the box through the erased slot,
   and the caller emits `checkcast Box; unbox-impl` once, as kotlinc does. When the carrier itself
