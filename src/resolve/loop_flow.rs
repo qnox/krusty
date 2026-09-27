@@ -63,7 +63,7 @@ impl Checker<'_> {
             collect_all_reassigned(self.file, part, &mut written);
         }
         for name in &written {
-            self.set_local_narrow(scope, name, None);
+            scope.narrow_local(name, None);
         }
     }
 }

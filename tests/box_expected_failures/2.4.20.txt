@@ -286,7 +286,6 @@ sam/topLevelConversions.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt
-smartCasts/kt44932.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
@@ -298,7 +297,6 @@ statics/syntheticAccessor.kt
 suspendConversion/suspendConversionNullableCCE.kt
 syntheticAccessors/kt10047.kt
 try/finally12.kt
-try/try5.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt

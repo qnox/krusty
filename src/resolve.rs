@@ -47,6 +47,7 @@ mod call_result_templates;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
+mod catch_flow;
 mod checker_symbol_queries;
 mod classifier_associated;
 mod collection_literals;
@@ -73,6 +74,7 @@ mod interface_delegation;
 mod invoke_selection;
 mod lambda_expectation;
 mod lambda_returns;
+mod lexical_bindings;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
@@ -12320,7 +12322,7 @@ struct Local {
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
     /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
-    safe_call_origin: Option<safe_call_flow::BindingIdentity>,
+    safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
 
 /// The per-argument view of a call site used during overload scoring: the argument expressions,
@@ -25037,18 +25039,8 @@ impl<'a> Checker<'a> {
                 scope.narrow_intersection(path.clone(), constituent);
             }
         }
-        // An explicit broader declaration retains its storage type while straight-line reads use the
-        // initializer's proven subtype (`var x: Base = Derived()`, `var n: Int? = 10`). A null
-        // INITIALIZER is the exception: kotlinc keeps the declared type there and only narrows to
-        // `Nothing?` on a null ASSIGNMENT.
-        if is_var {
-            let narrowing = if it == Ty::Null {
-                None
-            } else {
-                self.assignment_narrowing(&name, bind, it, self.span(init))
-            };
-            self.set_local_narrow(scope, &name, narrowing);
-        }
+        // A declared type is what the initializer leaves: kotlinc reads `var x: Base = Derived()` as
+        // `Base` until an assignment narrows it.
     }
 
     fn stmt_local_delegate(
@@ -37557,6 +37549,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_local_class_capture_bindings: HashMap::new(),
         local_function_capture_bindings: HashMap::new(),
         next_lexical_capture_identity: 0,
+        try_body_writes: Vec::new(),
         checked_local_class_declarations: std::collections::HashSet::new(),
         checked_local_classifier_identities: HashMap::new(),
         checked_local_classifier_type_arguments: HashMap::new(),
@@ -40568,6 +40561,8 @@ struct Checker<'a> {
     /// Resolver-only binding identities parallel to lifted local-function capture vectors.
     local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
     next_lexical_capture_identity: u32,
+    /// Bindings written by each try body being checked, innermost last.
+    try_body_writes: Vec<std::collections::HashSet<lexical_bindings::BindingIdentity>>,
     checked_local_class_declarations: std::collections::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
@@ -51314,10 +51309,6 @@ impl<'a> Checker<'a> {
         scope
             .ancestors()
             .find_map(|rung| rung.own_binding(name, Ns::Value)?.value())
-    }
-    /// Record (or clear, with `None`) the flow-narrowed read type of the innermost `name` binding.
-    fn set_local_narrow(&self, scope: &CheckerScope<'_>, name: &str, narrowed: Option<Ty>) {
-        scope.narrow_local(name, narrowed);
     }
 
     /// The flow-narrowed read type of `name` on the current execution edge. Nested lexical scopes
@@ -66528,16 +66519,18 @@ impl<'a> Checker<'a> {
         finally: Option<ExprId>,
     ) -> Ty {
         let t = {
-            // A catch begins on an exceptional edge from the try body, not on the body's normal
-            // completion edge. Preserve the entry facts while checking the body, restore them for
-            // each sibling catch, then retain only facts common to every normal exit. These are
-            // temporary lexical data-flow snapshots; no syntax coordinate or body survives FIR.
+            // A catch begins on an exceptional edge from any point of the try body: it gets the
+            // entry facts minus every narrowing the body writes. Normal exits keep only the facts
+            // common to all of them. No syntax coordinate or body survives FIR.
             let entry_flow = scope.flow_snapshot();
-            let bt = self.expr_result(scope, body, wanted.expected, wanted.value_required);
+            let (bt, written) = self.try_body_written_bindings(|checker| {
+                checker.expr_result(scope, body, wanted.expected, wanted.value_required)
+            });
             let mut exit_flows = vec![scope.flow_snapshot()];
             let mut result = bt;
             for c in &catches {
                 scope.restore_flow(&entry_flow);
+                self.clear_narrowings_a_try_body_writes(scope, &written);
                 let resolved_catch = self.type_ref_ty(scope, &c.ty);
                 let catch_is_throwable = std::iter::once(resolved_catch)
                     .chain(resolved_catch.ty_param_bound())
