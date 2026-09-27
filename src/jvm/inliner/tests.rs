@@ -545,6 +545,8 @@ fn plus_captured() -> Lambda {
         node,
         parameter_types: vec!["I".to_string()],
         return_type: "I".to_string(),
+        value_class_parameters: vec![None],
+        value_class_return: None,
         captured: 0..1,
         capture_names: vec![Some("$base".to_string())],
     }

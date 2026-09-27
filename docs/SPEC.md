@@ -6052,6 +6052,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
+  is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
+  static when the backend sees it; value-class lowering records the exact function each such call
+  reaches (`IrFile::jvm_member_targets`), and the cross-class walk bridges it like an instance
+  member. kotlinc's bridge is `public static final synthetic access$<name>-impl` over the same
+  parameters, forwarding with `invokestatic`. Every private-member bridge now sits after the class's
+  declared and generated members, as SyntheticAccessorLowering appends it, and carries kotlinc's
+  debug tables: one line (the class declaration) at the invoke, `$this` for an instance target, then
+  the target's own parameter names (the carrier is `arg0`). A private property with a declared getter
+  is reached the same way, through its exact getter (`access$getHeavy-impl(I)` on a value class,
+  `access$getHeavy(LHolder;)` on a class): the JVM property realization records the getter each
+  cross-class read reaches, where it previously called the private getter directly. Tests:
+  `tests/value_class_private_member_access_e2e.rs`,
+  `tests/class_member_order_e2e.rs::a_class_appends_private_member_bridges_after_its_members`,
+  `tests/value_class_member_order_e2e.rs`, box
+  `inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion*.kt`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
@@ -7547,6 +7563,98 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `IllegalArgumentException` with no message, making no builder. This is
+  platform-defined: the common `expect` constructor documents no exception; Kotlin/JVM throws
+  Java's `NegativeArraySizeException` with the capacity as message (`AbstractStringBuilder(int)`
+  allocates `new byte[capacity]`; kotlinc 2.4.10 on JDK 21 prints `-1` for `StringBuilder(-1)`), a
+  type Kotlin itself does not declare; Kotlin/JS ignores the capacity (`StringBuilderJs.kt`:
+  `actual constructor(capacity: Int) : this()`). The native runtime follows Kotlin/Native, the
+  platform it stands in for, and the only answer a Kotlin program on it can catch by a Kotlin name:
+  in the Kotlin/Native 2.4.10 distribution's linux_x64 stdlib cache, `StringBuilder(kotlin.Int)`
+  calls `AllocArrayInstance(kclass:kotlin.CharArray, capacity)` with no check of its own, and
+  `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a negative size, which throws
+  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`).
+  `StringBuilder(text)` over a `CharSequence` the program implements reads
+  it through its own `length` and `get`; when either throws, no builder is made and nothing more of
+  the sequence is read.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`,
+  `builder_from_throwing_char_sequence`).
+- **Native runtime members stop at the first program call that throws.** A runtime member that asks
+  the program's own overrides more than one question — `Pair`'s `equals`, `hashCode` and `toString`,
+  which ask each component in turn, and `Result.toString`, which renders its value or exception and
+  then builds `Success(…)`/`Failure(…)` around it — returns as soon as one of those calls comes back
+  with an exception pending. The second component is never asked, the placeholder the aborted call
+  returned (a `true`, a zero, a `null`) is never read, no text is built from it, and the exception
+  pending afterwards is the very object the call threw. That is Kotlin's answer: the generated
+  data-class members and `Result.toString` propagate the first exception from where it was thrown.
+  Tests: `tests/native_runtime_e2e.rs` (`pair_component_throws`, `result_to_string_throws`).
+- **A native `KClass` answers the names its descriptor publishes.** `simpleName` and
+  `qualifiedName` are not derived from the descriptor's rendered name: each `KType` publishes its
+  qualified and simple names and a kind (`KT_CLASS_NAMES_*` in `src/native/runtime/krusty_rt.h`).
+  A member class, top-level or nested, has both — `pkg.Top.Nested` and `Nested`, joined with dots
+  whatever the rendered name uses; a backticked `` `a$b` `` is `a$b` and `pkg.a$b`, not `b`. A local
+  class has only its simple name (`qualifiedName` is `null`), and an anonymous object has neither
+  (`simpleName` and `qualifiedName` are both `null`), as kotlinc 2.4.10 answers on the JVM for the
+  program recorded in the driver. A descriptor that publishes no names, or a kind without the names
+  it needs, is a fault in whatever emitted it and ends the program naming the descriptor.
+  Tests: `tests/native_runtime_e2e.rs` (`class_names`, `class_names_unpublished`).
+- **A native runtime call that raises returns at once, and its return value is not an answer.**
+  Unboxing `null` and every `kotlin.Number` conversion of `null` raise Kotlin's
+  `NullPointerException` with no message and return immediately, before any conversion or
+  narrowing: `toByte` and `toShort` read the box themselves rather than narrowing what `toInt`
+  returned. The value such a call returns alongside a pending exception is the C function's
+  obligation to return something, never Kotlin's answer, so the drivers never read it: they discard
+  it and assert the exact exception pending — its type and missing message for a raise the runtime
+  makes, and the very object thrown for a raise the program's own override makes (a
+  `CharSequence`'s `length`/`get`, a builder append's `toString`, a `Pair` component, a `Result`'s
+  content, a `lazy` initializer).
+  Tests: `tests/native_runtime_e2e.rs` (`unbox_null_raises`, `number_conversion_null_raises`,
+  `builder_from_throwing_char_sequence`, `builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `pair_component_throws`, `result_to_string_throws`,
+  `lazy_initializer_throws`).
+- **Native `Result` operations.** A success is its value and a failure a marker holding the
+  exception, so `Result.success(null)` is a success distinct from every failure. `isSuccess`,
+  `isFailure`, `getOrNull`, `exceptionOrNull` and `toString` (`Success(1)`, `Success(null)`,
+  `Failure(<exception's own toString>)`) answer as kotlinc 2.4.10 does on the JVM for the program
+  recorded in the driver. `getOrThrow` answers a success's value, and on a failure throws the very
+  exception it holds and answers NULL at once — never the failure marker, which is no value of the
+  program's type.
+  Tests: `tests/native_runtime_e2e.rs` (`result_operations`).
+- **A native `ReadWriteProperty` call names the two delegates it implements.**
+  `kt_rw_property_get`/`kt_rw_property_set` serve exactly `Delegates.notNull()` and
+  `Delegates.observable(…)`, recognized by their own descriptors. Any other receiver ends the
+  program with `krusty: a ReadWriteProperty read|write of a <descriptor name>, which is neither
+  Delegates.notNull() nor Delegates.observable()`, rather than being read as a `NotNullVar`.
+  Tests: `tests/native_runtime_e2e.rs` (`rw_property_get_unknown_delegate`,
+  `rw_property_set_unknown_delegate`).
+- **The native runtime's ordinary paths answer as Kotlin does.** Each expectation below comes from
+  the equivalent Kotlin program compiled and run with kotlinc 2.4.10 on the JVM; each driver records
+  its program.
+  - Boxing: a box carries its kind's descriptor and value; every `Byte`, `Short`/`Int`/`Long` in
+    -128..127, `Char` in 0..127 and both `Boolean`s come back as the same object, as on the JVM;
+    128 (and `Char` 128) come back fresh; `Long.MIN_VALUE` does not share zero's box; `Float` and
+    `Double` are never cached.
+  - `Number` conversions: a floating-point source truncates toward zero, saturates at the target's
+    ends and answers 0 for NaN; `toShort`/`toByte` narrow what `toInt` answers (so `1e10.toByte()`
+    is -1); a wider integer truncates (`4294967297L.toInt()` is 1); `toFloat` rounds to nearest.
+  - `Pair`: `equals` componentwise and only against a `Pair`, `hashCode` as
+    `31 * first.hashCode() + second.hashCode()` in wrapping 32-bit arithmetic with null as 0,
+    `toString` as `(first, second)`.
+  - Delegates: `lazy` runs its initializer once, on first read, and renders
+    `Lazy value not initialized yet.` until then; `observable` writes before its callback runs, so
+    the callback reads the new value; `notNull` read before a write throws
+    `IllegalStateException("Property nn should be initialized before get.")`.
+  - `StringBuilder`: appends of each kind, `appendLine`, `toString` as a copy, `setLength` shorter,
+    longer (NUL padding) and between the halves of a surrogate pair — which keeps the lone high
+    half, as the JVM does — growth past the capacity, identity equality and self-append.
+  Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
+  `builder_operations`, with `class_names` and `result_operations` above).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
@@ -8380,6 +8488,50 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/expression_line_marks_e2e.rs` (a bare return, a value return and an implicit `Unit`
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
+
+- **A source `when` has a stepping point on its own line** (kotlinc's `visitWhen`): a `when` the
+  source wrote with the `when` keyword (fir2ir's `IrStatementOrigin.WHEN`) that is laid out as a
+  chain of tests rather than a switch marks the `when`'s line and emits a `nop`. The
+  `RedundantNopsCleanup` step keeps that `nop` only when nothing else shares its line, so a
+  subject-less `when` whose first condition starts on the next line keeps it and a one-line `when`
+  loses it. An `if`, `&&`/`||`, a safe call and every lowering-built `when` get none. Common
+  lowering records the origin as a fact copied from checked FIR (`IrFile::whens.source_lines`, together
+  with the `when`'s own source line, which a subject block would otherwise hide); only the JVM
+  emitter turns it into a `nop`. Tests: `tests/source_when_stepping_nop_e2e.rs`,
+  `fir_lower::when_result_type_tests::only_a_source_when_carries_the_when_origin`.
+
+- **A comparison's deciding instruction carries the comparison's own line** (kotlinc's
+  `BooleanComparison`, which calls `markLineNumber(expression)` right before the jump, after the
+  `lcmp`/`dcmp*`/`fcmp*` of a wide comparison). Every comparison form marks it at the instruction
+  that decides it: the jump of a numeric comparison and of reference identity (`if_acmp*`), the
+  `ifnull`/`ifnonnull` of a null comparison (`BooleanNullCheck`), and the `Intrinsics.areEqual`
+  call of structural equality (`Equals`), in value position as in a condition. An operand on a later
+  line therefore never leaves its own line there, and a `when` branch condition on a line of its
+  own keeps that line through its jump rather than returning to the line of the statement holding
+  the `when`. A subject `when`'s comparison, and the subject read in it, are built at the
+  condition's offsets, so common lowering gives both the condition's source line (kotlinc's
+  `visitGetValue` marks a read's line); a `when` laid out as a `tableswitch`/`lookupswitch` loads
+  its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
+  no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
+
+- **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
+  `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
+  closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
+  transfer into one inverted jump itself: it lays down kotlinc's `if<!cond> next; nop; goto target;
+  next:`, `RedundantNopsCleanup` drops the `nop` when the jump shares its line, and `NegatedJumps`
+  then folds the guard into `if<cond> target` exactly when no line entry separates the two jumps.
+  A transfer written on a line of its own therefore keeps the guard as a branch around a `goto`
+  carrying that line. Test: `tests/loop_transfer_line_e2e.rs`.
+
+- **A local function or lambda that falls off its end marks its closing line**
+  (`setExtraLineNumberForVoidReturningFunction`), as a declared `Unit` function already did. The
+  checker records the closing `}` line of a block-bodied local function's body and of a lambda on
+  its FIR body (`FirBody::close_line`); lowering turns the former into the lifted function's
+  `fn_close_lines` entry and the latter into a fall-through mark on the `return` it appends
+  (`IrFile::fallthrough_return_line`), which the emitter writes BEFORE the returned `Unit` is
+  loaded. kotlinc's `nop` after that mark always shares its line with the load or the `return`
+  and is cleaned up, so it is not written. An expression-bodied local function ends in a return
+  of its own and gets no mark. Test: `tests/fallthrough_close_line_e2e.rs`.
 
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its

@@ -36,6 +36,7 @@ pub(super) fn emit_func_ref_class(
         .iter()
         .map(|capture| type_descriptor(*capture))
         .collect::<Vec<_>>();
+    let capture_signatures = capture_signatures(ir, env, fr);
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
     let owner_class = fr.owner_class_or_facade(facade);
@@ -101,11 +102,16 @@ pub(super) fn emit_func_ref_class(
         field_capture_descs.concat(),
         if fr.bound { "Ljava/lang/Object;" } else { "" }
     );
+    let capture_constructor_signature =
+        capture_signatures.constructor(&field_capture_descs, fr.bound);
     if !fr.capture_fields.is_empty() {
         // kotlinc visits its constructor first: the fields it fills are interned as its code
         // stores them, and declared after it.
         cw.seed_utf8("<init>");
         cw.seed_utf8(&capture_constructor);
+        if let Some(signature) = &capture_constructor_signature {
+            cw.seed_utf8(signature);
+        }
     }
 
     // The call argument param types begin AFTER the receiver for an unbound member ref.
@@ -209,8 +215,22 @@ pub(super) fn emit_func_ref_class(
         let sup = cw.methodref(&superclass, "<init>", super_descriptor);
         ctor.invokespecial(sup, if fr.bound { 6 } else { 5 }, 0);
         ctor.ret_void();
-        for (name, descriptor) in fr.capture_fields.iter().zip(&field_capture_descs) {
-            cw.add_field(capture_access, name, descriptor);
+        for ((name, descriptor), signature) in fr
+            .capture_fields
+            .iter()
+            .zip(&field_capture_descs)
+            .zip(&capture_signatures.fields)
+        {
+            // The constructor's stores intern the name and descriptor; kotlinc visits the field
+            // itself, and so its `Signature`, after every method.
+            cw.add_field_late_sig(
+                capture_access,
+                name,
+                descriptor,
+                signature.as_deref(),
+                None,
+                None,
+            );
         }
         // kotlinc names a carrier's constructor parameters after the fields they fill.
         let locals = fr.invoke.map(|_| {
@@ -225,10 +245,25 @@ pub(super) fn emit_func_ref_class(
             }
             function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &parameters)
         });
+        let signature = capture_constructor_signature.as_deref();
         if cross_package || inline_reachable {
-            finish_code::<0x0001>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
+            finish_code_sig::<0x0001>(
+                &mut cw,
+                "<init>",
+                &descriptor,
+                &mut ctor,
+                ctor_locals,
+                signature,
+            );
         } else {
-            finish_code::<0x0000>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
+            finish_code_sig::<0x0000>(
+                &mut cw,
+                "<init>",
+                &descriptor,
+                &mut ctor,
+                ctor_locals,
+                signature,
+            );
         }
         if let Some(locals) = locals {
             cw.set_method_debug("<init>", &descriptor, None, &locals);
@@ -554,4 +589,51 @@ fn push_reflection_owner(
         });
     }
     code.ldc_class(mapped, cw);
+}
+
+/// The generic `Signature`s of a carrier's capture fields, each `None` where the descriptor already
+/// says everything. kotlinc types a capture field by the captured value's declared type, so an object
+/// cell is `Ref$ObjectRef<T>`: the field signs `Lkotlin/jvm/internal/Ref$ObjectRef<Ljava/lang/String;>;`
+/// and the constructor that fills it takes the same type as a parameter.
+struct CaptureSignatures {
+    fields: Vec<Option<String>>,
+    parameters: Vec<Option<String>>,
+}
+
+fn capture_signatures(ir: &IrFile, env: &EmitEnv, fr: &crate::ir::FuncRef) -> CaptureSignatures {
+    let formatter = JvmSignatureFormatter::new(ir, env);
+    let declared = fr
+        .local_target
+        .map(|target| signature_function_params(ir, target))
+        .unwrap_or_else(|| fr.target_param_tys.clone());
+    let captures = &declared[..fr.field_capture_count as usize];
+    CaptureSignatures {
+        fields: captures
+            .iter()
+            .map(|ty| parameterized_sig(&formatter, ty))
+            .collect(),
+        parameters: captures
+            .iter()
+            .map(|ty| parameterized_sig_at(&formatter, ty, Wildcards::Declared))
+            .collect(),
+    }
+}
+
+impl CaptureSignatures {
+    /// The constructor's `Signature`: each capture's parameterized type or its descriptor, then the
+    /// bound receiver; `None` when no capture is parameterized.
+    fn constructor(&self, descriptors: &[String], bound: bool) -> Option<String> {
+        if self.parameters.iter().all(Option::is_none) {
+            return None;
+        }
+        let mut signature = String::from("(");
+        for (parameter, descriptor) in self.parameters.iter().zip(descriptors) {
+            signature.push_str(parameter.as_deref().unwrap_or(descriptor));
+        }
+        if bound {
+            signature.push_str("Ljava/lang/Object;");
+        }
+        signature.push_str(")V");
+        Some(signature)
+    }
 }

@@ -11,6 +11,7 @@ pub(super) fn emit_function_reference_access_bridge(
     owner: &str,
     cw: &mut ClassWriter,
     owner_is_interface: bool,
+    line: u32,
 ) {
     let function = &ir.functions[fid as usize];
     let parameters = jvm_function_params(ir, fid);
@@ -41,6 +42,9 @@ pub(super) fn emit_function_reference_access_bridge(
         cw.methodref(owner, &function.name, &descriptor)
     };
     let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
+    if line != 0 {
+        code.mark_line(line);
+    }
     if function.is_static {
         code.invokestatic(method, argument_words, slot_words(result) as i32);
     } else {
@@ -49,12 +53,93 @@ pub(super) fn emit_function_reference_access_bridge(
     emit_return(result, &mut code);
     code.ensure_locals(slot.max(1));
     code.link();
+    let name = format!("access${}", function.name);
+    let descriptor = method_descriptor(&bridge_parameters, result);
     cw.add_method(
-        0x1019, // PUBLIC | STATIC | FINAL | SYNTHETIC
-        &format!("access${}", function.name),
-        &method_descriptor(&bridge_parameters, result),
+        0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+        &name,
+        &descriptor,
         &code,
     );
+    set_bridge_locals(ir, fid, owner, &parameters, &name, &descriptor, cw);
+}
+
+/// kotlinc's whole-method locals of an `access$…` bridge: `$this` for an instance target, then the
+/// target's own parameter names over the slots they arrive in.
+fn set_bridge_locals(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    parameters: &[Ty],
+    name: &str,
+    descriptor: &str,
+    cw: &mut ClassWriter,
+) {
+    let names = crate::jvm::parameter_names::function_locals(ir, fid, parameters)
+        .expect("an access bridge target carries exact parameter identities");
+    let mut locals = Vec::with_capacity(parameters.len() + 1);
+    let mut slot = 0u16;
+    if !ir.functions[fid as usize].is_static {
+        locals.push(("$this".to_string(), format!("L{owner};"), 0));
+        slot = 1;
+    }
+    for (name, &parameter) in names.into_iter().zip(parameters) {
+        if let Some(name) = name {
+            locals.push((name, local_variable_desc(parameter), slot));
+        }
+        slot += slot_words(parameter);
+    }
+    cw.set_method_debug(name, descriptor, None, &locals);
+}
+
+/// The `access$…` bridges of `class`'s private members that another class calls, after its declared
+/// members as kotlinc's synthetic-accessor lowering appends them. A member realized as a static
+/// value-class `-impl` gets a bridge over the same parameters.
+pub(super) fn emit_private_member_access_bridges(
+    ir: &IrFile,
+    class: &IrClass,
+    owner: &str,
+    cw: &mut ClassWriter,
+    run: &EmitRun,
+) {
+    let bridged = run.private_member_access_bridges.borrow();
+    for &fid in class.methods.iter().filter(|fid| bridged.contains(fid)) {
+        if ir.functions[fid as usize].is_static {
+            emit_function_reference_access_bridge(ir, fid, owner, cw, false, class.decl_line);
+        } else {
+            emit_private_member_access_bridge(ir, fid, owner, cw, false, class.decl_line);
+        }
+    }
+}
+
+/// How another class reads a private property through the bridge of its exact `getter`: a static
+/// value-class `-impl` getter's bridge takes the same carrier, an instance getter's takes the owner.
+pub(super) fn private_member_read_access(
+    ir: &IrFile,
+    getter: u32,
+    owner: &str,
+) -> crate::jvm::inline::PropertyAccess {
+    use crate::jvm::inline::PropertyAccess;
+    let function = &ir.functions[getter as usize];
+    let parameters = jvm_function_params(ir, getter);
+    let result = jvm_declared_ty(&function.ret);
+    let name = format!("access${}", function.name);
+    if function.is_static {
+        return PropertyAccess::Accessor {
+            owner: owner.to_string(),
+            name,
+            descriptor: method_descriptor(&parameters, result),
+            is_static: true,
+            is_interface: false,
+        };
+    }
+    let mut bridge_parameters = vec![Ty::obj(owner)];
+    bridge_parameters.extend(parameters);
+    PropertyAccess::AccessBridge {
+        owner: owner.to_string(),
+        name,
+        descriptor: method_descriptor(&bridge_parameters, result),
+    }
 }
 
 /// Emit the Java-8 realization of a Kotlin private member used by a lexically related class.
@@ -66,6 +151,7 @@ pub(super) fn emit_private_member_access_bridge(
     owner: &str,
     cw: &mut ClassWriter,
     owner_is_interface: bool,
+    line: u32,
 ) {
     let function = &ir.functions[fid as usize];
     debug_assert!(!function.is_static);
@@ -98,6 +184,9 @@ pub(super) fn emit_private_member_access_bridge(
         .iter()
         .map(|parameter| slot_words(*parameter) as i32)
         .sum();
+    if line != 0 {
+        code.mark_line(line);
+    }
     code.invokespecial(target, argument_words, slot_words(result) as i32);
     emit_return(result, &mut code);
     code.ensure_locals(slot);
@@ -111,5 +200,14 @@ pub(super) fn emit_private_member_access_bridge(
         &bridge_name,
         &bridge_descriptor,
         &code,
+    );
+    set_bridge_locals(
+        ir,
+        fid,
+        owner,
+        &parameters,
+        &bridge_name,
+        &bridge_descriptor,
+        cw,
     );
 }

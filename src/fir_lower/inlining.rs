@@ -1179,7 +1179,6 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
-        | IrIntrinsic::StringPlus
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }

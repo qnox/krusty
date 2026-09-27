@@ -110,18 +110,28 @@ impl Emitter<'_> {
         for &o in ops {
             self.emit_value(o, code);
             let t = self.value_ty(o);
-            crate::trace_compiler!(
-                "splice",
-                "spill inline operand expression={o} node={:?} type={t:?}",
-                self.ir.expr(o)
-            );
-            let temp = self.frame.enter_temp(TempRole::OperandSpill, t);
-            let slot = temp.slot();
-            store(t, slot, code);
-            let lease = self.lease_frame_temporary(temp, t);
-            temps.push((slot, t, lease));
+            temps.push(self.spill_operand(o, t, code));
         }
         temps
+    }
+
+    /// Store the operand `o` just emitted, whose stack type is `t`, into a fresh spill temporary.
+    pub(super) fn spill_operand(
+        &mut self,
+        o: u32,
+        t: Ty,
+        code: &mut CodeBuilder,
+    ) -> (u16, Ty, TemporaryLease) {
+        crate::trace_compiler!(
+            "splice",
+            "spill inline operand expression={o} node={:?} type={t:?}",
+            self.ir.expr(o)
+        );
+        let temp = self.frame.enter_temp(TempRole::OperandSpill, t);
+        let slot = temp.slot();
+        store(t, slot, code);
+        let lease = self.lease_frame_temporary(temp, t);
+        (slot, t, lease)
     }
 
     /// Release spilled operands once they are loaded, newest first as they were entered, so the

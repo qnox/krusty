@@ -55,6 +55,7 @@ pub(super) fn finish_tailrec_body(
             result,
             unit && implicit_return,
             false,
+            0,
             origin,
         );
     }

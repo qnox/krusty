@@ -24922,7 +24922,7 @@ impl<'a> Checker<'a> {
         // Propagate an annotation's expected type through the initializer.
         let init_diag_mark = self.diags.diags.len();
         let it = match declared {
-            Some(d) => self.expr_expected(scope, init, d),
+            Some(d) => self.expr_declared(scope, init, d),
             _ => self.expr(scope, init),
         };
         let unbound_initializer =
@@ -25413,7 +25413,7 @@ impl<'a> Checker<'a> {
                 .or_else(|| property.storage().map(|(ty, _)| ty))
         };
         let vt = match assignment_expected {
-            Some(expected) => self.expr_expected(scope, value, expected),
+            Some(expected) => self.expr_declared(scope, value, expected),
             None => self.expr(scope, value),
         };
         // One narrowing record for every assignment target below (local, backing field, member or
@@ -26303,7 +26303,7 @@ impl<'a> Checker<'a> {
         let rt = self.ret_ty;
         match e {
             Some(ex) => {
-                let t = self.expr_expected(scope, ex, rt);
+                let t = self.expr_declared(scope, ex, rt);
                 let actual = self.recorded_expression_type_for_expected(scope, ex, t, rt);
                 self.narrow_platform_value(rt, ex, PlatformNarrowing::Declaration);
                 self.expect_assignable(rt, actual, self.span(ex), "return");
@@ -37546,6 +37546,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
+        expected_declared: false,
+        expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
         discovers_captures_at_construction: false,
@@ -40537,6 +40539,11 @@ struct Checker<'a> {
     /// constraints, but it cannot finalize an inference diagnostic; the selected argument check
     /// immediately following overload selection owns that decision.
     postponed_argument_depth: usize,
+    /// Whether [`Self::expected`] comes from a declaration, assignment or return (see
+    /// [`Self::expr_declared`]). Consumed with it.
+    expected_declared: bool,
+    /// The expressions being checked, innermost last, each with its expectation's provenance.
+    expectation_frames: Vec<conditional_branch::ExpectationFrame>,
     /// Nonzero while checking a statement that cannot execute because an earlier statement in the
     /// same block always transfers control. The statement is still checked enough to build local
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
@@ -57135,7 +57142,7 @@ impl<'a> Checker<'a> {
                 (!resolved_property_ty.mentions_error()).then_some(resolved_property_ty)
             };
             let it = match declared.filter(|_| p.declared_ty().is_some()) {
-                Some(expected) => self.expr_expected(scope, init, expected),
+                Some(expected) => self.expr_declared(scope, init, expected),
                 None => self.expr(scope, init),
             };
             if p.declared_ty().is_none() {
@@ -59206,7 +59213,7 @@ impl<'a> Checker<'a> {
                         };
                         if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
                             let declared = self.type_ref_ty(&property_scope, r);
-                            let it = self.expr_expected(&property_scope, init, declared);
+                            let it = self.expr_declared(&property_scope, init, declared);
                             let sp = self.value_diagnostic_span(init, it);
                             self.narrow_platform_value(
                                 declared,
@@ -60330,7 +60337,7 @@ impl<'a> Checker<'a> {
                         let it = match (prechecked_storage, declared) {
                             (Some(storage), _) => storage,
                             (None, Some(expected)) => {
-                                self.expr_expected(&initializer_scope, init, expected)
+                                self.expr_declared(&initializer_scope, init, expected)
                             }
                             (None, None) => self.expr(&initializer_scope, init),
                         };
@@ -61082,7 +61089,7 @@ impl<'a> Checker<'a> {
                     .then_some(inherited_result)
                     .flatten();
                     let inferred = if let Some(expected) = exposed_override_result {
-                        let checked = self.expr_expected(scope, *e, expected);
+                        let checked = self.expr_declared(scope, *e, expected);
                         let actual = self
                             .recorded_expression_type_for_expected(scope, *e, checked, expected);
                         self.narrow_platform_value(expected, *e, PlatformNarrowing::Declaration);
@@ -61152,7 +61159,7 @@ impl<'a> Checker<'a> {
     fn check_fun_body(&mut self, scope: &CheckerScope<'_>, f: &FunDecl) {
         match &f.body {
             FunBody::Expr(e) => {
-                let t = self.expr_expected(scope, *e, self.ret_ty);
+                let t = self.expr_declared(scope, *e, self.ret_ty);
                 let actual = self.recorded_expression_type_for_expected(scope, *e, t, self.ret_ty);
                 self.narrow_platform_value(self.ret_ty, *e, PlatformNarrowing::Declaration);
                 self.expect_assignable(self.ret_ty, actual, self.span(*e), "function body");
@@ -63807,6 +63814,7 @@ impl<'a> Checker<'a> {
             self.expr_stack.push(e);
         }
         let expected = self.expected.take();
+        let declared = std::mem::take(&mut self.expected_declared) && expected.is_some();
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
@@ -63824,9 +63832,12 @@ impl<'a> Checker<'a> {
         // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
         // is a stack-pointer read; `stacker` chains further segments only when the current one
         // runs low (see [`crate::wide_stack`]).
+        self.expectation_frames
+            .push(conditional_branch::ExpectationFrame::new(e, declared));
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
+        self.expectation_frames.pop();
         self.expr_depth -= 1;
         // A statement is done: a probe verdict no closed re-check superseded is authoritative.
         if self.expr_depth == 0 {
@@ -63867,6 +63878,7 @@ impl<'a> Checker<'a> {
                 return expected;
             }
         }
+        self.expected_declared |= self.block_forwards_declared_expectation();
         self.expected = Some(expected);
         self.expr(scope, e)
     }
@@ -67275,11 +67287,14 @@ impl<'a> Checker<'a> {
                 None if lt == Ty::Nothing => self.expr(scope, rhs),
                 None => self.expr_expected(scope, rhs, lt),
             };
-            let lt0 = self
-                .rebind_conditional_branch(lhs, rt, lt0, |c, exp| c.expr_expected(scope, lhs, exp));
+            let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
+            let lt0 = self.rebind_conditional_branch(lhs, rt, lt0, fixed, |c, exp| {
+                c.expr_expected(scope, lhs, exp)
+            });
             lt = definitely_non_null_ty(lt0);
-            let rt = self
-                .rebind_conditional_branch(rhs, lt, rt, |c, exp| c.expr_expected(scope, rhs, exp));
+            let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
+                c.expr_expected(scope, rhs, exp)
+            });
             self.report_unbound_conditional_branch(scope, lhs);
             self.report_unbound_conditional_branch(scope, rhs);
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
@@ -69395,58 +69410,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
-    /// result as its expectation.
-    fn rebind_conditional_branch(
-        &mut self,
-        branch: ExprId,
-        sibling: Ty,
-        current: Ty,
-        recheck: impl FnOnce(&mut Self, Ty) -> Ty,
-    ) -> Ty {
-        if current == Ty::Error
-            || matches!(sibling, Ty::Error | Ty::Nothing)
-            || sibling.mentions_pending()
-        {
-            return current;
-        }
-        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
-            return current;
-        };
-        let infer = |expected| {
-            crate::symbol_resolver::infer_generic_return_bindings(
-                &signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-        };
-        // The sibling may be MORE specific than the generic result classifier: a
-        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
-        // supertype. Project the sibling to the selected call's result classifier before giving up;
-        // this is ordinary subtype information, not collection-specific approximation.
-        let expectation = if infer(sibling).is_some() {
-            sibling
-        } else {
-            let source = self.fed_source();
-            let Some(applied) = crate::assignable::applied_supertype(
-                &crate::symbol_resolver::SourceOracle(&source),
-                sibling,
-                signature.ret,
-            ) else {
-                return current;
-            };
-            if infer(applied).is_none() {
-                return current;
-            }
-            applied
-        };
-        crate::trace_compiler!(
-            "expected_call",
-            "conditional branch {branch:?} rebinds against sibling {sibling:?} as {expectation:?}"
-        );
-        recheck(self, expectation)
-    }
-
     /// Report a conditional branch whose selected generic call remains symbolic after sibling
     /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
     /// diagnosed here.
@@ -69493,19 +69456,21 @@ impl<'a> Checker<'a> {
             match else_branch {
                 Some(eb) => {
                     let et = self.if_branch_ty(scope, cond, eb, false, wanted);
-                    let tt = self.rebind_conditional_branch(then_branch, et, tt, |c, exp| {
-                        c.if_branch_ty(
-                            scope,
-                            cond,
-                            then_branch,
-                            true,
-                            Wanted {
-                                expected: Some(exp),
-                                value_required: wanted.value_required,
-                            },
-                        )
-                    });
-                    let et = self.rebind_conditional_branch(eb, tt, et, |c, exp| {
+                    let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
+                    let tt =
+                        self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
+                            c.if_branch_ty(
+                                scope,
+                                cond,
+                                then_branch,
+                                true,
+                                Wanted {
+                                    expected: Some(exp),
+                                    value_required: wanted.value_required,
+                                },
+                            )
+                        });
+                    let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
                         c.if_branch_ty(
                             scope,
                             cond,
@@ -69895,6 +69860,7 @@ impl<'a> Checker<'a> {
             }
             // Recheck a symbolic generic call against the other arms' common result type. Conditions
             // and guards are not rechecked.
+            let fixed = self.expectation_fixes_branches(scope, e, expected);
             if arm_results.len() >= 2 {
                 for i in 0..arm_results.len() {
                     let sibling = arm_results
@@ -69919,7 +69885,7 @@ impl<'a> Checker<'a> {
                     let arm_declined = record.arm_declined.clone();
                     let this_narrow = record.this_narrow;
                     let rebound =
-                        self.rebind_conditional_branch(body, sibling, current, |c, exp| {
+                        self.rebind_conditional_branch(body, sibling, current, fixed, |c, exp| {
                             let arm_scope = scope.child(ScopeKind::Block);
                             let scope = &arm_scope;
                             c.apply_narrowings(
@@ -74139,7 +74105,7 @@ impl<'a> Checker<'a> {
             };
         }
         match expected_return {
-            Some(expected) => self.expr_expected(scope, body, expected),
+            Some(expected) => self.expr_declared(scope, body, expected),
             None => self.expr(scope, body),
         }
     }

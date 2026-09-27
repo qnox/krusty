@@ -44,6 +44,7 @@ mod field_flags;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
+mod operators;
 mod overrides;
 mod progression;
 pub(crate) mod referenced_classifiers;
@@ -68,6 +69,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{
@@ -1089,50 +1091,6 @@ pub struct IrSamTarget {
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,
-}
-
-/// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrBinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Eq,
-    Ne,
-    /// Referential identity (`===`/`!==`): a JVM `if_acmp*` on two reference operands, never the
-    /// structural `Intrinsics.areEqual` that `==`/`!=` (`Eq`/`Ne`) uses for references.
-    RefEq,
-    RefNe,
-    And,
-    Or,
-    /// Bitwise/shift on `Int`/`Long` (Kotlin's `and`/`or`/`xor`/`shl`/`shr`/`ushr` infix functions).
-    BitAnd,
-    BitOr,
-    BitXor,
-    Shl,
-    Shr,
-    Ushr,
-}
-
-/// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrTypeOp {
-    InstanceOf,    // `is T`
-    NotInstanceOf, // `!is T`
-    Cast,          // `as T?` (or `as <primitive>`): a plain `checkcast` — `null` passes
-    /// `as T` to a non-null reference type: null-check (`Intrinsics.checkNotNull`) then `checkcast`,
-    /// so casting `null` throws — matching kotlinc.
-    CastNonNull,
-    SafeCast, // `as? T`
-    /// Representation coercion the backend inserts (e.g. JVM box/unbox) — explicit in the IR so it
-    /// is visible and testable, not hidden in codegen.
-    ImplicitCoercion,
 }
 
 /// A function/method declaration (`IrFunction`).
@@ -2497,11 +2455,11 @@ pub struct IrFile {
     /// final, in an open class as much as in a final one. The JVM backend omits `ACC_FINAL` for a
     /// `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
-    /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
-    /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
+    /// Methods kotlinc emits `private`; the JVM backend gives a `FunId` in this set `ACC_PRIVATE`.
     pub private_methods: std::collections::HashSet<u32>,
-    /// Private instance methods referenced from synthesized callable-reference classes. The JVM
-    /// backend emits one declaration-owned static access bridge for each exact method identity.
+    /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
+    pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,

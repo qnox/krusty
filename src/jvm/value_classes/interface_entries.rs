@@ -84,6 +84,7 @@ pub(super) fn materialize(
                 concrete_ret: result,
                 target_ret: None,
                 type_safe_barrier: false,
+                special: false,
                 target_name: None,
                 box_ret: None,
                 unbox_params: Vec::new(),
