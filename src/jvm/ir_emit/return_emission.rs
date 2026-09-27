@@ -77,6 +77,13 @@ impl Emitter<'_> {
         value: Option<ExprId>,
         code: &mut CodeBuilder,
     ) {
+        // kotlinc's `setExtraLineNumberForVoidReturningFunction`: a body that falls off its end
+        // marks its closing line before the return materializes its value. The `nop` kotlinc
+        // writes there always shares that line with the value's load or the `return` and is
+        // cleaned up, so it is not written.
+        if let Some(line) = self.ir.fallthrough_return_line(returned) {
+            code.mark_line(line);
+        }
         let Some(value) = value else {
             // A void `return` emits nothing of its own, so with a finalizer active its line would
             // otherwise be claimed by the finalizer's first instruction. kotlinc anchors it on a

@@ -8377,6 +8377,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A transfer written on a line of its own therefore keeps the guard as a branch around a `goto`
   carrying that line. Test: `tests/loop_transfer_line_e2e.rs`.
 
+- **A local function or lambda that falls off its end marks its closing line**
+  (`setExtraLineNumberForVoidReturningFunction`), as a declared `Unit` function already did. The
+  checker records the closing `}` line of a block-bodied local function's body and of a lambda on
+  its FIR body (`FirBody::close_line`); lowering turns the former into the lifted function's
+  `fn_close_lines` entry and the latter into a fall-through mark on the `return` it appends
+  (`IrFile::fallthrough_return_line`), which the emitter writes BEFORE the returned `Unit` is
+  loaded. kotlinc's `nop` after that mark always shares its line with the load or the `return`
+  and is cleaned up, so it is not written. An expression-bodied local function ends in a return
+  of its own and gets no mark. Test: `tests/fallthrough_close_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's

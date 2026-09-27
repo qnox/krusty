@@ -106,6 +106,16 @@ impl FirBody {
         self.source_line_count
     }
 
+    /// The closing `}` line of this local callable's block body or lambda, where kotlinc marks
+    /// the return a body falling off its end gets; 0 when there is none.
+    pub const fn close_line(&self) -> u32 {
+        self.close_line
+    }
+
+    pub(crate) fn set_close_line(&mut self, line: u32) {
+        self.close_line = line;
+    }
+
     pub(crate) fn attach_debug_lines(
         &mut self,
         source: SourceFileId,
