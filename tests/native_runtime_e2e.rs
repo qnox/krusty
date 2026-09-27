@@ -124,19 +124,39 @@ fn build_and_run(driver: &str) -> Option<Output> {
     Some(Command::new(&executable).output().expect("run the driver"))
 }
 
-/// Run `driver`; the process must exit 0 and its stdout must end in `OK`. Returns the output for a
-/// driver whose test checks more than that. `None` when the host cannot run drivers at all.
-fn run_driver(driver: &str) -> Option<Output> {
+/// Run `driver`, which must succeed EXACTLY: exit status 0, stdout exactly `OK\n`, and nothing on
+/// stderr. A driver checks what it checks and says `OK` once; any other output means it printed
+/// something it should not have, which a looser test would let through.
+fn run_driver(driver: &str) {
+    let Some(output) = build_and_run(driver) else {
+        return;
+    };
+    assert!(
+        output.status.success() && output.stdout == b"OK\n" && output.stderr.is_empty(),
+        "{driver}: expected status 0, stdout \"OK\\n\" and an empty stderr, got {}\n\
+         stdout (first 200 bytes): {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(200)]),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run `driver`, which writes a payload and then `OK\n`: it must exit 0 with nothing on stderr and
+/// stdout ending in `OK\n`. Returns the payload before that `OK\n` for the test to check EXACTLY;
+/// only a driver whose output is itself the subject uses this. `None` when the host cannot run
+/// drivers at all.
+fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
     let output = build_and_run(driver)?;
     let stdout = &output.stdout;
     assert!(
-        output.status.success() && stdout.ends_with(b"OK\n"),
-        "{driver}: {}\nstdout (last 200 bytes): {:?}\nstderr: {}",
+        output.status.success() && stdout.ends_with(b"OK\n") && output.stderr.is_empty(),
+        "{driver}: expected status 0, stdout ending in \"OK\\n\" and an empty stderr, got {}\n\
+         stdout (last 200 bytes): {:?}\nstderr: {}",
         output.status,
         String::from_utf8_lossy(&stdout[stdout.len().saturating_sub(200)..]),
         String::from_utf8_lossy(&output.stderr)
     );
-    Some(output)
+    Some(stdout[..stdout.len() - b"OK\n".len()].to_vec())
 }
 
 /// Run `driver`, which must end the way the runtime ends a program it cannot continue
@@ -162,10 +182,9 @@ fn a_program_that_returns_ends_with_status_zero() {
 
 #[test]
 fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
-    let Some(output) = run_driver("write_nonblocking_stdout") else {
+    let Some(payload) = run_payload_driver("write_nonblocking_stdout") else {
         return;
     };
-    let payload = &output.stdout[..output.stdout.len() - "OK\n".len()];
     assert_eq!(payload.len(), 1 << 20, "every byte of the payload arrives");
     assert!(
         payload
@@ -267,6 +286,127 @@ fn a_builder_receiver_or_suffix_is_read_as_text_and_sliced_into_a_copy() {
 #[test]
 fn a_concatenation_stops_at_the_first_throwing_to_string() {
     run_driver("string_plus_throwing_to_string");
+}
+
+#[test]
+fn unboxing_null_raises_and_comes_back() {
+    run_driver("unbox_null_raises");
+}
+
+#[test]
+fn a_number_conversion_of_null_raises_and_comes_back() {
+    run_driver("number_conversion_null_raises");
+}
+
+#[test]
+fn a_builder_joins_a_surrogate_pair_appended_unit_by_unit() {
+    run_driver("builder_joins_surrogate_pair");
+}
+
+#[test]
+fn a_lazy_whose_initializer_throws_stays_uninitialized() {
+    run_driver("lazy_initializer_throws");
+}
+
+#[test]
+fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_throwing_to_string");
+}
+
+#[test]
+fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_line_throwing_to_string");
+}
+
+#[test]
+fn a_negative_builder_capacity_throws_illegal_argument_exception() {
+    run_driver("builder_negative_capacity");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
+    run_driver("builder_from_program_char_sequence");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_that_throws_is_not_made() {
+    run_driver("builder_from_throwing_char_sequence");
+}
+
+#[test]
+fn a_pair_stops_at_the_first_component_that_throws() {
+    run_driver("pair_component_throws");
+}
+
+#[test]
+fn a_result_whose_content_throws_renders_no_text() {
+    run_driver("result_to_string_throws");
+}
+
+#[test]
+fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
+    run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn a_class_answers_the_names_its_descriptor_publishes() {
+    run_driver("class_names");
+}
+
+#[test]
+fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
+    run_driver_expecting_failure(
+        "class_names_unpublished",
+        "krusty: the class pkg.Unpublished publishes no reflection names consistent with its kind\n",
+    );
+}
+
+#[test]
+fn a_result_answers_its_operations_and_get_or_throw_stops_at_the_throw() {
+    run_driver("result_operations");
+}
+
+#[test]
+fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
+    run_driver_expecting_failure(
+        "rw_property_get_unknown_delegate",
+        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
+         Delegates.notNull() nor Delegates.observable()\n",
+    );
+}
+
+#[test]
+fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
+    run_driver_expecting_failure(
+        "rw_property_set_unknown_delegate",
+        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
+         Delegates.notNull() nor Delegates.observable()\n",
+    );
+}
+
+#[test]
+fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
+    run_driver("boxing");
+}
+
+#[test]
+fn a_number_converts_saturating_and_truncating_as_kotlin_does() {
+    run_driver("number_conversions");
+}
+
+#[test]
+fn a_pairs_members_answer_componentwise() {
+    run_driver("pair_members");
+}
+
+#[test]
+fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+    run_driver("delegates");
+}
+
+#[test]
+fn a_builder_appends_copies_and_sets_its_length() {
+    run_driver("builder_operations");
 }
 
 fn compiled_build_script() -> PathBuf {

@@ -5,7 +5,12 @@
    the result. */
 #include "standins.h"
 
-/* What each operand's `toString` threw last, so the exception in flight is named by identity. */
+/* What each operand's `toString` throws, so the exception in flight is named by identity. Both are
+   made before any allocation is counted, and kept as collector roots, so that a count taken around
+   a concatenation sees only what the concatenation itself allocates. */
+static KRef left_exception;
+static KRef right_exception;
+/* What each operand's `toString` threw last. */
 static KRef thrown_by_left;
 static KRef thrown_by_right;
 static unsigned right_calls;
@@ -13,7 +18,7 @@ static unsigned right_calls;
 /* A `toString` that throws, as generated code does: the exception pending and NULL returned. */
 static KRef left_to_string(KRef self) {
     (void)self;
-    thrown_by_left = kt_throwable_new(&kt_type_index_out_of_bounds_exception, NULL);
+    thrown_by_left = left_exception;
     kt_throw(thrown_by_left);
     return NULL;
 }
@@ -23,7 +28,7 @@ static KRef left_to_string(KRef self) {
 static KRef right_to_string(KRef self) {
     (void)self;
     right_calls++;
-    thrown_by_right = kt_throwable_new(&kt_type_index_out_of_bounds_exception, NULL);
+    thrown_by_right = right_exception;
     kt_throw(thrown_by_right);
     return NULL;
 }
@@ -49,6 +54,10 @@ void kt_program_entry(void) {
     DRIVER_BEGIN();
     KObjectHeader left = {&left_type};
     KObjectHeader right = {&right_type};
+    kt_gc_add_global_root((void **)&left_exception);
+    kt_gc_add_global_root((void **)&right_exception);
+    left_exception = kt_throwable_new(&kt_type_index_out_of_bounds_exception, NULL);
+    right_exception = kt_throwable_new(&kt_type_index_out_of_bounds_exception, NULL);
 
     /* The LEFT operand throws: the right one's `toString` never runs, there is no text, nothing is
        allocated, and the exception in flight is the very one the left threw. */
