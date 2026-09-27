@@ -62,6 +62,7 @@ mod reference_tests;
 mod references;
 #[cfg(test)]
 mod test_support;
+mod try_expressions;
 mod type_materialization;
 #[cfg(test)]
 mod type_operation_tests;
@@ -96,16 +97,16 @@ use super::{
     FirAdaptedReferenceArgument, FirAnnotationConstruction, FirAnnotationDefaultValue,
     FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
     FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
-    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCatch, FirClassifierProperty,
-    FirConstant, FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget,
-    FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue,
-    FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr,
-    FirExprId, FirExprKind, FirImplicitReceiverCapture, FirIndexedAccessKind,
-    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
-    FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing,
-    FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
-    FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
-    FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirClassifierProperty, FirConstant,
+    FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget, FirControlTarget,
+    FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue, FirDefaultValue,
+    FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId,
+    FirExprKind, FirImplicitReceiverCapture, FirIndexedAccessKind, FirInterfaceDelegateArgument,
+    FirIntrinsic, FirJumpKind, FirLocalCallableRef, FirLocalClassCapture,
+    FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing, FirPluginOperand,
+    FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation,
+    FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId,
+    FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
     FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
     LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
     ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
@@ -2431,39 +2432,7 @@ impl BodyFirChecker<'_> {
                     body,
                     catches,
                     finally,
-                } => {
-                    let body = self.expression(*body)?;
-                    let mut checked_catches = Vec::with_capacity(catches.len());
-                    for catch in catches {
-                        let parameter_ty = self.info.resolved_type(&catch.ty).ok_or_else(|| {
-                            self.failure(
-                                Some(catch.ty.span),
-                                BodyCheckFailureKind::UnresolvedTypeSyntax,
-                            )
-                        })?;
-                        self.scopes.push(HashMap::new());
-                        self.delegate_scopes.push(HashMap::new());
-                        let parameter_ty = self.resolved_type(catch.ty.span, parameter_ty)?;
-                        let parameter = self.bind_local(&catch.name, parameter_ty);
-                        let checked_body = self.expression(catch.body);
-                        self.delegate_scopes.pop();
-                        self.scopes.pop();
-                        checked_catches.push(FirCatch {
-                            origin: self.origins.source(self.source, catch.param_span),
-                            parameter,
-                            parameter_ty,
-                            body: checked_body?,
-                            debug_line: catch.line,
-                        });
-                    }
-                    FirExprKind::Try {
-                        body,
-                        catches: checked_catches.into_boxed_slice(),
-                        finally: finally
-                            .map(|finally| self.expression(finally))
-                            .transpose()?,
-                    }
-                }
+                } => self.try_expression(*body, catches, *finally)?,
                 Expr::Call { .. }
                     if self.file.anonymous_object_classes.contains_key(&expression) =>
                 {

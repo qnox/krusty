@@ -34,6 +34,7 @@ pub enum IrNodeOrigin {
 mod bindings;
 mod bottom_values;
 mod bridges;
+mod catches;
 mod companion_blocks;
 mod constants;
 mod constructors;
@@ -55,6 +56,7 @@ pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
+pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
@@ -1084,29 +1086,6 @@ pub struct IrSamTarget {
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,
-}
-
-/// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
-#[derive(Clone, Debug)]
-pub struct IrCatch {
-    /// Value index the caught exception is bound to.
-    pub var: u32,
-    /// The debug-visible binding, absent for a compiler-generated handler — which binds no source
-    /// name and must not appear in a local variable table.
-    pub binding: Option<IrCatchBinding>,
-    /// JVM internal name of the caught exception type.
-    pub exc_internal: TypeName,
-    pub body: ExprId,
-    /// The source line of the clause's `catch` keyword, marked at the handler's entry; absent for a
-    /// compiler-generated handler, which has no clause of its own.
-    pub line: Option<u32>,
-}
-
-impl IrCatch {
-    /// The source spelling of the binding, absent for a compiler-generated handler.
-    pub fn binding_name(&self) -> Option<&str> {
-        self.binding.as_ref().map(|binding| binding.name.as_str())
-    }
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.

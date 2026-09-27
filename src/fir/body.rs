@@ -9,6 +9,8 @@ pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
+mod branches;
+pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition};
 mod ranges;
 pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
@@ -1631,32 +1633,6 @@ pub struct FirExpr {
     pub origin: OriginId,
     pub ty: ResolvedTy,
     pub kind: FirExprKind,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirCatch {
-    pub origin: OriginId,
-    pub parameter: LocalValueId,
-    pub parameter_ty: ResolvedTy,
-    pub body: FirExprId,
-    /// The `catch` keyword's source line, a line-only output fact; 0 when unknown.
-    pub debug_line: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirWhenBranch {
-    pub origin: OriginId,
-    pub conditions: Box<[FirWhenCondition]>,
-    pub guard: Option<FirExprId>,
-    pub result: FirExprId,
-}
-
-/// A `when` condition after the checker has distinguished value patterns from predicates that
-/// already consume the subject (`is`/`!is` and `in`/`!in`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirWhenCondition {
-    SubjectEquals(FirExprId),
-    Predicate(FirExprId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
