@@ -7484,6 +7484,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
 
+- **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
+  runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
+  `@IntrinsicConstEvaluation` builtin (`Int.plus`, `toByte()`, `compareTo`, `String.length`, ...) or
+  to one of the language's `==`, `<`, `<=`, `>`, `>=`, `&&`, `||`, whose every argument is a
+  constant, becomes its value, and a string template's neighbouring constant parts merge into one
+  `String` constant (`"a${1}b$x"` is `"a1b" + x`). So `1.toByte()` is `iconst_1`, not
+  `iconst_1; i2b`, and `Int.MAX_VALUE - 2` is `ldc 2147483645`. krusty folds the same operations as
+  checked FIR publishes them (`fir::ConstantEvaluation`), while lowering: the checker has already
+  turned exactly those builtin declarations into typed operations, so evaluation reads only the
+  operation and the checked types. Values follow Kotlin: integer arithmetic wraps, a shift distance is
+  masked, a floating value converts to an integral type rounding toward zero and saturating (NaN is
+  0), relational comparisons and `==` on floating values are IEEE (NaN is unordered, `0.0 == -0.0`),
+  and `compareTo` is the total order. What kotlinc's interpreter rejects stays an operation: an
+  integer division or remainder by zero, and a referential `===`. Calls the checker publishes as
+  ordinary library calls (`String.plus`, `String.get`, `toString()`, `floorDiv`, unsigned
+  arithmetic) are not folded yet, nor is an `if`/`when` over constants.
+  (`tests/constant_evaluation_e2e.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

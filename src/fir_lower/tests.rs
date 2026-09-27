@@ -63,28 +63,21 @@ fn consuming_lowering_materializes_common_ir_roots() {
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
 
     assert_eq!(lowered.owner, BodyOwnerId::from_raw(7));
-    assert_eq!(lowered.roots.as_ref(), &[3]);
-    assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(1))));
-    assert!(matches!(ir.expr(1), IrExpr::Const(IrConst::Int(2))));
+    // `1 + 2` is an operation over constants, which folds to its value before its operands lower.
+    assert_eq!(lowered.roots.as_ref(), &[1]);
+    assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(3))));
+    assert!(ir.folded_constants.contains(&0));
     assert!(matches!(
-        ir.expr(2),
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: 0,
-            rhs: 1
-        }
-    ));
-    assert!(matches!(
-        ir.expr(3),
+        ir.expr(1),
         IrExpr::Variable {
             index: 0,
             ty: Ty::Int,
-            init: Some(2),
+            init: Some(0),
             named: true
         }
     ));
     assert_eq!(ir.fir_origins.len(), ir.exprs.len());
-    assert_eq!(ir.fir_origins.get(&3), Some(&IrNodeOrigin::Fir(origin)));
+    assert_eq!(ir.fir_origins.get(&1), Some(&IrNodeOrigin::Fir(origin)));
 }
 
 #[test]
@@ -2855,10 +2848,29 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
 fn checked_increment_lowers_without_recovering_an_operator() {
     let origin = OriginId::from_raw(0);
     let mut body = FirBody::new(BodyOwnerId::from_raw(2));
-    let value = body.add_expr(FirExpr {
+    // A local read, not a constant: an increment of a constant folds to its value.
+    let local = body.allocate_local_value();
+    let initial = body.add_expr(FirExpr {
         origin,
         ty: resolved(Ty::Int),
         kind: FirExprKind::Constant(FirConstant::Int(41)),
+    });
+    let declaration = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Local {
+            target: local,
+            ty: resolved(Ty::Int),
+            mutable: false,
+            lateinit: false,
+            initializer: Some(initial),
+            conversion: None,
+        },
+    });
+    body.push_root(declaration);
+    let value = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Int),
+        kind: FirExprKind::ValueRead(local),
     });
     let increment = body.add_expr(FirExpr {
         origin,
@@ -2877,7 +2889,7 @@ fn checked_increment_lowers_without_recovering_an_operator() {
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
     assert!(matches!(
-        ir.expr(lowered.roots[0]),
+        ir.expr(lowered.roots[1]),
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             type_operand: Ty::Int,

@@ -83,14 +83,14 @@ mod tests {
 
     #[test]
     fn js_backend_runs_through_common_compiler_driver() {
-        let (outputs, diags) = compile_js_sources(&[("Main", "fun box(): Int = 1 + 2")]);
+        let (outputs, diags) = compile_js_sources(&[("Main", "fun box(x: Int): Int = x + 2")]);
 
         assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
         assert_eq!(
             outputs,
             vec![(
                 "Main.js".to_string(),
-                b"function box() {\n  return (1 + 2);\n}\n".to_vec(),
+                b"function box(v0) {\n  return (v0 + 2);\n}\n".to_vec(),
             )]
         );
     }

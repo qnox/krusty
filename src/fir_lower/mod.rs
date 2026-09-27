@@ -275,6 +275,9 @@ pub(crate) fn lower_body_with_context(
 
 struct BodyLowering<'a> {
     body: &'a FirBody,
+    /// Constant values of this body's operations, folded as kotlinc's `ConstEvaluationLowering`
+    /// folds them.
+    constants: crate::fir::ConstantEvaluation,
     index: &'a ResolvedModuleIndex,
     ir: &'a mut IrFile,
     expression_states: Vec<LoweringState>,
@@ -448,6 +451,7 @@ impl<'a> BodyLowering<'a> {
             .and_then(|count| count.checked_add(u32::from(has_extension_receiver)))
             .expect("too many FIR value slots");
         Self {
+            constants: crate::fir::ConstantEvaluation::default(),
             expression_states: vec![LoweringState::Uncomputed; body.expression_count()],
             statement_states: vec![LoweringState::Uncomputed; body.statement_count()],
             body,
