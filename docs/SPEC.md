@@ -9072,17 +9072,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
   `is` names. The read-only list `listOf` answers is `List`, `Collection`, `Iterable` and
-  `RandomAccess` and not mutable, and publishes no class name: that is Kotlin/Native's answer, an
-  anonymous read-only `AbstractList` from `Array.asList`, where the JVM's `java.util.Arrays$ArrayList`
-  is a `MutableList` to an `is` (kotlinc prints `true` there). A list equals any `List` with equal
-  elements in order, a program's own list class included, which it walks as the JVM's
-  `ArrayList.equals` does — `iterator()`, `hasNext`, `next`, the element's `equals`, and a final
-  `hasNext` — and a merely `Iterable` object never. The runtime reaches a program's collection only
-  through its `iterator()`, so the read-only list walks it the same way where the JVM's
-  `AbstractList.equals` asks for `listIterator()`, and `emptyList() == p` walks `p` where Kotlin's
-  `EmptyList.equals` (on both platforms) asks `p.isEmpty()`; the driver pins those calls. A call
-  into the program that throws ends the comparison. The answers, and the calls a growable list makes,
-  are compared with kotlinc's for `list_identity.kt` on every run.
+  `RandomAccess` and not mutable, and publishes no class name: that is Kotlin/Native's answer for
+  `listOf(a, b)`, the anonymous read-only `AbstractList` of `Array.asList`, where the JVM's
+  `java.util.Arrays$ArrayList` is a `MutableList` to an `is` and is named `ArrayList` -- a declared
+  divergence. A list equals any `List` with equal elements in order, a program's own list class
+  included, and a merely `Iterable` object never. A call into the program that throws ends the
+  comparison. The runtime reaches a program's collection only through its `iterator()`, `hasNext`
+  and `next`, so both lists walk a program list as the JVM's `ArrayList.equals` does --
+  `iterator()`, `hasNext`, `next`, the element's `equals`, and a final `hasNext`. That is a known
+  gap in both: Kotlin/Native's `AbstractList.equals` compares the `size`s first and then walks with
+  `iterator()` and `next()` alone, `EmptyList.equals` asks `isEmpty()`, and `ArrayList.equals`
+  compares `size` and then `get(i)`; closing it needs the compiler to record those members in a
+  program collection's descriptor. The read-only list's lines are declared (`not_yet_native`); the
+  growable list's match the JVM, so the oracle cannot see its gap. Compared with kotlinc's answers
+  for `list_identity.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`list_identity`).
 - **A native walk stops at the program's first throwing call, `iterator()` and `hasNext()`
   included.** Every runtime walk over an `Iterable` — `map`, `forEach`, `any`/`all`/`none`,
