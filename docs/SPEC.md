@@ -7585,6 +7585,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Delegates.notNull() nor Delegates.observable()`, rather than being read as a `NotNullVar`.
   Tests: `tests/native_runtime_e2e.rs` (`rw_property_get_unknown_delegate`,
   `rw_property_set_unknown_delegate`).
+- **The native runtime's ordinary paths answer as Kotlin does.** Each expectation below comes from
+  the equivalent Kotlin program compiled and run with kotlinc 2.4.10 on the JVM; each driver records
+  its program.
+  - Boxing: a box carries its kind's descriptor and value; every `Byte`, `Short`/`Int`/`Long` in
+    -128..127, `Char` in 0..127 and both `Boolean`s come back as the same object, as on the JVM;
+    128 (and `Char` 128) come back fresh; `Long.MIN_VALUE` does not share zero's box; `Float` and
+    `Double` are never cached.
+  - `Number` conversions: a floating-point source truncates toward zero, saturates at the target's
+    ends and answers 0 for NaN; `toShort`/`toByte` narrow what `toInt` answers (so `1e10.toByte()`
+    is -1); a wider integer truncates (`4294967297L.toInt()` is 1); `toFloat` rounds to nearest.
+  - `Pair`: `equals` componentwise and only against a `Pair`, `hashCode` as
+    `31 * first.hashCode() + second.hashCode()` in wrapping 32-bit arithmetic with null as 0,
+    `toString` as `(first, second)`.
+  - Delegates: `lazy` runs its initializer once, on first read, and renders
+    `Lazy value not initialized yet.` until then; `observable` writes before its callback runs, so
+    the callback reads the new value; `notNull` read before a write throws
+    `IllegalStateException("Property nn should be initialized before get.")`.
+  - `StringBuilder`: appends of each kind, `appendLine`, `toString` as a copy, `setLength` shorter,
+    longer (NUL padding) and between the halves of a surrogate pair — which keeps the lone high
+    half, as the JVM does — growth past the capacity, identity equality and self-append.
+  Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
+  `builder_operations`, with `class_names` and `result_operations` above).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

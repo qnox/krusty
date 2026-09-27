@@ -384,6 +384,31 @@ fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
     );
 }
 
+#[test]
+fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
+    run_driver("boxing");
+}
+
+#[test]
+fn a_number_converts_saturating_and_truncating_as_kotlin_does() {
+    run_driver("number_conversions");
+}
+
+#[test]
+fn a_pairs_members_answer_componentwise() {
+    run_driver("pair_members");
+}
+
+#[test]
+fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+    run_driver("delegates");
+}
+
+#[test]
+fn a_builder_appends_copies_and_sets_its_length() {
+    run_driver("builder_operations");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

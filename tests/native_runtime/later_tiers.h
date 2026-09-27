@@ -49,6 +49,10 @@ __attribute__((weak)) const KType kt_type_illegal_argument_exception = {
     .super = &kt_type_any,
 };
 
+/* `kotlin.Any`'s own `equals`, identity, as the tier that defines it answers; the builder's and the
+   delegates' vtables name it. */
+__attribute__((weak)) kt_boolean kt_any_equals(KRef self, KRef other) { return self == other; }
+
 /* `a == b` and `a.hashCode()` as the real pair answer them: `null` equals only `null` and hashes
    to 0, and anything else answers through its own vtable slot -- which is where a program's
    override, and so a throw, comes in. */
@@ -72,6 +76,34 @@ __attribute__((weak)) kt_int kt_hash_code(KRef value) {
         return kt_any_hash_code(value);
     }
     return ((kt_int(*)(KRef))type->vtable[KT_SLOT_HASH_CODE])(value);
+}
+
+__attribute__((weak)) const KType kt_type_illegal_state_exception = {
+    .name = "kotlin.IllegalStateException",
+    .name_length = sizeof("kotlin.IllegalStateException") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
+};
+
+/* The runtime declares these two `static` and defines them in a later tier; until then their calls
+   are unresolved references like any other, and these answer them the way the real ones do: a
+   function value's `invoke` through the slot it declares, and Kotlin's own text for a `notNull`
+   delegate read before it was written. */
+__attribute__((weak)) KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
+    if (function == NULL || type_of(function)->vtable == NULL ||
+        type_of(function)->vtable_length <= KT_SLOT_INVOKE) {
+        KT_SYS_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef, KRef, KRef))type_of(function)->vtable[KT_SLOT_INVOKE])(
+        function, first, second, third);
+}
+
+__attribute__((weak)) void kt_raise_uninitialized_property(KRef name) {
+    KRef message = kt_string_plus(kt_string_utf8("Property ", 9), kt_to_string(name));
+    message = kt_string_plus(message, kt_string_utf8(" should be initialized before get.", 34));
+    kt_throw(kt_throwable_new(&kt_type_illegal_state_exception, message));
 }
 
 /* Whether `text` -- a string or a builder -- holds exactly these BYTES. Read through the text
