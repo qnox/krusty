@@ -195,25 +195,35 @@ impl<'a> Layout<'a> {
             .collect();
         orphans.sort_unstable();
         let mut orphans = orphans.into_iter().peekable();
-        for index in 1..count {
-            while let Some((_, sequence)) = anchors.next_if(|(anchor, _)| *anchor <= index) {
-                for &entry in sequence {
-                    self.place(entry, &mut placed, &mut order);
+        // A sequence goes before an orphan with the same anchor; an anchor past the last entry
+        // places its sequence or orphan at the end, still in anchor order.
+        for index in 1..=count {
+            let bound = if index == count { usize::MAX } else { index };
+            loop {
+                let sequence = anchors.peek().map(|(anchor, _)| *anchor);
+                let orphan = orphans.peek().map(|&(anchor, _)| anchor);
+                match (sequence, orphan) {
+                    (Some(sequence), orphan)
+                        if sequence <= bound && orphan.is_none_or(|orphan| sequence <= orphan) =>
+                    {
+                        let (_, sequence) = anchors.next().expect("a peeked sequence");
+                        for &entry in sequence {
+                            self.place(entry, &mut placed, &mut order);
+                        }
+                    }
+                    (_, Some(orphan)) if orphan <= bound => {
+                        let (_, orphan) = orphans.next().expect("a peeked orphan");
+                        self.place(orphan, &mut placed, &mut order);
+                    }
+                    _ => break,
                 }
             }
-            while let Some((_, orphan)) = orphans.next_if(|&(anchor, _)| anchor <= index) {
-                self.place(orphan, &mut placed, &mut order);
-            }
-            if self.read.entries[index].is_some()
+            if index < count
+                && self.read.entries[index].is_some()
                 && !self.movable[index]
                 && self.anchored[index].is_none()
             {
                 self.place(index as u16, &mut placed, &mut order);
-            }
-        }
-        for (_, sequence) in anchors {
-            for &entry in sequence {
-                self.place(entry, &mut placed, &mut order);
             }
         }
         // Every kept entry is placed by now: it is named by a slot or by a placed entry. Placing
