@@ -7,8 +7,12 @@ pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod lifting_sites;
+pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
+mod branches;
+pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition};
 mod ranges;
 pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
@@ -1634,30 +1638,6 @@ pub struct FirExpr {
     pub kind: FirExprKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirCatch {
-    pub origin: OriginId,
-    pub parameter: LocalValueId,
-    pub parameter_ty: ResolvedTy,
-    pub body: FirExprId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirWhenBranch {
-    pub origin: OriginId,
-    pub conditions: Box<[FirWhenCondition]>,
-    pub guard: Option<FirExprId>,
-    pub result: FirExprId,
-}
-
-/// A `when` condition after the checker has distinguished value patterns from predicates that
-/// already consume the subject (`is`/`!is` and `in`/`!in`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirWhenCondition {
-    SubjectEquals(FirExprId),
-    Predicate(FirExprId),
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirLoopHeader {
     While {
@@ -1804,44 +1784,6 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
-/// Where a lambda or local function sits among the callables kotlinc lifts out of one declaration:
-/// the sequence (its lexical `owner` and outermost declaration name `container`, as the source
-/// spells them) and one step per enclosing local callable, down to this one. `lifted` is `false`
-/// for a callable kotlinc turns into a class of its own (a suspend lambda), which takes no place.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirLiftingSite {
-    pub owner: Box<str>,
-    pub container: Box<str>,
-    pub path: Box<[FirLiftingStep]>,
-    pub lifted: bool,
-}
-
-/// One enclosing local callable of a [`FirLiftingSite`]: its source name (`None` for a lambda or a
-/// local delegated property's accessor) and its position in the sequence's source order.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirLiftingStep {
-    pub name: Option<Box<str>>,
-    pub position: u32,
-}
-
-impl FirLiftingSite {
-    pub fn from_source(site: &crate::ast::LiftingSite, lifted: bool) -> Self {
-        Self {
-            owner: site.owner.as_str().into(),
-            container: site.container.as_str().into(),
-            path: site
-                .path
-                .iter()
-                .map(|step| FirLiftingStep {
-                    name: step.name.as_deref().map(Into::into),
-                    position: step.position,
-                })
-                .collect(),
-            lifted,
-        }
-    }
-}
-
 /// Exact lexical context a target needs to name the class it realizes for one expression: the
 /// stable source classifier that owns the executable context (`None` for the file), the source
 /// declaration names below it, and the shared generated-artifact ordinal.
@@ -1883,6 +1825,9 @@ pub struct FirBody {
     debug_value_names: HashMap<LocalValueId, Box<str>>,
     /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
+    /// Line-only debug fact: the closing `}` line of a local callable's block body (or of a
+    /// lambda), 0 when there is none.
+    close_line: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<FirStatementDebugLines>,
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
@@ -1941,6 +1886,7 @@ impl FirBody {
             direct_suspension: false,
             debug_value_names: HashMap::new(),
             source_line_count: 0,
+            close_line: 0,
             expression_debug_lines: Vec::new(),
             statement_debug_lines: Vec::new(),
             generated_class_provenance: HashMap::new(),

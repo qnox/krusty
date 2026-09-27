@@ -62,6 +62,7 @@ mod result_null_checks;
 mod runtime_capabilities;
 mod shared_captures;
 pub mod source_map;
+mod string_constant;
 pub mod suspend;
 pub(crate) mod suspend_impls;
 mod top_level_properties;

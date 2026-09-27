@@ -400,6 +400,8 @@ mod companion_supertype_e2e;
 mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
+#[path = "comparison_jump_line_e2e.rs"]
+mod comparison_jump_line_e2e;
 #[path = "comparison_under_operands_e2e.rs"]
 mod comparison_under_operands_e2e;
 #[path = "compound_index_assign_e2e.rs"]
@@ -426,12 +428,16 @@ mod const_read_inline_e2e;
 mod const_val_e2e;
 #[path = "constant_conditions_e2e.rs"]
 mod constant_conditions_e2e;
+#[path = "constant_evaluation_e2e.rs"]
+mod constant_evaluation_e2e;
 #[path = "constant_pool_order_e2e.rs"]
 mod constant_pool_order_e2e;
 #[path = "construction_argument_labels_e2e.rs"]
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "consumer_materialized_result_e2e.rs"]
+mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
 mod context_and_loop_wording_e2e;
 #[path = "context_function_type_e2e.rs"]
@@ -570,6 +576,8 @@ mod diagnostics_parity_support;
 mod diagnostics_receiver_reference_cases_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
+#[path = "discarded_generic_result_e2e.rs"]
+mod discarded_generic_result_e2e;
 #[path = "discarded_when_e2e.rs"]
 mod discarded_when_e2e;
 #[path = "discarded_when_value_e2e.rs"]
@@ -672,6 +680,8 @@ mod extension_property_e2e;
 mod extension_receiver_property_smartcast_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "fallthrough_close_line_e2e.rs"]
+mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
 mod feature_box_e2e;
 #[path = "feature_coverage_a_e2e.rs"]
@@ -878,6 +888,8 @@ mod inline_splice_e2e;
 mod inline_splice_ldc_wide_e2e;
 #[path = "inline_tail_expansion_shape_e2e.rs"]
 mod inline_tail_expansion_shape_e2e;
+#[path = "inline_value_class_lambda_e2e.rs"]
+mod inline_value_class_lambda_e2e;
 #[path = "inline_vc_suspend_coverage_e2e.rs"]
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
@@ -930,6 +942,8 @@ mod is_primitive_smartcast_e2e;
 mod java_abstract_override_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
+#[path = "java_bridge_members_e2e.rs"]
+mod java_bridge_members_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_ctor_sam_conversion_e2e.rs"]
@@ -1052,6 +1066,8 @@ mod local_superclass_capture_e2e;
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
+#[path = "loop_transfer_line_e2e.rs"]
+mod loop_transfer_line_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
@@ -1160,6 +1176,8 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
+#[path = "splice_nullable_value_class_lambda_e2e.rs"]
+mod splice_nullable_value_class_lambda_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -1178,6 +1196,8 @@ mod value_class_interface_entry_e2e;
 mod value_class_nothing_override_bridges_e2e;
 #[path = "value_class_object_carrier_generic_result_e2e.rs"]
 mod value_class_object_carrier_generic_result_e2e;
+#[path = "value_class_private_member_access_e2e.rs"]
+mod value_class_private_member_access_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
@@ -1314,6 +1334,8 @@ mod numeric_eq_conform_e2e;
 mod numeric_ops_coverage_e2e;
 #[path = "object_carrier_generic_element_e2e.rs"]
 mod object_carrier_generic_element_e2e;
+#[path = "object_cell_signatures_e2e.rs"]
+mod object_cell_signatures_e2e;
 #[path = "object_const_val_e2e.rs"]
 mod object_const_val_e2e;
 #[path = "object_default_ctor_arg_e2e.rs"]
@@ -1675,6 +1697,8 @@ mod source_fallback_companion_props_e2e;
 mod source_map_ranges_e2e;
 #[path = "source_map_row_count_e2e.rs"]
 mod source_map_row_count_e2e;
+#[path = "source_when_stepping_nop_e2e.rs"]
+mod source_when_stepping_nop_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
 mod spliced_lambda_nonlocal_return_e2e;
 #[path = "spliced_lambda_try_e2e.rs"]
@@ -1697,6 +1721,8 @@ mod stdlib_call_resolution_e2e;
 mod stdlib_ifblank_null_e2e;
 #[path = "string_concat_append_overload_e2e.rs"]
 mod string_concat_append_overload_e2e;
+#[path = "string_concatenation_e2e.rs"]
+mod string_concatenation_e2e;
 #[path = "string_plus_indy_e2e.rs"]
 mod string_plus_indy_e2e;
 #[path = "subtype_receiver_extension_call_e2e.rs"]
@@ -2033,6 +2059,8 @@ mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]
 mod reified_value_class_splice_e2e;
 
+#[path = "conditional_branch_expectation_e2e.rs"]
+mod conditional_branch_expectation_e2e;
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
 #[path = "finally_gap_ranges_e2e.rs"]

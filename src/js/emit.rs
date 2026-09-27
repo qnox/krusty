@@ -584,6 +584,13 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *rhs, inst)
             )
         }
+        IrExpr::StringConcat(parts) => {
+            let parts = parts
+                .iter()
+                .map(|&part| format!(" + String({})", emit_expr(ir, part, inst)))
+                .collect::<String>();
+            format!("(\"\"{parts})")
+        }
         IrExpr::PrimitiveNeg { operand, .. } => {
             format!("(-{})", emit_expr(ir, *operand, inst))
         }
@@ -713,11 +720,6 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                             "(()=>{{if(!({condition}))throw new Error({message});return undefined;}})()"
                         )
                     }
-                }
-                crate::ir::IrIntrinsic::StringPlus => {
-                    let receiver = emit_expr(ir, dispatch_receiver.unwrap(), inst);
-                    let argument = emit_expr(ir, args[0], inst);
-                    format!("(String({receiver}) + String({argument}))")
                 }
                 crate::ir::IrIntrinsic::StringLength | crate::ir::IrIntrinsic::ArraySize => {
                     format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))

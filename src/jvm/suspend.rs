@@ -738,12 +738,11 @@ fn linearize_suspending_finally(ir: &mut IrFile, expression: ExprId, suspend_set
     });
     let protected = ir.add_expr(IrExpr::Try {
         body,
-        catches: vec![crate::ir::IrCatch {
-            var: catch_var,
-            binding: None,
-            exc_internal: type_name("java/lang/Throwable"),
-            body: catch_body,
-        }],
+        catches: vec![crate::ir::IrCatch::generated(
+            catch_var,
+            type_name("java/lang/Throwable"),
+            catch_body,
+        )],
         finally: None,
         result: Ty::Unit,
     });
@@ -1421,6 +1420,7 @@ fn bind_value_try_to_local(
             var: catch.var,
             binding: catch.binding,
             exc_internal: catch.exc_internal,
+            line: catch.line,
             body: assign_branch_to_tmp(
                 ir,
                 catch.body,
@@ -4507,12 +4507,8 @@ fn wrap_dispatch_for_handlers(
     });
     branches.push((None, rethrow));
     let when = ir.add_expr(IrExpr::When { branches });
-    let catch = crate::ir::IrCatch {
-        var: catch_var,
-        binding: None,
-        exc_internal: crate::types::type_name("java/lang/Throwable"),
-        body: when,
-    };
+    let throwable = crate::types::type_name("java/lang/Throwable");
+    let catch = crate::ir::IrCatch::generated(catch_var, throwable, when);
     ir.add_expr(IrExpr::Try {
         body: dispatch,
         catches: vec![catch],

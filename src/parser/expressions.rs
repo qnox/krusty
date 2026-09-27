@@ -1308,6 +1308,7 @@ impl Parser<'_> {
             let save = self.i;
             self.skip_newlines();
             if self.at(TokenKind::Ident) && self.keyword_text("catch") {
+                let keyword_span = self.tok().span;
                 self.bump(); // 'catch'
                 self.expect(TokenKind::LParen, "'('");
                 // The parameter may sit on its own line(s) inside the parens (`catch (\n e: E\n)`),
@@ -1339,6 +1340,8 @@ impl Parser<'_> {
                     ty,
                     body: cbody,
                     param_span,
+                    keyword_span,
+                    line: 0,
                 });
             } else if self.at(TokenKind::Ident) && self.keyword_text("finally") {
                 self.bump(); // 'finally'

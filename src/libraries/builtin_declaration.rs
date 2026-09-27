@@ -21,6 +21,7 @@ pub(crate) struct BuiltinMemberDeclaration<'a> {
     pub is_property: bool,
     pub is_operator: bool,
     pub is_infix: bool,
+    pub annotations: &'a [TypeName],
 }
 
 /// One exact package-level Kotlin function after a provider has normalized its declaration.

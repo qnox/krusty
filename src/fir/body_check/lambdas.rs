@@ -83,6 +83,13 @@ impl BodyFirChecker<'_> {
             self.lambda_binding_name.clone(),
             label,
         ));
+        body.set_close_line(
+            self.file
+                .expr_end_lines
+                .get(expression.0 as usize)
+                .copied()
+                .unwrap_or(0),
+        );
         if let Some(site) = self.file.lambda_lifting_sites.get(&expression.0) {
             // A suspend lambda becomes a class of its own rather than a lifted method.
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(

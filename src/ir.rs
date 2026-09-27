@@ -34,14 +34,17 @@ pub enum IrNodeOrigin {
 mod bindings;
 mod bottom_values;
 mod bridges;
+mod catches;
 mod companion_blocks;
 mod constants;
 mod constructors;
 mod default_arguments;
 mod expression_provenance;
+mod field_flags;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
+mod operators;
 mod overrides;
 mod progression;
 pub(crate) mod referenced_classifiers;
@@ -56,14 +59,17 @@ pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
+pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
+pub use field_flags::IrfFlags;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{
@@ -1087,70 +1093,6 @@ pub struct IrSamTarget {
     pub function_adapter: bool,
 }
 
-/// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
-#[derive(Clone, Debug)]
-pub struct IrCatch {
-    /// Value index the caught exception is bound to.
-    pub var: u32,
-    /// The debug-visible binding, absent for a compiler-generated handler — which binds no source
-    /// name and must not appear in a local variable table.
-    pub binding: Option<IrCatchBinding>,
-    /// JVM internal name of the caught exception type.
-    pub exc_internal: TypeName,
-    pub body: ExprId,
-}
-
-impl IrCatch {
-    /// The source spelling of the binding, absent for a compiler-generated handler.
-    pub fn binding_name(&self) -> Option<&str> {
-        self.binding.as_ref().map(|binding| binding.name.as_str())
-    }
-}
-
-/// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrBinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Eq,
-    Ne,
-    /// Referential identity (`===`/`!==`): a JVM `if_acmp*` on two reference operands, never the
-    /// structural `Intrinsics.areEqual` that `==`/`!=` (`Eq`/`Ne`) uses for references.
-    RefEq,
-    RefNe,
-    And,
-    Or,
-    /// Bitwise/shift on `Int`/`Long` (Kotlin's `and`/`or`/`xor`/`shl`/`shr`/`ushr` infix functions).
-    BitAnd,
-    BitOr,
-    BitXor,
-    Shl,
-    Shr,
-    Ushr,
-}
-
-/// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IrTypeOp {
-    InstanceOf,    // `is T`
-    NotInstanceOf, // `!is T`
-    Cast,          // `as T?` (or `as <primitive>`): a plain `checkcast` — `null` passes
-    /// `as T` to a non-null reference type: null-check (`Intrinsics.checkNotNull`) then `checkcast`,
-    /// so casting `null` throws — matching kotlinc.
-    CastNonNull,
-    SafeCast, // `as? T`
-    /// Representation coercion the backend inserts (e.g. JVM box/unbox) — explicit in the IR so it
-    /// is visible and testable, not hidden in codegen.
-    ImplicitCoercion,
-}
-
 /// A function/method declaration (`IrFunction`).
 #[derive(Clone, Debug)]
 pub struct IrFunction {
@@ -1202,50 +1144,6 @@ pub struct IrEnumEntry {
 
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
 /// field's type / generic-param name / constant default / finality / visibility can't desync.
-/// Bit-packed boolean flags for an [`IrField`], collapsing `has_default`/`is_final`/`is_private`/
-/// `is_lateinit` into one byte. Read through the `IrField` accessors of the same names; built with the
-/// `with_*` chain. Headroom for four more flags before the byte fills.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IrfFlags(u8);
-
-impl IrfFlags {
-    const HAS_DEFAULT: u8 = 1 << 0;
-    const IS_FINAL: u8 = 1 << 1;
-    const IS_PRIVATE: u8 = 1 << 2;
-    const IS_LATEINIT: u8 = 1 << 3;
-
-    #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u8) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_has_default(self, on: bool) -> Self {
-        self.with(Self::HAS_DEFAULT, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_private(self, on: bool) -> Self {
-        self.with(Self::IS_PRIVATE, on)
-    }
-    #[inline]
-    pub const fn with_is_lateinit(self, on: bool) -> Self {
-        self.with(Self::IS_LATEINIT, on)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct IrField {
     pub name: String,
@@ -2446,6 +2344,10 @@ pub struct IrFile {
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
     /// rather than the checked cast a written `as` needs.
     pub written_casts: std::collections::HashSet<ExprId>,
+    /// Constants that are the value of an operation over constants (`1 + 2`), folded like kotlinc's
+    /// `ConstEvaluationLowering`, rather than a literal the source wrote. Kotlin metadata's
+    /// `HAS_CONSTANT` describes only a literal initializer, so a backend must not read it from these.
+    pub folded_constants: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
@@ -2559,11 +2461,11 @@ pub struct IrFile {
     /// final, in an open class as much as in a final one. The JVM backend omits `ACC_FINAL` for a
     /// `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
-    /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
-    /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
+    /// Methods kotlinc emits `private`; the JVM backend gives a `FunId` in this set `ACC_PRIVATE`.
     pub private_methods: std::collections::HashSet<u32>,
-    /// Private instance methods referenced from synthesized callable-reference classes. The JVM
-    /// backend emits one declaration-owned static access bridge for each exact method identity.
+    /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
+    pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,
