@@ -90,21 +90,6 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
     })
 }
 
-fn reads_value(ir: &IrFile, root: ExprId, value: u32) -> bool {
-    let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        if matches!(ir.expr(expression), IrExpr::GetValue(found) if *found == value) {
-            return true;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-    false
-}
-
 /// Realize the JVM's companion-property storage layout from semantic common IR.
 pub fn lower_companion_properties(ir: &mut IrFile) {
     // A companion `const val` remains declared by the companion in common IR and metadata, while
@@ -470,7 +455,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         });
 
         let mut initializer = candidate.initializer;
-        if reads_value(ir, initializer, 0) {
+        if crate::ir::reads_value(ir, initializer, 0) {
             let outer = ir.classes[candidate.outer as usize].fq_name;
             let companion = ir.classes[candidate.companion as usize].fq_name;
             let singleton = ir.add_expr(IrExpr::ExternalStaticInstance {

@@ -209,3 +209,17 @@ pub(super) fn label_positions(node: &MethodNode) -> Vec<Option<usize>> {
     }
     positions
 }
+
+/// kotlinc's `usesLocalExceptParameterNullCheck`: whether `callee` loads local `slot` for anything
+/// but the parameter null check inlining removes. A body whose null checks are not the triple
+/// kotlinc writes counts as reading every local.
+pub(crate) fn reads_local(callee: &MethodNode, slot: u16) -> bool {
+    let mut body = callee.clone();
+    if remove_closure_assertions(&mut body).is_err() {
+        return true;
+    }
+    let reads = body.instructions().any(|instruction| {
+        matches!(instruction, Insn::Var { op: 0x15..=0x19, slot: read } if *read == slot)
+    });
+    reads
+}

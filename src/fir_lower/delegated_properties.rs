@@ -1,8 +1,8 @@
 //! Lowering for a DELEGATED property (`val x: T by delegate`).
 //!
-//! A delegated property is three generated things: a static (or field) holding the delegate, a
-//! static holding its `KProperty` reference, and a pair of accessors that call the delegate's
-//! `getValue`/`setValue` operators. The operator is resolved by the checker; what this module owns
+//! A delegated property is two generated things: a static (or field) holding the delegate, and a
+//! pair of accessors that call the delegate's `getValue`/`setValue` operators, passing the
+//! property's own reference. Where that reference is stored is the backend's choice. The operator is resolved by the checker; what this module owns
 //! is the handoff — which value reaches which slot, and at what SEMANTIC type.
 //!
 //! Every value crossing into or out of the operator is adapted here, against the type the checker
@@ -31,17 +31,28 @@ use super::properties::{
 };
 use super::FirFileLoweringFailure;
 
-#[allow(clippy::too_many_arguments)]
+/// The checked delegated property a materializer realizes, with the source position and identity
+/// its accessors and reflected reference take.
+pub(super) struct DelegatedDeclaration {
+    pub(super) source_order: u32,
+    pub(super) property_id: crate::fir::PropertyId,
+    pub(super) property: IrCheckedProperty,
+    pub(super) context_parameters: Vec<Ty>,
+}
+
 pub(super) fn materialize_top_level_delegate(
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
+    declaration: DelegatedDeclaration,
     extension_receiver: Option<Ty>,
-    context_parameters: Vec<Ty>,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let DelegatedDeclaration {
+        source_order,
+        property_id,
+        mut property,
+        context_parameters,
+    } = declaration;
     if !context_parameters.is_empty() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -66,26 +77,18 @@ pub(super) fn materialize_top_level_delegate(
         IrNodeOrigin::Synthetic { cause, .. } => *cause,
     });
     let first_generated = ir.exprs.len();
-    let property_reference = delegated_property_reference(
-        ir,
-        property_id,
-        extension_receiver.is_some(),
-        property.flags,
-    );
+    // Every operand is its own reference to the one declaration; the JVM backend decides where the
+    // reflected value lives (kotlinc's per-class `$$delegatedProperties`).
+    let flags = property.flags;
+    let unbound = extension_receiver.is_some();
+    let reference =
+        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, unbound, flags);
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
-    // conventions against, and the static and every operand built from it carry that one answer.
+    // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        property_reference_ty,
-        property_reference,
-        None,
-        source_order,
-    )?;
     let owner = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+        let property_reference = reference(ir);
         delegated_call(
             index,
             ir,
@@ -115,7 +118,7 @@ pub(super) fn materialize_top_level_delegate(
     } else {
         ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null))
     };
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+    let property_reference = reference(ir);
     let read = delegated_call(
         index,
         ir,
@@ -147,7 +150,7 @@ pub(super) fn materialize_top_level_delegate(
             } else {
                 ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null))
             };
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+            let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(u32::from(extension_receiver.is_some())));
             let write = delegated_call(
                 index,
@@ -205,18 +208,20 @@ pub(super) fn materialize_top_level_delegate(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_member_delegate(
     index: &ResolvedModuleIndex,
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
+    declaration: DelegatedDeclaration,
     class_id: crate::ir::ClassId,
-    context_parameters: Vec<Ty>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let DelegatedDeclaration {
+        source_order,
+        property_id,
+        mut property,
+        context_parameters,
+    } = declaration;
     if !context_parameters.is_empty() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -244,29 +249,23 @@ pub(super) fn materialize_member_delegate(
     let owner_type = ir.classes[class_id as usize].fq_name;
     let delegate_field = u32::try_from(ir.classes[class_id as usize].fields.len())
         .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    ir.classes[class_id as usize].fields.push(
-        IrField::new(
-            format!("{}$delegate", property.name),
-            plan.storage_type.get(),
-        )
-        .with_is_final(true)
-        .with_is_private(true),
-    );
-    let property_reference = delegated_property_reference(ir, property_id, true, property.flags);
+    let mut storage = IrField::new(
+        format!("{}$delegate", property.name),
+        plan.storage_type.get(),
+    )
+    .with_is_final(true)
+    .with_is_private(true);
+    storage.constructor_store_line = property.decl_line;
+    ir.classes[class_id as usize].fields.push(storage);
+    let flags = property.flags;
+    let reference =
+        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, true, flags);
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
-    // conventions against, and the static and every operand built from it carry that one answer.
+    // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        property_reference_ty,
-        property_reference,
-        Some(owner_type),
-        source_order,
-    )?;
     let this_ref = ir.add_expr(IrExpr::GetValue(0));
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+        let property_reference = reference(ir);
         delegated_call(
             index,
             ir,
@@ -305,7 +304,7 @@ pub(super) fn materialize_member_delegate(
         index: delegate_field,
     });
     let this_ref = ir.add_expr(IrExpr::GetValue(0));
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+    let property_reference = reference(ir);
     let read = delegated_call(
         index,
         ir,
@@ -338,7 +337,7 @@ pub(super) fn materialize_member_delegate(
                 index: delegate_field,
             });
             let this_ref = ir.add_expr(IrExpr::GetValue(0));
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+            let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(1));
             let write = delegated_call(
                 index,
@@ -433,19 +432,21 @@ pub(super) fn materialize_member_delegate(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_member_extension_delegate(
     index: &ResolvedModuleIndex,
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
+    declaration: DelegatedDeclaration,
     class_id: crate::ir::ClassId,
     extension_receiver: Ty,
-    context_parameters: Vec<Ty>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let DelegatedDeclaration {
+        source_order,
+        property_id,
+        mut property,
+        context_parameters,
+    } = declaration;
     if !context_parameters.is_empty() || ir.classes[class_id as usize].is_interface {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -473,33 +474,27 @@ pub(super) fn materialize_member_extension_delegate(
     let owner = ir.classes[class_id as usize].fq_name;
     let delegate_field = u32::try_from(ir.classes[class_id as usize].fields.len())
         .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    ir.classes[class_id as usize].fields.push(
-        IrField::new(
-            format!("{}$delegate", property.name),
-            plan.storage_type.get(),
-        )
-        .with_is_final(true)
-        .with_is_private(true),
-    );
+    let mut storage = IrField::new(
+        format!("{}$delegate", property.name),
+        plan.storage_type.get(),
+    )
+    .with_is_final(true)
+    .with_is_private(true);
+    storage.constructor_store_line = property.decl_line;
+    ir.classes[class_id as usize].fields.push(storage);
 
     // A member extension property has two semantic receivers. Its declaration reference is the
     // unbound KProperty2-like value; the dispatch instance is supplied separately to
     // `provideDelegate`, while accessors supply the extension receiver to getValue/setValue.
-    let property_reference = delegated_property_reference(ir, property_id, true, property.flags);
+    let flags = property.flags;
+    let reference =
+        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, true, flags);
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
-    // conventions against, and the static and every operand built from it carry that one answer.
+    // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        property_reference_ty,
-        property_reference,
-        Some(owner),
-        source_order,
-    )?;
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
         let dispatch = ir.add_expr(IrExpr::GetValue(0));
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+        let property_reference = reference(ir);
         delegated_call(
             index,
             ir,
@@ -538,7 +533,7 @@ pub(super) fn materialize_member_extension_delegate(
         index: delegate_field,
     });
     let extension = ir.add_expr(IrExpr::GetValue(1));
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+    let property_reference = reference(ir);
     let read = delegated_call(
         index,
         ir,
@@ -571,7 +566,7 @@ pub(super) fn materialize_member_extension_delegate(
                 index: delegate_field,
             });
             let extension = ir.add_expr(IrExpr::GetValue(1));
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
+            let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(2));
             let write = delegated_call(
                 index,

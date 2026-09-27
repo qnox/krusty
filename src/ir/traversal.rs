@@ -238,6 +238,22 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
 /// initializer, which is arbitrary user code, so it is NOT in this set. Used where a value the source
 /// program computes is discarded by the target form and the consumer must decide whether it still has to
 /// be evaluated.
+/// Whether the tree under `root` reads value `value`.
+pub fn reads_value(ir: &IrFile, root: ExprId, value: u32) -> bool {
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if matches!(ir.expr(expression), IrExpr::GetValue(found) if *found == value) {
+            return true;
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
 pub fn expr_runs_no_code(ir: &IrFile, expr: ExprId) -> bool {
     matches!(
         ir.expr(expr),
