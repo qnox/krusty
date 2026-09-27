@@ -1142,6 +1142,8 @@ impl BodyLowering<'_> {
         // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It was
         // never applied here, so `tailrec fun` inside a function kept its self-call and overflowed
         // the stack at the depth the modifier exists to make safe.
+        // After the inline template is copied: a spliced copy is scoped by its call site.
+        nested.ir.callable_scopes.extend(nested.lowered_root_block);
         let frame = tailrec
             .then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()))
             .transpose()?;

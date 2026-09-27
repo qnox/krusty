@@ -74,6 +74,8 @@ pub struct LoweredFirBody {
     pub property_delegate: Option<crate::fir::FirPropertyDelegatePlan>,
     /// Where this body put its receiver and parameters.
     pub slots: BodySlots,
+    /// The block the body's root lowered from, when it is one. A callable body is its scope.
+    pub root_block: Option<ExprId>,
 }
 
 /// The value slots a body assigned to the things a CALLER supplies.
@@ -265,6 +267,7 @@ pub(crate) fn lower_body_with_context(
             .map(crate::fir::ResolvedTy::get),
         property_delegate: body.property_delegate().cloned(),
         slots: lowering.body_slots(),
+        root_block: lowering.lowered_root_block,
     };
     local_callables.realizations = lowering.published_local_callables;
     if let Some(classifier) = enclosing_classifier {
@@ -312,6 +315,30 @@ struct BodyLowering<'a> {
     expression_depth: u32,
     /// The executable scope the classes this body declares or generates belong to.
     enclosure: Option<crate::ir::IrEnclosure>,
+    /// The checked block this body's root evaluates, when it is one, and the block it lowered to.
+    /// A callable body publishes the lowered block as its own scope (see
+    /// [`crate::ir::IrFile::callable_scopes`]).
+    root_block: Option<FirExprId>,
+    lowered_root_block: Option<ExprId>,
+}
+
+/// The block a body's single root evaluates, through the implicit conversions checking put on its
+/// result (a lambda's `Unit` coercion).
+fn root_scope_block(body: &FirBody) -> Option<FirExprId> {
+    let [root] = body.roots() else {
+        return None;
+    };
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(*root)?.kind
+    else {
+        return None;
+    };
+    loop {
+        match &body.expr(expression)?.kind {
+            crate::fir::FirExprKind::ImplicitConversion { value, .. } => expression = *value,
+            crate::fir::FirExprKind::Block { .. } => return Some(expression),
+            _ => return None,
+        }
+    }
 }
 
 /// The enclosure of a root body: its exact callable, or the file or classifier whose initialization
@@ -481,6 +508,8 @@ impl<'a> BodyLowering<'a> {
             control_path: Vec::new(),
             enclosure: None,
             expression_depth: 0,
+            root_block: root_scope_block(body),
+            lowered_root_block: None,
         }
     }
 
@@ -805,8 +834,12 @@ fn finish_callable_body(
             value: None,
         })
     };
+    // The body and any block built here around its roots are the callable's own scope.
     for raw in first_generated..ir.exprs.len() {
         let expression = u32::try_from(raw).expect("too many common IR expressions");
+        if matches!(ir.expr(expression), crate::ir::IrExpr::Block { .. }) {
+            ir.callable_scopes.insert(expression);
+        }
         ir.fir_origins.insert(
             expression,
             IrNodeOrigin::Synthetic {
@@ -855,5 +888,7 @@ pub(crate) mod tests;
 
 // A sibling of `tests` rather than a child of it: the root test module is already over the size
 // this repository lets a file reach, so a new responsibility is declared here instead of growing it.
+#[cfg(test)]
+mod callable_scope_tests;
 #[cfg(test)]
 mod constructor_capture_tests;
