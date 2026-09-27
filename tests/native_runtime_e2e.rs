@@ -797,6 +797,16 @@ fn a_programs_own_text_is_asked_its_length_once_per_step() {
     run_driver("program_text_walk_asks_length_once_per_step");
 }
 
+#[test]
+fn a_list_grown_past_the_largest_capacity_is_out_of_memory() {
+    run_driver_expecting_failure("mutable_list_growth_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn an_element_member_that_throws_ends_the_walk_that_called_it() {
+    run_driver("list_stops_on_throwing_element");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

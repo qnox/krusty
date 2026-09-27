@@ -1,6 +1,6 @@
 /* What a driver of the list and iteration runtime needs from tiers above it, on top of the
    exception slot `later_tiers.h` stands in for: the exceptions a list raises, the set and map
-   questions every walk asks before it reaches a range, and `hashCode`.
+   questions every walk asks before it reaches a range, and `equals` and `hashCode`.
 
    Every definition is WEAK for the reason `later_tiers.h` gives: the tier that defines the real one
    wins the link, and the driver then runs against it unchanged. Each keeps the real contract and no
