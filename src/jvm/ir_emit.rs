@@ -3596,105 +3596,6 @@ struct LambdaSelection<'a> {
     rescued: &'a std::collections::HashSet<u32>,
 }
 
-/// Find private instance calls whose caller and declaration are different JVM classes.
-///
-/// FIR/common IR retain Kotlin ownership and the selected member identity only. The Java-8 access
-/// bridge is a physical realization, so this whole-file reachability walk belongs at the backend
-/// boundary and runs once per emission pass, never once per method candidate.
-fn cross_owner_private_member_calls(
-    ir: &IrFile,
-    facade: &str,
-    class_member_fids: &std::collections::HashSet<u32>,
-    private_interface_bodies_are_members: bool,
-) -> std::collections::HashSet<u32> {
-    let mut result = std::collections::HashSet::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(expression) = stack.pop() {
-            if !seen.insert(expression) {
-                continue;
-            }
-            if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
-                let target_class = &ir.classes[*class as usize];
-                let target = target_class.methods[*index as usize];
-                if target_class.fq_name() != owner
-                    && (private_interface_bodies_are_members || !target_class.is_interface)
-                    && ir.private_methods.contains(&target)
-                {
-                    result.insert(target);
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
-        }
-    };
-
-    let facade_roots = ir
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(fid, function)| {
-            !class_member_fids.contains(&(*fid as u32)) && function.dispatch_receiver.is_none()
-        })
-        .filter_map(|(_, function)| function.body)
-        .chain(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner.is_none())
-                .map(|property| property.init),
-        )
-        .collect();
-    scan(facade, facade_roots);
-
-    for class in &ir.classes {
-        let owner = class.fq_name();
-        let mut roots = class
-            .methods
-            .iter()
-            .filter_map(|fid| {
-                ir.functions
-                    .get(*fid as usize)
-                    .and_then(|function| function.body)
-            })
-            .collect::<Vec<_>>();
-        for fid in &class.methods {
-            if let Some(defaults) = ir
-                .fn_params
-                .get(fid)
-                .and_then(|parameters| parameters.defaults.as_ref())
-            {
-                roots.extend(defaults.iter().flatten().copied());
-            }
-        }
-        roots.extend(class.init_body);
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        roots.extend(
-            class
-                .properties
-                .iter()
-                .filter_map(|property| property.initializer),
-        );
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body);
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-        }
-        for entry in &class.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
-        roots.extend(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner_matches(&owner))
-                .map(|property| property.init),
-        );
-        scan(&owner, roots);
-    }
-    result
-}
-
 fn emit_pass(
     ir: &IrFile,
     facade: &str,
@@ -3748,7 +3649,7 @@ fn emit_pass(
     env.run
         .private_member_access_bridges
         .borrow_mut()
-        .clone_from(&cross_owner_private_member_calls(
+        .clone_from(&access_bridges::cross_owner_private_member_calls(
             ir,
             facade,
             &class_member_fids,
@@ -4940,16 +4841,15 @@ fn emit_scheduled_member(
         // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
         // `this` slot; an ordinary member is an instance method.
         emit_method(ir, fid, fq_name, facade, cw, !f.is_static, env);
-        if env
-            .run
-            .private_member_access_bridges
-            .borrow()
-            .contains(&fid)
-        {
-            access_bridges::emit_private_member_access_bridge(ir, fid, fq_name, cw, false);
-        }
         if ir.function_reference_access_bridges.contains(&fid) {
-            access_bridges::emit_function_reference_access_bridge(ir, fid, fq_name, cw, false);
+            access_bridges::emit_function_reference_access_bridge(
+                ir,
+                fid,
+                fq_name,
+                cw,
+                false,
+                c.decl_line,
+            );
         }
         bridge_emission::emit_value_class_interface_entries(
             ir,
@@ -5930,6 +5830,7 @@ fn emit_class(
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     if !static_storage(ir, c) {
@@ -6392,11 +6293,23 @@ fn emit_interface_class(
                 .borrow()
                 .contains(&fid)
             {
-                access_bridges::emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_private_member_access_bridge(
+                    ir,
+                    fid,
+                    &fq_name,
+                    &mut cw,
+                    true,
+                    c.decl_line,
+                );
             }
             if ir.function_reference_access_bridges.contains(&fid) {
                 access_bridges::emit_function_reference_access_bridge(
-                    ir, fid, &fq_name, &mut cw, true,
+                    ir,
+                    fid,
+                    &fq_name,
+                    &mut cw,
+                    true,
+                    c.decl_line,
                 );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
@@ -7019,7 +6932,14 @@ fn emit_enum_class(
                 // static call (`IncompatibleClassChangeError`).
                 emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
                 if ir.function_reference_access_bridges.contains(&fid) {
-                    access_bridges::emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
+                    access_bridges::emit_function_reference_access_bridge(
+                        ir,
+                        fid,
+                        &fq,
+                        cw,
+                        false,
+                        c.decl_line,
+                    );
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
                 // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
@@ -11485,6 +11405,12 @@ impl<'a> Emitter<'a> {
         let direct_field = self.direct_field_access(class, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
+            // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
+            if self.reaches_through_bridge(owner, getter) {
+                return Some(access_bridges::private_member_read_access(
+                    self.ir, getter, owner,
+                ));
+            }
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: if class.is_annotation {
@@ -12747,6 +12673,12 @@ impl<'a> Emitter<'a> {
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
                     // (stdlib facades, the common case) stay `Methodref`.
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
+                    // A private value-class `-impl` another class calls goes through its bridge.
+                    let bridged = self.ir.jvm_member_targets.get(&e);
+                    let name = match bridged.filter(|&&f| self.reaches_through_bridge(&owner, f)) {
+                        Some(_) => format!("access${name}"),
+                        None => name,
+                    };
                     let m = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &name, &descriptor)
                     } else {
