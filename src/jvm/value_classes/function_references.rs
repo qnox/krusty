@@ -70,9 +70,10 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                     fr.declaration_suspend,
                 ),
             },
-            crate::ir::ReflectedCallable::Constructor | crate::ir::ReflectedCallable::Physical => {
-                reflection_base.to_string()
-            }
+            // A local function is reflected by its lifted name, final only at emission.
+            crate::ir::ReflectedCallable::Constructor
+            | crate::ir::ReflectedCallable::Physical
+            | crate::ir::ReflectedCallable::LocalFunction(_) => reflection_base.to_string(),
         };
         let hidden_constructor = matches!(fr.reflected, crate::ir::ReflectedCallable::Constructor)
             && fr

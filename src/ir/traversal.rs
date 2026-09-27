@@ -433,11 +433,23 @@ pub(crate) fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<Expr
 /// locals (numbered from the old parameter count) must move up by the number of new parameters so
 /// they don't collide with the inserted parameter slots.
 pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
+    remap_value_indices(ir, e, threshold, &|index| index + by);
+}
+
+/// Move every value index `>= threshold` down by `by`, the inverse of [`shift_value_indices`]: a
+/// pass that turns leading parameters into something else (fields of a generated class) closes the
+/// gap they leave.
+pub fn lower_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
+    debug_assert!(threshold >= by, "lowered value indices stay non-negative");
+    remap_value_indices(ir, e, threshold, &|index| index - by);
+}
+
+fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
     fn shift(
         ir: &mut IrFile,
         e: ExprId,
         threshold: u32,
-        by: u32,
+        by: &dyn Fn(u32) -> u32,
         visited: &mut std::collections::HashSet<ExprId>,
     ) {
         // Operands may be shared deliberately (for example, the receiver of the read and write halves
@@ -447,23 +459,23 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
             return;
         }
         match &mut ir.exprs[e as usize] {
-            IrExpr::GetValue(i) if *i >= threshold => *i += by,
-            IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
-            IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
+            IrExpr::GetValue(i) if *i >= threshold => *i = by(*i),
+            IrExpr::SetValue { var, .. } if *var >= threshold => *var = by(*var),
+            IrExpr::Variable { index, .. } if *index >= threshold => *index = by(*index),
             // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable`
             // node); its uses inside the catch body are shifted by the recursion below, so the field
             // must shift too or the binding and its reads desync.
             IrExpr::Try { catches, .. } => {
                 for c in catches.iter_mut() {
                     if c.var >= threshold {
-                        c.var += by;
+                        c.var = by(c.var);
                     }
                 }
             }
             IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. })
                 if *variable >= threshold =>
             {
-                *variable += by;
+                *variable = by(*variable);
             }
             _ => {}
         }
@@ -487,5 +499,5 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
     }
 
     let mut visited = std::collections::HashSet::new();
-    shift(ir, e, threshold, by, &mut visited);
+    shift(ir, e, threshold, map, &mut visited);
 }

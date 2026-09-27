@@ -65,7 +65,9 @@ pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
-pub use references::{FuncRef, PropRef, ReflectedCallable};
+pub use references::{
+    FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
+};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -609,49 +611,6 @@ pub enum IrCheckedOperation {
         substitutions: Vec<IrCheckedSubstitution>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
     },
-}
-
-/// Language-level identity of a callable-reference value whose invocation has already been lowered
-/// to a common-IR adapter. The target is used for Kotlin reflection/equality only; a backend must
-/// never recover it from the adapter's generated name.
-#[derive(Clone, Debug)]
-pub enum IrCallableReferenceTarget {
-    Module(crate::fir::CallableId),
-    Constructor {
-        classifier: TypeName,
-    },
-    Local {
-        owner: Option<TypeName>,
-        name: Box<str>,
-    },
-    /// A DEPENDENCY declaration, by the provider-owned identity that names it. Kept opaque, as
-    /// every other dependency edge is: the owner spelling, the published name and whatever the
-    /// declaration is realized as are the target's to read from its provider. `receiver` is the
-    /// checked receiver type the reference was selected on (`None` for a top-level function), whose
-    /// classifier a reflective carrier names as the member's owner.
-    External {
-        declaration: crate::fir::ExternalCallableId,
-        receiver: Option<Ty>,
-    },
-}
-
-/// A checked callable-reference value after common invocation lowering. `adapter` is an exact
-/// common-IR function identity. `captures` are ordinary closure values and `bound_receiver` is the
-/// language-level receiver that participates in callable-reference equality. Keeping those facts
-/// separate prevents a backend from guessing Kotlin semantics from the number of captured values.
-/// The declaration signature remains semantic; target backends independently choose their callable
-/// carrier, storage, calling convention, and reflection descriptor.
-#[derive(Clone, Debug)]
-pub struct IrCallableReference {
-    pub target: IrCallableReferenceTarget,
-    pub adapter: FunId,
-    pub captures: Vec<ExprId>,
-    pub bound_receiver: Option<ExprId>,
-    pub function_type: Ty,
-    pub declaration_parameters: Box<[Ty]>,
-    pub declaration_result: Ty,
-    pub declaration_suspend: bool,
-    pub adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
 }
 
 /// Checked semantic shape of an annotation constructor call. The common IR retains the annotation

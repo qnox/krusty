@@ -181,7 +181,11 @@ fn emit_property_reference_constructor(
         &mut code,
         if bound { 2 } else { 1 },
     );
-    let receiver: &[&str] = if bound { &["receiver"] } else { &[] };
+    let receiver: &[(&str, &str)] = if bound {
+        &[("receiver", "Ljava/lang/Object;")]
+    } else {
+        &[]
+    };
     let locals = function_reference_invoke::reference_constructor_locals(cw, class, receiver);
     cw.set_method_debug("<init>", own_descriptor, None, &locals);
 }
@@ -672,8 +676,12 @@ fn attach_accessor_debug(
     descriptor: &str,
     parameters: &[&str],
 ) {
+    let parameters = parameters
+        .iter()
+        .map(|name| (*name, "Ljava/lang/Object;"))
+        .collect::<Vec<_>>();
     let locals =
-        function_reference_invoke::reference_constructor_locals(cw, &c.fq_name(), parameters);
+        function_reference_invoke::reference_constructor_locals(cw, &c.fq_name(), &parameters);
     let line = (c.decl_line != 0).then_some((0, c.decl_line));
     cw.set_method_debug(name, descriptor, line, &locals);
 }

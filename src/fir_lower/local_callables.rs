@@ -692,6 +692,7 @@ impl BodyLowering<'_> {
                 target: crate::ir::IrCallableReferenceTarget::Local {
                     owner: realization.owner,
                     name: realization.source_name.clone(),
+                    function: realization.function,
                 },
                 adapter: wrapper,
                 captures: bound_captures.to_vec(),
