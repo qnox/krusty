@@ -510,21 +510,33 @@ impl BodyFirChecker<'_> {
         }
         if let Some((from, to)) = self
             .info
-            .selected_suspend_function_conversions
+            .selected_function_value_conversions
             .get(&expression)
             .copied()
             .filter(|(_, selected_target)| *selected_target == target.get())
         {
             let span = self.file.expr_span(expression);
+            let info = self.info;
+            let name = info
+                .generated_class_names
+                .conversions
+                .get(&expression)
+                .ok_or_else(|| {
+                    self.failure(span, BodyCheckFailureKind::UnnamedFunctionValueConversion)
+                })?;
+            // The converted value is never itself a lambda or reference with a class of its own,
+            // so its node carries the name of the class its conversion compiles to.
+            self.record_class_name_provenance(&name.provenance, value);
             return Ok(Some(FirConversion {
                 origin: cause,
-                kind: FirConversionKind::SuspendFunction {
+                kind: FirConversionKind::FunctionValue {
                     from: ResolvedTy::new(from).map_err(|error| {
                         self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                     })?,
                     to: ResolvedTy::new(to).map_err(|error| {
                         self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                     })?,
+                    ordinal: name.ordinal,
                 },
             }));
         }

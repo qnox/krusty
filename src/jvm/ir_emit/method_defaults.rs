@@ -1,0 +1,415 @@
+//! JVM realization of default-valued function and method parameters.
+
+use super::*;
+
+/// kotlinc opens an inheritable member's `$default` synthetic with a guard on the trailing marker:
+/// a `super.m()` call carrying defaults cannot dispatch through the virtual forwarding stub.
+fn emit_default_super_guard(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    marker_slot: u16,
+    method_name: &str,
+) {
+    code.aload(marker_slot);
+    let ok = code.new_label();
+    code.ifnull(ok);
+    let cls = cw.class_ref("java/lang/UnsupportedOperationException");
+    code.new_obj(cls);
+    code.dup();
+    code.push_string(
+        &format!(
+            "Super calls with default arguments not supported in this target, function: {method_name}"
+        ),
+        cw,
+    );
+    let ctor = cw.methodref(
+        "java/lang/UnsupportedOperationException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+    );
+    code.invokespecial(ctor, 1, 0);
+    code.athrow();
+    code.bind(ok);
+}
+
+/// Whether a class can be inherited from, and therefore needs the member-default super-call guard.
+fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
+    ir.classes.iter().any(|class| {
+        class.fq_name_matches(owner)
+            && !class.is_object
+            && (class.is_open
+                || class.is_abstract
+                || class.is_sealed
+                || !class.enum_entries.is_empty())
+    })
+}
+
+/// Emit an instance method's mask-expanding `$default` synthetic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_default_stub(
+    ir: &IrFile,
+    fid: u32,
+    static_owner: Option<StaticOwner>,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    defaults: &[Option<u32>],
+    env: &EmitEnv,
+    is_interface: bool,
+) {
+    let function = &ir.functions[fid as usize];
+    let method_name = function.name.clone();
+    let real_params = jvm_function_params(ir, fid);
+    let boxed = default_stub_boxed_parameters(ir, fid);
+    let stub_param_tys: Vec<Ty> = real_params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| boxed.get(&index).copied().unwrap_or(*ty))
+        .collect();
+    let receiver_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(receiver_offset)
+        .expect("an extension receiver is a leading physical parameter");
+    let ret = jvm_declared_ty(&function.ret);
+    let owner_ty = Ty::obj(owner);
+    let stub_name = format!("{method_name}$default");
+    let stub_desc = method_descriptor(&default_stub_params(ir, fid, owner_ty), ret);
+    cw.reserve_method_name(&stub_name);
+    cw.reserve_descriptor(&stub_desc);
+    let mut emitter = Emitter::new(
+        ir,
+        cw,
+        env,
+        static_owner,
+        owner,
+        facade,
+        ret,
+        defaults.iter().flatten().copied(),
+    );
+    let receiver = emitter.frame.enter(FrameKey::Receiver, owner_ty);
+    emitter.slots.insert(0, (receiver, owner_ty));
+    let mut param_slots = Vec::new();
+    for (index, ty) in stub_param_tys.iter().enumerate() {
+        let value = index as u32 + 1;
+        let slot = emitter.frame.enter(FrameKey::Value(value), *ty);
+        emitter.slots.insert(value, (slot, *ty));
+        param_slots.push((slot, *ty));
+    }
+    let mask_count = default_mask_count(logical_param_count);
+    let mask_slots = (0..mask_count)
+        .map(|mask| {
+            let slot = emitter.frame.enter(
+                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
+                Ty::Int,
+            );
+            let _ = emitter.lease_temporary(slot, Ty::Int);
+            slot
+        })
+        .collect::<Vec<_>>();
+    let marker_slot = emitter.frame.enter(
+        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
+        Ty::obj("java/lang/Object"),
+    );
+    let _ = emitter.lease_temporary(marker_slot, Ty::obj("java/lang/Object"));
+
+    let mut code = CodeBuilder::new(emitter.frame.size());
+    if is_interface || owner_is_inheritable(ir, owner) {
+        emit_default_super_guard(emitter.cw, &mut code, marker_slot, &method_name);
+    }
+    emit_default_param_overwrites(
+        &mut emitter,
+        &mut code,
+        &defaults[receiver_offset..],
+        receiver_offset,
+        &param_slots,
+        &mask_slots,
+    );
+    code.aload(0);
+    for (index, &(slot, ty)) in param_slots.iter().enumerate() {
+        load(ty, slot, &mut code);
+        if let Some(value_class) = boxed.get(&index) {
+            emit_unbox_impl(ir, emitter.cw, value_class, &mut code);
+        }
+    }
+    let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
+    let descriptor = method_descriptor(&real_params, ret);
+    let method = if is_interface {
+        emitter
+            .cw
+            .interface_methodref(owner, &method_name, &descriptor)
+    } else {
+        emitter.cw.methodref(owner, &method_name, &descriptor)
+    };
+    if is_interface {
+        code.invokeinterface(method, argument_words, slot_words(ret) as i32);
+    } else if ir.method_visibility(fid).is_private() {
+        code.invokespecial(method, argument_words, slot_words(ret) as i32);
+    } else {
+        code.invokevirtual(method, argument_words, slot_words(ret) as i32);
+    }
+    emit_return(ret, &mut code);
+    code.ensure_locals(emitter.frame.max());
+    code.link();
+    emitter
+        .cw
+        .add_method(default_stub_access(ir, fid), &stub_name, &stub_desc, &code);
+    if let Some(&line) = ir
+        .fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+    {
+        emitter
+            .cw
+            .set_method_lines(&stub_name, &stub_desc, &[(0, line)]);
+    }
+}
+
+/// Physical parameters of an instance method's `$default` synthetic.
+pub(super) fn default_stub_params(ir: &IrFile, fid: u32, owner_ty: Ty) -> Vec<Ty> {
+    let real_params = jvm_function_params(ir, fid);
+    let boxed = default_stub_boxed_parameters(ir, fid);
+    let receiver_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(receiver_offset)
+        .expect("an extension receiver is a leading physical parameter");
+    let mut parameters = vec![owner_ty];
+    parameters.extend(
+        real_params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| boxed.get(&index).copied().unwrap_or(*ty)),
+    );
+    parameters.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(logical_param_count),
+    ));
+    parameters.push(Ty::obj("java/lang/Object"));
+    parameters
+}
+
+pub(super) fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<usize, Ty> {
+    ir.default_stub_boxed_params
+        .get(&fid)
+        .map(|parameters| parameters.iter().copied().collect())
+        .unwrap_or_default()
+}
+
+/// A static `$default` stub's trailing marker is constructor-specific only for a value-class
+/// `constructor-impl`; every function stub uses plain `Object`.
+pub(super) fn static_default_stub_marker(ir: &IrFile, fid: u32) -> Ty {
+    if ir.jvm_value_class_constructor_impls.contains(&fid) {
+        Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
+    } else {
+        Ty::obj("java/lang/Object")
+    }
+}
+
+pub(super) fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
+    let marker = static_default_stub_marker(ir, fid);
+    let function = &ir.functions[fid as usize];
+    let mut parameters = jvm_function_params(ir, fid);
+    let boxed = default_stub_boxed_parameters(ir, fid);
+    for (index, parameter) in parameters.iter_mut().enumerate() {
+        if let Some(boxed) = boxed.get(&index) {
+            *parameter = *boxed;
+        }
+    }
+    let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
+        + usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_parameter_count = parameters
+        .len()
+        .checked_sub(receiver_prefix)
+        .expect("callable receivers are leading physical parameters");
+    parameters.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(logical_parameter_count),
+    ));
+    parameters.push(marker);
+    parameters
+}
+
+pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
+    let visibility = match ir.method_visibility(fid) {
+        crate::types::Visibility::Private | crate::types::Visibility::PackagePrivate => 0x0000,
+        // Generated nested and lambda classes invoke this helper directly; kotlinc therefore
+        // exposes a protected declaration's `$default` stub publicly.
+        crate::types::Visibility::Protected
+        | crate::types::Visibility::Internal
+        | crate::types::Visibility::Public => 0x0001,
+    };
+    visibility | 0x1008
+}
+
+pub(super) fn emit_default_param_overwrites(
+    emitter: &mut Emitter<'_>,
+    code: &mut CodeBuilder,
+    defaults: &[Option<u32>],
+    receiver_offset: usize,
+    param_slots: &[(u16, Ty)],
+    mask_slots: &[u16],
+) {
+    let logical_param_count = param_slots
+        .len()
+        .checked_sub(receiver_offset)
+        .expect("an extension receiver is a leading physical parameter");
+    for (index, default) in defaults.iter().enumerate().take(logical_param_count) {
+        if let Some(expression) = default {
+            let (slot, ty) = param_slots[index + receiver_offset];
+            code.iload(mask_slots[index / 32]);
+            code.push_int(default_mask_bit(index), emitter.cw);
+            code.iand();
+            let skip = code.new_label();
+            code.ifeq(skip);
+            emitter.emit_value(*expression, code);
+            store(ty, slot, code);
+            code.bind(skip);
+        }
+    }
+}
+
+pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
+    if matches!(
+        ir.expr(expression),
+        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
+    ) {
+        return true;
+    }
+    let mut found = false;
+    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+        found |= body_has_reified_markers(ir, child);
+    });
+    found
+}
+
+/// Emit a facade-style static function `$default` synthetic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_facade_default_stub(
+    ir: &IrFile,
+    fid: u32,
+    static_owner: StaticOwner,
+    facade: &str,
+    cw: &mut ClassWriter,
+    defaults: &[Option<u32>],
+    env: &EmitEnv,
+    marker: Ty,
+) {
+    let function = &ir.functions[fid as usize];
+    let method_name = function.name.clone();
+    let real_params = jvm_function_params(ir, fid);
+    let boxed = default_stub_boxed_parameters(ir, fid);
+    let stub_param_tys = real_params
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| boxed.get(&index).copied().unwrap_or(*parameter))
+        .collect::<Vec<_>>();
+    let ret = jvm_declared_ty(&function.ret);
+    let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
+        + usize::from(ir.extension_receiver_fns.contains(&fid));
+    let extension_prefix = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(receiver_prefix)
+        .expect("callable receivers are leading physical parameters");
+    {
+        let mask_words = default_mask_count(logical_param_count);
+        let descriptor = method_descriptor(
+            &stub_param_tys
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_n(Ty::Int, mask_words))
+                .chain(std::iter::once(marker))
+                .collect::<Vec<_>>(),
+            ret,
+        );
+        cw.seed_utf8(&format!("{method_name}$default"));
+        cw.seed_utf8(&descriptor);
+    }
+    let mut emitter = Emitter::new(
+        ir,
+        cw,
+        env,
+        Some(static_owner),
+        facade,
+        facade,
+        ret,
+        defaults.iter().flatten().copied(),
+    );
+    let mut param_slots = Vec::new();
+    for (index, ty) in stub_param_tys.iter().enumerate() {
+        let slot = emitter.frame.enter(FrameKey::Value(index as u32), *ty);
+        emitter.slots.insert(index as u32, (slot, *ty));
+        param_slots.push((slot, *ty));
+    }
+    let mask_count = default_mask_count(logical_param_count);
+    let mask_slots = (0..mask_count)
+        .map(|mask| {
+            let slot = emitter.frame.enter(
+                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
+                Ty::Int,
+            );
+            let _ = emitter.lease_temporary(slot, Ty::Int);
+            slot
+        })
+        .collect::<Vec<_>>();
+    let marker_slot = emitter.frame.enter(
+        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
+        marker,
+    );
+    let _ = emitter.lease_temporary(marker_slot, marker);
+    let mut code = CodeBuilder::new(emitter.frame.size());
+    emit_default_param_overwrites(
+        &mut emitter,
+        &mut code,
+        &defaults[extension_prefix..],
+        receiver_prefix,
+        &param_slots,
+        &mask_slots,
+    );
+    if let Some(body) = function
+        .body
+        .filter(|&body| body_has_reified_markers(ir, body))
+    {
+        emitter.emit(body, &mut code);
+        if ret == Ty::Unit && !emitter.discarding_diverges(body) {
+            code.ret_void();
+        }
+    } else {
+        for (index, &(slot, ty)) in param_slots.iter().enumerate() {
+            load(ty, slot, &mut code);
+            if let Some(value_class) = boxed.get(&index) {
+                emit_unbox_impl(ir, emitter.cw, value_class, &mut code);
+            }
+        }
+        let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
+        let descriptor = method_descriptor(&real_params, ret);
+        let method = emitter.cw.methodref(facade, &method_name, &descriptor);
+        code.invokestatic(method, argument_words, slot_words(ret) as i32);
+        emit_return(ret, &mut code);
+    }
+    code.ensure_locals(emitter.frame.max());
+    code.link();
+    let mut stub_params = stub_param_tys;
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(logical_param_count),
+    ));
+    stub_params.push(marker);
+    let descriptor = method_descriptor(&stub_params, ret);
+    emitter.cw.add_method(
+        default_stub_access(ir, fid),
+        &format!("{method_name}$default"),
+        &descriptor,
+        &code,
+    );
+    if let Some(&line) = ir
+        .fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+    {
+        emitter
+            .cw
+            .set_method_lines(&format!("{method_name}$default"), &descriptor, &[(0, line)]);
+    }
+}

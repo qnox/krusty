@@ -25,7 +25,7 @@ impl BodyLowering<'_> {
                 | FirConversionKind::NullabilityWidening { to }
                 | FirConversionKind::SmartCast { to }
                 | FirConversionKind::PlatformNarrowing { to, .. }
-                | FirConversionKind::SuspendFunction { to, .. },
+                | FirConversionKind::FunctionValue { to, .. },
             ) => to.get(),
             Some(FirConversionKind::CoerceToUnit) => Ty::Unit,
             Some(FirConversionKind::Sam(_)) | None => self

@@ -156,8 +156,8 @@ fn a_body_disagreeing_with_the_declared_result_is_still_rejected() {
         (
             1,
             format!(
-                "{path}:3:53: error: type mismatch: inferred type is String but Mono<Auth>! was \
-                 expected\nkrusty: 1 error(s)\n"
+                "{path}:3:55: error: return type mismatch: expected 'Mono<Auth>!', actual \
+                 'String'.\nkrusty: 1 error(s)\n"
             )
             .as_str()
         ),

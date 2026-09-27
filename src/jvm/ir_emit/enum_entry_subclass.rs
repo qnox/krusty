@@ -57,7 +57,16 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.invokespecial(super_init, argw, 0);
     let mut ctor_max = 1 + ctor_words;
     if let Some(init_body) = c.init_body {
-        let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
+        let mut e = Emitter::new(
+            ir,
+            &mut cw,
+            env,
+            Some(StaticOwner::Class(c.fq_name)),
+            &fq_name,
+            facade,
+            Ty::Unit,
+            [init_body],
+        );
         let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq_name));
         e.slots.insert(0, (receiver, Ty::obj(&fq_name))); // `this`
         for (index, &ty) in ctor_params.iter().enumerate() {
@@ -82,6 +91,7 @@ pub(super) fn emit_enum_entry_subclass(
         emit_ctor_default_stub_with_prefix(
             ir,
             &fq_name,
+            c.fq_name,
             facade,
             &[Ty::String, Ty::Int],
             0,
@@ -118,7 +128,16 @@ pub(super) fn emit_enum_entry_subclass(
         // source member overrides consume an instance receiver. The ordinary class/enum writers
         // already honor this IR bit, and entry subclasses must use the same rule.
         let function = &ir.functions[fid as usize];
-        emit_method(ir, fid, &fq_name, facade, &mut cw, !function.is_static, env);
+        emit_method(
+            ir,
+            fid,
+            StaticOwner::Class(c.fq_name),
+            &fq_name,
+            facade,
+            &mut cw,
+            !function.is_static,
+            env,
+        );
         if ir.function_reference_access_bridges.contains(&fid) {
             super::access_bridges::emit_function_reference_access_bridge(
                 ir,
@@ -134,6 +153,7 @@ pub(super) fn emit_enum_entry_subclass(
                 emit_facade_default_stub(
                     ir,
                     fid,
+                    StaticOwner::Class(c.fq_name),
                     &fq_name,
                     &mut cw,
                     defaults,
@@ -141,7 +161,17 @@ pub(super) fn emit_enum_entry_subclass(
                     Ty::obj("java/lang/Object"),
                 );
             } else {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
+                emit_default_stub(
+                    ir,
+                    fid,
+                    Some(StaticOwner::Class(c.fq_name)),
+                    &fq_name,
+                    facade,
+                    &mut cw,
+                    defaults,
+                    env,
+                    false,
+                );
             }
         }
     }

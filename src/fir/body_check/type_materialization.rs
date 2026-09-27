@@ -261,9 +261,19 @@ impl BodyFirChecker<'_> {
     /// Carry the naming provenance the file's local-class walk gave `source` onto its FIR node,
     /// with its lexical owner as a stable classifier declaration.
     fn record_generated_class_provenance(&mut self, source: ExprId, expression: FirExprId) {
-        let Some(provenance) = self.file.callable_reference_provenance.get(&source.0) else {
+        let info = self.info;
+        let Some(provenance) = info.generated_class_names.reference(self.file, source) else {
             return;
         };
+        self.record_class_name_provenance(provenance, expression);
+    }
+
+    /// Carry one naming provenance onto the FIR node `expression` a target realizes as a class.
+    pub(super) fn record_class_name_provenance(
+        &mut self,
+        provenance: &crate::ast::LocalClassNameProvenance,
+        expression: FirExprId,
+    ) {
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => {
                 let Some(owner) = self
