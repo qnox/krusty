@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use super::frame_map::{FrameKey, Mark};
-use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
+use super::{debug_lines, CodeBuilder, Emitter, IrExpr, Label, Ty};
+use crate::ir::IrNodeOrigin;
 
 impl Emitter<'_> {
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
@@ -18,6 +19,9 @@ impl Emitter<'_> {
     ) {
         let enclosing_statement_line = self.statement_line;
         self.block_depth += 1;
+        if self.block_depth == 1 {
+            self.function_scope_blocks = self.source_blocks_of_body(&stmts, value);
+        }
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
         self.note_inlined_only_cells(&stmts, value);
@@ -54,6 +58,36 @@ impl Emitter<'_> {
         if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
             self.statement_line = Some(line);
         }
+    }
+
+    /// The source block a function body wraps when nothing but its return follows it, with the
+    /// blocks lowering generated around it. Their declarations are the function's own locals, in
+    /// scope through that return as kotlinc's are, so their debug ranges end with the method. A
+    /// block inside the source block (a `for` loop's) keeps its own scope.
+    fn source_blocks_of_body(&self, stmts: &[u32], value: Option<u32>) -> Vec<u32> {
+        let mut blocks = Vec::new();
+        let Some((&first, rest)) = stmts.split_first() else {
+            return blocks;
+        };
+        let returns_only = rest
+            .iter()
+            .all(|&statement| matches!(self.ir.expr(statement), IrExpr::Return(_)));
+        if value.is_some() || !returns_only {
+            return blocks;
+        }
+        let mut current = first;
+        while let IrExpr::Block { stmts, value } = self.ir.expr(current) {
+            blocks.push(current);
+            let generated = matches!(
+                self.ir.fir_origins.get(&current),
+                Some(IrNodeOrigin::Synthetic { .. })
+            );
+            match (&stmts[..], value) {
+                ([only], None) if generated => current = *only,
+                _ => break,
+            }
+        }
+        blocks
     }
 
     /// Close source-local debug ranges declared in the current nested block.

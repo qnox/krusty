@@ -9554,6 +9554,8 @@ struct Emitter<'a> {
     /// Captured-local declarations whose holder only inlined lambdas capture: see
     /// `shared_cell_declaration`.
     inlined_only_cells: HashSet<crate::ir::ExprId>,
+    /// The source blocks of the function being emitted, whose locals are the function's own.
+    function_scope_blocks: Vec<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -9655,6 +9657,7 @@ impl<'a> Emitter<'a> {
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
             inlined_only_cells: HashSet::new(),
+            function_scope_blocks: Vec::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -10622,7 +10625,9 @@ impl<'a> Emitter<'a> {
                 let saved = self.open_slot_scope();
                 let terminal_target = self.terminal_statement_target.take();
                 self.emit_open_block(stmts, value, terminal_target, code);
-                self.close_scope_locals(code);
+                if !self.function_scope_blocks.contains(&e) {
+                    self.close_scope_locals(code);
+                }
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
             }
