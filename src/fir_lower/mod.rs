@@ -783,7 +783,19 @@ fn finish_callable_body(
             .pop()
             .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
-        if let Some(&end) = ir.expr_end_lines.get(&value) {
+        // A block's value is what returns: a lambda body's block ends at its closing `}`, which
+        // kotlinc does not mark for the value it returns. The innermost value that records an end
+        // line gives it.
+        let mut end = ir.expr_end_lines.get(&value).copied();
+        let mut returned = value;
+        while let crate::ir::IrExpr::Block {
+            value: Some(inner), ..
+        } = ir.expr(returned)
+        {
+            returned = *inner;
+            end = ir.expr_end_lines.get(&returned).copied().or(end);
+        }
+        if let Some(end) = end {
             ir.mark_implicit_return_end_line(return_value, end);
         }
         roots.push(return_value);

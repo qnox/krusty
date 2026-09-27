@@ -1823,13 +1823,8 @@ pub struct FirBody {
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
-    /// Physical source-line count for debug output; it carries no source lookup capability.
-    source_line_count: u32,
-    /// Line-only debug fact: the closing `}` line of a local callable's block body (or of a
-    /// lambda), 0 when there is none.
-    close_line: u32,
-    expression_debug_lines: Vec<FirExpressionDebugLines>,
-    statement_debug_lines: Vec<FirStatementDebugLines>,
+    /// Line-only source metadata for debug output; see `debug_lines`.
+    debug_lines: debug_lines::FirBodyDebugLines,
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
@@ -1885,10 +1880,7 @@ impl FirBody {
             source_lambda: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
-            source_line_count: 0,
-            close_line: 0,
-            expression_debug_lines: Vec::new(),
-            statement_debug_lines: Vec::new(),
+            debug_lines: Default::default(),
             generated_class_provenance: HashMap::new(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
@@ -2511,7 +2503,7 @@ impl FirBody {
     pub fn add_expr(&mut self, expression: FirExpr) -> FirExprId {
         let id = FirExprId::from_raw(next_id(self.expressions.len(), "FIR expressions"));
         self.expressions.push(expression);
-        self.expression_debug_lines.push(Default::default());
+        self.debug_lines.add_expression();
         id
     }
 
@@ -2546,8 +2538,7 @@ impl FirBody {
     pub fn add_statement(&mut self, statement: FirStatement) -> FirStatementId {
         let id = FirStatementId::from_raw(next_id(self.statements.len(), "FIR statements"));
         self.statements.push(statement);
-        self.statement_debug_lines
-            .push(FirStatementDebugLines::default());
+        self.debug_lines.add_statement();
         id
     }
 
@@ -2744,8 +2735,7 @@ impl FirBody {
                 .values()
                 .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
                 .sum::<usize>()
-            + self.expression_debug_lines.len() * std::mem::size_of::<FirExpressionDebugLines>()
-            + self.statement_debug_lines.len() * std::mem::size_of::<FirStatementDebugLines>()
+            + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
