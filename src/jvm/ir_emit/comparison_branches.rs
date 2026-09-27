@@ -111,6 +111,15 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether `operand`'s type names an enum class (kotlinc's `isEnumValue`), nullable or not.
+    fn is_enum_value(&self, operand: ExprId) -> bool {
+        self.value_ty(operand)
+            .non_null()
+            .obj_internal()
+            .and_then(|classifier| self.classifiers.classifier(classifier))
+            .is_some_and(|classifier| classifier.is_enum())
+    }
+
     /// Negate the Boolean on the operand stack as kotlinc's `Not` materializes it:
     /// `ifne F; iconst_1; goto E; F: iconst_0; E:`.
     fn negate_material_bool(&mut self, code: &mut CodeBuilder) {
@@ -253,6 +262,22 @@ impl Emitter<'_> {
                 code.ifnull(target);
             } else {
                 code.ifnonnull(target);
+            }
+            return true;
+        }
+        // kotlinc's `Equals` compares by reference when either operand's type is an enum class:
+        // an enum constant is a singleton and `Enum.equals` is identity.
+        if matches!(op, Eq | Ne)
+            && !lt.is_jvm_scalar()
+            && !self.value_ty(rhs).is_jvm_scalar()
+            && (self.is_enum_value(lhs) || self.is_enum_value(rhs))
+        {
+            self.emit_identity_operands(lhs, rhs, code);
+            self.mark_comparison_decision(&[lhs, rhs], code);
+            if (op == Eq) == jt {
+                code.if_acmpeq(target);
+            } else {
+                code.if_acmpne(target);
             }
             return true;
         }

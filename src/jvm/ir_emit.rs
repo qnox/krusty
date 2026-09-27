@@ -9133,6 +9133,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Checked classifier declarations: which kind of classifier an operand's type names.
+    classifiers: &'a dyn BackendClassifierSource,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -9258,6 +9260,7 @@ impl<'a> Emitter<'a> {
             default_call_operands: env.default_call_operands,
             unit_result_tail_forwards: env.unit_result_tail_forwards,
             static_owner,
+            classifiers: env.signature_symbols,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),

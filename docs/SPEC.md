@@ -8578,6 +8578,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   adapter body alike, where krusty boxed the value and called the box's `toString()`. Test:
   `tests/primitive_to_string_e2e.rs`.
 
+- **Equality with an enum operand compares references** (kotlinc's `Equals`, which takes
+  `referenceEquals` when `a.isEnumValue || b.isEnumValue`). `==`/`!=` where either operand's type
+  names an enum class — nullable or not, source-declared or from a library, the other side any
+  reference — is `if_acmpeq`/`if_acmpne` (materialized with a branch in value position), with the
+  comparison's line marked before the jump, not `Intrinsics.areEqual`. A null literal operand
+  keeps the `ifnull`/`ifnonnull` form. The emitter reads the classifier kind from the checked
+  classifier facts for the operand's type. Test: `tests/enum_equality_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
