@@ -437,7 +437,11 @@ pub(super) fn realize(
         // realize that exact declaration with the common primitive operation at this target
         // boundary. `String.get` keeps its own intrinsic call below.
         if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
-            if intrinsic != crate::libraries::CompilerIntrinsic::StringGet {
+            if !matches!(
+                intrinsic,
+                crate::libraries::CompilerIntrinsic::StringGet
+                    | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
+            ) {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
                         dispatch_receiver: Some(receiver),
@@ -803,6 +807,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::ProgressionStep
                 | crate::libraries::CompilerIntrinsic::ProgressionReversed
                 | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
+                | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                 | crate::libraries::CompilerIntrinsic::NumericConversion
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | crate::libraries::CompilerIntrinsic::PrimitiveCompare
@@ -925,6 +930,38 @@ pub(super) fn realize(
                         ret: semantic_ret,
                     };
                 }
+                crate::libraries::MemberRealization::Intrinsic(
+                    crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext,
+                ) => {
+                    let receiver = ir.ext_call_source_receiver.get(&expression).copied();
+                    *callee = match primitive_iterator_next(callable.owner, receiver) {
+                        Some((name, element)) => {
+                            physical_result = element;
+                            Callee::Virtual {
+                                owner: callable.owner,
+                                name,
+                                descriptor: crate::jvm::names::method_descriptor(&[], element),
+                                params: None,
+                                interface: false,
+                            }
+                        }
+                        None => {
+                            let (owner, interface) = call_site_owner(
+                                classpath,
+                                callable.owner,
+                                callable.owner_is_interface,
+                                receiver,
+                            );
+                            Callee::Virtual {
+                                owner,
+                                name: callable.name,
+                                descriptor,
+                                params: None,
+                                interface,
+                            }
+                        }
+                    };
+                }
                 crate::libraries::MemberRealization::Intrinsic(_)
                 | crate::libraries::MemberRealization::RangeConstruction { .. } => {
                     return Err(target.into());
@@ -1006,6 +1043,36 @@ pub(super) fn realize(
 /// `IntProgression.getFirst`), unless that class does not inherit the member or an interface
 /// receiver reaches a class member (`toString` on an interface stays `Object.toString`). A class
 /// the call site cannot name (a package-private JDK base) never becomes the owner.
+/// The unboxed element operation a primitive iterator's `next()` is invoked through, with the
+/// element type it returns.
+///
+/// kotlinc's `IteratorNext` intrinsic calls `IntIterator.nextInt()I` when the selected declaration is
+/// the primitive iterator's own `next`, i.e. the receiver's checked type is that iterator class. A
+/// receiver of a subclass selects the subclass's inherited member, which kotlinc calls as the
+/// ordinary boxed `next()`, so `None` then.
+fn primitive_iterator_next(
+    iterator: crate::types::TypeName,
+    receiver: Option<crate::types::Ty>,
+) -> Option<(String, crate::types::Ty)> {
+    use crate::types::Ty;
+    let element = crate::types::wk::primitive_iterator_element(iterator)?;
+    if receiver.and_then(|receiver| receiver.non_null().obj_internal()) != Some(iterator) {
+        return None;
+    }
+    let element_name = match element {
+        Ty::Boolean => "Boolean",
+        Ty::Byte => "Byte",
+        Ty::Char => "Char",
+        Ty::Short => "Short",
+        Ty::Int => "Int",
+        Ty::Long => "Long",
+        Ty::Float => "Float",
+        Ty::Double => "Double",
+        _ => return None,
+    };
+    Some((format!("next{element_name}"), element))
+}
+
 fn call_site_owner(
     classpath: &Classpath,
     declared: crate::types::TypeName,

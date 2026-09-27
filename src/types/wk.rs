@@ -41,6 +41,32 @@ names! {
     char_progression => "kotlin/ranges/CharProgression",
     uint_progression => "kotlin/ranges/UIntProgression",
     ulong_progression => "kotlin/ranges/ULongProgression",
+    boolean_iterator => "kotlin/collections/BooleanIterator",
+    byte_iterator => "kotlin/collections/ByteIterator",
+    char_iterator => "kotlin/collections/CharIterator",
+    short_iterator => "kotlin/collections/ShortIterator",
+    int_iterator => "kotlin/collections/IntIterator",
+    long_iterator => "kotlin/collections/LongIterator",
+    float_iterator => "kotlin/collections/FloatIterator",
+    double_iterator => "kotlin/collections/DoubleIterator",
+}
+
+/// The element type of the `kotlin.collections` primitive iterator class `name`
+/// (`IntIterator` iterates `Int`), if `name` is one.
+pub fn primitive_iterator_element(name: TypeName) -> Option<super::Ty> {
+    use super::Ty;
+    [
+        (boolean_iterator(), Ty::Boolean),
+        (byte_iterator(), Ty::Byte),
+        (char_iterator(), Ty::Char),
+        (short_iterator(), Ty::Short),
+        (int_iterator(), Ty::Int),
+        (long_iterator(), Ty::Long),
+        (float_iterator(), Ty::Float),
+        (double_iterator(), Ty::Double),
+    ]
+    .into_iter()
+    .find_map(|(iterator, element)| (iterator == name).then_some(element))
 }
 
 /// The nested class of `Intrinsics` kotlinc's callable-reference reflection names as the owner of a

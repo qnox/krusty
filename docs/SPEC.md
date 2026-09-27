@@ -8537,6 +8537,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
   no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
 
+- **A primitive iterator's `next()` calls its unboxed element operation** (kotlinc's
+  `IteratorNext` intrinsic): a call of `next()` declared by a `kotlin.collections` primitive
+  iterator (`IntIterator`, `LongIterator`, … `BooleanIterator`), in source or in a `for` loop over
+  an `iterator()` returning one, is `invokevirtual IntIterator.nextInt()I` rather than the boxed
+  `next()` and an `intValue()`. The provider marks that exact declaration (owner, `operator`, no
+  parameters, the iterator's element result) as `CompilerIntrinsic::PrimitiveIteratorNext`; the JVM
+  target realizes it only when the receiver's checked type is that iterator class, since kotlinc
+  keys the intrinsic on the callee's parent and a subclass receiver selects its own inherited
+  member. A generic `Iterator<Int>` keeps `Iterator.next()` and its cast. Test:
+  `tests/primitive_iterator_next_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
