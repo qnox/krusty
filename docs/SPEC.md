@@ -7531,6 +7531,98 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
+  native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
+  own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
+  exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
+  that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
+  NEGATIVE one throws `IllegalArgumentException` with no message, making no builder. This is
+  platform-defined: the common `expect` constructor documents no exception; Kotlin/JVM throws
+  Java's `NegativeArraySizeException` with the capacity as message (`AbstractStringBuilder(int)`
+  allocates `new byte[capacity]`; kotlinc 2.4.10 on JDK 21 prints `-1` for `StringBuilder(-1)`), a
+  type Kotlin itself does not declare; Kotlin/JS ignores the capacity (`StringBuilderJs.kt`:
+  `actual constructor(capacity: Int) : this()`). The native runtime follows Kotlin/Native, the
+  platform it stands in for, and the only answer a Kotlin program on it can catch by a Kotlin name:
+  in the Kotlin/Native 2.4.10 distribution's linux_x64 stdlib cache, `StringBuilder(kotlin.Int)`
+  calls `AllocArrayInstance(kclass:kotlin.CharArray, capacity)` with no check of its own, and
+  `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a negative size, which throws
+  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`).
+  `StringBuilder(text)` over a `CharSequence` the program implements reads
+  it through its own `length` and `get`; when either throws, no builder is made and nothing more of
+  the sequence is read.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `builder_negative_capacity`,
+  `builder_from_throwing_char_sequence`).
+- **Native runtime members stop at the first program call that throws.** A runtime member that asks
+  the program's own overrides more than one question — `Pair`'s `equals`, `hashCode` and `toString`,
+  which ask each component in turn, and `Result.toString`, which renders its value or exception and
+  then builds `Success(…)`/`Failure(…)` around it — returns as soon as one of those calls comes back
+  with an exception pending. The second component is never asked, the placeholder the aborted call
+  returned (a `true`, a zero, a `null`) is never read, no text is built from it, and the exception
+  pending afterwards is the very object the call threw. That is Kotlin's answer: the generated
+  data-class members and `Result.toString` propagate the first exception from where it was thrown.
+  Tests: `tests/native_runtime_e2e.rs` (`pair_component_throws`, `result_to_string_throws`).
+- **A native `KClass` answers the names its descriptor publishes.** `simpleName` and
+  `qualifiedName` are not derived from the descriptor's rendered name: each `KType` publishes its
+  qualified and simple names and a kind (`KT_CLASS_NAMES_*` in `src/native/runtime/krusty_rt.h`).
+  A member class, top-level or nested, has both — `pkg.Top.Nested` and `Nested`, joined with dots
+  whatever the rendered name uses; a backticked `` `a$b` `` is `a$b` and `pkg.a$b`, not `b`. A local
+  class has only its simple name (`qualifiedName` is `null`), and an anonymous object has neither
+  (`simpleName` and `qualifiedName` are both `null`), as kotlinc 2.4.10 answers on the JVM for the
+  program recorded in the driver. A descriptor that publishes no names, or a kind without the names
+  it needs, is a fault in whatever emitted it and ends the program naming the descriptor.
+  Tests: `tests/native_runtime_e2e.rs` (`class_names`, `class_names_unpublished`).
+- **A native runtime call that raises returns at once, and its return value is not an answer.**
+  Unboxing `null` and every `kotlin.Number` conversion of `null` raise Kotlin's
+  `NullPointerException` with no message and return immediately, before any conversion or
+  narrowing: `toByte` and `toShort` read the box themselves rather than narrowing what `toInt`
+  returned. The value such a call returns alongside a pending exception is the C function's
+  obligation to return something, never Kotlin's answer, so the drivers never read it: they discard
+  it and assert the exact exception pending — its type and missing message for a raise the runtime
+  makes, and the very object thrown for a raise the program's own override makes (a
+  `CharSequence`'s `length`/`get`, a builder append's `toString`, a `Pair` component, a `Result`'s
+  content, a `lazy` initializer).
+  Tests: `tests/native_runtime_e2e.rs` (`unbox_null_raises`, `number_conversion_null_raises`,
+  `builder_from_throwing_char_sequence`, `builder_append_throwing_to_string`,
+  `builder_append_line_throwing_to_string`, `pair_component_throws`, `result_to_string_throws`,
+  `lazy_initializer_throws`).
+- **Native `Result` operations.** A success is its value and a failure a marker holding the
+  exception, so `Result.success(null)` is a success distinct from every failure. `isSuccess`,
+  `isFailure`, `getOrNull`, `exceptionOrNull` and `toString` (`Success(1)`, `Success(null)`,
+  `Failure(<exception's own toString>)`) answer as kotlinc 2.4.10 does on the JVM for the program
+  recorded in the driver. `getOrThrow` answers a success's value, and on a failure throws the very
+  exception it holds and answers NULL at once — never the failure marker, which is no value of the
+  program's type.
+  Tests: `tests/native_runtime_e2e.rs` (`result_operations`).
+- **A native `ReadWriteProperty` call names the two delegates it implements.**
+  `kt_rw_property_get`/`kt_rw_property_set` serve exactly `Delegates.notNull()` and
+  `Delegates.observable(…)`, recognized by their own descriptors. Any other receiver ends the
+  program with `krusty: a ReadWriteProperty read|write of a <descriptor name>, which is neither
+  Delegates.notNull() nor Delegates.observable()`, rather than being read as a `NotNullVar`.
+  Tests: `tests/native_runtime_e2e.rs` (`rw_property_get_unknown_delegate`,
+  `rw_property_set_unknown_delegate`).
+- **The native runtime's ordinary paths answer as Kotlin does.** Each expectation below comes from
+  the equivalent Kotlin program compiled and run with kotlinc 2.4.10 on the JVM; each driver records
+  its program.
+  - Boxing: a box carries its kind's descriptor and value; every `Byte`, `Short`/`Int`/`Long` in
+    -128..127, `Char` in 0..127 and both `Boolean`s come back as the same object, as on the JVM;
+    128 (and `Char` 128) come back fresh; `Long.MIN_VALUE` does not share zero's box; `Float` and
+    `Double` are never cached.
+  - `Number` conversions: a floating-point source truncates toward zero, saturates at the target's
+    ends and answers 0 for NaN; `toShort`/`toByte` narrow what `toInt` answers (so `1e10.toByte()`
+    is -1); a wider integer truncates (`4294967297L.toInt()` is 1); `toFloat` rounds to nearest.
+  - `Pair`: `equals` componentwise and only against a `Pair`, `hashCode` as
+    `31 * first.hashCode() + second.hashCode()` in wrapping 32-bit arithmetic with null as 0,
+    `toString` as `(first, second)`.
+  - Delegates: `lazy` runs its initializer once, on first read, and renders
+    `Lazy value not initialized yet.` until then; `observable` writes before its callback runs, so
+    the callback reads the new value; `notNull` read before a write throws
+    `IllegalStateException("Property nn should be initialized before get.")`.
+  - `StringBuilder`: appends of each kind, `appendLine`, `toString` as a copy, `setLength` shorter,
+    longer (NUL padding) and between the halves of a surrogate pair — which keeps the lone high
+    half, as the JVM does — growth past the capacity, identity equality and self-append.
+  Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
+  `builder_operations`, with `class_names` and `result_operations` above).
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an

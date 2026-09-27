@@ -135,31 +135,56 @@ __attribute__((weak)) KRef kt_box_int(kt_int value) {
     return (KRef)box;
 }
 
+/* A thrown object as the runtime lays one out: its message, then its cause. A driver that asks
+   what an exception SAID reads the message through `kt_throwable_message`, and the two stand-ins
+   below agree on where it is, as the real pair does. */
+typedef struct DriverThrowable {
+    KObjectHeader header;
+    KRef message;
+    KRef cause;
+} DriverThrowable;
+
+static const uint32_t driver_throwable_offsets[] = {offsetof(DriverThrowable, message),
+                                                    offsetof(DriverThrowable, cause)};
+
+/* The exception in flight. `kt_throw` registers the slot as a collector root the first time it
+   stores into it, as the real slot is one: while an exception is pending it, and its message, are
+   reachable only through here. */
 __attribute__((weak)) KRef kt_pending;
+
+__attribute__((weak)) void kt_throw(KRef thrown) {
+    static kt_boolean registered;
+    if (!registered) {
+        registered = 1;
+        kt_gc_add_global_root((void **)&kt_pending);
+    }
+    kt_pending = thrown;
+}
 
 __attribute__((weak)) KRef kt_pending_exception(void) { return kt_pending; }
 
+__attribute__((weak)) KRef kt_throwable_new(const KType *type, KRef message) {
+    /* `message` stays in this parameter across the allocation: it is its root. */
+    DriverThrowable *thrown = (DriverThrowable *)kt_gc_allocate(type, sizeof(DriverThrowable));
+    thrown->message = message;
+    thrown->cause = NULL;
+    return (KRef)thrown;
+}
+
+__attribute__((weak)) KRef kt_throwable_message(KRef self) {
+    return ((const DriverThrowable *)self)->message;
+}
+
+/* Every exception type a driver stands in for lists the throwable's fields for the collector, so a
+   pending exception keeps its message alive. */
 __attribute__((weak)) const KType kt_type_index_out_of_bounds_exception = {
     .name = "kotlin.IndexOutOfBoundsException",
     .name_length = sizeof("kotlin.IndexOutOfBoundsException") - 1,
-    .instance_size = sizeof(KObjectHeader),
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
 };
-
-/* An exception here is its type and nothing else: that is all a driver asks of one. It is not
-   collected, since the pending slot is not a root below the tier that makes it one, so it is
-   allocated from static storage rather than the heap. */
-__attribute__((weak)) KRef kt_throwable_new(const KType *type, KRef message) {
-    static KObjectHeader thrown[64];
-    static unsigned count;
-    (void)message;
-    if (count == sizeof(thrown) / sizeof(thrown[0])) {
-        KT_SYS_FAIL("driver: more exceptions than the stand-in holds\n");
-    }
-    thrown[count].type = type;
-    return (KRef)&thrown[count++];
-}
-
-__attribute__((weak)) void kt_throw(KRef thrown) { kt_pending = thrown; }
 
 /* The collector finds roots from here up; a driver that allocates records it first. */
 #define DRIVER_BEGIN()                                                                             \
