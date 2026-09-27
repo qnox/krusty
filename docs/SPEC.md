@@ -4623,6 +4623,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the JVM local-class naming spells them (`<init>`, `<clinit>`, `<get-x>`, `<anonymous>`) into the
   sort key. Tests: `tests/inner_class_declaration_order_e2e.rs`,
   `src/frontend/tests/streaming/local_class_provenance.rs::an_initializer_object_records_the_instance_or_static_initialization_it_runs_in`.
+- **A member reference only copied inline code makes gives its caller no `InnerClasses` row.**
+  kotlinc lists a nested class when its type mapper maps a signature naming it while generating
+  the class. An inline function's body is compiled once and its instructions are copied into each
+  call site, so a field or method reference only that copied body names never reaches the
+  caller's mapper: `inline fun read(): Any = Holder.item` gives a caller no `Holder$Item` row,
+  whether `read` is in this module or on the classpath, while the caller's own `Holder.item` read
+  keeps it. The class writer records each member reference as copied or mapped; bytecode copied
+  from a classpath inline body is copied, and so is every expression common lowering copied from
+  a same-module inline function's own body (a lambda argument the caller passes is the caller's
+  code). A reference or `NameAndType` descriptor that only copied code uses mentions no class.
+  Tests: `tests/inlined_code_inner_classes_e2e.rs`,
+  `src/jvm/classfile/member_mapping.rs::tests::a_reference_is_copied_only_until_the_class_names_it_itself`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order

@@ -1823,7 +1823,7 @@ pub(super) fn splice_unified(
             return None;
         }
     }
-    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
+    cw.copying(|cw| relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw))?;
     // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
     // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
     // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the

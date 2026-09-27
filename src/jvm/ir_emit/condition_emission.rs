@@ -37,6 +37,18 @@ impl Emitter<'_> {
         jump_when_true: bool,
         code: &mut CodeBuilder,
     ) -> bool {
+        self.emitting(cond, |emitter| {
+            emitter.emit_cond_branch_node(cond, target, jump_when_true, code)
+        })
+    }
+
+    fn emit_cond_branch_node(
+        &mut self,
+        cond: u32,
+        target: Label,
+        jump_when_true: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
         // A constant condition folds: `while (true)` (a `Boolean(true)` pre-test, jump-out-when-false)
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.

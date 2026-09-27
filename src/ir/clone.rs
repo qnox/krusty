@@ -328,6 +328,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         };
     }
     ir.copy_generated_line_marks(source, target);
+    ir.copy_inline_copy_mark(source, target);
     copy_map!(fir_origins);
     copy_map!(expression_owners);
     copy_map!(checked_return_depths);
