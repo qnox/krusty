@@ -3460,19 +3460,9 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // The String-plus argument is the declaration's `Any?` operand and therefore boxes an
-            // unboxed value class. Dynamic invokes, reference varargs, and string templates are the
-            // other erased reference boundaries handled here.
-            if let IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
-                        ..
-                    },
-                args,
-                ..
-            }
-            | IrExpr::InvokeFunction { args, .. }
+            // Dynamic invokes, reference varargs, and string concatenations are the erased
+            // reference boundaries handled here.
+            if let IrExpr::InvokeFunction { args, .. }
             | IrExpr::Vararg { elements: args, .. }
             // A value-class part of a string template flows into `StringBuilder.append(Object)` /
             // `String.valueOf(Object)`, so it must box (→ the value class's `toString`) — unless it

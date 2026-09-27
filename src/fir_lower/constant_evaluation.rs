@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Ty;
 
+use super::string_concatenation::ConcatenationPart;
 use crate::fir::{
     FirBinaryOperation, FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversion,
     FirConversionKind, FirExprId, FirExprKind, FirIntrinsic, FirUnaryOperation,
@@ -33,7 +34,7 @@ pub(super) struct EvaluatedConstant {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TemplateRun {
     Constant(FirConstant),
-    Part(FirExprId),
+    Part(ConcatenationPart),
 }
 
 /// Memoized constant values of one checked body's expressions.
@@ -80,18 +81,18 @@ impl ConstantEvaluation {
         (constant.ty == body.expr(expression)?.ty.get().canonical_semantic()).then_some(constant)
     }
 
-    /// A string template's parts with each run of constant parts merged into one `String`
-    /// constant, as kotlinc folds a string concatenation whose neighbouring arguments are
-    /// constants or operations over constants.
+    /// A flattened concatenation's parts with each run of constant parts merged into one
+    /// `String` constant, as kotlinc folds a string concatenation whose neighbouring arguments
+    /// are constants or operations over constants.
     pub(super) fn template_runs(
         &mut self,
         body: &FirBody,
-        parts: &[FirExprId],
+        parts: &[ConcatenationPart],
     ) -> Vec<TemplateRun> {
         let mut runs = Vec::with_capacity(parts.len());
         let mut run: Option<KtStringBuf> = None;
         for &part in parts {
-            let text = self.evaluate(body, part).and_then(|constant| {
+            let text = self.evaluate(body, part.value).and_then(|constant| {
                 let mut text = KtStringBuf::new();
                 push_text(&constant, &mut text)?;
                 Some(text.finish())

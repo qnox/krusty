@@ -100,6 +100,20 @@ fn deep_constant_arithmetic_chain_folds_on_two_mib_stack() {
 }
 
 #[test]
+fn deep_string_concatenation_flattens_on_two_mib_stack() {
+    // A left-nested `s + "a" + s + ...` chain is one concatenation as deep as it is long; its
+    // parts are collected without recursing once per level.
+    let chain = vec!["s + \"a\""; 200].join(" + ");
+    let src = format!("fun deep(s: String): String = {chain}\n");
+    let (es, emitted) = compile_on_regression_stack(src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(
+        emitted,
+        "400-part concatenation is inside the depth guard and must emit"
+    );
+}
+
+#[test]
 fn deep_inferred_return_chain_preinfers_on_two_mib_stack() {
     // No declared return type → the MODULE-LEVEL pre-inference pass checks the expression body
     // before any per-file check runs, so it recurses just as deep and must survive on the explicit

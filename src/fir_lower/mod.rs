@@ -47,6 +47,7 @@ mod sam_conversions;
 mod sink;
 mod source_calls;
 mod statement;
+mod string_concatenation;
 mod suspend_conversions;
 mod tailrec;
 mod type_operations;

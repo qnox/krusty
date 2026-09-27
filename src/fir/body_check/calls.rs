@@ -2321,10 +2321,12 @@ impl BodyFirChecker<'_> {
                     let receiver = self.explicit_receiver(receiver)?;
                     return self.primitive_compare_call(expression, receiver, operands, member);
                 }
-                // `"abc"[1]` selects the same `String.get` as `"abc".get(1)` and keeps its
-                // intrinsic identity rather than becoming an ordinary external call.
+                // `"abc"[1]` and `"a" + b` select the same `String.get` and `String.plus` as the
+                // explicit calls and keep their intrinsic identity rather than becoming ordinary
+                // external calls.
                 crate::libraries::MemberRealization::Intrinsic(
-                    crate::libraries::CompilerIntrinsic::StringGet,
+                    crate::libraries::CompilerIntrinsic::StringGet
+                    | crate::libraries::CompilerIntrinsic::StringPlus,
                 ) => {
                     let receiver = self.explicit_receiver(receiver)?;
                     return self.selected_member_call_with_semantics(

@@ -62,7 +62,50 @@ impl BodyLowering<'_> {
         // kotlinc folds an intrinsic-const operation over constants before any other lowering, so
         // the whole operation becomes its value.
         let folded = self.constants.fold(self.body, expression_id);
+        // kotlinc then flattens nested concatenations into one, merging each run of constant
+        // arguments into one `String` constant.
+        let concatenation = folded
+            .is_none()
+            .then(|| super::string_concatenation::flattened_concatenation(self.body, expression_id))
+            .flatten();
         let lowered = match &expression.kind {
+            _ if concatenation.is_some() => {
+                let parts = concatenation.expect("guarded by the arm");
+                let runs = self.constants.template_runs(self.body, &parts);
+                let parts = runs
+                    .iter()
+                    .map(|run| match run {
+                        super::constant_evaluation::TemplateRun::Constant(text) => {
+                            let text = lower_constant(text, Ty::String, origin)?;
+                            Ok((self.ir.add_expr(IrExpr::Const(text)), None))
+                        }
+                        super::constant_evaluation::TemplateRun::Part(part) => Ok((
+                            self.expression_with_conversion(part.value, part.conversion)?,
+                            Some(self.converted_type(part.value, part.conversion)?),
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+                // Like a call's operands, a concatenation's parts evaluate into source-order locals
+                // once one of them suspends, so the suspension can split the body between them.
+                if parts.iter().any(|&(part, _)| self.operand_suspends(part)) {
+                    let mut statements = Vec::new();
+                    let parts = parts
+                        .into_iter()
+                        .map(|(part, ty)| match ty {
+                            Some(ty) => self.spill_call_operand(part, ty, &mut statements),
+                            None => part,
+                        })
+                        .collect();
+                    let value = self.ir.add_expr(IrExpr::StringConcat(parts));
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: statements,
+                        value: Some(value),
+                    })
+                } else {
+                    let parts = parts.into_iter().map(|(part, _)| part).collect();
+                    self.ir.add_expr(IrExpr::StringConcat(parts))
+                }
+            }
             _ if folded.is_some() => {
                 let folded = folded.expect("guarded by the arm");
                 let constant = lower_constant(&folded.value, expression.ty.get(), origin)?;
@@ -880,22 +923,8 @@ impl BodyLowering<'_> {
                 *negated,
                 origin,
             )?,
-            FirExprKind::StringTemplate(parts) => {
-                // kotlinc merges each run of constant parts into one `String` constant.
-                let runs = self.constants.template_runs(self.body, parts);
-                let parts = runs
-                    .iter()
-                    .map(|run| match run {
-                        super::constant_evaluation::TemplateRun::Constant(text) => {
-                            let text = lower_constant(text, Ty::String, origin)?;
-                            Ok(self.ir.add_expr(IrExpr::Const(text)))
-                        }
-                        super::constant_evaluation::TemplateRun::Part(part) => {
-                            self.expression(*part)
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.ir.add_expr(IrExpr::StringConcat(parts))
+            FirExprKind::StringTemplate(_) => {
+                unreachable!("a string template folds to a constant or is a concatenation")
             }
             FirExprKind::AnnotationArray(values) => {
                 let elements = values
