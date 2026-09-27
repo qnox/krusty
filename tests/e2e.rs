@@ -1178,6 +1178,8 @@ mod value_class_interface_entry_e2e;
 mod value_class_nothing_override_bridges_e2e;
 #[path = "value_class_object_carrier_generic_result_e2e.rs"]
 mod value_class_object_carrier_generic_result_e2e;
+#[path = "value_class_private_member_access_e2e.rs"]
+mod value_class_private_member_access_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]

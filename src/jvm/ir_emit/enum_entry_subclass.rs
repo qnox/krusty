@@ -121,7 +121,12 @@ pub(super) fn emit_enum_entry_subclass(
         emit_method(ir, fid, &fq_name, facade, &mut cw, !function.is_static, env);
         if ir.function_reference_access_bridges.contains(&fid) {
             super::access_bridges::emit_function_reference_access_bridge(
-                ir, fid, &fq_name, &mut cw, false,
+                ir,
+                fid,
+                &fq_name,
+                &mut cw,
+                false,
+                c.decl_line,
             );
         }
         if let Some(defaults) = ir.param_defaults(fid) {

@@ -6020,6 +6020,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
+  is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
+  static when the backend sees it; value-class lowering records the exact function each such call
+  reaches (`IrFile::jvm_static_member_calls`), and the cross-class walk bridges it like an instance
+  member. kotlinc's bridge is `public static final synthetic access$<name>-impl` over the same
+  parameters, forwarding with `invokestatic`. Every private-member bridge now sits after the class's
+  declared and generated members, as SyntheticAccessorLowering appends it, and carries kotlinc's
+  debug tables: one line (the class declaration) at the invoke, `$this` for an instance target, then
+  the target's own parameter names (the carrier is `arg0`). Tests:
+  `tests/value_class_private_member_access_e2e.rs`,
+  `tests/class_member_order_e2e.rs::a_class_appends_private_member_bridges_after_its_members`,
+  `tests/value_class_member_order_e2e.rs`, box
+  `inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion*.kt`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
