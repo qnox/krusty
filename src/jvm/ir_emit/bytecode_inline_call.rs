@@ -531,6 +531,7 @@ impl Emitter<'_> {
             inline_only: target.inline_only,
             call_line,
             claimable,
+            visited: HashMap::new(),
         };
         let mut objects =
             lines
@@ -986,24 +987,32 @@ impl inliner::SourceLines for UnmappedLines {
     }
 }
 
-/// The inlined body's lines, mapped into the caller's source map against the call's line.
+/// The inlined body's lines, mapped into the caller's source map against the call's line. A line
+/// the body revisits keeps the line it was first mapped to (`SourceMapCopier.visitedLines`), even
+/// when a range mapped since would extend to cover it.
 struct CallLines<'e, 'a, 'b> {
     emitter: &'e mut Emitter<'a>,
     body: &'b crate::jvm::classreader::MethodCode,
     inline_only: bool,
     call_line: u16,
     claimable: u16,
+    visited: HashMap<u16, u16>,
 }
 
 impl inliner::SourceLines for CallLines<'_, '_, '_> {
     fn map(&mut self, line: u16) -> Option<u16> {
-        self.emitter.map_inlined_line(
+        if let Some(&mapped) = self.visited.get(&line) {
+            return Some(mapped);
+        }
+        let mapped = self.emitter.map_inlined_line(
             self.body,
             self.inline_only,
             line,
             self.call_line,
             self.claimable,
-        )
+        )?;
+        self.visited.insert(line, mapped);
+        Some(mapped)
     }
     fn synthetic(&mut self) -> Option<u16> {
         self.emitter
