@@ -4599,6 +4599,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   descriptor, a nested block's local included, follows the body's constants in table order. The
   class writer interns the table when the method is added; nothing interns a local where its block
   closes. Test: `tests/method_pool_order_e2e.rs::a_nested_block_local_interns_after_the_whole_body`.
+- **An enum's fields intern after its methods.** kotlinc visits an enum's methods (`<init>`, the
+  declared members, `values`/`valueOf`/`getEntries`, `$values`, `<clinit>`) before its fields, so
+  a property, entry constant, `$VALUES` or `$ENTRIES` name interns where a body first references
+  it, and the rest at the field visit. A declared function therefore precedes `values`. Test:
+  `tests/method_pool_order_e2e.rs::an_enum_declared_function_interns_before_its_synthesized_members`.
 - **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
   interface's inherited members supertype by supertype in the order they are written, at every
   level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`

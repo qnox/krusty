@@ -90,11 +90,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field.
         let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
-        let field_ann = match nullability {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        };
+        let field_ann = super::nullability_annotation(nullability);
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
         // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
@@ -295,11 +291,7 @@ pub(super) fn emit_static_accessors(
     // the property accepts, so the declaration's own recorded type answers instead.
     let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
     let nullability = field_nullability_kind(ir, owner, &s.name, accessor_ty);
-    let acc_ann = match nullability {
-        1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-        2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-        _ => None,
-    };
+    let acc_ann = super::nullability_annotation(nullability);
     // The accessors erase the property's type arguments in their descriptors, so each carries the
     // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.

@@ -24,6 +24,8 @@
 //!
 //! - A local declared in a nested block interns with the method's local-variable table, after
 //!   every constant of the body, not where its block closes.
+//! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
+//!   and its fields, entry constants included, intern where a body first references them.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
 //!
@@ -281,5 +283,20 @@ fn a_nested_block_local_interns_after_the_whole_body() {
          \x20   return \"small\"\n\
          }\n",
         &["NestedBlockLocalKt"],
+    );
+}
+
+/// kotlinc visits an enum's declared functions before `values()`, and its fields after every
+/// method, so a declared function's header and locals precede the synthesized members.
+#[test]
+fn an_enum_declared_function_interns_before_its_synthesized_members() {
+    assert_identical(
+        "EnumDeclaredFunction",
+        "enum class Mode(val label: String) {\n\
+         \x20   ON(\"on\"), OFF(\"off\");\n\
+         \x20   val shout = \"!\"\n\
+         \x20   fun pick(level: Int): Int = level\n\
+         }\n",
+        &["Mode"],
     );
 }
