@@ -1513,6 +1513,8 @@ mod reified_parameter_forwarding_e2e;
 mod reified_splice_host_pool_wide_e2e;
 #[path = "relational_compare_to_seam_e2e.rs"]
 mod relational_compare_to_seam_e2e;
+#[path = "release_publisher_e2e.rs"]
+mod release_publisher_e2e;
 #[path = "require_check_smartcast_e2e.rs"]
 mod require_check_smartcast_e2e;
 #[path = "resolution_cycles_e2e.rs"]
