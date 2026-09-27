@@ -340,7 +340,16 @@ pub(super) fn emit_func_ref_class(
     // A singleton carrier's `<clinit>` follows its methods, as kotlinc orders them.
     let singleton = field_capture_tys.is_empty() && !fr.bound;
     if let Some(invoke) = fr.invoke {
-        emit_method(ir, invoke, &fq, facade, &mut cw, true, env);
+        emit_method(
+            ir,
+            invoke,
+            StaticOwner::Class(c.fq_name),
+            &fq,
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
         function_reference_invoke::emit_reference_invoke_bridge(
             ir,
             &mut cw,

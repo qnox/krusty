@@ -69,6 +69,7 @@ pub(super) fn emit(
         ir,
         &mut *cw,
         env,
+        Some(StaticOwner::Class(c.fq_name)),
         fq_name,
         facade,
         Ty::Unit,

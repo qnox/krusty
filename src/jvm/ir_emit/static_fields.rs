@@ -141,6 +141,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         ir,
         cw,
         env,
+        Some(StaticOwner::Facade),
         facade,
         facade,
         Ty::Unit,
@@ -467,6 +468,7 @@ pub(super) fn emit_class_static_initializer(
             ir,
             cw,
             env,
+            Some(StaticOwner::Class(c.fq_name)),
             fq_name,
             facade,
             Ty::Unit,
@@ -516,7 +518,7 @@ impl Emitter<'_> {
         let facade = self.facade.clone();
         // A PRIVATE property's field, read from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, i)
-            .filter(|storage| !storage.owner.is_emitted_class(&self.owner, &facade))
+            .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -536,16 +538,17 @@ impl Emitter<'_> {
         // is a PUBLIC field with no bridges: every reader goes `getstatic` directly.
         if let Some(owner) = self.ir.statics[i as usize].owner {
             let owner_name = owner.render();
+            let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
-            if self.owner != owner_name && companion_blocks::accessor_owned(self.ir, i) {
+            if !emitted_by_owner && companion_blocks::accessor_owned(self.ir, i) {
                 let m = self.cw.methodref(
                     &owner_name,
                     &property_getter_name(&name),
                     &format!("(){}", type_descriptor(jt)),
                 );
                 code.invokestatic(m, 0, slot_words(jt) as i32);
-            } else if self.owner == owner_name
+            } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(i)
                 || self.ir.is_jvm_field_static(i)
             {
@@ -567,7 +570,7 @@ impl Emitter<'_> {
         // Within the facade (or a `const val`, which is public) read the field directly; from
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
         // cross-file property-access compilation.
-        else if self.owner == facade || is_const {
+        else if self.static_owner == Some(StaticOwner::Facade) || is_const {
             let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
             code.getstatic(fref, slot_words(jt) as i32);
         } else {
@@ -599,7 +602,7 @@ impl Emitter<'_> {
         // A PRIVATE property's field, written from another class, goes through its owner's
         // accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, index)
-            .filter(|storage| !storage.owner.is_emitted_class(&self.owner, &facade))
+            .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -621,7 +624,8 @@ impl Emitter<'_> {
         // `putstatic` directly.
         if let Some(owner) = self.ir.statics[index as usize].owner {
             let owner_name = owner.render();
-            if self.owner != owner_name && companion_blocks::accessor_owned(self.ir, index) {
+            let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
+            if !emitted_by_owner && companion_blocks::accessor_owned(self.ir, index) {
                 let setter = self.ir.statics[index as usize]
                     .setter_jvm_name
                     .clone()
@@ -630,7 +634,7 @@ impl Emitter<'_> {
                     self.cw
                         .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));
                 code.invokestatic(m, slot_words(jt) as i32, 0);
-            } else if self.owner == owner_name
+            } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(index)
                 || self.ir.is_jvm_field_static(index)
             {
@@ -648,7 +652,7 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if self.owner == facade || is_const {
+        } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
             let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
             code.putstatic(fref, slot_words(jt) as i32);
         } else {
