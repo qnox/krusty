@@ -506,6 +506,7 @@ impl Checker<'_> {
                 arg_tys,
             },
             &shape.params,
+            &shape.params,
             &shape.call_sig,
             None,
         ) {
@@ -664,6 +665,7 @@ impl Checker<'_> {
                 args,
                 arg_tys,
             },
+            &validation_params,
             &validation_params,
             &candidate.call_sig,
             None,
@@ -918,6 +920,7 @@ impl Checker<'_> {
                             arg_tys,
                         },
                         &shape.params,
+                        &shape.params,
                         &shape.call_sig,
                         None,
                     ) {
@@ -1074,6 +1077,7 @@ impl Checker<'_> {
                             args,
                             arg_tys,
                         },
+                        &shape.params,
                         &shape.params,
                         &shape.call_sig,
                         None,
