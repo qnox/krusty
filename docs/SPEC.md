@@ -9116,12 +9116,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the count passes `Int.MAX_VALUE`: `count()` and `count { }` raise `ArithmeticException("Count
   overflow has happened.")` at the 2^31st counted element, and `indexOf`, `forEachIndexed` and
   `withIndex()`'s iterator raise `ArithmeticException("Index overflow has happened.")` at index
-  2^31, before comparing, acting on or fetching that element (kotlinc 2.4.10 on the JVM, for the
-  program recorded in the driver). A list's modification count wraps, as the JVM's `modCount` does,
-  and an iterator made before the wrap still sees the change. The driver harness builds with signed
-  overflow trapping (`-fsanitize=signed-integer-overflow -fsanitize-trap=...`), so a counter left
-  signed fails its driver with SIGILL.
-  Tests: `tests/native_runtime_e2e.rs` (`walk_count_overflow`, `list_modification_count_wraps`).
+  2^31, before comparing, acting on or fetching that element. Every walk starts its counter at
+  `kt_walk_counter_origin` (zero) and checks it through the one helper `kt_counter_overflowed`, so
+  the drivers start the counters just below 2^31 and reach the checks in two elements. The JVM
+  needs seconds to walk 2^31 elements, past the box runner's 10-second limit on a loaded machine
+  (measured: a single `indexOf` over 2^31 + 1 timed out there), so those answers -- `count()` of
+  2^31 elements raises, of 2^31 - 1 is `Int.MAX_VALUE`, `indexOf` in 2^31 + 1 raises and in 2^31 is
+  -1, each having read every element -- are recorded in `walk_count_overflow.kt` and
+  `walk_index_overflow.kt` from kotlinc 2.4.20 and pinned in the drivers, with `count { }`,
+  `forEachIndexed` and `withIndex()`, which pass the same helper; the programs run short walks of
+  the same kinds, which are compared on every run. A list's modification count
+  wraps, as the JVM's `modCount` does, and an iterator made before the wrap still sees the change.
+  The driver harness builds with signed overflow trapping
+  (`-fsanitize=signed-integer-overflow -fsanitize-trap=...`), so a counter left signed fails its
+  driver with SIGILL.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_count_overflow`, `walk_index_overflow`,
+  `list_modification_count_wraps`).
 - **A native walk over a builder asks its current length, and a list renders itself as
   `(this Collection)`.** `map` over a `StringBuilder` steps as Kotlin's `CharSequence.iterator()`
   does, asking the current length before each step, so a transform that appends to or shortens the

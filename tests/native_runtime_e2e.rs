@@ -828,8 +828,13 @@ fn a_list_modification_count_wraps_and_is_still_noticed() {
 }
 
 #[test]
-fn a_walk_counter_past_the_largest_int_raises_kotlins_overflow() {
-    run_driver("walk_count_overflow");
+fn a_walk_count_past_the_largest_int_raises_kotlins_overflow() {
+    run_driver_against_kotlin("walk_count_overflow");
+}
+
+#[test]
+fn a_walk_index_past_the_largest_int_raises_kotlins_overflow() {
+    run_driver_against_kotlin("walk_index_overflow");
 }
 
 #[test]

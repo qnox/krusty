@@ -1,114 +1,65 @@
-/* A walk's `Int` counter past `Int.MAX_VALUE` raises Kotlin's `ArithmeticException` rather than
-   wrapping: `count()` of 2^31 elements raises `Count overflow has happened.` at the last one, and
-   `indexOf` in 2^31 + 1 elements raises `Index overflow has happened.` before comparing the
-   element at index 2^31, having compared every one before it.
-   The counters were signed `Int`s incremented past their maximum, which is undefined in C; the
-   harness builds every driver with signed overflow trapping, so a counter left signed ends this
-   driver with SIGILL instead of the exception.
+/* A walk's `Int` count past `Int.MAX_VALUE` raises Kotlin's `ArithmeticException` rather than
+   wrapping: `count()` of 2^31 elements raises `Count overflow has happened.` at the last one, having
+   read every element, and `count()` of 2^31 - 1 answers `Int.MAX_VALUE`. The counters were signed
+   `Int`s incremented past their maximum, which is undefined in C; the harness builds every driver
+   with signed overflow trapping, so a counter left signed ends this driver with SIGILL instead.
 
-   The expected answers are Kotlin's, from this program compiled and run with the reference kotlinc
-   2.4.10 on the JVM:
+   The driver prints what ordinary walks answer and how many elements each left unread, and the
+   harness compares the lines with what `walk_count_overflow.kt` answers under the reference
+   kotlinc. The walks that reach the check read 2^31 elements, which the JVM cannot do within the
+   harness's limit on a loaded machine, so the driver pins those answers, recorded in the program:
+   it starts every walk's counter at 2^31 - 2 (see `walk_counter.h`), so two elements reach the
+   count a walk of 2^31 reaches. */
+#include "walk_counter.h"
 
-       class Many(val n: Long) : Iterable<Any> {
-           override fun iterator() = object : Iterator<Any> {
-               var left = n
-               override fun hasNext() = left > 0
-               override fun next(): Any { left--; return Unit }
-           }
-       }
-       fun t(label: String, f: () -> Any?) = println("$label " + try { f().toString() }
-           catch (e: Throwable) { "threw ${e::class.qualifiedName}: ${e.message}" })
-       fun main() {
-           t("count 2^31") { Many(2147483648L).count() }
-           t("indexOf 2^31+1") { Many(2147483649L).indexOf("x") }
-           t("indexOf 2^31") { Many(2147483648L).indexOf("x") }
-       }
-
-   which prints `count 2^31 threw java.lang.ArithmeticException: Count overflow has happened.`,
-   `indexOf 2^31+1 threw java.lang.ArithmeticException: Index overflow has happened.` and
-   `indexOf 2^31 -1`. The same program answers `2147483647` for `Many(2147483647L).count()`,
-   `Count overflow` for `count { true }` of 2^31, and `Index overflow` for `forEachIndexed` over
-   2^31 + 1 elements after the action saw index 2147483647. `count { }`, `forEachIndexed` and
-   `withIndex()` count through the same two checks as the walks here, and are not repeated because
-   each costs 2^31 steps (and `forEachIndexed` a boxed index per step). */
-#include "collections_later_tiers.h"
-
-typedef struct Many {
-    KObjectHeader header;
-    int64_t size;
-} Many;
-
-typedef struct ManyIterator {
-    KObjectHeader header;
-    int64_t left;
-} ManyIterator;
-
-static KObjectHeader unit_object;
-
-static kt_boolean many_has_next(KRef self) { return ((const ManyIterator *)self)->left > 0; }
-
-static KRef many_next(KRef self) {
-    ((ManyIterator *)self)->left--;
-    return (KRef)&unit_object;
+static KRef always(KRef self, KRef element) {
+    (void)self;
+    (void)element;
+    return kt_box_boolean(1);
 }
 
-static const KType many_iterator_type = {
-    .name = "ManyIterator",
-    .name_length = sizeof("ManyIterator") - 1,
-    .instance_size = sizeof(ManyIterator),
-    .super = &kt_type_any,
-    .walk_has_next = many_has_next,
-    .walk_next = many_next,
-};
+/* Every other element, starting with the first, as the program's `seen++ % 2 == 0` says. */
+static kt_int seen;
 
-static KRef many_iterator(KRef self) {
-    ManyIterator *iterator =
-        (ManyIterator *)kt_gc_allocate(&many_iterator_type, sizeof(ManyIterator));
-    iterator->left = ((const Many *)self)->size;
-    return (KRef)iterator;
+static KRef every_other(KRef self, KRef element) {
+    (void)self;
+    (void)element;
+    return kt_box_boolean(seen++ % 2 == 0);
 }
 
-static const KType many_type = {
-    .name = "Many",
-    .name_length = sizeof("Many") - 1,
-    .instance_size = sizeof(Many),
-    .super = &kt_type_any,
-    .walk_iterator = many_iterator,
-};
-
-static KRef many(int64_t size) {
-    Many *made = (Many *)kt_gc_allocate(&many_type, sizeof(Many));
-    made->size = size;
-    return (KRef)made;
-}
-
-/* What `indexOf` looks for: an object whose `equals` is identity, so no element matches. */
-static const kt_fn probe_vtable[] = {(kt_fn)kt_any_equals, NULL, NULL};
-static const KType probe_type = {
-    .name = "Probe",
-    .name_length = sizeof("Probe") - 1,
-    .instance_size = sizeof(KObjectHeader),
-    .super = &kt_type_any,
-    .vtable = probe_vtable,
-    .vtable_length = 3,
-};
-static KObjectHeader probe_object = {&probe_type};
-
-static kt_boolean raised(const char *message, kt_int length) {
-    KRef thrown = kt_pending_exception();
-    kt_clear_pending();
-    return thrown != NULL && type_of(thrown) == &kt_type_arithmetic_exception &&
-           text_is(kt_throwable_message(thrown), message, length);
-}
+FUNCTION_VALUE(f_always, always)
+FUNCTION_VALUE(f_every_other, every_other)
 
 void kt_program_entry(void) {
-    DRIVER_BEGIN();
-    unit_object.type = &kt_type_any;
+    WALK_COUNTER_BEGIN();
 
-    (void)kt_iterable_count(many(2147483648LL));
-    CHECK(raised("Count overflow has happened.", 28), "count() of 2^31 elements\n");
+    KRef walked = many(3);
+    show_walk("count() of 3 elements", kt_iterable_count(walked), walked);
+    walked = many(0);
+    show_walk("count() of no elements", kt_iterable_count(walked), walked);
+    walked = many(5);
+    show_walk("count { every other } of 5 elements",
+              kt_iterable_count_matching(walked, f_every_other), walked);
 
-    (void)kt_iterable_index_of(many(2147483649LL), (KRef)&probe_object);
-    CHECK(raised("Index overflow has happened.", 28), "indexOf in 2^31 + 1 elements\n");
+    /* The walks that reach the check, pinned (see `walk_count_overflow.kt`). */
+    kt_walk_counter_origin = 2147483646u;
+    walked = many(1);
+    CHECK(kt_iterable_count(walked) == 2147483647 && kt_pending_exception() == NULL &&
+              ((const Many *)walked)->left == 0,
+          "count() of 2^31 - 1 elements\n");
+    walked = many(2);
+    (void)kt_iterable_count(walked);
+    CHECK(raised_overflow("Count overflow has happened.") && ((const Many *)walked)->left == 0,
+          "count() of 2^31 elements\n");
+    walked = many(1);
+    CHECK(kt_iterable_count_matching(walked, f_always) == 2147483647 &&
+              kt_pending_exception() == NULL,
+          "count { } of 2^31 - 1 elements\n");
+    walked = many(2);
+    (void)kt_iterable_count_matching(walked, f_always);
+    CHECK(raised_overflow("Count overflow has happened.") && ((const Many *)walked)->left == 0,
+          "count { } of 2^31 elements\n");
+
+    kt_walk_counter_origin = 0;
     kt_sys_write(1, "OK\n", 3);
 }
