@@ -4,7 +4,7 @@ mod abstract_method_nullability;
 mod annotation_constructions;
 mod array_representation;
 pub mod backend;
-mod bridge_return_adaptations;
+mod bridge_adaptations;
 pub mod bridges;
 mod builtin_member_operations;
 mod bytecode;

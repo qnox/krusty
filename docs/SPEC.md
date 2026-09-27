@@ -8546,9 +8546,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed form takes the carrier out of that class's own `unbox-impl` (`checkcast IC;
   IC.unbox-impl()I`) — the class identity is unknowable from the bridge at emission time, because the
   value-class pass rewrites `erased_ret` to the carrier in the same step, so the JVM pass records it
-  in `bridge_return_adaptations` — a backend-owned physical realization plan passed directly to
-  bridge emission and keyed by the owning class and bridge ordinal. No classifier identity for a JVM
-  boxing decision sits on common `Bridge` or `IrFile`. That holds for a
+  in `bridge_adaptations` — a backend-owned physical realization plan passed directly to bridge
+  emission and keyed by the owning class and bridge ordinal. The same plan holds the rest of a
+  bridge's value-class adapters: boxing the target's carrier result (`box-impl`) and unboxing each
+  argument that arrives boxed in an erased slot, each with whether a null passes it by. The plan
+  follows a bridge the pass drops as a duplicate of a real method, so every later ordinal still
+  names its own plan. No classifier identity for a JVM boxing decision sits on common `Bridge` or
+  `IrFile`. That holds for a
   REFERENCE carrier too (`checkcast Text; Text.unbox-impl()Ljava/lang/String;`): keying the adapter
   on the carrier alone sent a reference carrier down the ordinary `Object`-to-`String` narrowing,
   which never unboxed and handed the caller a `Text` where a `String` was declared. Nor may the two
