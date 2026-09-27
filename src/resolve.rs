@@ -40479,8 +40479,8 @@ struct Checker<'a> {
     /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
     /// first-observed source order while still allowing replacement by expression identity.
     postponed_diagnostics: PostponedDiagnostics,
-    /// Per call, the parameters of the member overloads eager lambda analysis eliminated.
-    eager_eliminated_members: HashMap<ExprId, Vec<Vec<Ty>>>,
+    /// Per call, the identities of the member overloads eager lambda analysis eliminated.
+    eager_eliminated_members: HashMap<ExprId, Vec<eager_lambda_analysis::MemberIdentity>>,
     /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
@@ -74036,9 +74036,8 @@ impl<'a> Checker<'a> {
                 .then(|| self.expr_types[argument.0 as usize])
             })
             .collect::<Vec<_>>();
-        let declarations = self.eager_lambda_members(
+        let declarations = self.eager_lambda_constructors(
             scope,
-            call,
             eager_lambda_analysis::EagerLambdaCall {
                 shape: UntypedLambdaCall {
                     args,

@@ -23,9 +23,15 @@ fn accepted_like_kotlinc(source: &str) -> bool {
     expected.is_empty()
 }
 
-/// Require `source` to compile as kotlinc compiles it: each of `classes` whole, then `box()` under
-/// both compilers.
-fn assert_compiles_like_kotlinc(stem: &str, source: &str, classes: &[&str]) {
+/// Require `source` to compile as kotlinc compiles it: each of `classes` whole, the code of each of
+/// `lambda_classes`, then `box()` under both compilers. A suspend lambda class's `@Metadata`, which
+/// records the lambda's function, is outside this comparison.
+fn assert_compiles_like_kotlinc(
+    stem: &str,
+    source: &str,
+    classes: &[&str],
+    lambda_classes: &[&str],
+) {
     assert!(
         accepted_like_kotlinc(source),
         "{stem}: kotlinc {} accepts the fixture",
@@ -33,6 +39,9 @@ fn assert_compiles_like_kotlinc(stem: &str, source: &str, classes: &[&str]) {
     );
     for class in classes {
         common::assert_class_matches_kotlinc(stem, source, class);
+    }
+    for class in lambda_classes {
+        common::assert_class_code_matches_kotlinc(stem, source, class);
     }
     common::expect_box_same_as_kotlinc(source, &format!("{stem}Run"));
 }
@@ -53,6 +62,7 @@ fn a_lambda_result_selects_between_a_function_type_and_a_sam() {
         "SamAndLambda",
         &format!("{EAGER}{SAM_AND_LAMBDA}"),
         &["SamAndLambdaKt"],
+        &[],
     );
 }
 
@@ -70,7 +80,8 @@ fn a_lambda_result_selects_between_a_suspend_and_a_plain_function_type() {
     assert_compiles_like_kotlinc(
         "SuspendAndNotSuspend",
         &format!("{EAGER}{SUSPEND_AND_NOT_SUSPEND}"),
-        &["SuspendAndNotSuspendKt", "SuspendAndNotSuspendKt$box$1"],
+        &["SuspendAndNotSuspendKt"],
+        &["SuspendAndNotSuspendKt$box$1"],
     );
 }
 
@@ -89,7 +100,8 @@ fn a_lambda_result_selects_between_a_suspend_function_type_and_a_sam() {
     assert_compiles_like_kotlinc(
         "SuspendAndSam",
         &format!("{EAGER}{SUSPEND_AND_SAM}"),
-        &["SuspendAndSamKt", "SuspendAndSamKt$box$1"],
+        &["SuspendAndSamKt"],
+        &["SuspendAndSamKt$box$1"],
     );
 }
 
@@ -153,7 +165,7 @@ const RESULT_RULES: &str = "object Type\n\
 /// its lambdas' result types carry emission differences of their own.
 #[test]
 fn the_lambda_results_select_like_kotlinc() {
-    assert_compiles_like_kotlinc("ResultRules", &format!("{EAGER}{RESULT_RULES}"), &[]);
+    assert_compiles_like_kotlinc("ResultRules", &format!("{EAGER}{RESULT_RULES}"), &[], &[]);
 }
 
 const RECEIVERS: &str = "fun interface IntSam { fun run(): Int }\n\
@@ -180,7 +192,7 @@ const RECEIVERS: &str = "fun interface IntSam { fun run(): Int }\n\
 /// its own.
 #[test]
 fn members_extensions_and_constructors_select_like_kotlinc() {
-    assert_compiles_like_kotlinc("Receivers", &format!("{EAGER}{RECEIVERS}"), &[]);
+    assert_compiles_like_kotlinc("Receivers", &format!("{EAGER}{RECEIVERS}"), &[], &[]);
 }
 
 const NO_CANDIDATE_FITS: &str = "@JvmName(\"a1\") fun intOrString(b: () -> Int) = \"I\"\n\
@@ -195,26 +207,90 @@ fn when_no_candidate_fits_the_first_reports_the_mismatch() {
     )));
 }
 
-const SUSPEND_LAMBDA_PARAMETERS: &str = "fun f(b: suspend (Int) -> String) = \"O\"\n\
+const GENERIC_RESULT_BOUNDS: &str = "class Inv<T>(val v: T)\n\
+    @JvmName(\"g1\") fun <T : Number> g(b: () -> T) = \"N\"\n\
+    @JvmName(\"g2\") fun <T : CharSequence> g(b: () -> T) = \"C\"\n\
+    @JvmName(\"h1\") fun <T : Number?> h(b: () -> T) = \"N\"\n\
+    @JvmName(\"h2\") fun <T : CharSequence> h(b: () -> T) = \"C\"\n\
+    @JvmName(\"k1\") fun <T : Number> k(b: () -> T) = \"N\"\n\
+    @JvmName(\"k2\") fun <T : CharSequence?> k(b: () -> T) = \"C\"\n\
+    @JvmName(\"p1\") fun <T : Number> p(b: () -> Inv<T>) = \"N\"\n\
+    @JvmName(\"p2\") fun <T : CharSequence> p(b: () -> Inv<T>) = \"C\"\n\
+    @JvmName(\"q1\") fun <T : Number> q(b: () -> Inv<out T>) = \"N\"\n\
+    @JvmName(\"q2\") fun <T : CharSequence> q(b: () -> Inv<out T>) = \"C\"\n\
+    @JvmName(\"m1\") fun <T : Number> m(b: () -> T) = \"N\"\n\
+    @JvmName(\"m2\") fun m(b: () -> String) = \"S\"\n\
+    @JvmName(\"r1\") fun <T : Number> r(b: () -> T?) = \"N\"\n\
+    @JvmName(\"r2\") fun <T : CharSequence> r(b: () -> T?) = \"C\"\n\
+    @JvmName(\"a1\") fun <T : Any> a(b: () -> T) = \"A\"\n\
+    @JvmName(\"a2\") fun <T : CharSequence> a(b: () -> T) = \"C\"\n\
     fun box(): String {\n\
-    \x20   f { x -> \"\" }\n\
-    \x20   f { _ -> \"\" }\n\
-    \x20   f { \"\" + it }\n\
-    \x20   return \"OK\"\n\
+    \x20   val s = g { \"s\" } + g { 1 } + h { null } + h { \"s\" } + k { null } + k { 1 } +\n\
+    \x20       p { Inv(\"s\") } + p { Inv(1) } + q { Inv(\"s\") } + q { Inv(1) } + m { 1 } + m { \"s\" } +\n\
+    \x20       r { \"s\" } + r { 1 } + a { \"s\" } + a { 1 }\n\
+    \x20   return if (s == \"CNNCCNCNCNNSCNCA\") \"OK\" else s\n\
     }\n";
 
-/// A suspend lambda's class records its `invoke` in `@Metadata`: each parameter by the name source
-/// gave it, `<unused var>` for `_` and `it` for the implicit one. A lambda without a suspension
-/// point is such a class too.
+/// A lambda result constrains the candidate's own type parameters: a candidate whose declared
+/// bound the solved result violates drops out, directly, through a nullable result, through an
+/// invariant or projected type argument, and beside a candidate without type parameters. When
+/// both bounds admit the result, the more specific candidate wins.
 #[test]
-fn suspend_lambda_classes_record_their_parameters() {
+fn a_lambda_result_violating_a_type_parameter_bound_eliminates_the_candidate() {
     assert_compiles_like_kotlinc(
-        "SuspendLambdaParameters",
-        SUSPEND_LAMBDA_PARAMETERS,
-        &[
-            "SuspendLambdaParametersKt$box$1",
-            "SuspendLambdaParametersKt$box$2",
-            "SuspendLambdaParametersKt$box$3",
-        ],
+        "GenericResultBounds",
+        &format!("{EAGER}{GENERIC_RESULT_BOUNDS}"),
+        &[],
+        &[],
     );
+}
+
+const GENERIC_MEMBER_RESULT_BOUNDS: &str = "class C {\n\
+    \x20   fun <T : Number> m(x: Int, b: () -> T) = \"N\"\n\
+    \x20   fun <T : CharSequence> m(x: Long, b: () -> T) = \"C\"\n\
+    \x20   fun inside(): String = m(1) { \"s\" } + m(1) { 1 }\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val c = C()\n\
+    \x20   val s = c.m(1) { \"s\" } + c.m(1) { 1 } + c.inside()\n\
+    \x20   return if (s == \"CNCN\") \"OK\" else s\n\
+    }\n";
+
+/// Member overloads are told apart by their bounds before the more specific `Int` parameter is
+/// preferred, and the call's final selection keeps the member the analysis kept.
+#[test]
+fn members_are_told_apart_by_their_bounds_before_specificity() {
+    assert_compiles_like_kotlinc(
+        "GenericMemberResultBounds",
+        &format!("{EAGER}{GENERIC_MEMBER_RESULT_BOUNDS}"),
+        &[],
+        &[],
+    );
+}
+
+const GENERIC_RESULT_OR_UNIT: &str = "class Inv<T>(val v: T)\n\
+    @JvmName(\"u1\") fun <T : Number> u(b: () -> T) = \"N\"\n\
+    @JvmName(\"u2\") fun u(b: () -> Unit) = \"U\"\n\
+    @JvmName(\"v1\") fun <T : CharSequence> v(b: () -> Inv<out T>) = \"C\"\n\
+    @JvmName(\"v2\") fun v(b: () -> Unit) = \"U\"\n\
+    fun box(): String {\n\
+    \x20   val s = u { \"s\" } + u { 1 } + v { Inv(1) } + v { Inv(\"s\") }\n\
+    \x20   return if (s == \"SELECTED\") \"OK\" else s\n\
+    }\n";
+
+/// A generic candidate the lambda result fits needs no coercion to `Unit`, so it wins over a
+/// `() -> Unit` candidate; one whose bound the result violates drops out and leaves the coercing
+/// candidate.
+#[test]
+fn a_bound_violating_generic_candidate_leaves_the_unit_candidate() {
+    let source = GENERIC_RESULT_OR_UNIT.replace("SELECTED", "UNUC");
+    assert_compiles_like_kotlinc("GenericResultOrUnit", &format!("{EAGER}{source}"), &[], &[]);
+}
+
+/// Without the feature the lambda is not analyzed first: the `() -> Unit` candidate is chosen
+/// every time.
+#[test]
+fn without_the_feature_the_unit_candidate_is_chosen() {
+    let source = GENERIC_RESULT_OR_UNIT.replace("SELECTED", "UUUU");
+    assert_compiles_like_kotlinc("GenericResultOrUnitOff", &source, &[], &[]);
 }

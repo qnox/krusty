@@ -418,6 +418,22 @@ fn disassemble_with(name: &str, bytes: &[u8], flags: &[&str]) -> String {
 /// Compile `source` with both compilers and require `class` to be kotlinc's: its header, every
 /// member with its code and debug tables, and its `@Metadata`.
 pub fn assert_class_matches_kotlinc(stem: &str, source: &str, class: &str) -> ReferenceComparison {
+    let comparison = assert_class_code_matches_kotlinc(stem, source, class);
+    assert_eq!(
+        super::common_core::raw_kotlin_metadata(&comparison.krusty_bytes),
+        super::common_core::raw_kotlin_metadata(&comparison.reference_bytes),
+        "{class}: kotlinc's @Metadata"
+    );
+    comparison
+}
+
+/// Compile `source` with both compilers and require `class`'s header and every member, with its
+/// code and debug tables, to be kotlinc's. The class's `@Metadata` is not compared.
+pub fn assert_class_code_matches_kotlinc(
+    stem: &str,
+    source: &str,
+    class: &str,
+) -> ReferenceComparison {
     let comparison = compare_with_kotlinc_plugin(
         stem,
         source,
@@ -451,11 +467,6 @@ pub fn assert_class_matches_kotlinc(stem: &str, source: &str, class: &str) -> Re
         member_blocks(&comparison.krusty),
         member_blocks(&comparison.reference),
         "{class}: kotlinc's members"
-    );
-    assert_eq!(
-        super::common_core::raw_kotlin_metadata(&comparison.krusty_bytes),
-        super::common_core::raw_kotlin_metadata(&comparison.reference_bytes),
-        "{class}: kotlinc's @Metadata"
     );
     comparison
 }

@@ -14,7 +14,9 @@
 //!   constraints on the candidate's expected result: every labelled `return` value, and the last
 //!   statement unless that result is `Unit`, which coerces it. A candidate that coerced a result
 //!   not already `Unit` is marked as using the coercion. A lambda ending in a statement, and an
-//!   empty lambda, result in `Unit`.
+//!   empty lambda, result in `Unit`. When the expected result mentions the candidate's own type
+//!   parameters, the results join the candidate's ordinary argument constraints in the shared
+//!   call-constraint solver; a solution that violates a declared bound eliminates the candidate.
 //! - Candidates whose constraints fail drop out. When none remain, the first candidate is kept so
 //!   that its own diagnostics are reported. The analysis repeats for the next lambda while more
 //!   than one candidate remains.
@@ -27,8 +29,11 @@
 use std::collections::HashSet;
 
 use crate::ast::{Expr, ExprId, Stmt};
-use crate::libraries::{FnKind, FunctionInfo, LibraryMember};
-use crate::types::{ty_mentions_param, FnSig, Ty};
+use crate::libraries::{
+    FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, ImplicitClassifierCallable,
+    LibraryMember, SourceMember,
+};
+use crate::types::{ty_mentions_param, ty_subst_keep_unbound, FnSig, Ty, TypeName};
 
 use super::{
     call_argument_parameter_indices, lambda_returns::ReturnTarget, ArgSlots, Checker, CheckerScope,
@@ -42,10 +47,76 @@ pub(super) struct EagerLambdaCall<'a> {
     pub(super) label: Option<&'a str>,
 }
 
+/// The identity of a member overload, stable across the separate times a call's member family is
+/// built: the declaration a provider normalized the candidate from, or, for a member the language
+/// synthesizes on a classifier, that operation on its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MemberIdentity {
+    Declaration(crate::fir::DeclarationId),
+    SourceMember(SourceMember),
+    External(crate::fir::ExternalCallableId),
+    Synthesized {
+        owner: TypeName,
+        callable: ImplicitClassifierCallable,
+    },
+}
+
+impl MemberIdentity {
+    fn of(member: &LibraryMember) -> Option<Self> {
+        if let Some(declaration) = member.stable_declaration {
+            return Some(Self::Declaration(declaration));
+        }
+        if let Some(source) = member.source_member {
+            return Some(Self::SourceMember(source));
+        }
+        if let Some(external) = member.external_identity {
+            return Some(Self::External(external));
+        }
+        Some(Self::Synthesized {
+            owner: member.owner?,
+            callable: member.implicit_classifier_callable?,
+        })
+    }
+}
+
+/// A generic candidate's constraint system over the call's arguments: its own type parameters with
+/// their declared bounds, the parameter each argument maps to, and the types of the arguments that
+/// are already typed.
+struct CandidateConstraints {
+    /// `params` holds one parameter per source argument, the element type of a vararg taking a
+    /// single element.
+    signature: GenericSig,
+    arguments: Vec<Option<Ty>>,
+}
+
+impl CandidateConstraints {
+    fn new(
+        declaration: &GenericSig,
+        parameters: Vec<Ty>,
+        arguments: &[Option<Ty>],
+        type_args: &[Ty],
+    ) -> Self {
+        let explicit = crate::symbol_resolver::seeded_gsig_binds(declaration, type_args);
+        Self {
+            signature: GenericSig {
+                formals: declaration.formals.clone(),
+                formal_bounds: declaration.formal_bounds.clone(),
+                receiver: None,
+                params: parameters
+                    .into_iter()
+                    .map(|parameter| ty_subst_keep_unbound(parameter, &explicit))
+                    .collect(),
+                ret: Ty::Unit,
+                return_policy: GenericReturnPolicy::Exact,
+            },
+            arguments: arguments.to_vec(),
+        }
+    }
+}
+
 /// One applicable candidate taking part in the analysis.
 struct EagerCandidate {
-    /// The candidate's own type parameters.
-    formals: Vec<String>,
+    constraints: CandidateConstraints,
     /// Per argument, the function type the candidate expects for a lambda literal.
     lambdas: Vec<Option<&'static FnSig>>,
     has_contract: bool,
@@ -106,9 +177,32 @@ impl Checker<'_> {
         }
     }
 
+    /// Narrow the constructors `constructors` of a call with lambda arguments.
+    pub(super) fn eager_lambda_constructors(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: EagerLambdaCall<'_>,
+        constructors: Vec<LibraryMember>,
+    ) -> Vec<LibraryMember> {
+        if !self.file.eager_lambda_analysis {
+            return constructors;
+        }
+        let candidates = constructors
+            .iter()
+            .map(|member| self.eager_member_candidate(scope, &call, member))
+            .collect::<Vec<_>>();
+        match self.eager_lambda_survivors(scope, &call, candidates) {
+            Some((positions, survivors)) => {
+                without_eliminated(constructors, &positions, &survivors)
+            }
+            None => constructors,
+        }
+    }
+
     /// Narrow the member overloads `members` of the call `call_expression` with lambda arguments,
-    /// and keep what was eliminated for the call's final selection
-    /// ([`Self::eager_lambda_retains_member`]).
+    /// and keep the identities of those eliminated for the call's final selection, which builds
+    /// the family again ([`Self::eager_lambda_retains_member`]). The family is returned unchanged
+    /// when a member to eliminate has no stable identity to keep.
     pub(super) fn eager_lambda_members(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -127,12 +221,19 @@ impl Checker<'_> {
         else {
             return members;
         };
-        let eliminated = members
+        let Some(eliminated) = members
             .iter()
             .zip(&positions)
             .filter(|(_, position)| position.is_some_and(|position| !survivors.contains(&position)))
-            .map(|(member, _)| member.params.clone())
-            .collect();
+            .map(|(member, _)| MemberIdentity::of(member))
+            .collect::<Option<Vec<_>>>()
+        else {
+            crate::trace_compiler!(
+                "resolve",
+                "eager lambda analysis keeps the family: an eliminated member has no identity"
+            );
+            return members;
+        };
         self.eager_eliminated_members
             .insert(call_expression, eliminated);
         without_eliminated(members, &positions, &survivors)
@@ -143,7 +244,9 @@ impl Checker<'_> {
     pub(super) fn eager_lambda_retains_member(&self, call: ExprId, member: &LibraryMember) -> bool {
         self.eager_eliminated_members
             .get(&call)
-            .is_none_or(|eliminated| !eliminated.contains(&member.params))
+            .is_none_or(|eliminated| {
+                MemberIdentity::of(member).is_none_or(|member| !eliminated.contains(&member))
+            })
     }
 
     /// Run the analysis over `candidates` (`None` where a candidate is not applicable). Answers,
@@ -189,7 +292,13 @@ impl Checker<'_> {
                 let Some(expected) = candidate.lambdas[argument] else {
                     return false;
                 };
-                match self.eager_results_fit(scope, &results, expected.ret, &candidate.formals) {
+                let fit = self.eager_results_fit(
+                    scope,
+                    &results,
+                    (argument, expected),
+                    &candidate.constraints,
+                );
+                match fit {
                     Some(coerced) => {
                         candidate.uses_unit_coercion |= coerced;
                         true
@@ -242,7 +351,12 @@ impl Checker<'_> {
             })
             .collect();
         Some(EagerCandidate {
-            formals: shape.generic_formals,
+            constraints: CandidateConstraints::new(
+                &function.semantic_signature(),
+                shape.argument_parameters,
+                call.shape.partial,
+                call.shape.type_args,
+            ),
             lambdas,
             has_contract: function
                 .callable
@@ -260,12 +374,17 @@ impl Checker<'_> {
         call: &EagerLambdaCall<'_>,
         member: &LibraryMember,
     ) -> Option<EagerCandidate> {
-        let formals = member
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formals.clone())
-            .unwrap_or_default();
-        if !call.shape.type_args.is_empty() && formals.len() != call.shape.type_args.len() {
+        let declaration = member.generic_sig.clone().unwrap_or_else(|| GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: member.params.clone(),
+            ret: member.ret,
+            return_policy: GenericReturnPolicy::Exact,
+        });
+        if !call.shape.type_args.is_empty()
+            && declaration.formals.len() != call.shape.type_args.len()
+        {
             return None;
         }
         let contextual = self.contextual_call_shape(
@@ -293,23 +412,36 @@ impl Checker<'_> {
             call.shape.trailing_lambda,
             &contextual.call_sig,
         )?;
-        let lambdas = call
+        let argument_parameters = call
             .shape
             .args
             .iter()
             .zip(parameters)
             .map(|(&argument, parameter)| {
                 let declared = *contextual.params.get(parameter)?;
-                let expected = if contextual.call_sig.vararg_index == Some(parameter) {
-                    declared.array_read_elem()?
+                if contextual.call_sig.vararg_index == Some(parameter)
+                    && !self.file.is_spread_arg(argument)
+                {
+                    declared.array_read_elem()
                 } else {
-                    declared
-                };
-                self.eager_lambda_expectation(argument, expected)
+                    Some(declared)
+                }
             })
+            .collect::<Option<Vec<_>>>()?;
+        let lambdas = call
+            .shape
+            .args
+            .iter()
+            .zip(&argument_parameters)
+            .map(|(&argument, &expected)| self.eager_lambda_expectation(argument, expected))
             .collect();
         Some(EagerCandidate {
-            formals,
+            constraints: CandidateConstraints::new(
+                &declaration,
+                argument_parameters,
+                call.shape.partial,
+                call.shape.type_args,
+            ),
             lambdas,
             has_contract: member
                 .contract
@@ -373,7 +505,7 @@ impl Checker<'_> {
             let fixed_inputs = candidates.iter().all(|(_, candidate)| {
                 inputs.params.iter().all(|&input| {
                     !input.mentions_error()
-                        && !ty_mentions_param(input, &candidate.formals)
+                        && !ty_mentions_param(input, &candidate.constraints.signature.formals)
                         && Self::type_is_lexically_fixed(scope, input)
                 })
             });
@@ -456,19 +588,80 @@ impl Checker<'_> {
         LambdaResults { tail, returns }
     }
 
-    /// Whether a candidate expecting the lambda to result in `expected` accepts `results`, and if
-    /// so whether it coerced the last expression to `Unit`. An expected result that mentions one of
-    /// the candidate's own `formals` takes the results as constraints still to be solved.
+    /// Whether a candidate expecting the lambda to be `expected` accepts `results`, and if so
+    /// whether it coerced the last expression to `Unit`. An expected result that mentions one of
+    /// the candidate's own type parameters first takes the results as constraints, solved together
+    /// with the call's typed arguments; the solution must satisfy every declared bound, and the
+    /// results must then fit the solved result.
     fn eager_results_fit(
         &self,
         scope: &CheckerScope<'_>,
         results: &LambdaResults,
-        expected: Ty,
-        formals: &[String],
+        (argument, expected): (usize, &'static FnSig),
+        constraints: &CandidateConstraints,
     ) -> Option<bool> {
-        if ty_mentions_param(expected, formals) {
+        let signature = &constraints.signature;
+        if !ty_mentions_param(expected.ret, &signature.formals) {
+            return self.eager_results_fit_fixed(scope, results, expected.ret);
+        }
+        let lambda_actual = |result: Ty| {
+            Ty::fun_with_shape(
+                expected.params.clone(),
+                result,
+                expected.context_count,
+                expected.has_receiver,
+                expected.suspend,
+            )
+        };
+        let tail = match results.tail {
+            LambdaTail::Expression(_, actual) => Some(actual),
+            LambdaTail::Unit => Some(Ty::Unit),
+            LambdaTail::Jump => None,
+        };
+        let lambda_results = results.returns.iter().copied().chain(tail);
+        let actuals = constraints
+            .arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, actual)| actual.map(|actual| (index, actual)))
+            .chain(lambda_results.map(|result| (argument, lambda_actual(result))))
+            .filter(|(_, actual)| !actual.mentions_error())
+            .map(|(index, actual)| (index, actual, false));
+        let solved = crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+            &self.fed_source(),
+            signature,
+            actuals,
+            None,
+        );
+        crate::trace_compiler!(
+            "resolve",
+            "eager lambda argument={argument} bindings={:?} bound_violation={:?}",
+            solved.bindings,
+            solved.bound_violation,
+        );
+        if solved.bound_violation.is_some()
+            || !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                signature,
+                &solved.bindings,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            )
+        {
+            return None;
+        }
+        let result = ty_subst_keep_unbound(expected.ret, &solved.bindings);
+        if ty_mentions_param(result, &signature.formals) {
             return Some(false);
         }
+        self.eager_results_fit_fixed(scope, results, result)
+    }
+
+    /// [`Self::eager_results_fit`] for an expected result without type variables.
+    fn eager_results_fit_fixed(
+        &self,
+        scope: &CheckerScope<'_>,
+        results: &LambdaResults,
+        expected: Ty,
+    ) -> Option<bool> {
         let fits =
             |actual: Ty| actual.mentions_error() || self.receiver_is_assignable(actual, expected);
         if !results.returns.iter().all(|&returned| fits(returned)) {
@@ -485,5 +678,43 @@ impl Checker<'_> {
                     .then_some(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(params: Vec<Ty>) -> LibraryMember {
+        LibraryMember::new("m".to_string(), params, Ty::String, String::new())
+    }
+
+    /// Members that share a parameter shape stay distinct through their declarations.
+    #[test]
+    fn a_member_is_identified_by_its_declaration_not_its_parameters() {
+        let shape = vec![Ty::fun(Vec::new(), Ty::String)];
+        let mut first = member(shape.clone());
+        first.stable_declaration = Some(crate::fir::DeclarationId::from_raw(1));
+        let mut second = member(shape);
+        second.stable_declaration = Some(crate::fir::DeclarationId::from_raw(2));
+        assert_ne!(MemberIdentity::of(&first), MemberIdentity::of(&second));
+        assert_eq!(
+            MemberIdentity::of(&first),
+            MemberIdentity::of(&first.clone())
+        );
+    }
+
+    /// A language-synthesized member is identified by its operation on its owner; a member with
+    /// no identity at all has none to keep.
+    #[test]
+    fn a_synthesized_member_is_identified_by_its_operation_and_owner() {
+        let mut values = member(Vec::new());
+        values.owner = Some(crate::types::type_name("demo/E"));
+        values.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValues);
+        let mut value_of = values.clone();
+        value_of.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValueOf);
+        assert!(MemberIdentity::of(&values).is_some());
+        assert_ne!(MemberIdentity::of(&values), MemberIdentity::of(&value_of));
+        assert_eq!(MemberIdentity::of(&member(Vec::new())), None);
     }
 }
