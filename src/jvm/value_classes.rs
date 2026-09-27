@@ -3359,36 +3359,30 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // The nullable-Any toString declaration consumes a reference. Other intrinsics carry
+            // A virtual/interface dispatch on an UNBOXED value-class receiver boxes it with `box-impl`
+            // when (1) the owner is NOT the value class (an interface it implements, an `IFoo by Z(x)`
+            // forwarder) or (2) the callee is a SIBLING-FILE user instance method (`params: Some`); a
+            // same-file member is a `MethodCall` (boxed above) and a static `-impl` is `Static`. A
+            // `super` call (`Special`) always takes the box, as kotlinc's `invokespecial` does. Of the
+            // intrinsics only the nullable-Any `toString` consumes a reference; the others carry
             // concrete scalar/array contracts and must not turn their receiver into an erased box.
             if let IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::NullableAnyToString,
-                        ..
-                    },
+                callee,
                 dispatch_receiver: Some(recv),
                 ..
             } = &ir.exprs[id as usize]
             {
-                if let Repr::Unboxed(x) = repr_ctx.repr(*recv) {
-                    ops.push((*recv, repr_ctx.box_op(*recv, x)));
-                }
-            }
-            // A virtual/interface dispatch on an UNBOXED value-class receiver must box it — the dispatch
-            // needs the boxed object. Two cases: (1) the owner is NOT the value class (an INTERFACE it
-            // implements — an `IFoo by Z(x)` delegation forwarder), or (2) the owner IS the value class and
-            // the callee is a SIBLING-FILE user instance method (`params: Some`; krusty emits a value
-            // class's own user methods as boxed-`this` instance methods). A same-file member call takes the
-            // index-resolved `MethodCall` path (boxed above); the value class's static `-impl`s are
-            // `Callee::Static`, not `Virtual`, so they never reach here.
-            if let IrExpr::Call {
-                callee: Callee::Virtual { owner, params, .. },
-                dispatch_receiver: Some(recv),
-                ..
-            } = &ir.exprs[id as usize]
-            {
-                if !is_value_class_internal(*owner, &under) || params.is_some() {
+                let boxes = match callee {
+                    Callee::Virtual { owner, params, .. } => {
+                        !is_value_class_internal(*owner, &under) || params.is_some()
+                    }
+                    Callee::Special { .. } => true,
+                    Callee::Intrinsic { operation, .. } => {
+                        *operation == crate::ir::IrIntrinsic::NullableAnyToString
+                    }
+                    _ => false,
+                };
+                if boxes {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*recv) {
                         ops.push((*recv, repr_ctx.box_op(*recv, x)));
                     }
