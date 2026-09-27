@@ -200,7 +200,7 @@ pub(super) fn primary_constructor_identities(
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<Option<String>> {
-    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    let identities = crate::jvm::parameter_names::constructor_local_variables(class);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
 }

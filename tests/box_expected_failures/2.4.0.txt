@@ -197,7 +197,6 @@ ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 lateinit/innerIsInitialized.kt
-localClass/virtualCallFromConstructor.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt
 localClasses/localClassInParameterInitializer.kt
@@ -270,7 +269,6 @@ specialBuiltins/explicitSuperCall.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 statics/syntheticAccessor.kt
-super/kt4982.kt
 syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt

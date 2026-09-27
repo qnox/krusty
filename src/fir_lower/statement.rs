@@ -327,7 +327,8 @@ impl BodyLowering<'_> {
             fields
                 .push(IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true));
             arguments.push(IrCtorArg {
-                name: Some(capture.name.to_string()),
+                // A capture is synthetic: no source parameter, so no metadata value parameter.
+                name: None,
                 context_kind: crate::types::ContextParameterKind::None,
                 ty: capture.ty.get(),
                 declared_ty: None,
@@ -336,12 +337,9 @@ impl BodyLowering<'_> {
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
-                check: capture
-                    .ty
-                    .get()
-                    .is_reference()
-                    .then(|| capture.name.to_string())
-                    .filter(|_| !capture.ty.get().is_nullable()),
+                // A captured value is compiler-supplied, never a caller's argument: kotlinc does
+                // not guard it with `checkNotNullParameter`.
+                check: None,
             });
             if let Some(identity) = capture.capture_identity {
                 self.ir
@@ -365,6 +363,15 @@ impl BodyLowering<'_> {
         }
         class.fields.splice(0..0, fields);
         class.ctor_args.splice(0..0, arguments);
+        // kotlinc's LocalDeclarationsLowering stores every captured value before the constructor
+        // delegates (`this.$a = a; super(…)`), like the enclosing instance of an inner class.
+        for (parameter, field) in &mut class.pre_super_param_fields {
+            *parameter += shifted;
+            *field += shifted;
+        }
+        class
+            .pre_super_param_fields
+            .splice(0..0, (0..shifted).map(|capture| (capture, capture)));
         class.ctor_param_count += captures.len() as u32;
         class.constructor_prefix_count += captures.len() as u32;
         class.is_local_class = true;
