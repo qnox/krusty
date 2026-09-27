@@ -1,7 +1,8 @@
 use crate::fir::{
-    FirLocalClassCapture, FirLocalClassCaptureSource, FirStatementId, FirStatementKind,
+    FirCapturedReceiver, FirLocalClassCapture, FirLocalClassCaptureSource, FirStatementId,
+    FirStatementKind,
 };
-use crate::ir::{ExprId, IrCtorArg, IrExpr, IrField};
+use crate::ir::{ExprId, IrCapturedReceiver, IrCtorArg, IrExpr, IrField};
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
@@ -328,6 +329,12 @@ impl BodyLowering<'_> {
             values.push((value, capture.ty.get()));
             fields
                 .push(IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true));
+            // A captured receiver keeps what it was in source; the target spells its name.
+            let receiver = capture.receiver.as_ref().map(|receiver| match receiver {
+                FirCapturedReceiver::Enclosing => IrCapturedReceiver::Enclosing,
+                FirCapturedReceiver::Callable(label) => IrCapturedReceiver::Callable(label.clone()),
+                FirCapturedReceiver::Lambda(label) => IrCapturedReceiver::Lambda(label.clone()),
+            });
             arguments.push(IrCtorArg {
                 // A capture is synthetic: no source parameter, so no metadata value parameter.
                 name: None,
@@ -344,6 +351,7 @@ impl BodyLowering<'_> {
                 check: None,
                 capture: Some(crate::ir::IrConstructorCapture {
                     source_name: capture.name.clone(),
+                    receiver,
                 }),
             });
             if let Some(identity) = capture.capture_identity {

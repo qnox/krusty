@@ -254,6 +254,8 @@ pub(crate) struct Scope<'p, B> {
     /// addressed as `this`; when the last context parameter occupies this slot, lowering binds it
     /// under its declared name instead.
     current_receiver_name: Option<String>,
+    /// A receiver lambda's label (explicit, or the called function's name) when this rung is one.
+    lambda_label: Option<String>,
     /// Source declaration that introduced this rung's ordinary extension receiver. Receiver
     /// lambdas have no declaration; extension functions and properties retain the exact span so a
     /// selected outer receiver marks that declaration used without reconstructing identity from a
@@ -296,6 +298,7 @@ impl<'p, B> Scope<'p, B> {
             kind,
             context_receivers: RefCell::new(Vec::new()),
             current_receiver_name: None,
+            lambda_label: None,
             extension_receiver_declaration: None,
             extension_receiver_label: None,
             companion_classifier: None,
@@ -923,6 +926,22 @@ impl<'p, B> Scope<'p, B> {
                         && receiver.label.as_deref() == Some(label)
                 })
         })
+    }
+
+    /// The label of the receiver lambda whose rung introduced the receiver `identity`.
+    pub(crate) fn implicit_receiver_lambda_label(
+        &self,
+        identity: (usize, usize),
+    ) -> Option<String> {
+        self.ancestors()
+            .find(|scope| (*scope as *const Self as usize, 0) == identity)
+            .and_then(|scope| scope.lambda_label.clone())
+    }
+
+    /// This receiver lambda rung's label.
+    pub(crate) fn with_lambda_label(mut self, label: Option<String>) -> Self {
+        self.lambda_label = label;
+        self
     }
 
     pub(crate) fn implicit_receiver_context_label(

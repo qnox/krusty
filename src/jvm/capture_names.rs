@@ -5,11 +5,31 @@
 //! the constructor's `MethodParameters` entry and its `LocalVariableTable` row the same way (`$a`).
 //! Every class-file surface that names a capture goes through this module.
 
-use crate::ir::{IrClass, IrConstructorCapture};
+use crate::ir::{IrCapturedReceiver, IrClass, IrConstructorCapture};
 
-/// The field, reflected parameter and local-variable name of a captured value.
+/// The field and reflected parameter name of a capture: `$a` for a value, `this$0` for the
+/// enclosing instance, and `$this_<label>` for a callable's or lambda's receiver (`$this` for an
+/// unlabeled lambda's).
 pub(super) fn capture_name(capture: &IrConstructorCapture) -> String {
-    format!("${}", capture.source_name)
+    match &capture.receiver {
+        None => format!("${}", capture.source_name),
+        Some(IrCapturedReceiver::Enclosing) => "this$0".to_string(),
+        Some(IrCapturedReceiver::Callable(label) | IrCapturedReceiver::Lambda(Some(label))) => {
+            format!("$this_{label}")
+        }
+        Some(IrCapturedReceiver::Lambda(None)) => "$this".to_string(),
+    }
+}
+
+/// The constructor's local-variable name for a capture. kotlinc calls the enclosing instance and a
+/// named callable's receiver `$receiver` there; everything else is named like its field.
+pub(super) fn capture_parameter_local(capture: &IrConstructorCapture) -> String {
+    match capture.receiver {
+        Some(IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable(_)) => {
+            "$receiver".to_string()
+        }
+        _ => capture_name(capture),
+    }
 }
 
 /// The capture a class stores into `field`, if that field holds a captured value.

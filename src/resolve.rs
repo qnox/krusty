@@ -32,6 +32,8 @@ mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod anonymous_object_capture;
+pub use anonymous_object_capture::{AnonymousObjectCapture, AnonymousObjectCaptureSource};
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
@@ -3543,61 +3545,6 @@ impl PropertyReadSelection {
             Self::Extension(access) => access.property.getter.external_property_identity,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnonymousObjectCapture {
-    pub name: String,
-    pub ty: Ty,
-    /// The enclosing mutable local is represented by one shared cell rather than copied by value.
-    /// This is a semantic capture decision; the backend chooses the cell representation.
-    pub shared_cell: bool,
-    /// Physical value captured by the generated class. A delegated property's semantic type remains
-    /// `ty`, while its immutable delegate object is the constructor/field payload.
-    pub storage_ty: Option<Ty>,
-    /// Semantic source of the captured value. Keep this separate from `name`: `this$0` is one JVM
-    /// field spelling, not a reliable front-end discriminator. A backend or future target may choose
-    /// a different physical name while the enclosing-instance meaning remains unchanged.
-    pub source: AnonymousObjectCaptureSource,
-    /// Source-level receiver label required while a retained inline/local classifier body is
-    /// checked in isolation. This is present only for an implicit receiver capture; checked FIR
-    /// consumes the semantic receiver coordinate and does not retain the spelling.
-    pub receiver_label: Option<Box<str>>,
-    /// Number of distinct same-named lexical bindings nearer than the selected source at this
-    /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
-    /// consumes it while the active lexical scopes still exist.
-    pub(crate) lexical_shadow_depth: u32,
-    /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
-    /// establish their own identity when checked; transitive captures preserve the upstream field.
-    pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
-}
-
-impl AnonymousObjectCapture {
-    pub fn stored_ty(&self) -> Ty {
-        self.storage_ty.unwrap_or(self.ty)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnonymousObjectCaptureSource {
-    LexicalValue,
-    /// A field of the construction site's current classifier, selected by the checker. The capture
-    /// constructor reads this exact ordinal; neither FIR construction nor lowering looks the name up.
-    ClassStorage {
-        field: u32,
-    },
-    /// Exact class-receiver rung selected at the construction site.
-    EnclosingInstance {
-        current: bool,
-        depth: u32,
-    },
-    /// A receiver introduced by an enclosing extension/receiver-function/context rung. The
-    /// coordinate is relative to the construction body's checked receiver tower; it is semantic
-    /// identity and must not be reconstructed from the capture field spelling.
-    ImplicitReceiver {
-        current: bool,
-        depth: u32,
-    },
 }
 
 type ModuleSymbolCache = HashMap<
@@ -18986,6 +18933,7 @@ impl<'a> Checker<'a> {
                         source,
                         delegate_storage: local.delegate_storage_ty,
                         receiver_label: None,
+                        receiver: None,
                     });
                 });
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
@@ -19030,6 +18978,12 @@ impl<'a> Checker<'a> {
                                     }
                                 },
                                 delegate_storage: None,
+                                receiver: Some(self.captured_receiver(
+                                    scope,
+                                    identity,
+                                    extension_declaration,
+                                    receiver.class_receiver,
+                                )),
                                 receiver_label: (!receiver.class_receiver)
                                     .then(|| {
                                         extension_declaration
@@ -24830,6 +24784,12 @@ impl<'a> Checker<'a> {
                             storage_ty: None,
                             source,
                             receiver_label: label,
+                            receiver: Some(self.captured_receiver(
+                                scope,
+                                receiver.identity,
+                                receiver.extension_receiver,
+                                receiver.class_receiver,
+                            )),
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         };
@@ -24870,6 +24830,7 @@ impl<'a> Checker<'a> {
                             name: captured,
                             source: AnonymousObjectCaptureSource::LexicalValue,
                             receiver_label: None,
+                            receiver: None,
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         });
@@ -37867,6 +37828,7 @@ struct AnonymousCaptureCandidate {
     source: AnonymousObjectCaptureSource,
     delegate_storage: Option<Ty>,
     receiver_label: Option<Box<str>>,
+    receiver: Option<crate::fir::FirCapturedReceiver>,
 }
 
 #[derive(Clone, Copy)]
@@ -38028,6 +37990,7 @@ fn record_anonymous_construction_captures(
             storage_ty: candidate.delegate_storage,
             source: candidate.source,
             receiver_label: candidate.receiver_label.clone(),
+            receiver: candidate.receiver.clone(),
             lexical_shadow_depth: 0,
             capture_dependency: None,
         })
@@ -41228,7 +41191,12 @@ impl<'a> Checker<'a> {
             .filter(|(_, _, identity, _)| {
                 scope.innermost_class_receiver_identity() != Some(*identity)
             })
-            .map(|(ty, _, _, _)| ty);
+            .map(|(ty, extension, identity, class_receiver)| {
+                (
+                    ty,
+                    self.captured_receiver(scope, identity, extension, class_receiver),
+                )
+            });
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -41477,6 +41445,7 @@ impl<'a> Checker<'a> {
                         depth: 0,
                     },
                     receiver_label: None,
+                    receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                 }),
@@ -41490,7 +41459,7 @@ impl<'a> Checker<'a> {
         // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
         // conservatively is harmless when no member ultimately reads it and prevents a later body
         // callback from attempting source-scope lookup after the enclosing body has been dropped.
-        if let Some(receiver) = implicit_receiver_capture {
+        if let Some((receiver, receiver_name)) = implicit_receiver_capture {
             result.values.push(AnonymousObjectCapture {
                 name: "this$receiver".to_string(),
                 ty: receiver,
@@ -41503,6 +41472,7 @@ impl<'a> Checker<'a> {
                 receiver_label: innermost_label
                     .filter(|(_, _, is_class)| !*is_class)
                     .map(|(label, _, _)| label.clone().into_boxed_str()),
+                receiver: Some(receiver_name),
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -41544,6 +41514,7 @@ impl<'a> Checker<'a> {
                 name,
                 source,
                 receiver_label: None,
+                receiver: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -73270,8 +73241,9 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|ty| ContextReceiver::new(*ty, "_", None, true)),
                 );
-                let lambda_scope =
-                    scope.function_child(current_receiver, current_receiver_name, &outer_receivers);
+                let lambda_scope = scope
+                    .function_child(current_receiver, current_receiver_name, &outer_receivers)
+                    .with_lambda_label(receiver_label.map(str::to_string));
                 let scope = &lambda_scope;
                 for receiver in implicit_types.iter().rev() {
                     if let Some(internal) = receiver.obj_internal() {

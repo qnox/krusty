@@ -147,6 +147,20 @@ pub struct IrJvmValueClassSecondaryCtor {
 pub struct IrConstructorCapture {
     /// The captured declaration's source name (`a` for a captured `val a`).
     pub source_name: Box<str>,
+    /// What the capture is when it holds a receiver rather than a value.
+    pub receiver: Option<IrCapturedReceiver>,
+}
+
+/// What a captured receiver was in source. kotlinc's LocalDeclarationsLowering names each kind's
+/// field and constructor parameter differently, so a target formats its names from this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrCapturedReceiver {
+    /// The enclosing class instance.
+    Enclosing,
+    /// The extension receiver of the named callable with this source name.
+    Callable(Box<str>),
+    /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
+    Lambda(Option<Box<str>>),
 }
 
 /// The constructors the compiler generates for a class, by role, and the calls that select one.
