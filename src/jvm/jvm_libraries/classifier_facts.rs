@@ -243,10 +243,12 @@ mod tests {
         let fixture = serializer_fixture("mismatch", InnerClassFixture::Mismatched);
         let libraries = JvmLibraries::new(classpath(&fixture)).expect("initialize JVM libraries");
         let owner = type_name(&fixture.owner);
-        assert_eq!(owner.existing_nested_child("$serializer"), None);
+        // Writing the fixture's `Payload$$serializer` class file names the `$serializer` child;
+        // only the `InnerClasses` tuple, which points elsewhere, can make it the serializer.
+        let named = owner.existing_nested_child("$serializer");
 
         assert_eq!(generated_serializer_singleton(&libraries, owner), None);
-        assert_eq!(owner.existing_nested_child("$serializer"), None);
+        assert_eq!(owner.existing_nested_child("$serializer"), named);
 
         drop(libraries);
         std::fs::remove_dir_all(fixture.directory).expect("remove classpath directory");

@@ -219,28 +219,49 @@ pub fn classes_against_kotlinc_lib(
     lib: &[(&str, &str)],
     src: &str,
 ) -> Option<ClassSets> {
+    classes_against_kotlinc_lib_target(name, lib, src, None)
+}
+
+/// [`classes_against_kotlinc_lib`] with `src` compiled for kotlinc's `-jvm-target` `jvm_target`
+/// (the library keeps the default target).
+pub fn classes_against_kotlinc_lib_target(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    jvm_target: Option<u16>,
+) -> Option<ClassSets> {
     let library = super::common_core::kotlinc_lib_out(lib)?;
     let dir = super::common_core::scratch_dir()?;
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).ok()?;
     let source = dir.join(format!("{name}.kt"));
     std::fs::write(&source, src).ok()?;
-    let arguments = vec![
+    let mut arguments = vec![
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         "-cp".to_string(),
         library.to_string_lossy().into_owned(),
-        source.to_string_lossy().into_owned(),
     ];
+    if let Some(target) = jvm_target {
+        arguments.push("-jvm-target".to_string());
+        arguments.push(target.to_string());
+    }
+    arguments.push(source.to_string_lossy().into_owned());
     let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let mut reference = std::collections::BTreeMap::new();
     collect_classes(&reference_dir, &reference_dir, &mut reference);
     let classpath = [library, super::common_core::stdlib_jar()];
-    let krusty = super::common_core::compile_in_process_metadata_cp(src, name, &classpath)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
-        .into_iter()
-        .collect();
+    let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
+        src,
+        name,
+        &classpath,
+        "main",
+        jvm_target.map(|target| target + 44),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
+    .into_iter()
+    .collect();
     let _ = std::fs::remove_dir_all(dir);
     Some(ClassSets { reference, krusty })
 }

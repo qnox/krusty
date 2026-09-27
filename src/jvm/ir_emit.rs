@@ -10625,11 +10625,10 @@ impl<'a> Emitter<'a> {
                     return true;
                 }
             }
-            // If the body INVOKES the lambda parameter (`FunctionN.invoke`), splice the lambda body at
-            // those sites. If the lambda is used only as a VALUE — passed to a call/constructor, as in the
-            // `Continuation(ctx){…}` fake-constructor's `new …$Continuation$1(ctx, resumeWith)` — there is
-            // no invoke site to splice into, so fall through to MATERIALIZE the lambda as a `Function1`
-            // object (`emit_operands`) and splice the body verbatim (the param slot binds to that object).
+            // If the body INVOKES the lambda parameter (`FunctionN.invoke`), its lambda bodies replace
+            // those invokes. If the lambda is used only as a VALUE, passed to the constructor of an
+            // anonymous object the body creates (`Continuation(ctx){…}`'s
+            // `new …$Continuation$1(ctx, resumeWith)`), the object is regenerated around it.
             let body_invokes_lambda =
                 crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
@@ -10638,9 +10637,12 @@ impl<'a> Emitter<'a> {
                 let route = self.lambda_call_route(&inline_call, code);
                 let reason = match route {
                     Ok(bytecode_inline_call::LambdaCallRoute::MethodInliner(callee)) => {
-                        if let Err(reason) =
-                            self.inline_classpath_lambda_call(&inline_call, &callee, code)
-                        {
+                        if let Err(reason) = self.inline_classpath_lambda_call(
+                            &inline_call,
+                            &callee,
+                            bytecode_inline_call::LambdaPlacement::Invokes,
+                            code,
+                        ) {
                             self.run.set_inline_bail(reason);
                         }
                         return true;
@@ -10664,20 +10666,7 @@ impl<'a> Emitter<'a> {
                     code,
                 );
             }
-            // A literal lambda used as a value needs kotlinc's anonymous-object regeneration
-            // before MethodNode can own it. Keep only that still-unmigrated shape on the byte
-            // bridge; no-lambda calls never fall back to it.
-            if let Err(reason) = bytecode_inline_call::check_byte_splice_body(
-                inline_call.target.name,
-                inline_call.target.splice_desc,
-                inline_call.body,
-            ) {
-                self.run.set_inline_bail(reason);
-                return true;
-            }
-            return self
-                .try_inline_materialized_lambda_body(&inline_call, code)
-                .is_some();
+            return self.inline_value_used_lambda_call(&inline_call, code);
         }
         self.try_inline_classpath_body(&inline_call, code).is_some()
     }

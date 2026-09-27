@@ -9,6 +9,7 @@
 //! `invoke` returns. The lambda's code goes through the same sorter as the body's, so its locals
 //! share the numbering the body's locals get.
 
+use crate::jvm::bytecode_passes::coroutines::markers::inline_call_marker;
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::method_node::{Category, Insn, LabelId, LocalVariable, MethodNode, Node};
 
@@ -39,6 +40,20 @@ pub(crate) struct Lambda {
     pub return_type: String,
     /// The lambda's captured values: this range of [`Parameters::captured`].
     pub captured: std::ops::Range<usize>,
+    /// The name of each captured value (`capturedVars`: `$x` for a captured `x`), which a
+    /// regenerated object that inlines the lambda names its field after; `None` for a value the
+    /// port does not name yet.
+    pub capture_names: Vec<Option<String>>,
+}
+
+impl Lambda {
+    /// The descriptors of the lambda's captured values, which its node takes after its parameters.
+    pub(crate) fn captured_types(&self) -> Option<Vec<String>> {
+        let arguments = descriptors::argument_types(&self.node.desc)?;
+        arguments
+            .get(self.parameter_types.len()..)
+            .map(|captured| captured.iter().map(|ty| ty.to_string()).collect())
+    }
 }
 
 /// How the inlined code's line numbers reach the caller's line table (kotlinc's `SourceMapper`).
@@ -51,6 +66,12 @@ pub(crate) trait SourceLines {
     fn synthetic(&mut self) -> Option<u16>;
     /// The line of the call.
     fn call_site(&self) -> Option<u16>;
+    /// A line of an inlined lambda, which is a line of the caller's code: it stays as it is where
+    /// the lambda is inlined into the caller itself, and is mapped where a regenerated object
+    /// inlines it (`None` drops it).
+    fn lambda(&mut self, line: u16) -> Option<u16> {
+        Some(line)
+    }
 }
 
 /// A lambda's lines are lines of the caller's own file, which map to themselves.
@@ -73,6 +94,9 @@ pub(super) struct Context<'a> {
     pub parameters: &'a Parameters,
     pub lambdas: &'a [Lambda],
     pub inline_only: bool,
+    /// Whether each expanded lambda is bracketed by `InlineMarker.beforeInlineCall` and
+    /// `afterInlineCall` (`addInlineMarker`), for FixStack to save the operand stack around it.
+    pub inline_markers: bool,
 }
 
 /// kotlinc's `calcMarkerShift`: past the last inline marker variable, in the slots the prepared
@@ -362,6 +386,9 @@ impl Expansion<'_> {
                 out.nodes.push(Node::Line { line, start: label });
             }
         }
+        if self.context.inline_markers {
+            out.nodes.push(inline_call_marker(true));
+        }
         let slot = u16::try_from(value_param_shift).map_err(|_| InlineError::LambdaArity)?;
         let inlined = inline_lambda(self.lambda, self.context.parameters, slot)?;
         let import = LabelImport::new(&inlined, out);
@@ -377,9 +404,12 @@ impl Expansion<'_> {
         for node in &inlined.nodes {
             out.nodes.push(match node {
                 Node::Label(label) => Node::Label(import.label(*label)),
-                Node::Line { line, start } => Node::Line {
-                    line: *line,
-                    start: import.label(*start),
+                Node::Line { line, start } => match lines.lambda(*line) {
+                    Some(line) => Node::Line {
+                        line,
+                        start: import.label(*start),
+                    },
+                    None => continue,
                 },
                 Node::Insn(insn) => {
                     let mut insn = import.insn(insn);
@@ -398,6 +428,9 @@ impl Expansion<'_> {
             out.local_variables.push(local);
         }
         out.nodes.extend(coerce_to_object(&self.lambda.return_type));
+        if self.context.inline_markers {
+            out.nodes.push(inline_call_marker(false));
+        }
         if self.current_line >= 0 {
             let line = u16::try_from(self.current_line).expect("a line number fits u16");
             let line = if self.context.inline_only {
@@ -434,6 +467,7 @@ fn inline_lambda(
         parameters: &parameters,
         lambdas: &[],
         inline_only: false,
+        inline_markers: false,
     };
     let mut node = expand(&node, &context, invokes, &mut CallerLines)?;
     preparation::remove_closure_assertions(&mut node)?;

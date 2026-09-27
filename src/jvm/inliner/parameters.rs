@@ -11,6 +11,8 @@ use crate::jvm::method_node::{Category, Insn, LocalVariable, MethodNode, Node};
 
 use super::InlineError;
 
+const ALOAD: u8 = 0x19;
+const GETFIELD: u8 = 0xb4;
 const CHECKCAST: u8 = 0xc0;
 
 /// How one parameter's value reaches the inlined body.
@@ -30,6 +32,14 @@ pub(crate) enum Binding {
     /// before it is placed (`markPlacesForInlineAndRemoveInlinable`), and each `invoke` of it
     /// becomes the lambda's own body, so it has no slot in the caller.
     Lambda(usize),
+    /// A value an inline lambda captured, which a regenerated anonymous object keeps in a field of
+    /// its own (kotlinc's `RegeneratedLambdaFieldRemapper`): read as `aload 0; getfield`, never
+    /// written, and without a slot in the object's method.
+    Field {
+        owner: String,
+        name: String,
+        desc: String,
+    },
 }
 
 /// One parameter of the inlined callee, in declaration order.
@@ -60,6 +70,12 @@ enum Remapped<'a> {
     },
     /// An inline lambda, which the body no longer reads.
     Lambda,
+    /// A captured value kept in a field of the object the body belongs to.
+    Field {
+        owner: &'a str,
+        name: &'a str,
+        desc: &'a str,
+    },
 }
 
 impl Parameters {
@@ -117,7 +133,7 @@ impl Parameters {
                     next += parameter.category.words() as u16;
                     Some(slot)
                 }
-                Binding::CallerLocal { .. } | Binding::Lambda(_) => None,
+                Binding::CallerLocal { .. } | Binding::Lambda(_) | Binding::Field { .. } => None,
             })
             .collect()
     }
@@ -143,6 +159,7 @@ impl Parameters {
             if slot < declaration + words {
                 return match &parameter.binding {
                     Binding::Lambda(_) => Remapped::Lambda,
+                    Binding::Field { owner, name, desc } => Remapped::Field { owner, name, desc },
                     Binding::Temporary => Remapped::Frame(frame_base + temporary),
                     Binding::CallerLocal {
                         slot,
@@ -198,6 +215,18 @@ impl Parameters {
                             }));
                         }
                     }
+                    Remapped::Field { owner, name, desc } => {
+                        if (0x36..=0x3a).contains(op) {
+                            return Err(InlineError::StoreToCapturedField);
+                        }
+                        out.nodes.push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
+                        out.nodes.push(Node::Insn(Insn::Field {
+                            op: GETFIELD,
+                            owner: owner.to_string(),
+                            name: name.to_string(),
+                            desc: desc.to_string(),
+                        }));
+                    }
                     Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
                 },
                 Node::Insn(Insn::Iinc { slot, delta }) => {
@@ -208,7 +237,9 @@ impl Parameters {
                             category: Category::Int,
                             ..
                         } => slot,
-                        Remapped::Caller { .. } => return Err(InlineError::IncrementOfCallerValue),
+                        Remapped::Caller { .. } | Remapped::Field { .. } => {
+                            return Err(InlineError::IncrementOfCallerValue)
+                        }
                         Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
                     };
                     out.nodes.push(Node::Insn(Insn::Iinc {
@@ -227,7 +258,7 @@ impl Parameters {
                     slot,
                     ..local.clone()
                 }),
-                Remapped::Caller { .. } | Remapped::Lambda => None,
+                Remapped::Caller { .. } | Remapped::Lambda | Remapped::Field { .. } => None,
             })
             .collect();
         Ok(out)
