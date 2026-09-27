@@ -8,6 +8,9 @@
 //!
 //! The region is therefore an accumulator rather than one range: a control transfer closes the open
 //! segment ahead of the copy it is about to run and opens a fresh one once the transfer is emitted.
+//! The same gap opens in every `try` nested inside the one whose finalizer runs, a catch-only one
+//! included (kotlinc's KT-31923 rule): the transfer has already left those `try`s, so a throw from
+//! the copy must not reach their catches either.
 
 use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
@@ -25,17 +28,20 @@ pub(super) struct TryParts<'a> {
 
 /// One `try`'s protected region while it is being emitted.
 ///
-/// The region covers everything lexically inside the `try` EXCEPT the inlined copies of that try's
-/// own `finally`. A `return` out of the body inlines such a copy in the middle of the region, so the
-/// open segment is closed ahead of it and a fresh one opened once the whole `return` has been
-/// emitted — which is usually empty, because a `return` ends its enclosing scope.
+/// The region covers everything lexically inside the `try` EXCEPT the finalizer copies a transfer
+/// out of it inlines: its own finalizer's, and those of every enclosing `try` the transfer leaves
+/// once it has left this one. A `return` out of the body inlines such a copy in the middle of the
+/// region, so the open segment is closed ahead of it and a fresh one opened once the whole `return`
+/// has been emitted — which is usually empty, because a `return` ends its enclosing scope.
 ///
-/// Nested `try`s are unaffected by each other: an inner finalizer copy is ordinary code as far as an
-/// outer region is concerned, and stays inside it.
-pub(super) struct FinallyRegion {
-    /// The exact finalizer this region belongs to; regions are matched by IR identity, never by
-    /// nesting depth, so a `return` closes the region of the finalizer it is actually running.
-    finalizer: u32,
+/// A `try` without a `finally` has a region too, for its typed catches: it lives only while its
+/// body is emitted. An enclosing `try`'s region is unaffected by a nested finalizer copy that does
+/// not leave it: that copy is ordinary code as far as the outer region is concerned.
+pub(super) struct ProtectedRegion {
+    /// The exact finalizer this region belongs to, if the `try` has one; regions are matched by IR
+    /// identity, never by nesting depth, so a `return` closes the region of the finalizer it is
+    /// actually running.
+    finalizer: Option<u32>,
     /// Segments closed so far.
     segments: Vec<(Label, Label)>,
     /// Start of the segment currently open, if one is.
@@ -43,51 +49,74 @@ pub(super) struct FinallyRegion {
 }
 
 impl Emitter<'_> {
-    /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
-    /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
-    /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
-    /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
-    /// `top` there, since an exception may occur before they are assigned).
     /// The region of an ACTIVE finalizer. Presence is an invariant, not a condition: `emit_try`
     /// pushes the region and the finalizer together and takes the region back only after the last
     /// catch body has popped it, so every finalizer reachable by a transfer has one.
     fn finally_region(&mut self, finalizer: u32) -> usize {
-        self.finally_regions
+        self.protected_regions
             .iter()
-            .rposition(|region| region.finalizer == finalizer)
+            .rposition(|region| region.finalizer == Some(finalizer))
             .expect("an active finalizer owns a protected region")
+    }
+
+    /// Start a protected segment in region `index` at the current offset, unless one is open.
+    fn open_region_segment(&mut self, index: usize, code: &mut CodeBuilder) {
+        if self.protected_regions[index].open.is_some() {
+            return;
+        }
+        let label = code.new_label();
+        self.protected_regions[index].open = Some(label);
+        self.bind(label, code);
+    }
+
+    /// End region `index`'s open segment at the current offset. A segment that turns out to be
+    /// empty is dropped when the table is resolved: an empty range protects nothing, and kotlinc
+    /// emits no entry for one.
+    fn close_region_segment(&mut self, index: usize, code: &mut CodeBuilder) {
+        let Some(start) = self.protected_regions[index].open.take() else {
+            return;
+        };
+        let label = code.new_label();
+        self.protected_regions[index].segments.push((start, label));
+        self.bind(label, code);
     }
 
     /// Start a protected segment for `finalizer` at the current offset. Whether one is already open
     /// is the only conditional part: a transfer that runs no finalizer leaves the segment as it is.
     pub(super) fn open_finally_segment(&mut self, finalizer: u32, code: &mut CodeBuilder) {
         let index = self.finally_region(finalizer);
-        if self.finally_regions[index].open.is_some() {
-            return;
-        }
-        let label = code.new_label();
-        self.finally_regions[index].open = Some(label);
-        self.bind(label, code);
+        self.open_region_segment(index, code);
     }
 
-    /// End `finalizer`'s open protected segment at the current offset. A segment that turns out to
-    /// be empty is dropped when the table is resolved: an empty range protects nothing, and kotlinc
-    /// emits no entry for one.
+    /// End `finalizer`'s open protected segment at the current offset.
     pub(super) fn close_finally_segment(&mut self, finalizer: u32, code: &mut CodeBuilder) {
         let index = self.finally_region(finalizer);
-        let Some(start) = self.finally_regions[index].open.take() else {
-            return;
-        };
-        let label = code.new_label();
-        self.finally_regions[index].segments.push((start, label));
-        self.bind(label, code);
+        self.close_region_segment(index, code);
+    }
+
+    /// End the open segments a transfer leaves ahead of the copy of `finalizer` it is about to
+    /// inline: that finalizer's own, and those of every `try` nested inside its `try`. A nested
+    /// region that is not open — a finalizer's whose copy the transfer already ran, or one whose
+    /// `try` is emitting its normal-path copy — is left as it is.
+    pub(super) fn close_left_regions(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        let outermost = self.finally_region(finalizer);
+        for index in outermost..self.protected_regions.len() {
+            self.close_region_segment(index, code);
+        }
     }
 
     /// Reopen every active region a control transfer closed. Called once the transfer is fully
-    /// emitted, so the copies of every finalizer it ran are outside their own regions.
+    /// emitted, so the copies of every finalizer it ran are outside the regions it left. A
+    /// finalizer's region is active while its finalizer is (its body and catch bodies); a
+    /// catch-only region is active for as long as it exists.
     pub(super) fn reopen_finally_segments(&mut self, code: &mut CodeBuilder) {
-        for finalizer in self.return_finalizers.clone() {
-            self.open_finally_segment(finalizer, code);
+        for index in 0..self.protected_regions.len() {
+            let active = self.protected_regions[index]
+                .finalizer
+                .is_none_or(|finalizer| self.return_finalizers.contains(&finalizer));
+            if active {
+                self.open_region_segment(index, code);
+            }
         }
     }
 
@@ -99,9 +128,14 @@ impl Emitter<'_> {
     ) -> Vec<(Label, Label)> {
         self.close_finally_segment(finalizer, code);
         let index = self.finally_region(finalizer);
-        self.finally_regions.remove(index).segments
+        self.protected_regions.remove(index).segments
     }
 
+    /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
+    /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
+    /// covers the body+store; each catch is an exception-table handler whose frame has the caught
+    /// exception on the stack and the pre-`try` locals (the result temp/catch var read as `top`
+    /// there, since an exception may occur before they are assigned).
     pub(super) fn emit_try(
         &mut self,
         expression: u32,
@@ -136,12 +170,12 @@ impl Emitter<'_> {
         } else {
             self.diverges(body)
         };
+        self.protected_regions.push(ProtectedRegion {
+            finalizer: finally,
+            segments: Vec::new(),
+            open: Some(start),
+        });
         if let Some(finalizer) = finally {
-            self.finally_regions.push(FinallyRegion {
-                finalizer,
-                segments: Vec::new(),
-                open: Some(start),
-            });
             self.return_finalizers.push(finalizer);
         }
         let stores_body = !is_stmt && !body_diverges;
@@ -184,14 +218,20 @@ impl Emitter<'_> {
         }
         self.bind(end, code);
         // Typed catches guard only the try BODY. When a transfer out of the body has inlined this
-        // try's own finalizer, the body is split into segments around that copy just like the
-        // catch-all region below. Snapshot the body-only segments now: catch bodies are appended to
-        // the active finally region later, but must never be guarded by their sibling typed catches.
+        // try's finalizer, or an enclosing one, the body is split into segments around that copy
+        // just like the catch-all region below. Snapshot the body-only segments now: catch bodies
+        // are appended to the active finally region later, but must never be guarded by their
+        // sibling typed catches. A catch-only region ends here: its catch bodies lie outside it.
         let typed_catch_ranges = if let Some(finalizer) = finally {
             let index = self.finally_region(finalizer);
-            self.finally_regions[index].segments.clone()
+            self.protected_regions[index].segments.clone()
         } else {
-            vec![(start, end)]
+            let index = self.protected_regions.len() - 1;
+            self.close_region_segment(index, code);
+            self.protected_regions
+                .pop()
+                .expect("a catch-only try's region is the innermost one at its body's end")
+                .segments
         };
         let mut after_reachable = false;
         if !body_diverges {

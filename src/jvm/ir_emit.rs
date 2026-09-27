@@ -88,7 +88,7 @@ use class_pool_seed::{
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
-use try_emission::FinallyRegion;
+use try_emission::ProtectedRegion;
 mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
@@ -9735,10 +9735,10 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
-    /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
-    /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
-    /// raised while the finalizer runs re-enters the same handler and runs it a second time.
-    finally_regions: Vec<FinallyRegion>,
+    /// Protected-region accumulators for the active `try`s, outermost first. A copy of a finalizer
+    /// must not lie inside the ranges of its own `try` or of any `try` nested in it, or an exception
+    /// raised while the finalizer runs re-enters a handler the transfer has already left.
+    protected_regions: Vec<ProtectedRegion>,
     /// A statement at the lexical tail of a loop body may branch directly to the loop's next
     /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
     /// common IR. Blocks pass it only to their terminal statement.
@@ -9798,7 +9798,7 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
-            finally_regions: Vec::new(),
+            protected_regions: Vec::new(),
             terminal_statement_target: None,
             regeneration_site: None,
         }
