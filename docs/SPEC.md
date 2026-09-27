@@ -7186,6 +7186,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through its wrapper, not through the value-class `box-impl` rewrite. Its `DefaultImpls` forwarder has no line number, as
   kotlinc's has none for any inherited member. Tests:
   `tests/value_class_inherited_default_names_e2e.rs`, the `declaration_inventory` unit tests.
+- **A value class in a generic value class's `T` carrier is stored as its box.** For
+  `value class R<T>(val a: T)`, `R<R<Int>>(a)` passes `a` to `constructor-impl(Object)` through
+  `box-impl`, because the constructor's declared parameter is `T`. Reading `c.a` into a reference
+  consumer (`Any?`, or a generic parameter) hands that box on unchanged: the checked coercion from
+  `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
+  call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
 - **A generic result specialized to an `Object`-carried value class is unboxed once.** A call to a
   dependency's `fun <T> pass(value: T): T` with `b: Box` returns the box through the erased slot,
   and the caller emits `checkcast Box; unbox-impl` once, as kotlinc does. When the carrier itself
