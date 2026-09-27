@@ -531,6 +531,15 @@ typedef struct KRange {
     kt_long step;
 } KRange;
 
+/* The DESCRIPTOR says whether a `KRange` is a range — what `..` and `until` answer — or a
+   progression — what `step`, `downTo` and `reversed()` answer. The step cannot say so: `1..3 step
+   1` steps by one and is an `IntProgression`, which renders `1..3 step 1`. Each range's `super` is
+   its element's progression, as `IntRange : IntProgression` is in Kotlin. */
+extern const KType kt_type_int_progression;
+extern const KType kt_type_long_progression;
+extern const KType kt_type_char_progression;
+extern const KType kt_type_uint_progression;
+extern const KType kt_type_ulong_progression;
 extern const KType kt_type_int_range;
 extern const KType kt_type_long_range;
 extern const KType kt_type_char_range;
@@ -560,7 +569,10 @@ KRef kt_uint_range_until(kt_int first, kt_int last);
 KRef kt_ulong_range_until(kt_long first, kt_long last);
 
 /* `value in range`. The caller widens its own element to 64 bits — signed for `Int` and `Long`,
-   unsigned for `Char` — which is the same widening the bounds were stored with. */
+   unsigned for `Char`, `UInt` and `ULong` — which is the same widening the bounds were stored
+   with. On a PROGRESSION this is Kotlin's `Iterable.contains`: a question its `Int`-indexed walk
+   cannot answer before index 2^31 throws `ArithmeticException("Index overflow has happened.")`,
+   with `false` returned beside it. */
 kt_boolean kt_range_contains(KRef range, kt_long value);
 /* `range.first` / `range.last` / `range.start` / `range.endInclusive`, at the range's own width. */
 kt_long kt_range_first(KRef range);
@@ -609,11 +621,18 @@ void kt_rw_property_set(KRef self, KRef property, KRef value);
 /* ---- comparable ranges ------------------------------------------------------------------------
 
    `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS and each comparison is the value's own, through `kt_compare_any`. Not a
-   progression either: `Comparable` names no successor, so there is no step and no walk. */
+   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
+   chose that operation where it built the range, knowing the element type, so the runtime never
+   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
+   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
+   either: `Comparable` names no successor, so there is no step and no walk. */
 extern const KType kt_type_comparable_range;
 
-KRef kt_comparable_range(KRef start, KRef end);
+/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
+   leaves the exception pending and its answer means nothing. */
+typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
+
+KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
 kt_boolean kt_comparable_range_contains(KRef range, KRef value);
 kt_boolean kt_comparable_range_is_empty(KRef range);
 KRef kt_comparable_range_start(KRef range);
@@ -627,8 +646,11 @@ KRef kt_range_iterator(KRef range);
 
 /* ---- progressions ---------------------------------------------------------------------------
 
-   `step`, `downTo` and `reversed` answer a PROGRESSION, which here is a range with a step: the
-   same object, so `first`, `last`, `isEmpty` and iteration are the ones above. A step of zero is
+   `step`, `downTo` and `reversed` answer a PROGRESSION: the same struct as a range under its own
+   descriptor (`kt_type_int_progression` and its kin), so `first`, `last`, `isEmpty` and iteration
+   are the ones above, and only the three `kotlin.Any` members and class identity differ. The
+   iterator either hands out is Kotlin's concrete `IntProgressionIterator` (or its Long, Char,
+   UInt or ULong twin). A step of zero is
    Kotlin's `IllegalArgumentException`, and the step given to `step` is its magnitude — `a downTo b
    step 2` descends by two, because the receiver's direction is what decides. */
 KRef kt_range_step(KRef range, kt_long step);
