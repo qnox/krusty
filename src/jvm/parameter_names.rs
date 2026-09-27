@@ -26,6 +26,8 @@ pub(super) fn local_variable(
     }
     match identity.role {
         IrParameterRole::Value | IrParameterRole::ContextValue => None,
+        // kotlinc writes no local-variable row for a parameter with a special name.
+        IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue => None,
         IrParameterRole::AnonymousContextParameter { .. } => None,
         IrParameterRole::ContextReceiver { ordinal } => {
             Some(format!("$context_receiver_{ordinal}"))
@@ -117,20 +119,35 @@ fn anonymous_context_ordinal_separator() -> char {
     }
 }
 
+/// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
+/// label, and `<this>` for a lambda without one.
+pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
+    match origin.label.as_deref() {
+        Some(label) => format!("$this${}", super::debug_local_names::escaped(label)),
+        None => "<this>".to_string(),
+    }
+}
+
 /// JVM local-table spelling for a parameter of one exact common-IR function, apart from the
 /// anonymous context labels [`function_locals`] adds for the whole parameter list.
 ///
 /// A source extension declaration uses kotlinc's `$this$<function>` spelling. A receiver lambda's
-/// static implementation instead uses `<this>`; the typed lambda edge selects that ABI surface,
-/// without making common IR encode either JVM spelling.
+/// static implementation instead uses [`lambda_receiver`]'s spelling after its checked label; the
+/// typed lambda edge selects that ABI surface, without making common IR encode either JVM spelling.
 fn function_local_variable(
     ir: &IrFile,
     function: u32,
     identity: &IrParameterIdentity,
 ) -> Option<String> {
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
+        // Only a source lambda's implementation takes an extension receiver among the functions
+        // with lambda parameters; a generated adapter passes its receiver as a value.
         if ir.lambda_own_params_from.contains_key(&function) {
-            return Some("<this>".to_string());
+            let origin = ir
+                .lambda_origins
+                .get(&function)
+                .expect("a lambda's extension receiver belongs to a source lambda");
+            return Some(lambda_receiver(origin));
         }
         let source_name = ir
             .fn_source_names
@@ -164,13 +181,22 @@ pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String
         .flatten()
 }
 
-/// Kotlin metadata accepts only a declaration/producer-published semantic name.
+/// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
+/// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
+/// parameter; a destructuring one is `<destruct>`.
 pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
     match identity.role {
-        IrParameterRole::AnonymousContextParameter { .. } => Some("<unused var>"),
+        IrParameterRole::AnonymousContextParameter { .. } | IrParameterRole::UnusedValue => {
+            Some("<unused var>")
+        }
+        IrParameterRole::DestructuredValue => Some(DESTRUCTURED),
         _ => identity.source_name.as_deref(),
     }
 }
+
+/// Kotlin's special name for a parameter written as a destructuring declaration. A suspend lambda's
+/// body also reads the parameter back into a local of this name.
+pub(super) const DESTRUCTURED: &str = "<destruct>";
 
 pub(super) fn metadata_context_kind(
     identity: &IrParameterIdentity,
@@ -436,6 +462,9 @@ pub(super) fn function_assertions(
 pub(super) fn assertion(identity: &IrParameterIdentity) -> Option<String> {
     match identity.role {
         IrParameterRole::ExtensionReceiver => Some("<this>".to_string()),
+        IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue => {
+            metadata(identity).map(str::to_owned)
+        }
         _ => local_variable(identity, ""),
     }
 }
@@ -568,6 +597,23 @@ mod tests {
     }
 
     #[test]
+    fn a_lambda_parameter_with_a_special_name_has_no_local_variable_row() {
+        for (role, name) in [
+            (IrParameterRole::UnusedValue, "<unused var>"),
+            (IrParameterRole::DestructuredValue, "<destruct>"),
+        ] {
+            let parameter = IrParameterIdentity {
+                source_name: None,
+                role,
+                provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+            };
+            assert_eq!(local_variable(&parameter, "box$lambda$0"), None);
+            assert_eq!(metadata(&parameter), Some(name));
+            assert_eq!(assertion(&parameter), Some(name.to_string()));
+        }
+    }
+
+    #[test]
     fn an_unnamed_generated_parameter_never_acquires_a_positional_name() {
         let generated = IrParameterIdentity::generated(
             IrGeneratedParameterRole::Positional { ordinal: 3 },
@@ -595,11 +641,50 @@ mod tests {
             FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
         );
         ir.lambda_own_params_from.insert(function, 0);
+        let origin = |label: Option<&str>| crate::ir::IrLambdaOrigin {
+            identity: 0,
+            lexical_owner: None,
+            enclosing_name: "transform".into(),
+            binding_name: None,
+            ordinal: 0,
+            implementation_name: "transform".into(),
+            implementation_ordinal: 0,
+            receiver_parameter: Some(0),
+            label: label.map(str::to_owned),
+        };
 
+        ir.lambda_origins.insert(function, origin(None));
         assert_eq!(
             function_locals(&ir, function, &[crate::types::Ty::String]),
             Some(vec![Some("<this>".to_string())])
         );
+        ir.lambda_origins.insert(function, origin(Some("build")));
+        assert_eq!(
+            function_locals(&ir, function, &[crate::types::Ty::String]),
+            Some(vec![Some("$this$build".to_string())])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a lambda's extension receiver belongs to a source lambda")]
+    fn a_lambda_receiver_without_a_source_lambda_is_rejected() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "adapter".to_string(),
+            params: vec![crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
+        );
+        ir.lambda_own_params_from.insert(function, 0);
+
+        let _ = function_locals(&ir, function, &[crate::types::Ty::String]);
     }
 
     #[test]

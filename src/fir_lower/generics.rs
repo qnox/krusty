@@ -1,4 +1,5 @@
 use crate::fir::{DeclarationId, ResolvedClassifierHeader, ResolvedModuleIndex, TypeParameterId};
+use crate::ir::type_reflection::type_parameters_named_by;
 use crate::ir::{IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{wk, Ty};
 
@@ -6,31 +7,30 @@ pub(super) fn declaration_type_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
 ) -> Vec<IrTypeParameter> {
-    let mut parameters = Vec::new();
-    for ordinal in 0.. {
-        let Some(parameter) = index.type_parameter(declaration, ordinal) else {
-            break;
-        };
-        let header = index
-            .type_parameter_header(parameter)
-            .expect("a published type-parameter identity must own compact semantic facts");
-        parameters.push(IrTypeParameter {
-            name: index
-                .type_parameter_name(parameter)
-                .expect("a type parameter must retain its declared metadata name")
-                .to_owned(),
-            semantic_name: index
-                .type_parameter_semantic_name(parameter)
-                .expect("a type parameter must retain its resolved semantic name")
-                .to_owned(),
-            bounds: header
-                .bounds
-                .iter()
-                .map(|bound| (bound.ty.get(), bound.is_interface))
-                .collect(),
-            variance: header.flags.variance(),
-            reified: header.flags.is_reified(),
-        });
+    (0..)
+        .map_while(|ordinal| index.type_parameter(declaration, ordinal))
+        .map(|parameter| type_parameter(index, parameter))
+        .collect()
+}
+
+/// The declarations of the type parameters `function_type` names, then of those their bounds
+/// name, in first-use order.
+pub(super) fn named_type_parameters(
+    index: &ResolvedModuleIndex,
+    function_type: Ty,
+) -> Vec<IrTypeParameter> {
+    let mut names = Vec::new();
+    type_parameters_named_by(function_type, &mut names);
+    let mut parameters: Vec<IrTypeParameter> = Vec::new();
+    while let Some(&name) = names.get(parameters.len()) {
+        let declaration = index
+            .type_parameter_by_semantic_name(name)
+            .expect("a type parameter a type names has a resolved declaration");
+        let parameter = type_parameter(index, declaration);
+        for &(bound, _) in &parameter.bounds {
+            type_parameters_named_by(bound, &mut names);
+        }
+        parameters.push(parameter);
     }
     parameters
 }

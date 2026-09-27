@@ -3206,23 +3206,44 @@ pub fn metadata_header_diff_against_kotlinc_cp(
     class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<Result<(), String>> {
-    let (actual, reference) = compile_class_with_kotlinc_and_krusty(name, src, class, cp_jars)?;
+    metadata_headers_diff_against_kotlinc_cp(name, src, &[class], cp_jars)
+}
+
+/// [`metadata_header_diff_against_kotlinc_cp`] for each of `classes`, from one compilation by each
+/// compiler: every class whose header differs is reported.
+#[allow(dead_code)]
+pub fn metadata_headers_diff_against_kotlinc_cp(
+    name: &str,
+    src: &str,
+    classes: &[&str],
+    cp_jars: &[PathBuf],
+) -> Option<Result<(), String>> {
+    let compiled = compile_classes_with_kotlinc_and_krusty(name, src, classes, cp_jars)?;
     let header = |bytes: &[u8]| {
         (
             kotlin_metadata::kotlin_metadata_ints(bytes),
             raw_kotlin_metadata(bytes),
         )
     };
-    let (expected, emitted) = (header(&reference), header(&actual));
-    assert!(
-        expected.0.is_some(),
-        "{name}: kotlinc {class} carries no @Metadata"
-    );
-    Some(match expected == emitted {
+    let differences: Vec<String> = classes
+        .iter()
+        .zip(&compiled)
+        .filter_map(|(class, (actual, reference))| {
+            let (expected, emitted) = (header(reference), header(actual));
+            assert!(
+                expected.0.is_some(),
+                "{name}: kotlinc {class} carries no @Metadata"
+            );
+            (expected != emitted).then(|| {
+                format!(
+                    "{name}/{class}: @Metadata differs from kotlinc\n  kotlinc: {expected:?}\n  krusty : {emitted:?}"
+                )
+            })
+        })
+        .collect();
+    Some(match differences.is_empty() {
         true => Ok(()),
-        false => Err(format!(
-            "{name}/{class}: @Metadata differs from kotlinc\n  kotlinc: {expected:?}\n  krusty : {emitted:?}"
-        )),
+        false => Err(differences.join("\n")),
     })
 }
 
@@ -3234,6 +3255,17 @@ fn compile_class_with_kotlinc_and_krusty(
     class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<(Vec<u8>, Vec<u8>)> {
+    compile_classes_with_kotlinc_and_krusty(name, src, &[class], cp_jars)?.pop()
+}
+
+/// Each of `classes` as one kotlinc and one krusty compilation of `src` write it:
+/// `(krusty, kotlinc)` class-file bytes, or `None` when no reference compiler is provisioned.
+fn compile_classes_with_kotlinc_and_krusty(
+    name: &str,
+    src: &str,
+    classes: &[&str],
+    cp_jars: &[PathBuf],
+) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;
@@ -3246,16 +3278,22 @@ fn compile_class_with_kotlinc_and_krusty(
     ];
     let (code, stderr) = kotlinc_compile(&args)?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let reference = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
-
-    let classes = compile_in_process_metadata_cp(src, name, cp_jars)
+    let emitted = compile_in_process_metadata_cp(src, name, cp_jars)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
-    let (_, actual) = classes
+    let compiled = classes
         .iter()
-        .find(|(n, _)| n == class)
-        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+        .map(|class| {
+            let reference = std::fs::read(kref.join(format!("{class}.class")))
+                .unwrap_or_else(|error| panic!("{name}: kotlinc did not write {class}: {error}"));
+            let (_, actual) = emitted
+                .iter()
+                .find(|(n, _)| n == class)
+                .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+            (actual.clone(), reference)
+        })
+        .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    Some((actual.clone(), reference))
+    Some(compiled)
 }
 
 /// [`metadata_diff_against_kotlinc_cp`] with BOTH sides compiled under an explicit module name

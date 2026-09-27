@@ -74,8 +74,8 @@ fn a_function_calling_members_matches_kotlinc_s_instructions() {
 fn a_receiver_lambda_calling_its_receiver_s_member_matches_kotlinc() {
     // The call's receiver is the lambda's own extension receiver, kept in the private `L$0`. The
     // lambda is not a call argument, so kotlinc names that receiver `<this>`; as an argument
-    // (`builder { step(1) }`) kotlinc names it after the call, `$this$builder`, which krusty does
-    // not yet.
+    // (`builder { step(1) }`) kotlinc names it after the call, `$this$builder`
+    // (`lambda_receiver_label_e2e`).
     let src = "class Controller {\n\
     suspend fun step(n: Int): String = \"s\" + n\n\
 }\n\

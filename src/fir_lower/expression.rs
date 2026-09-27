@@ -1414,6 +1414,13 @@ impl BodyLowering<'_> {
                 let lambda = self.checked_lambda(*callable, body, suspend)?;
                 if suspend {
                     self.record_generated_class_provenance(expression_id, lambda as usize);
+                    let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
+                        unreachable!("a checked lambda lowers to a lambda")
+                    };
+                    let type_parameters =
+                        super::generics::named_type_parameters(self.index, expression.ty.get());
+                    self.ir
+                        .record_lambda_type_parameters(impl_fn, type_parameters);
                 }
                 lambda
             }
