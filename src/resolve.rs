@@ -19014,6 +19014,9 @@ impl<'a> Checker<'a> {
                                                     .flatten()
                                             })
                                             .or_else(|| {
+                                                scope.implicit_receiver_lambda_label(identity)
+                                            })
+                                            .or_else(|| {
                                                 scope.implicit_receiver_context_name(identity)
                                             })
                                             .or_else(|| {

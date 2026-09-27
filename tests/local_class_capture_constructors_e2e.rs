@@ -199,6 +199,59 @@ fn captured_receivers_are_named_like_kotlinc() {
     );
 }
 
+/// A local class or anonymous object inside a receiver lambda passed as an argument, reading the
+/// lambda's receiver through its label: the callee's name, an explicit label, and an inline callee.
+const LABELED_RECEIVERS: &str = r##"
+interface Action {
+    fun run(): Any
+}
+
+class Box(val v: Any)
+
+fun <T> scope(b: Box, f: Box.() -> T): T = b.f()
+
+inline fun <T> inlineScope(b: Box, f: Box.() -> T): T = b.f()
+
+fun calleeLabel(b: Box): Action = scope(b) {
+    object : Action {
+        override fun run() = this@scope.v
+    }
+}
+
+fun explicitLabel(b: Box): Action = scope(b) outer@{
+    object : Action {
+        override fun run() = this@outer
+    }
+}
+
+fun inlineLabel(b: Box): Action = inlineScope(b) {
+    object : Action {
+        override fun run() = this@inlineScope.v
+    }
+}
+
+fun localClass(b: Box): Any = scope(b) {
+    class L {
+        fun r() = this@scope
+    }
+    L()
+}
+"##;
+
+#[test]
+fn labeled_lambda_receivers_are_captured_like_kotlinc() {
+    assert_identical(
+        "LabeledReceivers",
+        LABELED_RECEIVERS,
+        &[
+            "LabeledReceiversKt$calleeLabel$1$1",
+            "LabeledReceiversKt$explicitLabel$1$1",
+            "LabeledReceiversKt$inlineLabel$1$1",
+            "LabeledReceiversKt$localClass$1$L",
+        ],
+    );
+}
+
 /// Local and anonymous classes capturing anonymous context parameters (`context(_: Box)`), which
 /// kotlinc stores in a field named after the parameter's own label (`$$context-Box`). The implicit
 /// context argument read from that field has no source position, so each `run` marks its line only
