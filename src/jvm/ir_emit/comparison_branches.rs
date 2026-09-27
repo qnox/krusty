@@ -39,7 +39,11 @@ impl Emitter<'_> {
     pub(super) fn emit_comparison(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         let (op, lhs, rhs) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
-            this.emit_comparison_value(op, lhs, rhs, code)
+            if this.is_floating_equality(op, lhs, rhs) {
+                this.emit_floating_equality_value(op, lhs, rhs, code);
+            } else {
+                this.emit_comparison_value(op, lhs, rhs, code);
+            }
         });
     }
 
@@ -53,8 +57,61 @@ impl Emitter<'_> {
     ) {
         let (op, lhs, rhs) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
-            this.emit_compare_branch(op, lhs, rhs, target, jt, code)
+            if this.is_floating_equality(op, lhs, rhs) {
+                this.emit_floating_equality_branch(op, lhs, rhs, target, jt, code);
+            } else {
+                this.emit_compare_branch(op, lhs, rhs, target, jt, code);
+            }
         });
+    }
+
+    /// Whether `lhs op rhs` is IEEE 754 `==`/`!=` between two non-null floating operands.
+    ///
+    /// kotlinc lowers these through its `Ieee754Equals` intrinsic, whose result is always a
+    /// materialized Boolean (`dcmpg; ifne L; iconst_1; goto M; L: iconst_0`), and `!=` is the
+    /// negation of that Boolean. Neither is fused into the jump that consumes it, unlike an ordering
+    /// comparison or integral equality.
+    fn is_floating_equality(&self, op: IrBinOp, lhs: ExprId, rhs: ExprId) -> bool {
+        matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+            && [lhs, rhs]
+                .iter()
+                .all(|&operand| matches!(self.value_ty(operand), Ty::Float | Ty::Double))
+    }
+
+    /// Floating `==`/`!=` in value position: the materialized equality, negated for `!=` by a
+    /// second materialization (`ifne L; iconst_1; goto M; L: iconst_0`), as kotlinc's `!` does.
+    fn emit_floating_equality_value(
+        &mut self,
+        op: IrBinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        self.emit_comparison_value(IrBinOp::Eq, lhs, rhs, code);
+        if op == IrBinOp::Ne {
+            let unequal = code.new_label();
+            code.ifne(unequal);
+            self.materialize_cmp_bool(unequal, code);
+        }
+    }
+
+    /// Floating `==`/`!=` as a condition: the materialized equality, then one `ifne`/`ifeq` to
+    /// `target` whose polarity carries the `!=` negation.
+    fn emit_floating_equality_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) {
+        self.emit_comparison_value(IrBinOp::Eq, lhs, rhs, code);
+        if jt == (op == IrBinOp::Eq) {
+            code.ifne(target);
+        } else {
+            code.ifeq(target);
+        }
     }
 
     fn comparison_parts(&self, expression: ExprId) -> (IrBinOp, ExprId, ExprId) {
