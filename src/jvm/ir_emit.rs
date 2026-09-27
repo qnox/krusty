@@ -3248,11 +3248,11 @@ fn jvm_enum_class_signature(
 
     if let Some(generic) = recorded {
         for supertype in generic.supers.iter().skip(1) {
-            signature.push_str(&formatter.ty_at(supertype, Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(supertype, Wildcards::Supertype)?);
         }
     } else {
         for interface in class.interfaces.iter_ids() {
-            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Supertype)?);
         }
     }
     Some(signature)
@@ -8672,10 +8672,10 @@ fn jvm_class_signature(
         // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
         // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic
         // return. A class header is not a method-parameter position: declaration-site variance is
-        // suppressed (`interface L<E> : List<E>` implements Java `List<E>`, not `List<? extends E>`).
+        // not written on its own arguments (`interface L<E> : List<E>` implements Java `List<E>`).
         // An explicit source projection remains encoded by `ty_at` itself.
         for sup in &g.supers {
-            s.push_str(&formatter.ty_at(sup, Wildcards::Suppressed)?);
+            s.push_str(&formatter.ty_at(sup, Wildcards::Supertype)?);
         }
     }
     Some(s).filter(|signature| signature.contains('<'))
