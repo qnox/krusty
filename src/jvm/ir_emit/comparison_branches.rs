@@ -1,11 +1,40 @@
 //! JVM emission of a comparison (`<`, `<=`, `>`, `>=`, `==`, `!=`, `===`, `!==`) in value position
 //! and as a condition: the null, identity, structural and numeric forms share one classifier, and
-//! the jump carries the comparison's own source line, as kotlinc's `BooleanComparison` marks it.
+//! the instruction that decides each of them carries the comparison's own source line, as kotlinc's
+//! `BooleanComparison`, `BooleanNullCheck` and `Intrinsics.areEqual` call mark it.
 
 use super::*;
 use crate::ir::ExprId;
 
 impl Emitter<'_> {
+    /// Mark the comparison's line at the instruction that decides it, after its operands.
+    ///
+    /// kotlinc marks the comparison expression's line right before the deciding instruction on every
+    /// form: the jump of `BooleanComparison` (numeric and reference identity) and `BooleanNullCheck`
+    /// (`ifnull`/`ifnonnull`), and the `Intrinsics.areEqual` call of structural equality. An operand
+    /// on a later line therefore never leaves its own line on that instruction. A comparison with no
+    /// line of its own returns to the enclosing statement's line instead, when an operand marked one.
+    pub(super) fn mark_comparison_decision(&self, operands: &[ExprId], code: &mut CodeBuilder) {
+        match self.comparison_line.filter(|&line| line != 0) {
+            Some(line) => code.mark_line(line),
+            None => self.return_to_statement_line(operands, code),
+        }
+    }
+
+    /// Put the enclosing statement's line back after operands that carried a line of their own —
+    /// the same "return to the statement's line" the `putfield` of a field store gets.
+    pub(super) fn return_to_statement_line(&self, operands: &[ExprId], code: &mut CodeBuilder) {
+        let Some(line) = self.statement_line else {
+            return;
+        };
+        if operands
+            .iter()
+            .any(|operand| self.ir.expr_source_lines.contains_key(operand))
+        {
+            code.mark_line(line);
+        }
+    }
+
     /// A comparison in value position: its Boolean result on the operand stack.
     pub(super) fn emit_comparison(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         let (op, lhs, rhs) = self.comparison_parts(expression);
@@ -153,6 +182,7 @@ impl Emitter<'_> {
             && !rhs_null
         {
             self.emit_identity_operands(lhs, rhs, code);
+            self.mark_comparison_decision(&[lhs, rhs], code);
             if (op == RefEq) == jt {
                 code.if_acmpeq(target);
             } else {
@@ -172,6 +202,7 @@ impl Emitter<'_> {
             // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
             // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
             self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
+            self.mark_comparison_decision(&[operand], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
             } else {
@@ -187,5 +218,18 @@ impl Emitter<'_> {
         }
         self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
         true
+    }
+
+    /// Put the null-safe structural equality result for two references on the operand stack.
+    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
+        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
+        self.mark_comparison_decision(&[lhs, rhs], code);
+        let m = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "areEqual",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        );
+        code.invokestatic(m, 2, 1);
     }
 }

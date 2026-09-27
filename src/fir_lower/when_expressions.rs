@@ -56,7 +56,8 @@ impl BodyLowering<'_> {
             for candidate in branch.conditions.iter().copied() {
                 let candidate = match candidate {
                     FirWhenCondition::SubjectEquals(candidate) => {
-                        // fir2ir builds the subject comparison at the condition's own offsets.
+                        // fir2ir builds the subject comparison, and the subject read in it, at
+                        // the condition's own offsets.
                         let line = self.body.expression_debug_lines(candidate).source;
                         let candidate = self.expression(candidate)?;
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
@@ -69,6 +70,7 @@ impl BodyLowering<'_> {
                             rhs: candidate,
                         });
                         if line != 0 {
+                            self.ir.expr_source_lines.insert(subject, line);
                             self.ir.expr_source_lines.insert(comparison, line);
                         }
                         comparison

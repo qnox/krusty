@@ -238,7 +238,10 @@ impl Emitter<'_> {
     ) {
         let default = code.new_label();
         let case_labels: Vec<Label> = plan.cases.iter().map(|_| code.new_label()).collect();
-        self.emit_value(plan.subject, code);
+        // kotlinc's `SwitchGenerator` loads the `when`'s subject once, not a condition's read of
+        // it, so the load carries none of the conditions' source lines.
+        let subject = self.ir.expr(plan.subject).clone();
+        self.emit_value_node(plan.subject, &subject, code);
         let low = plan.cases.iter().map(|(key, _)| *key).min().expect("keys");
         let high = plan.cases.iter().map(|(key, _)| *key).max().expect("keys");
         let span = i64::from(high) - i64::from(low) + 1;

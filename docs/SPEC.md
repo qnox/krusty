@@ -8355,18 +8355,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `RedundantNopsCleanup` step keeps that `nop` only when nothing else shares its line, so a
   subject-less `when` whose first condition starts on the next line keeps it and a one-line `when`
   loses it. An `if`, `&&`/`||`, a safe call and every lowering-built `when` get none. Common
-  lowering records the origin as a fact copied from checked FIR (`IrFile::source_whens`, together
+  lowering records the origin as a fact copied from checked FIR (`IrFile::whens.source_lines`, together
   with the `when`'s own source line, which a subject block would otherwise hide); only the JVM
   emitter turns it into a `nop`. Tests: `tests/source_when_stepping_nop_e2e.rs`,
   `fir_lower::when_result_type_tests::only_a_source_when_carries_the_when_origin`.
 
-- **A comparison's jump carries the comparison's own line** (kotlinc's `BooleanComparison`, which
-  calls `markLineNumber(expression)` right before the jump, after the `lcmp`/`dcmp*`/`fcmp*` of a
-  wide comparison). A `when` branch condition on a line of its own therefore keeps that line
-  through its jump rather than returning to the line of the statement holding the `when`. A
-  subject `when`'s comparison is built at the condition's offsets, so common lowering gives the
-  generated `==` the condition's source line. A comparison with no line of its own still returns
-  to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
+- **A comparison's deciding instruction carries the comparison's own line** (kotlinc's
+  `BooleanComparison`, which calls `markLineNumber(expression)` right before the jump, after the
+  `lcmp`/`dcmp*`/`fcmp*` of a wide comparison). Every comparison form marks it at the instruction
+  that decides it: the jump of a numeric comparison and of reference identity (`if_acmp*`), the
+  `ifnull`/`ifnonnull` of a null comparison (`BooleanNullCheck`), and the `Intrinsics.areEqual`
+  call of structural equality (`Equals`), in value position as in a condition. An operand on a later
+  line therefore never leaves its own line there, and a `when` branch condition on a line of its
+  own keeps that line through its jump rather than returning to the line of the statement holding
+  the `when`. A subject `when`'s comparison, and the subject read in it, are built at the
+  condition's offsets, so common lowering gives both the condition's source line (kotlinc's
+  `visitGetValue` marks a read's line); a `when` laid out as a `tableswitch`/`lookupswitch` loads
+  its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
+  no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
 
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that

@@ -14687,18 +14687,6 @@ impl<'a> Emitter<'a> {
         code.set_stack(entry_stack);
     }
 
-    /// Put the null-safe structural equality result for two references on the operand stack.
-    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
-        let m = self.cw.methodref(
-            "kotlin/jvm/internal/Intrinsics",
-            "areEqual",
-            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-        );
-        code.invokestatic(m, 2, 1);
-    }
-
     /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
     ///
     /// `None` unless one side is the primitive three-way comparison and the other is the integer
