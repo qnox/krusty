@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
 use super::{debug_lines, jvm_declared_ty, EmitRun, Emitter};
-use crate::ir::{ExprId, IrFile};
+use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::bytecode_passes::coroutines::markers::SuspendMarker;
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, CoroutineOutcome, CoroutineRequest, TransformedCoroutine,
@@ -24,10 +24,62 @@ use crate::types::Ty;
 /// result. Empty for every function the transformer does not take.
 pub(super) type TransformedSuspensions = HashMap<ExprId, Ty>;
 
+/// What a suspension point leaves on the stack after its invoke.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SuspensionResult {
+    /// The callee's declared result.
+    Declared,
+    /// Nothing: the result is discarded.
+    Discarded,
+    /// The erased `Object` result as the invoke left it.
+    Erased,
+}
+
 impl Emitter<'_> {
     /// The declared result of `e` when it is a suspension point the transformer takes.
     pub(super) fn transformed_result(&self, e: ExprId) -> Option<Ty> {
         self.transformed_suspensions.get(&e).copied()
+    }
+
+    /// Emit `e`, a value coerced to `target`, leaving the erased `Object` result when it is a
+    /// suspension point and `target` is `Object`: kotlinc coerces a suspension point's result only
+    /// for a consumer that needs a narrower type, so `return step()` returns the result as is.
+    /// `false`, having emitted nothing, for anything else.
+    pub(super) fn emit_erased_suspension_result(
+        &mut self,
+        e: ExprId,
+        target: Ty,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        if target != Ty::obj("java/lang/Object") {
+            return false;
+        }
+        // An implicit coercion to a reference type between them narrows nothing kotlinc writes.
+        let mut e = e;
+        while let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(e)
+        {
+            if !super::ir_ty_to_jvm(type_operand).is_reference() {
+                break;
+            }
+            e = *arg;
+        }
+        if self
+            .transformed_result(e)
+            .is_none_or(|result| result == Ty::Unit)
+        {
+            return false;
+        }
+        debug_lines::mark_expression_start(self.ir, e, code);
+        self.open_transformed_suspension(e, code);
+        let node = self.ir.expr(e).clone();
+        self.emit_value_node(e, &node, code);
+        self.mark_after_inlined_call(e, code);
+        self.close_transformed_suspension(e, SuspensionResult::Erased, code);
+        true
     }
 
     /// Mark where a call's own invoke starts: its line and, for a suspension point, the markers
@@ -50,12 +102,17 @@ impl Emitter<'_> {
         }
     }
 
-    /// Close suspension point `e` after its invoke, leaving the callee's declared result on the
-    /// stack: nothing for `Unit`, and nothing at all when the result is `discarded`.
+    /// Close suspension point `e` after its invoke, leaving the callee's declared result.
+    pub(super) fn close_declared_suspension(&mut self, e: ExprId, code: &mut CodeBuilder) {
+        self.close_transformed_suspension(e, SuspensionResult::Declared, code);
+    }
+
+    /// Close suspension point `e` after its invoke, leaving what `result` asks for of the callee's
+    /// erased `Object` result.
     pub(super) fn close_transformed_suspension(
         &mut self,
         e: ExprId,
-        discarded: bool,
+        leave: SuspensionResult,
         code: &mut CodeBuilder,
     ) {
         let Some(result) = self.transformed_result(e) else {
@@ -63,6 +120,10 @@ impl Emitter<'_> {
         };
         code.suspend_marker(SuspendMarker::AfterSuspend as i32, self.cw);
         code.inline_call_marker(false);
+        if leave == SuspensionResult::Erased {
+            return;
+        }
+        let discarded = leave == SuspensionResult::Discarded;
         let target = jvm_declared_ty(&result);
         if discarded || target == Ty::Unit {
             code.pop();

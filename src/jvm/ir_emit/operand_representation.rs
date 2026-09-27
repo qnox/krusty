@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// An operand whose value arrives in an erased reference slot before checked IR narrows it.
+pub(super) enum ErasedResult {
+    /// A call's erased result under the implicit coercion to its substituted type.
+    Coerced { call: crate::ir::ExprId, slot: Ty },
+    /// A function value's `invoke`, whose result is `Object`.
+    Invocation,
+}
+
 /// How a reference value reaches a consumer's reference type.
 pub(super) enum ReferenceCoercion {
     /// The value is already acceptable; the verifier keeps its current type.
@@ -26,6 +34,71 @@ impl Emitter<'_> {
     ) {
         self.emit_value(expression, code);
         self.coerce_reference_on_stack(self.value_ty(expression), expected, code);
+    }
+
+    /// Emit an operand whose consumer materializes it at its own slot type, answering the stack type
+    /// left for that materialization. An erased reference result stays erased here: kotlinc narrows
+    /// it only when the consumer's type asks for it, not to the substituted type.
+    pub(super) fn emit_consumed_operand(
+        &mut self,
+        expression: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        match self.erased_reference_result(expression) {
+            Some(ErasedResult::Coerced { call, slot }) => {
+                self.emit_value(call, code);
+                slot
+            }
+            Some(ErasedResult::Invocation) => {
+                // Scoped to this one emission: a copy of the node emitted elsewhere (a `finally`
+                // body) narrows as usual.
+                self.erased_invocations.insert(expression);
+                self.emit_value(expression, code);
+                self.erased_invocations.remove(&expression);
+                Ty::obj("java/lang/Object")
+            }
+            None => {
+                self.emit_value(expression, code);
+                self.value_ty(expression)
+            }
+        }
+    }
+
+    /// How `expression` produces a reference value in an erased `Object` slot that checked IR
+    /// narrows to another JVM reference type: a generic declaration's result (from a source or provider
+    /// callee) under its implicit coercion, or a function value's `invoke`. Carriers (value
+    /// classes, unsigned, primitives) keep their own adaptation.
+    pub(super) fn erased_reference_result(
+        &self,
+        expression: crate::ir::ExprId,
+    ) -> Option<ErasedResult> {
+        let narrows = |slot: Ty, target: Ty| {
+            ir_ty_to_jvm(&slot).is_reference()
+                && ir_ty_to_jvm(&target).is_reference()
+                && matches!(
+                    self.reference_coercion(slot, target),
+                    ReferenceCoercion::Cast(_)
+                )
+        };
+        match self.ir.expr(expression) {
+            crate::ir::IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } => {
+                // Only a slot erased to `Object`: a bounded type parameter's slot (`T : Base`) is
+                // already a class a receiver or argument adapter takes as the value's own type.
+                let slot = *self.ir.physical_types.get(arg)?;
+                (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && narrows(slot, *type_operand))
+                    .then_some(ErasedResult::Coerced { call: *arg, slot })
+            }
+            crate::ir::IrExpr::InvokeFunction { ret, .. } => {
+                (!matches!(ret, Ty::Unit | Ty::Nothing)
+                    && narrows(Ty::obj("java/lang/Object"), *ret))
+                .then_some(ErasedResult::Invocation)
+            }
+            _ => None,
+        }
     }
 
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.

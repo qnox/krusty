@@ -400,6 +400,8 @@ mod companion_supertype_e2e;
 mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
+#[path = "comparison_jump_line_e2e.rs"]
+mod comparison_jump_line_e2e;
 #[path = "comparison_under_operands_e2e.rs"]
 mod comparison_under_operands_e2e;
 #[path = "compound_index_assign_e2e.rs"]
@@ -434,6 +436,8 @@ mod constant_pool_order_e2e;
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "consumer_materialized_result_e2e.rs"]
+mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
 mod context_and_loop_wording_e2e;
 #[path = "context_function_type_e2e.rs"]
@@ -664,6 +668,8 @@ mod expression_line_marks_e2e;
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
 mod ext_receiver_tparam_binding_e2e;
+#[path = "extension_call_operands_e2e.rs"]
+mod extension_call_operands_e2e;
 #[path = "extension_default_args_e2e.rs"]
 mod extension_default_args_e2e;
 #[path = "extension_default_stub_e2e.rs"]
@@ -676,6 +682,8 @@ mod extension_property_e2e;
 mod extension_receiver_property_smartcast_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "fallthrough_close_line_e2e.rs"]
+mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
 mod feature_box_e2e;
 #[path = "feature_coverage_a_e2e.rs"]
@@ -778,6 +786,8 @@ mod function_type_is_e2e;
 mod function_type_supertype_e2e;
 #[path = "function_typed_property_e2e.rs"]
 mod function_typed_property_e2e;
+#[path = "function_value_conversion_e2e.rs"]
+mod function_value_conversion_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
@@ -916,6 +926,8 @@ mod interface_static_member_refs_e2e;
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
 mod internal_classpath_access_e2e;
+#[path = "invariant_argument_wildcards_e2e.rs"]
+mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
 #[path = "invoke_operator_lambda_arg_e2e.rs"]
@@ -1008,6 +1020,10 @@ mod labeled_this_e2e;
 mod lambda_e2e;
 #[path = "lambda_exit_join_e2e.rs"]
 mod lambda_exit_join_e2e;
+#[path = "lambda_implicit_return_lines_e2e.rs"]
+mod lambda_implicit_return_lines_e2e;
+#[path = "lambda_receiver_label_e2e.rs"]
+mod lambda_receiver_label_e2e;
 #[path = "lambda_result_inference_e2e.rs"]
 mod lambda_result_inference_e2e;
 #[path = "lambda_result_type_variable_e2e.rs"]
@@ -1058,6 +1074,8 @@ mod local_superclass_capture_e2e;
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
+#[path = "loop_transfer_line_e2e.rs"]
+mod loop_transfer_line_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
@@ -1166,6 +1184,10 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
+#[path = "splice_nullable_value_class_lambda_e2e.rs"]
+mod splice_nullable_value_class_lambda_e2e;
+#[path = "suspend_under_try_e2e.rs"]
+mod suspend_under_try_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -1687,6 +1709,8 @@ mod source_fallback_companion_props_e2e;
 mod source_map_ranges_e2e;
 #[path = "source_map_row_count_e2e.rs"]
 mod source_map_row_count_e2e;
+#[path = "source_when_stepping_nop_e2e.rs"]
+mod source_when_stepping_nop_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
 mod spliced_lambda_nonlocal_return_e2e;
 #[path = "spliced_lambda_try_e2e.rs"]
@@ -1782,6 +1806,10 @@ mod suspend_interface_delegation_e2e;
 mod suspend_interface_impl_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
+#[path = "suspend_lambda_metadata_e2e.rs"]
+mod suspend_lambda_metadata_e2e;
+#[path = "suspend_lambda_sites_e2e.rs"]
+mod suspend_lambda_sites_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]

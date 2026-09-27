@@ -943,12 +943,17 @@ impl BodyLowering<'_> {
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
-        if body.source_lambda().is_some() {
+        // A block-bodied local function falls off its closing brace, where kotlinc marks the
+        // implicit `return` as it does for a declared one.
+        if !body.has_implicit_return() && body.close_line() != 0 {
+            self.ir.fn_close_lines.insert(function, body.close_line());
+        }
+        if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
             // the diagnostic placeholder `<anonymous>` into common IR: angle-bracket names are
             // illegal JVM methods, and other targets own their own physical spelling.
             let enclosing_name = body.debug_name().unwrap_or_default().to_owned();
-            let binding_name = body.debug_binding_name().map(str::to_owned);
+            let binding_name = source_lambda.binding_name().map(str::to_owned);
             // A local binding contributes to the lambda CLASS name, not to its implementation
             // method. Inside `init { val x = { ... } }`, for example, the class is `C$x$1` while
             // the method remains in the class-initializer sequence.
@@ -996,6 +1001,7 @@ impl BodyLowering<'_> {
                     implementation_name,
                     implementation_ordinal,
                     receiver_parameter,
+                    label: source_lambda.label().map(str::to_owned),
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");
@@ -1152,6 +1158,7 @@ impl BodyLowering<'_> {
                 result,
                 body.has_implicit_return(),
                 unit_as_value,
+                body.close_line(),
                 body_origin(body),
             )?
         };
@@ -1270,7 +1277,7 @@ fn local_function_parameter_identities(
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     body: &FirBody,
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
-    let capturer = match body.source_lambda() {
+    let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
         None => crate::ir::IrCapturingCallable::LocalFunction,
         Some(crate::fir::FirLambdaForm::AnonymousFunction) => {
             crate::ir::IrCapturingCallable::AnonymousFunction
@@ -1337,14 +1344,25 @@ fn local_function_parameter_identities(
         body.parameters()
             .iter()
             .skip(context_value_count)
-            .map(|parameter| {
-                body.debug_value_name(parameter.value)
+            .map(|parameter| match parameter.name {
+                crate::fir::FirValueParameterName::Bound => body
+                    .debug_value_name(parameter.value)
                     .map(crate::ir::IrParameterIdentity::source)
                     .unwrap_or(crate::ir::IrParameterIdentity {
                         source_name: None,
                         role: crate::ir::IrParameterRole::Value,
                         provenance: crate::ir::IrParameterProvenance::SourceDeclared,
-                    })
+                    }),
+                crate::fir::FirValueParameterName::Unused => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::UnusedValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
+                crate::fir::FirValueParameterName::Destructured => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::DestructuredValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
             }),
     );
     Ok(identities)

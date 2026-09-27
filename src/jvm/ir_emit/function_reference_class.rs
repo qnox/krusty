@@ -51,9 +51,9 @@ pub(super) fn emit_func_ref_class(
     };
     // The carrier's generic header: its runtime base class, then the Kotlin function type it
     // implements (and the suspend marker interface), written as a supertype, without wildcards.
-    let suspend = fr.is_suspend || matches!(fr.dispatch, FrDispatch::SuspendConvert);
+    let suspend = fr.is_suspend;
     let signature = JvmSignatureFormatter::new(ir, env)
-        .ty_at(&fr.function_type, Wildcards::Suppressed)
+        .ty_at(&fr.function_type, Wildcards::Supertype)
         .map(|function| {
             let marker = if suspend {
                 "Lkotlin/coroutines/jvm/internal/SuspendFunction;"
@@ -91,7 +91,7 @@ pub(super) fn emit_func_ref_class(
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(physical_arity));
     if suspend {
-        // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
+        // A suspend reference also carries kotlinc's suspend-function marker interface.
         cw.add_interface("kotlin/coroutines/jvm/internal/SuspendFunction");
     }
     // kotlinc's capture fields are final and synthetic; the dispatching `invoke` keeps its own
@@ -160,9 +160,7 @@ pub(super) fn emit_func_ref_class(
         _ => fr.reflection_name.as_deref().unwrap_or(&fr.fn_name),
     };
     let signature_name = match fr.dispatch {
-        FrDispatch::Static | FrDispatch::StaticBound | FrDispatch::SuspendConvert => {
-            reflection_name
-        }
+        FrDispatch::Static | FrDispatch::StaticBound => reflection_name,
         FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => {
             mapped_builtin_virtual_name(&call_owner, reflection_name, &signature_desc)
         }
@@ -172,16 +170,7 @@ pub(super) fn emit_func_ref_class(
         .clone()
         .unwrap_or_else(|| format!("{signature_name}{signature_desc}"));
 
-    let call_desc = if matches!(fr.dispatch, FrDispatch::SuspendConvert) {
-        // The delegated call is the wrapped value's ERASED `Function{n}.invoke` — `n` erased Object
-        // parameters (the invoke's trailing continuation is dropped), Object return.
-        let mut d = String::from("(");
-        for _ in 0..physical_arity as usize - 1 {
-            d.push_str("Ljava/lang/Object;");
-        }
-        d.push_str(")Ljava/lang/Object;");
-        d
-    } else {
+    let call_desc = {
         let mut d = String::from("(");
         for pt in target_param_tys.iter().skip(first_arg) {
             d.push_str(&ir_type_desc(pt));
@@ -340,7 +329,16 @@ pub(super) fn emit_func_ref_class(
     // A singleton carrier's `<clinit>` follows its methods, as kotlinc orders them.
     let singleton = field_capture_tys.is_empty() && !fr.bound;
     if let Some(invoke) = fr.invoke {
-        emit_method(ir, invoke, &fq, facade, &mut cw, true, env);
+        emit_method(
+            ir,
+            invoke,
+            StaticOwner::Class(c.fq_name),
+            &fq,
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
         function_reference_invoke::emit_reference_invoke_bridge(
             ir,
             &mut cw,
@@ -370,7 +368,7 @@ pub(super) fn emit_func_ref_class(
     }
     // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).
     match fr.dispatch {
-        FrDispatch::VirtualBound | FrDispatch::SuspendConvert => {
+        FrDispatch::VirtualBound => {
             inv.aload(0);
             let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
             inv.getfield(recv_f, 1);
@@ -435,11 +433,6 @@ pub(super) fn emit_func_ref_class(
             _ => 0,
         };
     for (k, pt) in fr.param_tys.iter().enumerate().skip(first_arg) {
-        // Suspend conversion: the trailing continuation parameter is NOT forwarded — the wrapped
-        // plain function never suspends and takes only the value arguments.
-        if matches!(fr.dispatch, FrDispatch::SuspendConvert) && k == fr.param_tys.len() - 1 {
-            continue;
-        }
         function_reference_invoke::load_erased_function_argument(&mut cw, &mut inv, high_arity, k);
         let jt = ir_ty_to_jvm(pt);
         let target_jt = target_param_tys
@@ -490,20 +483,28 @@ pub(super) fn emit_func_ref_class(
     } else {
         slot_words(target_ret_jvm) as i32
     };
-    // A reference to a PRIVATE same-file top-level function can't invokestatic it from this
-    // (separate) class — call kotlinc's `access$<name>` facade bridge instead (`emit_pass` emits it
-    // for exactly these referenced targets).
-    let static_call_name = if fr.call_owner_is_facade()
-        && function_reference_target(ir, fr)
-            .is_some_and(|target| ir.private_methods.contains(&target))
-    {
+    // A reference to a PRIVATE same-file static function can't invokestatic it from this
+    // (separate) class — call its static owner's `access$<name>` accessor instead.
+    let static_owner = StaticOwner::of(fr.call_owner);
+    let static_call_name = if function_reference_target(ir, fr).is_some_and(|target| {
+        static_accessors::routes_through_accessor(
+            ir,
+            static_owner == StaticOwner::Class(c.fq_name),
+            target,
+        )
+    }) {
         format!("access${}", fr.call_name)
     } else {
         fr.call_name.clone()
     };
     match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound => {
-            let m = cw.methodref(&call_owner, &static_call_name, &call_desc);
+            // A static of an interface is named by an `InterfaceMethodref`.
+            let m = if static_owner.is_interface(ir) {
+                cw.interface_methodref(&call_owner, &static_call_name, &call_desc)
+            } else {
+                cw.methodref(&call_owner, &static_call_name, &call_desc)
+            };
             inv.invokestatic(m, call_arg_words, ret_words);
         }
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM

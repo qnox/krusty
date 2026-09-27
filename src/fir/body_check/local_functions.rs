@@ -55,6 +55,14 @@ impl BodyFirChecker<'_> {
         body.set_result_type(self.resolved_type(function.span, info.sig.ret)?);
         if implicit_return {
             body.set_implicit_return();
+        } else {
+            body.set_close_line(
+                self.file
+                    .expr_end_lines
+                    .get(root.0 as usize)
+                    .copied()
+                    .unwrap_or(0),
+            );
         }
         body.set_debug_name(function.name.clone());
         if let Some(site) = self.file.local_function_lifting_sites.get(&statement) {
@@ -232,11 +240,10 @@ impl BodyFirChecker<'_> {
             } else {
                 nested.bind_local(&parameter.name, ty)
             };
-            nested.body.add_parameter(FirValueParameter {
-                origin: nested.origins.source(nested.source, parameter.ty.span),
-                value,
-                ty,
-            });
+            let origin = nested.origins.source(nested.source, parameter.ty.span);
+            nested
+                .body
+                .add_parameter(FirValueParameter::bound(origin, value, ty));
         }
         for capture in &info.captures {
             if let Some((depth, binding)) = nested.outer_values.get(&capture.name).copied() {

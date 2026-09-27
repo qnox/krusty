@@ -56,16 +56,24 @@ impl BodyLowering<'_> {
             for candidate in branch.conditions.iter().copied() {
                 let candidate = match candidate {
                     FirWhenCondition::SubjectEquals(candidate) => {
+                        // fir2ir builds the subject comparison, and the subject read in it, at
+                        // the condition's own offsets.
+                        let line = self.body.expression_debug_lines(candidate).source;
                         let candidate = self.expression(candidate)?;
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
                             origin: branch.origin,
                         })?;
                         let subject = self.ir.add_expr(IrExpr::GetValue(subject));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: IrBinOp::Eq,
                             lhs: subject,
                             rhs: candidate,
-                        })
+                        });
+                        if line != 0 {
+                            self.ir.expr_source_lines.insert(subject, line);
+                            self.ir.expr_source_lines.insert(comparison, line);
+                        }
+                        comparison
                     }
                     FirWhenCondition::Predicate(candidate) => self.expression(candidate)?,
                 };
@@ -87,7 +95,9 @@ impl BodyLowering<'_> {
         let when = self.ir.add_expr(IrExpr::When {
             branches: lowered_branches,
         });
-        if line != 0 {
+        // fir2ir gives a `when` without branches no `IrWhen` at all, only the block holding its
+        // subject, so it has no `when` line of its own.
+        if line != 0 && !branches.is_empty() {
             self.ir.whens.source_lines.insert(when, line);
         }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());

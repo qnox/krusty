@@ -50,11 +50,26 @@ impl Emitter<'_> {
                 value.map(|expression| (expression, self.ir.expr(expression))),
             );
         }
-        let arg = match op {
-            IrTypeOp::ImplicitCoercion => self.unboxed_reference_source(arg, type_operand),
-            _ => arg,
+        if op == IrTypeOp::ImplicitCoercion && self.emit_erased_suspension_result(arg, jvm_ty, code)
+        {
+            return;
+        }
+        let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+        let (physical_arg, semantic_arg) = match op {
+            // A reference target materializes an erased result at its own type, so the result's
+            // narrowing to the substituted type is not written first.
+            IrTypeOp::ImplicitCoercion
+                if reference_target && self.erased_reference_result(arg).is_some() =>
+            {
+                let source = self.emit_consumed_operand(arg, code);
+                (source, source)
+            }
+            IrTypeOp::ImplicitCoercion => {
+                let arg = self.unboxed_reference_source(arg, type_operand);
+                self.emit_type_op_operand(arg, code)
+            }
+            _ => self.emit_type_op_operand(arg, code),
         };
-        let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf if type_operand.is_nullable() => {
                 if physical_arg.is_jvm_scalar() {

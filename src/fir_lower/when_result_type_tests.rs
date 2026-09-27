@@ -1,4 +1,5 @@
-//! The type common lowering records for a `when` or `if`, as fir2ir types it: its checked result
+//! The type common lowering records for a `when` or `if`, as fir2ir types it, and the `when` origin
+//! fir2ir gives only a source `when`. The type is its checked result
 //! when it is exhaustive down an unbraced `else if` chain, `Unit` otherwise.
 
 use super::tests::lower_single_source;
@@ -50,5 +51,24 @@ fn a_when_ending_in_an_open_else_if_is_unit() {
     assert_eq!(
         when_types("fun f(x: Int) { when { x > 2 -> next(x); else -> x } }"),
         [Some(Ty::Int)]
+    );
+}
+
+/// Whether each `when` in `function`'s file is recorded as a source `when`, innermost first.
+fn source_when_origins(function: &str) -> Vec<bool> {
+    let ir = lower_single_source(&format!("{function}\n"), "WhenOrigins");
+    (0..ir.exprs.len() as u32)
+        .filter(|expression| matches!(ir.expr(*expression), IrExpr::When { .. }))
+        .map(|expression| ir.whens.source_lines.contains_key(&expression))
+        .collect()
+}
+
+#[test]
+fn only_a_source_when_carries_the_when_origin() {
+    assert_eq!(
+        source_when_origins(
+            "fun f(x: Int, b: Boolean): Int { if (b && x > 0) return 1\n return when (x) { 1 -> 2 else -> 3 } }"
+        ),
+        [false, false, true]
     );
 }

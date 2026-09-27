@@ -33,6 +33,7 @@ mod captured_storage;
 mod checked_facts;
 mod class_pool_seed;
 mod companion_blocks;
+mod comparison_branches;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
@@ -47,6 +48,7 @@ mod enum_metadata;
 mod field_write;
 mod frame_map;
 mod function_debug;
+mod function_invocation;
 mod function_reference_class;
 mod function_reference_invoke;
 mod implicit_reference_coercion;
@@ -54,12 +56,14 @@ mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
+mod lambda_class_names;
 mod local_updates;
 mod loop_emission;
 mod member_schedule;
 mod metadata_member_order;
 mod metadata_policy;
 mod method_access;
+mod method_defaults;
 mod method_signatures;
 mod non_null_operands;
 mod numeric_comparison;
@@ -80,6 +84,7 @@ mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 mod value_class_descriptors;
 mod value_class_signatures;
+use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
     seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
     PlainClassPoolSeed,
@@ -91,6 +96,7 @@ use try_emission::ProtectedRegion;
 mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
+mod static_accessors;
 mod static_fields;
 mod string_members;
 mod type_operation_emission;
@@ -118,6 +124,10 @@ pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
     finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+};
+use method_defaults::{
+    body_has_reified_markers, default_stub_access, default_stub_params, emit_default_stub,
+    emit_facade_default_stub, static_default_stub_marker, static_default_stub_params,
 };
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use scalar_coercion::{
@@ -252,6 +262,9 @@ pub(crate) struct EmitRun {
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
     private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// The synthetic accessors each static owner declares for its private static declarations
+    /// used from other classes; see [`static_accessors`].
+    static_accessor_plan: std::cell::RefCell<static_accessors::StaticAccessorPlan>,
     /// Spill plans discovered for the suspend functions whose coroutine machine emission owns.
     /// Absent on the discovery pass and present on the one that builds the machine.
     machine_plans: std::cell::RefCell<coroutine_machine::MachinePlans>,
@@ -3034,6 +3047,7 @@ fn emit_jvm_interface_companion_surface(
             ir,
             cw,
             env,
+            Some(StaticOwner::Class(c.fq_name)),
             &fq_name,
             facade,
             Ty::Unit,
@@ -3233,11 +3247,11 @@ fn jvm_enum_class_signature(
 
     if let Some(generic) = recorded {
         for supertype in generic.supers.iter().skip(1) {
-            signature.push_str(&formatter.ty_at(supertype, Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(supertype, Wildcards::Supertype)?);
         }
     } else {
         for interface in class.interfaces.iter_ids() {
-            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Supertype)?);
         }
     }
     Some(signature)
@@ -3646,80 +3660,23 @@ fn emit_pass(
         .iter()
         .flat_map(|c| c.methods.iter().copied())
         .collect();
+    let contexts = static_accessors::emission_contexts(ir, &class_member_fids);
     env.run
         .private_member_access_bridges
         .borrow_mut()
         .clone_from(&access_bridges::cross_owner_private_member_calls(
             ir,
-            facade,
-            &class_member_fids,
+            &contexts,
             opts.jvm_default != JvmDefaultMode::Disable,
         ));
+    *env.run.static_accessor_plan.borrow_mut() =
+        static_accessors::plan(ir, env, &contexts, &class_member_fids);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
     // `IncompatibleClassChangeError` when only one carries the entry. kotlinc emits it here too.
     env.inner_classes.register(&mut cw);
-    // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
-    // continuation class, or any class member): a cross-class private invokestatic is illegal, so
-    // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
-    // and the class calls that (the `Callee::Local` emit arm does the routing).
-    let facade_access_bridges: std::collections::HashSet<u32> = {
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for c in &ir.classes {
-            for &fid in &c.methods {
-                if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                    roots.push(b);
-                }
-            }
-            roots.extend(c.init_body);
-            roots.extend(c.super_arg_prelude.iter().copied());
-            roots.extend(c.super_args.iter().copied());
-            for sc in &c.secondary_ctors {
-                roots.extend(sc.body);
-                roots.extend(sc.defaults.iter().flatten().copied());
-                roots.extend(sc.delegate_prelude.iter().copied());
-                roots.extend(sc.delegate_args.iter().copied());
-            }
-            for en in &c.enum_entries {
-                roots.extend(en.args.iter().copied());
-            }
-        }
-        let mut out = std::collections::HashSet::new();
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let crate::ir::IrExpr::Call {
-                callee: Callee::Local(fid),
-                ..
-            } = &ir.exprs[cur as usize]
-            {
-                if ir.private_methods.contains(fid) && !class_member_fids.contains(fid) {
-                    out.insert(*fid);
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-        // A function-reference class dispatching to a PRIVATE facade function (its `invoke` is
-        // synthesized bytecode, not IR) needs the same bridge.
-        for c in &ir.classes {
-            if let Some(fr) = &c.func_ref {
-                if fr.call_owner_is_facade() {
-                    if let Some(target) = function_reference_target(ir, fr).filter(|target| {
-                        ir.private_methods.contains(target) && !class_member_fids.contains(target)
-                    }) {
-                        out.insert(target);
-                    }
-                }
-            }
-        }
-        out
-    };
     let mut facade_has_method = false;
-    let mut deferred_access_bridges = Vec::new();
     let facade_functions = ir.functions.iter().enumerate().filter_map(|(i, f)| {
         let i = i as u32;
         // Inline-only lambda impls (spliced) and dead ones (inlined at every use) are not facade
@@ -3748,7 +3705,17 @@ fn emit_pass(
         };
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
-        emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
+        emit_method_maybe_rescued(
+            ir,
+            i as u32,
+            StaticOwner::Facade,
+            facade,
+            facade,
+            &mut cw,
+            false,
+            env,
+            rescued,
+        );
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
         facade_has_method = true;
@@ -3778,9 +3745,6 @@ fn emit_pass(
                 &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
             );
         }
-        if facade_access_bridges.contains(&(i as u32)) {
-            deferred_access_bridges.push(i as u32);
-        }
         // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -3792,6 +3756,7 @@ fn emit_pass(
             emit_facade_default_stub(
                 ir,
                 i as u32,
+                StaticOwner::Facade,
                 facade,
                 &mut cw,
                 defaults,
@@ -3814,11 +3779,15 @@ fn emit_pass(
             );
         }
     }
-    // kotlinc's SyntheticAccessorLowering appends each `access$<name>` bridge to the facade after
-    // every declared and lifted member.
-    for function in deferred_access_bridges {
-        access_bridges::emit_facade_function_access_bridge(ir, function, facade, &mut cw);
-    }
+    // A facade's accessors map to the file's first line.
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Facade,
+        facade,
+        1,
+        &mut cw,
+    );
     static_fields::emit_statics(ir, facade, &mut cw, env);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
@@ -4730,7 +4699,16 @@ fn emit_declared_property_accessors(
             .get(&(c.fq_name_id(), property.name.clone()))
         {
             // The marker is STATIC (kotlinc's shape): no `this` slot.
-            emit_method(ir, marker, fq_name, facade, cw, false, env);
+            emit_method(
+                ir,
+                marker,
+                StaticOwner::Class(c.fq_name),
+                fq_name,
+                facade,
+                cw,
+                false,
+                env,
+            );
         }
     }
 }
@@ -4799,7 +4777,16 @@ fn emit_scheduled_member(
                 .get(&(c.fq_name_id(), property.name.clone()))
             {
                 // The marker is STATIC (kotlinc's shape): no `this` slot.
-                emit_method(ir, marker, fq_name, facade, cw, false, env);
+                emit_method(
+                    ir,
+                    marker,
+                    StaticOwner::Class(c.fq_name),
+                    fq_name,
+                    facade,
+                    cw,
+                    false,
+                    env,
+                );
             }
             return;
         }
@@ -4840,7 +4827,16 @@ fn emit_scheduled_member(
     if f.body.is_some() {
         // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
         // `this` slot; an ordinary member is an instance method.
-        emit_method(ir, fid, fq_name, facade, cw, !f.is_static, env);
+        emit_method(
+            ir,
+            fid,
+            StaticOwner::Class(c.fq_name),
+            fq_name,
+            facade,
+            cw,
+            !f.is_static,
+            env,
+        );
         if ir.function_reference_access_bridges.contains(&fid) {
             access_bridges::emit_function_reference_access_bridge(
                 ir,
@@ -4879,9 +4875,28 @@ fn emit_scheduled_member(
     if let Some(defaults) = ir.param_defaults(fid) {
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
-            emit_facade_default_stub(ir, fid, fq_name, cw, defaults, env, marker);
+            emit_facade_default_stub(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                fq_name,
+                cw,
+                defaults,
+                env,
+                marker,
+            );
         } else {
-            emit_default_stub(ir, fid, fq_name, facade, cw, defaults, env, false);
+            emit_default_stub(
+                ir,
+                fid,
+                Some(StaticOwner::Class(c.fq_name)),
+                fq_name,
+                facade,
+                cw,
+                defaults,
+                env,
+                false,
+            );
         }
     }
 }
@@ -5450,6 +5465,7 @@ fn emit_class(
                 ir,
                 &mut cw,
                 env,
+                Some(StaticOwner::Class(c.fq_name)),
                 &fq_name,
                 facade,
                 Ty::Unit,
@@ -5674,6 +5690,7 @@ fn emit_class(
             constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
                 &fq_name,
+                c.fq_name,
                 facade,
                 prefix_params,
                 prefix_count,
@@ -5727,7 +5744,16 @@ fn emit_class(
     {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
-            emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
         }
     }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
@@ -5833,6 +5859,14 @@ fn emit_class(
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -6286,7 +6320,16 @@ fn emit_interface_class(
         // the JVM rejected the result (`VerifyError: Bad type on operand stack`).
         if f.body.is_some() && (bodies_on_interface || f.is_static) {
             // A default method — concrete instance method on the interface.
-            emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
             if env
                 .run
                 .private_member_access_bridges
@@ -6452,6 +6495,7 @@ fn emit_interface_class(
                     emit_default_stub(
                         ir,
                         default_fid,
+                        Some(StaticOwner::Class(c.fq_name)),
                         &fq_name,
                         facade,
                         &mut cw,
@@ -6481,6 +6525,7 @@ fn emit_interface_class(
                         emit_default_stub(
                             ir,
                             default_fid,
+                            None,
                             &fq_name,
                             facade,
                             di,
@@ -6493,8 +6538,17 @@ fn emit_interface_class(
             }
         }
     }
-    // The `access$…$jd` bridges follow every declared member (kotlinc's order): declared bodies
-    // first, then the republished surface for inherited defaults this interface does not redeclare.
+    // The synthetic accessors of private statics come first, then the `access$…$jd` bridges
+    // (kotlinc's order): declared bodies first, then the republished surface for inherited
+    // defaults this interface does not redeclare.
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
         let physical_params = jvm_function_params(ir, fid);
@@ -6788,7 +6842,16 @@ fn emit_enum_class(
     // ids onto the enum's slot layout: `this` at 0, then every user parameter at slots 3+ after the
     // synthetic name and ordinal. A pure SetField block retains each store's source line.
     if let Some(init_body) = c.init_body {
-        let mut e = Emitter::new(ir, &mut cw, env, &fq, facade, Ty::Unit, [init_body]);
+        let mut e = Emitter::new(
+            ir,
+            &mut cw,
+            env,
+            Some(StaticOwner::Class(c.fq_name)),
+            &fq,
+            facade,
+            Ty::Unit,
+            [init_body],
+        );
         let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq));
         e.slots.insert(0, (receiver, Ty::obj(&fq)));
         // The synthetic name and ordinal come first; no semantic value names them.
@@ -6872,6 +6935,7 @@ fn emit_enum_class(
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
             &fq,
+            c.fq_name,
             facade,
             &[Ty::String, Ty::Int],
             0,
@@ -6930,7 +6994,16 @@ fn emit_enum_class(
                 // Honor `is_static` (an extension-synthesized `static` member like serialization's
                 // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
                 // static call (`IncompatibleClassChangeError`).
-                emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
+                emit_method(
+                    ir,
+                    fid,
+                    StaticOwner::Class(c.fq_name),
+                    &fq,
+                    facade,
+                    cw,
+                    !f.is_static,
+                    env,
+                );
                 if ir.function_reference_access_bridges.contains(&fid) {
                     access_bridges::emit_function_reference_access_bridge(
                         ir,
@@ -6947,7 +7020,17 @@ fn emit_enum_class(
                 // Same call as the class path, so the super-call guard rides along: an enum IS
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
                 if let Some(defaults) = ir.param_defaults(fid) {
-                    emit_default_stub(ir, fid, &fq, facade, cw, defaults, env, false);
+                    emit_default_stub(
+                        ir,
+                        fid,
+                        Some(StaticOwner::Class(c.fq_name)),
+                        &fq,
+                        facade,
+                        cw,
+                        defaults,
+                        env,
+                        false,
+                    );
                 }
             } else {
                 // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
@@ -7098,6 +7181,7 @@ fn emit_enum_class(
             ir,
             &mut cw,
             env,
+            Some(StaticOwner::Class(c.fq_name)),
             &fq,
             facade,
             Ty::Unit,
@@ -7308,6 +7392,7 @@ fn emit_enum_class(
 fn emit_method_maybe_rescued(
     ir: &IrFile,
     fid: u32,
+    static_owner: StaticOwner,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
@@ -7318,15 +7403,16 @@ fn emit_method_maybe_rescued(
     if rescued {
         // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
         // `emit_all_with_class_meta`) — bypass the early return.
-        emit_method_inner(ir, fid, owner, facade, cw, instance, env);
+        emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
     } else {
-        emit_method(ir, fid, owner, facade, cw, instance, env);
+        emit_method(ir, fid, static_owner, owner, facade, cw, instance, env);
     }
 }
 
 fn emit_method(
     ir: &IrFile,
     fid: u32,
+    static_owner: StaticOwner,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
@@ -7339,7 +7425,7 @@ fn emit_method(
     if standalone_method_is_elided(ir, fid, env) {
         return;
     }
-    emit_method_inner(ir, fid, owner, facade, cw, instance, env);
+    emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
 }
 
 /// Whether this common-IR function has no standalone JVM declaration.
@@ -7767,7 +7853,7 @@ fn emit_holder_method(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(receiver));
+    emit_method_inner_with_holder(ir, fid, None, owner, facade, cw, true, env, Some(receiver));
 }
 
 /// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
@@ -7984,13 +8070,24 @@ fn holder_method_signature(
 fn emit_method_inner(
     ir: &IrFile,
     fid: u32,
+    static_owner: StaticOwner,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
     instance: bool,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(ir, fid, owner, facade, cw, instance, env, None);
+    emit_method_inner_with_holder(
+        ir,
+        fid,
+        Some(static_owner),
+        owner,
+        facade,
+        cw,
+        instance,
+        env,
+        None,
+    );
 }
 
 /// `holder_receiver` is `Some(interface)` when the body is being written onto that interface's
@@ -8000,6 +8097,7 @@ fn emit_method_inner(
 fn emit_method_inner_with_holder(
     ir: &IrFile,
     fid: u32,
+    static_owner: Option<StaticOwner>,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
@@ -8011,7 +8109,7 @@ fn emit_method_inner_with_holder(
     let body = f.body.unwrap();
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&f.ret);
-    let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
+    let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -8573,10 +8671,10 @@ fn jvm_class_signature(
         // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
         // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic
         // return. A class header is not a method-parameter position: declaration-site variance is
-        // suppressed (`interface L<E> : List<E>` implements Java `List<E>`, not `List<? extends E>`).
+        // not written on its own arguments (`interface L<E> : List<E>` implements Java `List<E>`).
         // An explicit source projection remains encoded by `ty_at` itself.
         for sup in &g.supers {
-            s.push_str(&formatter.ty_at(sup, Wildcards::Suppressed)?);
+            s.push_str(&formatter.ty_at(sup, Wildcards::Supertype)?);
         }
     }
     Some(s).filter(|signature| signature.contains('<'))
@@ -8926,313 +9024,6 @@ fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Op
     formatter.ty(bound)
 }
 
-/// kotlinc opens a member's `$default` synthetic with a guard on the trailing marker parameter:
-/// a `super.m()` call carrying defaults is impossible to dispatch (the stub would re-enter the
-/// OVERRIDE through `invokevirtual`), so it passes a non-null marker and the stub throws.
-///
-/// Only a member whose owner can be inherited from gets it. Measured against kotlinc 2.4.10: an
-/// `open`/`abstract`/`sealed` class does, and so does an `enum class` (its entries may carry bodies,
-/// which subclass it); a final class — including a `data class`, a nested or companion object, and a
-/// private one — does not, nor does an interface's `$DefaultImpls` or a file facade, none of which
-/// can be the receiver of such a `super` call.
-fn emit_default_super_guard(
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    marker_slot: u16,
-    method_name: &str,
-) {
-    code.aload(marker_slot);
-    let ok = code.new_label();
-    // The fall-through target is a branch target, so it needs a StackMapTable entry: the method-entry
-    // locals with an empty stack (kotlinc writes a `same_frame` here). Without it the JVM rejects the
-    // method — "Expecting a stackmap frame at branch target".
-    code.ifnull(ok);
-    let cls = cw.class_ref("java/lang/UnsupportedOperationException");
-    code.new_obj(cls);
-    code.dup();
-    code.push_string(
-        &format!(
-            "Super calls with default arguments not supported in this target, function: {method_name}"
-        ),
-        cw,
-    );
-    let ctor = cw.methodref(
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
-    );
-    code.invokespecial(ctor, 1, 0);
-    code.athrow();
-    code.bind(ok);
-}
-
-/// Whether a CLASS can be inherited from, and so whether its members' `$default` synthetics carry
-/// kotlinc's super-call guard. An interface is not asked — it is always a possible `super<I>.m()`
-/// receiver, so its stub is guarded unconditionally. See [`emit_default_super_guard`].
-fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
-    ir.classes.iter().any(|c| {
-        c.fq_name_matches(owner)
-            && !c.is_object
-            && (c.is_open || c.is_abstract || c.is_sealed || !c.enum_entries.is_empty())
-    })
-}
-
-/// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
-/// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
-/// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
-/// 0. This is the JVM realization of default arguments — the `param_defaults` *meaning* is in the IR.
-#[allow(clippy::too_many_arguments)]
-fn emit_default_stub(
-    ir: &IrFile,
-    fid: u32,
-    owner: &str,
-    facade: &str,
-    cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
-    env: &EmitEnv,
-    is_interface: bool,
-) {
-    let f = &ir.functions[fid as usize];
-    let method_name = f.name.clone();
-    // The REAL (base-method) param types unbox every value class. `stub_param_tys` is the `$default`
-    // signature, where a nullable-underlying value-class param stays BOXED (kotlinc): the stub takes the
-    // value class, `box-impl`s any default-filled value, and `unbox-impl`s before delegating to the base.
-    let real_params = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
-    let stub_param_tys: Vec<Ty> = real_params
-        .iter()
-        .enumerate()
-        .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t))
-        .collect();
-    let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
-    let logical_param_count = real_params
-        .len()
-        .checked_sub(recv_offset)
-        .expect("an extension receiver is a leading physical parameter");
-    let ret = jvm_declared_ty(&f.ret);
-    let owner_ty = Ty::obj(owner);
-    // kotlinc interns a synthetic's name and descriptor at its method header, before its body.
-    let stub_name = format!("{method_name}$default");
-    let stub_desc = method_descriptor(&default_stub_params(ir, fid, owner_ty), ret);
-    cw.reserve_method_name(&stub_name);
-    cw.reserve_descriptor(&stub_desc);
-    let mut e = Emitter::new(
-        ir,
-        cw,
-        env,
-        owner,
-        facade,
-        ret,
-        defaults.iter().flatten().copied(),
-    );
-    // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
-    let receiver = e.frame.enter(FrameKey::Receiver, owner_ty);
-    e.slots.insert(0, (receiver, owner_ty));
-    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
-    for (i, t) in stub_param_tys.iter().enumerate() {
-        let value = (i + 1) as u32;
-        let slot = e.frame.enter(FrameKey::Value(value), *t);
-        e.slots.insert(value, (slot, *t));
-        param_slots.push((slot, *t));
-    }
-    let mask_count = default_mask_count(logical_param_count);
-    let mask_slots: Vec<u16> = (0..mask_count)
-        .map(|mask| {
-            let s = e.frame.enter(
-                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
-                Ty::Int,
-            );
-            // The mask ints and the trailing marker are BACKEND temporaries: no semantic value
-            // names them, they only have to be typed in every frame this stub records.
-            // Held for the whole stub: nothing releases a mask word before the method ends.
-            let _ = e.lease_temporary(s, Ty::Int);
-            s
-        })
-        .collect();
-    let marker_slot = e.frame.enter(
-        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
-        Ty::obj("java/lang/Object"),
-    );
-    let _ = e.lease_temporary(marker_slot, Ty::obj("java/lang/Object"));
-
-    let mut code = CodeBuilder::new(e.frame.size());
-    // An INTERFACE's stub is guarded too: `super<I>.m()` is a real call site, so kotlinc puts the
-    // guard on whichever class carries the mask-expanding body — the interface itself under
-    // `-jvm-default=enable`, the `$DefaultImpls` holder under `disable`. (The enable-mode holder copy
-    // is a thin forward emitted by `emit_default_stub_forward` and correctly carries no guard: it
-    // passes the marker straight through to the body that does check it.)
-    if is_interface || owner_is_inheritable(ir, owner) {
-        emit_default_super_guard(e.cw, &mut code, marker_slot, &method_name);
-    }
-    // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
-    // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
-    // mask bits stay LOGICAL (kotlinc's convention).
-    emit_default_param_overwrites(
-        &mut e,
-        &mut code,
-        &defaults[recv_offset..],
-        recv_offset,
-        &param_slots,
-        &mask_slots,
-    );
-    code.aload(0);
-    for (i, &(pslot, pty)) in param_slots.iter().enumerate() {
-        load(pty, pslot, &mut code);
-        // A boxed value-class stub param unboxes to the underlying the base (mangled) method expects.
-        if let Some(vc) = boxed.get(&i) {
-            emit_unbox_impl(ir, e.cw, vc, &mut code);
-        }
-    }
-    let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
-    let desc = method_descriptor(&real_params, ret);
-    let is_private = ir.private_methods.contains(&fid);
-    if is_interface {
-        // The default stub is a STATIC interface method; it dispatches to the real (abstract) member via
-        // `invokeinterface` on `$this`.
-        let m = e.cw.interface_methodref(owner, &method_name, &desc);
-        code.invokeinterface(m, aw, slot_words(ret) as i32);
-    } else if is_private {
-        // A PRIVATE member is non-virtual — `invokevirtual` on it fails resolution pre-nestmates
-        // (class-file major 52); kotlinc dispatches with `invokespecial`.
-        let m = e.cw.methodref(owner, &method_name, &desc);
-        code.invokespecial(m, aw, slot_words(ret) as i32);
-    } else {
-        let m = e.cw.methodref(owner, &method_name, &desc);
-        code.invokevirtual(m, aw, slot_words(ret) as i32);
-    }
-    emit_return(ret, &mut code);
-    code.ensure_locals(e.frame.max());
-    code.link();
-
-    e.cw.add_method(default_stub_access(ir, fid), &stub_name, &stub_desc, &code);
-    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's DECLARATION line
-    // (`fn_sig_lines`) — not the body-attributed `fn_decl_lines`, which points at an expression
-    // body's own line when the signature wraps.
-    if let Some(&line) = ir
-        .fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-    {
-        e.cw.set_method_lines(&stub_name, &stub_desc, &[(0, line)]);
-    }
-}
-
-/// The `$default` stub's physical parameter list, shared by the stub emitter and the holder's
-/// `enable`-mode forward (their descriptors must agree or the forward links to nothing): the
-/// receiver, the declared parameters (a nullable-underlying value-class parameter stays BOXED),
-/// one `int` mask per 32 logical parameters, and the trailing `Object` marker.
-fn default_stub_params(ir: &IrFile, fid: u32, owner_ty: Ty) -> Vec<Ty> {
-    let real_params = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
-    let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
-    let logical_param_count = real_params
-        .len()
-        .checked_sub(recv_offset)
-        .expect("an extension receiver is a leading physical parameter");
-    let mut stub_params = vec![owner_ty];
-    stub_params.extend(
-        real_params
-            .iter()
-            .enumerate()
-            .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t)),
-    );
-    stub_params.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(logical_param_count),
-    ));
-    stub_params.push(Ty::obj("java/lang/Object"));
-    stub_params
-}
-
-fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<usize, Ty> {
-    ir.default_stub_boxed_params
-        .get(&fid)
-        .map(|parameters| parameters.iter().copied().collect())
-        .unwrap_or_default()
-}
-
-/// A `$default` stub's trailing marker: kotlinc's `DefaultConstructorMarker` for a constructor (a
-/// value class's `constructor-impl`), the plain `Object` a function's stub takes otherwise.
-fn static_default_stub_marker(ir: &IrFile, fid: u32) -> Ty {
-    if ir.jvm_value_class_constructor_impls.contains(&fid) {
-        Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
-    } else {
-        Ty::obj("java/lang/Object")
-    }
-}
-
-fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
-    let marker = static_default_stub_marker(ir, fid);
-    let function = &ir.functions[fid as usize];
-    let mut parameters = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
-    for (index, parameter) in parameters.iter_mut().enumerate() {
-        if let Some(boxed) = boxed.get(&index) {
-            *parameter = *boxed;
-        }
-    }
-    let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
-        + usize::from(ir.extension_receiver_fns.contains(&fid));
-    let logical_parameter_count = parameters
-        .len()
-        .checked_sub(receiver_prefix)
-        .expect("callable receivers are leading physical parameters");
-    parameters.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(logical_parameter_count),
-    ));
-    parameters.push(marker);
-    parameters
-}
-
-/// The access flags of a member's `$default` synthetic: kotlinc mirrors the origin's visibility —
-/// with PRIVATE demoted to package-private (the stub is invoked from call sites that could not reach the
-/// private member itself) — always `| STATIC | SYNTHETIC`. Keyed on the IR's visibility model in ONE
-/// place: it currently distinguishes public vs private (`ir.private_methods`); when the IR carries
-/// protected/internal, their mappings extend here.
-fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
-    let vis = if ir.private_methods.contains(&fid) {
-        0x0000 // package-private
-    } else {
-        0x0001 // ACC_PUBLIC
-    };
-    vis | 0x1008 // ACC_STATIC | ACC_SYNTHETIC
-}
-
-/// `defaults` is LOGICAL (Kotlin value parameters, extension receiver excluded); `recv_offset`
-/// counts the leading physical receiver slots. The MASK bit index is the LOGICAL parameter index —
-/// kotlinc numbers `$default` mask bits over the declared value parameters, so an extension's
-/// receiver does not shift them (verified against kotlinc 2.4.0: `fun Host.tag(name, port = 9)` →
-/// port checks bit 2, not bit 4).
-fn emit_default_param_overwrites(
-    e: &mut Emitter<'_>,
-    code: &mut CodeBuilder,
-    defaults: &[Option<u32>],
-    recv_offset: usize,
-    param_slots: &[(u16, Ty)],
-    mask_slots: &[u16],
-) {
-    let logical_param_count = param_slots
-        .len()
-        .checked_sub(recv_offset)
-        .expect("an extension receiver is a leading physical parameter");
-    for (i, def) in defaults.iter().enumerate().take(logical_param_count) {
-        if let Some(def_expr) = def {
-            let (pslot, pty) = param_slots[i + recv_offset];
-            code.iload(mask_slots[i / 32]);
-            code.push_int(default_mask_bit(i), e.cw);
-            code.iand();
-            let skip = code.new_label();
-            code.ifeq(skip);
-            // The value-class realization pass has already adapted the checked default root to this
-            // exact physical stub slot. Emission only stores that selected representation.
-            e.emit_value(*def_expr, code);
-            store(pty, pslot, code);
-            code.bind(skip);
-        }
-    }
-}
-
 fn default_mask_count(param_count: usize) -> usize {
     param_count.div_ceil(32).max(1)
 }
@@ -9313,175 +9104,6 @@ fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBu
     code.invokevirtual(m, 0, slot_words(u) as i32);
 }
 
-/// Emit the `foo$default(params…, int mask, Object marker)` synthetic for a TOP-LEVEL facade function
-/// (kotlinc's default-argument ABI). Unlike [`emit_default_stub`] (an instance member) there is NO leading
-/// `self`: the real parameters occupy value-indices `0..n` (the STATIC layout the defaults were lowered
-/// with), and the stub dispatches to the real facade method via `invokestatic`. For each `mask & (1<<i)`
-/// bit set, the argument slot is overwritten with `default_i` before the dispatch.
-/// Whether an emitted body contains reification-marker nodes (a `<reified T>` fn realized as a
-/// standalone method) — its `$default` must inline the body, never delegate.
-fn body_has_reified_markers(ir: &IrFile, body: crate::ir::ExprId) -> bool {
-    fn walk(ir: &IrFile, e: crate::ir::ExprId) -> bool {
-        if matches!(
-            ir.expr(e),
-            IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
-        ) {
-            return true;
-        }
-        let mut found = false;
-        crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
-            if walk(ir, child) {
-                found = true;
-            }
-        });
-        found
-    }
-    walk(ir, body)
-}
-
-fn emit_facade_default_stub(
-    ir: &IrFile,
-    fid: u32,
-    facade: &str,
-    cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
-    env: &EmitEnv,
-    marker: Ty,
-) {
-    let f = &ir.functions[fid as usize];
-    let method_name = f.name.clone();
-    let real_params = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
-    let stub_param_tys = real_params
-        .iter()
-        .enumerate()
-        .map(|(index, parameter)| boxed.get(&index).copied().unwrap_or(*parameter))
-        .collect::<Vec<_>>();
-    let ret = jvm_declared_ty(&f.ret);
-    // A source value-class member is now a static `*-impl` whose leading carrier parameter is the
-    // former dispatch receiver. It participates in the physical descriptor but not in Kotlin's
-    // default-mask ordinals, just like an extension receiver.
-    let dispatch_prefix = usize::from(f.is_static && f.dispatch_receiver.is_some());
-    let extension_prefix = usize::from(ir.extension_receiver_fns.contains(&fid));
-    let receiver_prefix = dispatch_prefix + extension_prefix;
-    let logical_param_count = real_params
-        .len()
-        .checked_sub(receiver_prefix)
-        .expect("callable receivers are leading physical parameters");
-    // kotlinc interns the synthetic's NAME + DESCRIPTOR at its method header, before any constant
-    // its body (the delegating call, the default fills) introduces.
-    {
-        let mask_words = default_mask_count(logical_param_count);
-        let stub_desc = method_descriptor(
-            &stub_param_tys
-                .iter()
-                .copied()
-                .chain(std::iter::repeat_n(Ty::Int, mask_words))
-                .chain(std::iter::once(marker))
-                .collect::<Vec<_>>(),
-            ret,
-        );
-        cw.seed_utf8(&format!("{method_name}$default"));
-        cw.seed_utf8(&stub_desc);
-    }
-
-    let mut e = Emitter::new(
-        ir,
-        cw,
-        env,
-        facade,
-        facade,
-        ret,
-        defaults.iter().flatten().copied(),
-    );
-    // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
-    // with); then mask + marker (not value-indexed).
-    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
-    for (i, t) in stub_param_tys.iter().enumerate() {
-        let slot = e.frame.enter(FrameKey::Value(i as u32), *t);
-        e.slots.insert(i as u32, (slot, *t));
-        param_slots.push((slot, *t));
-    }
-    let mask_count = default_mask_count(logical_param_count);
-    let mask_slots: Vec<u16> = (0..mask_count)
-        .map(|mask| {
-            let s = e.frame.enter(
-                FrameKey::Parameter((stub_param_tys.len() + mask) as u16),
-                Ty::Int,
-            );
-            // Backend temporaries — see the member stub: typed in frames, named by no value.
-            // Held for the whole stub: nothing releases a mask word before the method ends.
-            let _ = e.lease_temporary(s, Ty::Int);
-            s
-        })
-        .collect();
-    let marker_slot = e.frame.enter(
-        FrameKey::Parameter((stub_param_tys.len() + mask_count) as u16),
-        marker,
-    );
-    let _ = e.lease_temporary(marker_slot, marker);
-
-    let mut code = CodeBuilder::new(e.frame.size());
-    // A top-level EXTENSION's registered defaults/names carry a leading `$receiver` slot; the mask
-    // bits stay LOGICAL (kotlinc's convention), so slice the receiver prefix off and offset slots.
-    emit_default_param_overwrites(
-        &mut e,
-        &mut code,
-        &defaults[extension_prefix..],
-        receiver_prefix,
-        &param_slots,
-        &mask_slots,
-    );
-    // A REIFIED base (its body carries reification markers) cannot be DELEGATED to: the real
-    // method throws at runtime and exists only to be inlined. kotlinc's `$default` therefore
-    // inlines the whole body after the default fills — emit the same: the body was lowered with
-    // value ids 0..n bound to the parameters, exactly this frame's layout.
-    if let Some(body) = f.body.filter(|&body| body_has_reified_markers(ir, body)) {
-        e.emit(body, &mut code);
-        if ret == Ty::Unit && !e.discarding_diverges(body) {
-            code.ret_void();
-        }
-    } else {
-        for (index, &(pslot, pty)) in param_slots.iter().enumerate() {
-            load(pty, pslot, &mut code);
-            if let Some(value_class) = boxed.get(&index) {
-                emit_unbox_impl(ir, e.cw, value_class, &mut code);
-            }
-        }
-        let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
-        let desc = method_descriptor(&real_params, ret);
-        let m = e.cw.methodref(facade, &method_name, &desc);
-        code.invokestatic(m, aw, slot_words(ret) as i32);
-        emit_return(ret, &mut code);
-    }
-    code.ensure_locals(e.frame.max());
-    code.link();
-
-    let mut stub_params = stub_param_tys;
-    stub_params.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(logical_param_count),
-    ));
-    stub_params.push(marker);
-    let desc = method_descriptor(&stub_params, ret);
-    e.cw.add_method(
-        default_stub_access(ir, fid),
-        &format!("{method_name}$default"),
-        &desc,
-        &code,
-    );
-    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's DECLARATION line
-    // (`fn_sig_lines`) — not the body-attributed `fn_decl_lines`, which points at an expression
-    // body's own line when the signature wraps.
-    if let Some(&line) = ir
-        .fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-    {
-        e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
-    }
-}
-
 /// The target-neutral identity and selected declaration shape shared by JVM property reads and writes.
 /// Keeping these fields together prevents the two realizers from accepting subtly different owner,
 /// interface, or physical-type inputs as the semantic operation grows more metadata.
@@ -9508,6 +9130,9 @@ struct Emitter<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
+    /// The exact source class whose code this emitter is writing. A generated holder has no
+    /// source-static ownership; it must route every private static access through the owner.
+    static_owner: Option<StaticOwner>,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -9546,6 +9171,8 @@ struct Emitter<'a> {
     /// The declarations that read a suspend lambda's parameters from their fields, in the
     /// `invokeSuspend` being emitted. Each is marked for the transformer.
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
+    /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
+    erased_invocations: HashSet<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -9583,6 +9210,8 @@ struct Emitter<'a> {
     /// carries its own line leaves that line in effect; the instruction that CONSUMES the operand
     /// belongs to the statement, and kotlinc marks it back to this line.
     statement_line: Option<u32>,
+    /// The source line of the comparison being emitted, which its jump carries.
+    comparison_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
@@ -9612,6 +9241,7 @@ impl<'a> Emitter<'a> {
         ir: &'a IrFile,
         cw: &'a mut ClassWriter,
         env: &EmitEnv<'a>,
+        static_owner: Option<StaticOwner>,
         owner: &str,
         facade: &str,
         ret: Ty,
@@ -9627,6 +9257,7 @@ impl<'a> Emitter<'a> {
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             unit_result_tail_forwards: env.unit_result_tail_forwards,
+            static_owner,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -9643,6 +9274,7 @@ impl<'a> Emitter<'a> {
             machine_suspensions: HashSet::new(),
             transformed_suspensions: HashMap::new(),
             suspend_lambda_parameter_reads: HashSet::new(),
+            erased_invocations: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -9653,6 +9285,7 @@ impl<'a> Emitter<'a> {
             open_locals: Vec::new(),
             block_depth: 0,
             statement_line: None,
+            comparison_line: None,
             record_locals: false,
             inside_condition: false,
             this_uninitialized: false,
@@ -9662,6 +9295,17 @@ impl<'a> Emitter<'a> {
             terminal_statement_target: None,
             regeneration_site: None,
         }
+    }
+
+    /// Whether code emitted by this source owner reaches a private member of another source class.
+    /// Generated holders have no source owner and therefore always use the declaring class's bridge.
+    fn reaches_through_bridge(&self, owner: TypeName, function: u32) -> bool {
+        self.static_owner != Some(StaticOwner::Class(owner))
+            && self
+                .run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
     }
 
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
@@ -9913,17 +9557,10 @@ impl<'a> Emitter<'a> {
                     }
                     let body_ret =
                         self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
-                    if body_ret.is_jvm_scalar() {
-                        // The erased `invoke` result is `Object`, so reverse the same semantic adapter
-                        // choice after the inline body leaves its physical carrier on the stack. Use
-                        // the BODY's value type, not the contextual lambda declaration return: a block
-                        // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
-                        box_prim_free(
-                            self.cw,
-                            &mut scratch,
-                            semantic_scalar_adapter(body_value_ty, body_ret),
-                        );
-                    }
+                    // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not
+                    // the contextual lambda declaration return: a block accepted as `() -> Any?` can
+                    // still produce a primitive `Boolean`/`Int` here.
+                    self.coerce_invoke_result(body_value_ty, body_ret, &mut scratch);
                     scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
                     let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
                         &scratch.bytes,
@@ -10523,7 +10160,7 @@ impl<'a> Emitter<'a> {
             match self.inlined_literal_positions(
                 call_expression,
                 leading_non_argument_operands,
-                &args,
+                args,
             ) {
                 Ok(positions) if positions.is_empty() => {
                     return self.try_inline_classpath_body(&inline_call, code).is_some();
@@ -10663,8 +10300,7 @@ impl<'a> Emitter<'a> {
                     (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
                 let slot = if let Some(i) = init {
-                    self.emit_value(i, code);
-                    let source = self.value_ty(i);
+                    let source = self.emit_consumed_operand(i, code);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
                     self.adapt_physical_operand(source, semantic, Some(ty), jt, code);
                     // kotlinc's `visitVariable` marks the initializer's line, then the
@@ -10734,8 +10370,8 @@ impl<'a> Emitter<'a> {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }
             IrExpr::While { .. } => self.emit_while(e, code),
-            IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
-            IrExpr::Continue { label } => self.emit_loop_transfer(&label, false, code),
+            IrExpr::Break { label } => self.emit_loop_transfer(e, &label, true, code),
+            IrExpr::Continue { label } => self.emit_loop_transfer(e, &label, false, code),
             other => {
                 self.emit_discarding_node(e, &other, code);
             }
@@ -10753,7 +10389,7 @@ impl<'a> Emitter<'a> {
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
         self.machine_after(suspension, code);
-        self.close_transformed_suspension(e, false, code);
+        self.close_declared_suspension(e, code);
     }
 
     /// Open a suspension this emission's machine owns, if `e` is one.
@@ -11314,7 +10950,9 @@ impl<'a> Emitter<'a> {
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
         let direct_field = self.direct_field_access(class, declared, true);
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
@@ -11406,7 +11044,7 @@ impl<'a> Emitter<'a> {
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
             // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
-            if self.reaches_through_bridge(owner, getter) {
+            if self.reaches_through_bridge(class.fq_name, getter) {
                 return Some(access_bridges::private_member_read_access(
                     self.ir, getter, owner,
                 ));
@@ -11466,7 +11104,9 @@ impl<'a> Emitter<'a> {
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
         // accessor and the field itself is unreachable.
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
@@ -11593,10 +11233,10 @@ impl<'a> Emitter<'a> {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
-                self.emit_loop_transfer(label, true, code);
+                self.emit_loop_transfer(e, label, true, code);
             }
             IrExpr::Continue { label } => {
-                self.emit_loop_transfer(label, false, code);
+                self.emit_loop_transfer(e, label, false, code);
             }
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
@@ -12212,10 +11852,12 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(&f.ret);
                     // A PRIVATE facade function can't be invoked from another class (a lambda impl on
                     // its enclosing class, a continuation class, any class member) — kotlinc routes
-                    // those callers through the `access$<name>` bridge (emitted by `emit_pass` when
-                    // referenced; see `facade_access_bridges`).
-                    let name = if self.owner != self.facade && self.ir.private_methods.contains(fid)
-                    {
+                    // those callers through the facade's `access$<name>` accessor.
+                    let name = if static_accessors::routes_through_accessor(
+                        self.ir,
+                        self.static_owner == Some(StaticOwner::Facade),
+                        *fid,
+                    ) {
                         format!("access${}", f.name)
                     } else {
                         f.name.clone()
@@ -12250,9 +11892,8 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
-                    let source_owner_is_interface = self.ir.classes.iter().any(|candidate| {
-                        candidate.is_interface && candidate.fq_name_id() == *owner
-                    });
+                    let static_owner = StaticOwner::Class(*owner);
+                    let source_owner_is_interface = static_owner.is_interface(self.ir);
                     let owner = owner.render();
                     // `owner_is_interface` answers from the CLASSPATH; a static declared on an
                     // interface being compiled right now is not there. An `invokestatic` naming an
@@ -12260,10 +11901,20 @@ impl<'a> Emitter<'a> {
                     // too.
                     let owner_is_interface =
                         source_owner_is_interface || self.bodies.owner_is_interface(&owner);
-                    let method = if owner_is_interface {
-                        self.cw.interface_methodref(&owner, &f.name, &descriptor)
+                    // A private one reached from another class goes through its owner's accessor.
+                    let name = if static_accessors::routes_through_accessor(
+                        self.ir,
+                        self.static_owner == Some(static_owner),
+                        *function,
+                    ) {
+                        format!("access${}", f.name)
                     } else {
-                        self.cw.methodref(&owner, &f.name, &descriptor)
+                        f.name.clone()
+                    };
+                    let method = if owner_is_interface {
+                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    } else {
+                        self.cw.methodref(&owner, &name, &descriptor)
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
@@ -12577,6 +12228,7 @@ impl<'a> Emitter<'a> {
                     descriptor,
                     inline,
                 } => {
+                    let owner_identity = *owner;
                     let (owner, name, descriptor, inline) =
                         (owner.render(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
@@ -12675,7 +12327,9 @@ impl<'a> Emitter<'a> {
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
                     // A private value-class `-impl` another class calls goes through its bridge.
                     let bridged = self.ir.jvm_member_targets.get(&e);
-                    let name = match bridged.filter(|&&f| self.reaches_through_bridge(&owner, f)) {
+                    let name = match bridged
+                        .filter(|&&function| self.reaches_through_bridge(owner_identity, function))
+                    {
                         Some(_) => format!("access${name}"),
                         None => name,
                     };
@@ -13394,46 +13048,8 @@ impl<'a> Emitter<'a> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    // Common lowering records the source lambda's stable lexical origin. Consume that
-                    // edge directly: a source lambda lowered into multiple constructors keeps one name
-                    // and identity, and no generated method spelling or value table is searched here.
-                    let origin = self.ir.lambda_origins.get(impl_fn);
-                    let (internal, identity) = if let Some(origin) = origin {
-                        let ordinal = origin.ordinal + 1;
-                        // A class-initialization origin (a property initializer or an init block)
-                        // has the EMPTY enclosing name — kotlinc emits no function segment there
-                        // (`C$prop$1`, `C$local$1`, `C$1`), so an empty segment is dropped, never
-                        // printed as `C$$1`.
-                        let mut internal = impl_owner.clone();
-                        for segment in [
-                            Some(origin.enclosing_name.as_str()),
-                            origin.binding_name.as_deref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .filter(|segment| !segment.is_empty())
-                        {
-                            internal.push('$');
-                            internal.push_str(segment);
-                        }
-                        internal.push('$');
-                        internal.push_str(&ordinal.to_string());
-                        (internal, LambdaClassIdentity::Source(origin.identity))
-                    } else {
-                        // Backend-synthesized lambdas have no source expression. Their implementation
-                        // id is already the exact stable identity; its generated name is serialization
-                        // input only for this JVM artifact boundary.
-                        let (enclosing, index) = impl_name
-                            .split_once("$lambda$")
-                            .map(|(head, tail)| {
-                                (head.to_string(), tail.parse::<u32>().unwrap_or(0))
-                            })
-                            .unwrap_or_else(|| (impl_name.clone(), 0));
-                        (
-                            format!("{impl_owner}${enclosing}${}", index + 1),
-                            LambdaClassIdentity::Synthetic(*impl_fn),
-                        )
-                    };
+                    let (internal, identity) =
+                        lambda_class_names::class_name(self.ir, *impl_fn, &impl_name, &impl_owner);
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -13686,98 +13302,9 @@ impl<'a> Emitter<'a> {
                 params,
                 ret,
             } => {
-                let n = args.len();
-                let high_arity = is_high_arity_function(n as u8);
-                if args.iter().any(|&a| self.emits_control_flow(a)) {
-                    // A branchy argument can't run with the function value on the stack — its merge
-                    // frame would omit it. Evaluate the function + args into temps first (in order),
-                    // then load and box.
-                    let mut all = vec![*func];
-                    all.extend(args.iter().copied());
-                    let temps = self.spill_to_temps(&all, code);
-                    load(temps[0].1, temps[0].0, code);
-                    if high_arity {
-                        code.push_int(n as i32, self.cw);
-                        let object = self.cw.class_ref("java/lang/Object");
-                        code.anewarray(object);
-                    }
-                    for (i, &(slot, t, _)) in temps[1..].iter().enumerate() {
-                        if high_arity {
-                            code.dup();
-                            code.push_int(i as i32, self.cw);
-                        }
-                        load(t, slot, code);
-                        let semantic = params.get(i).copied().unwrap_or(t);
-                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, t));
-                        if high_arity {
-                            code.array_store(0x53, 1); // aastore
-                        }
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    self.emit_value(*func, code);
-                    if high_arity {
-                        code.push_int(n as i32, self.cw);
-                        let object = self.cw.class_ref("java/lang/Object");
-                        code.anewarray(object);
-                    }
-                    for (i, &arg) in args.iter().enumerate() {
-                        if high_arity {
-                            code.dup();
-                            code.push_int(i as i32, self.cw);
-                        }
-                        self.emit_value(arg, code);
-                        let at = self.value_ty(arg);
-                        let semantic = params.get(i).copied().unwrap_or(at);
-                        // `FunctionN` parameters are erased `Object`, but wrapper selection is a
-                        // semantic operation. Retaining `params` on the IR node prevents an unsigned
-                        // argument from being boxed as the signed wrapper of its shared carrier.
-                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, at));
-                        if high_arity {
-                            code.array_store(0x53, 1); // aastore
-                        }
-                    }
-                }
-                let iface = jvm_function_interface(n as u8);
-                let m = self.cw.interface_methodref(
-                    &iface,
-                    "invoke",
-                    &jvm_function_invoke_descriptor(n as u8),
-                );
-                // A function VALUE's invocation is a dispatch like any other: after the operands
-                // have each marked their own line, the call's own line returns at the `invoke`.
-                self.mark_dispatch_line(e, code);
-                code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
-                // The interface returns `Object`; cast/unbox to the function's declared return type.
-                // Select a scalar adapter from that semantic return before `ir_ty_to_jvm` reduces an
-                // unsigned type to its signed carrier. This is the common consumer for real lambdas,
-                // callable references, and property references, independent of which producer object
-                // supplied the `FunctionN` implementation.
-                let rt = ir_ty_to_jvm(ret);
-                if rt.is_jvm_scalar() {
-                    unbox_prim_from(
-                        self.cw,
-                        code,
-                        Ty::obj("java/lang/Object"),
-                        semantic_scalar_adapter(*ret, rt),
-                    );
-                } else {
-                    match rt {
-                        Ty::Unit | Ty::Nothing => code.pop(),
-                        Ty::String => {
-                            let ci = self.cw.class_ref("java/lang/String");
-                            code.checkcast(ci);
-                        }
-                        _ if rt.is_array() => {
-                            let ci = self.cw.class_ref(&type_descriptor(rt));
-                            code.checkcast(ci);
-                        }
-                        Ty::Obj(internal, _) => {
-                            let ci = self.cw.class_ref(&internal.render());
-                            code.checkcast(ci);
-                        }
-                        _ => {}
-                    }
+                self.emit_function_invocation(e, *func, args, params, code);
+                if !self.erased_invocations.remove(&e) {
+                    self.narrow_invocation_result(*ret, code);
                 }
             }
             _ => {}
@@ -14152,75 +13679,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Push `ops` onto the stack in order. If any later op introduces control flow, evaluate all ops
-    /// into temps first, then load them, keeping the operand baseline empty across nested branches.
-    fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, ops, code, |_, _, _| {});
-    }
-
-    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
-    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
-    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
-    /// after a right operand has landed above it, and a branchy right operand still requires both
-    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
-    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
-    fn emit_operands_adapted<F>(
-        &mut self,
-        default_plan: Option<(
-            u32,
-            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
-        )>,
-        ops: &[u32],
-        code: &mut CodeBuilder,
-        mut adapt: F,
-    ) where
-        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
-    {
-        let mut inside_run = false;
-        if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
-            let temps = self.spill_to_temps(ops, code);
-            for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                load(t, slot, code);
-                adapt(self, t, code);
-            }
-            self.release_operand_spills(&temps);
-        } else {
-            for (operand_index, &o) in ops.iter().enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                self.emit_value(o, code);
-                adapt(self, self.value_ty(o), code);
-            }
-        }
-    }
-
-    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
-    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
-    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
-        box_prim_free(self.cw, code, ty);
-    }
-
-    /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
-    /// side is a primitive right where it lands — kotlinc's shape for a mixed pair (`aload_0; iload_1;
-    /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
-    /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
-    /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
-    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
-    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
-    fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
-    }
-
     fn emit_primitive_inc_dec_virtual(
         &mut self,
         owner: &str,
@@ -14422,50 +13880,8 @@ impl<'a> Emitter<'a> {
                     },
                 }
             }
-            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_compare(op, lhs, rhs, code),
+            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_comparison(expression, code),
         }
-    }
-
-    fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        let f = code.new_label();
-        // Every comparison that needs a conditional branch goes through the same classifier and
-        // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
-        // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
-        // null/reference/numeric case tables here previously let zero-left ordering acquire a different
-        // node-shape rule depending on whether the comparison happened to be an `if` condition.
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, f, false, code) {
-            self.materialize_cmp_bool(f, code);
-            return;
-        }
-
-        // The shared emitter returns false only for structural equality between two non-null
-        // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
-        // position, so branching merely to reconstruct it would be longer and less faithful.
-        self.emit_structural_equality(lhs, rhs, code);
-        if op == IrBinOp::Ne {
-            code.push_int(1, self.cw);
-            code.ixor();
-        }
-    }
-
-    /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
-    /// exactly when the comparison is FALSE. Fall through to `iconst_1`, jump over the `iconst_0` the
-    /// `f` arm pushes — kotlinc's polarity (`if_icmpne; iconst_1; goto; iconst_0`), which keeps the
-    /// null, referential and numeric arms byte-identical to it at no extra instruction cost.
-    fn materialize_cmp_bool(&mut self, f: Label, code: &mut CodeBuilder) {
-        // The branch popped its operands — this is the height on BOTH merge paths (the `f` branch and
-        // the fall-through). The 0/1 booleans below each leave exactly one value, so the tracker must be
-        // reset to this height at `bind(f)`; otherwise the linear counter carries the fall-through's
-        // `push 1` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but it makes
-        // `stack_height()` over-report, which the branchy-inline baseline check relies on).
-        let merged = code.stack_height().max(0) as u16;
-        let end = code.new_label();
-        code.push_int(1, self.cw);
-        code.goto(end);
-        self.bind(f, code);
-        code.set_stack(merged);
-        code.push_int(0, self.cw);
-        self.bind(end, code);
     }
 
     /// Realize the already-selected Kotlin assertion operation. The runtime guard is emitted before
@@ -14530,112 +13946,6 @@ impl<'a> Emitter<'a> {
         code.set_stack(entry_stack);
     }
 
-    /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when
-    /// the comparison's result equals `jt` — no 0/1 boolean is materialized. Mirrors `emit_compare`'s
-    /// operand/3-way/null/ref handling but ends in one fused branch with the right polarity.
-    fn emit_compare_branch(
-        &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        target: Label,
-        jt: bool,
-        code: &mut CodeBuilder,
-    ) {
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, target, jt, code) {
-            return;
-        }
-
-        // The shared classifier leaves only non-null structural `==`/`!=` here. Unlike value position,
-        // a condition must consume `Intrinsics.areEqual` with one final branch; the comparison's
-        // requested polarity determines whether equality means taking or skipping the target.
-        debug_assert!(matches!(op, IrBinOp::Eq | IrBinOp::Ne));
-        self.emit_structural_equality(lhs, rhs, code);
-        if (op == IrBinOp::Eq) == jt {
-            code.ifne(target);
-        } else {
-            code.ifeq(target);
-        }
-    }
-
-    /// Emit every comparison except non-null structural reference equality as a branch.
-    ///
-    /// Returning `false` is a deliberately narrow contract: both operands are non-null references and
-    /// `op` is `==`/`!=`, so the caller must emit `Intrinsics.areEqual` in the form appropriate to its
-    /// consumer. All null, identity and numeric classification lives here so comparison semantics cannot
-    /// drift based on whether an identical IR node is consumed as a Boolean value or as control flow.
-    fn emit_non_structural_compare_branch(
-        &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        target: Label,
-        jt: bool,
-        code: &mut CodeBuilder,
-    ) -> bool {
-        use IrBinOp::*;
-        let lt = self.value_ty(lhs);
-        // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`
-        // (kotlinc's form), NOT `aconst_null; if_acmp*`. Computed up front so the referential-identity
-        // path below doesn't claim a null comparison (a `null` literal's type is a reference).
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        // Referential identity (`===`/`!==`) on two non-null references — or on a mixed reference/
-        // primitive pair, whose primitive side boxes first — → `if_acmpeq`/`if_acmpne`.
-        if matches!(op, RefEq | RefNe)
-            && identity_compares_refs(lt, self.value_ty(rhs))
-            && !lhs_null
-            && !rhs_null
-        {
-            self.emit_identity_operands(lhs, rhs, code);
-            if (op == RefEq) == jt {
-                code.if_acmpeq(target);
-            } else {
-                code.if_acmpne(target);
-            }
-            return true;
-        }
-        let op = match op {
-            RefEq => Eq,
-            RefNe => Ne,
-            o => o,
-        };
-        if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
-            let operand = if lhs_null { rhs } else { lhs };
-            // A physical primitive arises here only for identity (`x === null`/`x !== null`): kotlinc
-            // accepts that with an always-false/true warning, whereas structural `x == null` is
-            // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
-            // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
-            self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
-            if (op == Eq) == jt {
-                code.ifnull(target);
-            } else {
-                code.ifnonnull(target);
-            }
-            return true;
-        }
-        // Structural equality's value result has different optimal consumers: value position can use it
-        // directly, while control flow branches on it. Tell the caller to select that final operation;
-        // the semantic classification itself still occurs once, here.
-        if matches!(op, Eq | Ne) && !(lt.is_jvm_scalar() && self.value_ty(rhs).is_jvm_scalar()) {
-            return false;
-        }
-        self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
-        true
-    }
-
-    /// Put the null-safe structural equality result for two references on the operand stack.
-    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
-        let m = self.cw.methodref(
-            "kotlin/jvm/internal/Intrinsics",
-            "areEqual",
-            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-        );
-        code.invokestatic(m, 2, 1);
-    }
-
     /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
     ///
     /// `None` unless one side is the primitive three-way comparison and the other is the integer
@@ -14688,35 +13998,6 @@ impl<'a> Emitter<'a> {
             return None;
         };
         Some((*receiver, *argument, direct))
-    }
-
-    /// The loop label a branch body jumps to when it does nothing else.
-    ///
-    /// `None` unless the body IS a `break` or `continue` — one that also computed something would
-    /// have to emit that first, and the jump could then not be fused into the condition. Leaving a
-    /// `try` counts as computing something: the transfer runs every `finally` it leaves, so a fused
-    /// jump would skip them.
-    fn loop_jump_target(&self, body: u32) -> Option<Label> {
-        let mut node = self.ir.expr(body);
-        if let IrExpr::Block { stmts, value } = node {
-            let [only] = stmts.as_slice() else {
-                return None;
-            };
-            if value.is_some() {
-                return None;
-            }
-            node = self.ir.expr(*only);
-        }
-        let (label, brk) = match node {
-            IrExpr::Break { label } => (label, true),
-            IrExpr::Continue { label } => (label, false),
-            _ => return None,
-        };
-        let (cont, end, depth) = self.loop_transfer_target(label)?;
-        if self.return_finalizers.len() > depth {
-            return None;
-        }
-        Some(if brk { end } else { cont })
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
