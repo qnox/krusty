@@ -120,6 +120,14 @@ fn project_classifier_parents(
             panic!("a finalized direct interface must name a classifier or function type");
         }
     }
+    // The legacy view keeps function supertypes out of `interfaces`, so count only nominal ones.
+    let written_before = header
+        .interfaces_written_before_superclass()
+        .iter()
+        .filter(|parent| relative(parent.get()).obj_internal().is_some())
+        .count();
+    class.interfaces_before_superclass =
+        u32::try_from(written_before).expect("a classifier's interface count fits u32");
     class.callable_signature = callable_signatures.first().copied();
     class.callable_signatures = callable_signatures;
     let mut names = crate::types::TypeNameList::new();

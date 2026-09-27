@@ -32,6 +32,7 @@ mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
 pub(crate) use actualization_names::actualization_type_bindings;
@@ -1977,6 +1978,8 @@ pub struct ClassSig {
     pub callable_signatures: Vec<Ty>,
     /// Internal name of the base class (`: Base(..)`), if any.
     pub super_internal: Option<TypeName>,
+    /// How many of [`Self::interfaces`] the declaration lists before [`Self::super_internal`].
+    pub interfaces_before_superclass: u32,
     /// Applied type arguments on [`Self::super_internal`].
     pub super_type_args: Vec<Ty>,
     /// The parameter types of the base constructor that this class's `super(args)` targets, as the
@@ -2133,6 +2136,7 @@ impl ClassSig {
             callable_signature: None,
             callable_signatures: Vec::new(),
             super_internal: None,
+            interfaces_before_superclass: 0,
             super_type_args: Vec::new(),
             super_ctor_params: Vec::new(),
             ctor_defaults: Vec::new(),
@@ -4648,95 +4652,6 @@ impl SymbolTable {
         !function.is_inline()
             || function.has_callable_inline_extension_body()
             || self.inline_fn_facade_emittable(file, file_index, function)
-    }
-
-    pub(crate) fn applied_source_parents(
-        &self,
-        class: &ClassSig,
-        bindings: HashMap<String, Ty>,
-    ) -> Vec<(TypeName, Ty)> {
-        let mut parents = class
-            .interfaces
-            .iter_ids()
-            .enumerate()
-            .map(|(index, parent)| {
-                let arguments = class
-                    .interface_type_args
-                    .get(index)
-                    .map(|arguments| {
-                        arguments
-                            .iter()
-                            .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                (parent, Ty::obj_args_name(parent, &arguments))
-            })
-            .collect::<Vec<_>>();
-        if let Some(parent) = class.super_internal {
-            let arguments = class
-                .super_type_args
-                .iter()
-                .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
-                .collect::<Vec<_>>();
-            parents.push((parent, Ty::obj_args_name(parent, &arguments)));
-        }
-        parents
-    }
-
-    /// Applied source hierarchy, including its first external boundary.
-    pub(crate) fn applied_type_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
-        let Some(internal) = root.obj_internal() else {
-            return Vec::new();
-        };
-        let mut pending = vec![(internal, root, 0)];
-        let mut seen = std::collections::HashSet::new();
-        let mut hierarchy = Vec::new();
-        while let Some((owner, applied, depth)) = pending.pop() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            hierarchy.push((owner, applied, depth));
-            if let Some(class) = self.class_by_type_name(owner) {
-                let bindings = class.type_parameter_bindings(applied);
-                pending.extend(
-                    self.applied_source_parents(class, bindings)
-                        .into_iter()
-                        .map(|(parent, applied)| (parent, applied, depth + 1)),
-                );
-            }
-        }
-        hierarchy
-    }
-
-    pub(crate) fn applied_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
-        let Some(internal) = root.obj_internal() else {
-            return Vec::new();
-        };
-        let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
-        let mut seen = std::collections::HashSet::new();
-        let mut hierarchy = Vec::new();
-        while let Some((owner, applied, depth)) = pending.pop_front() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            hierarchy.push((owner, applied, depth));
-            let parents = if let Some(class) = self.class_by_type_name(owner) {
-                self.applied_source_parents(class, class.type_parameter_bindings(applied))
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect()
-            } else {
-                crate::symbol_resolver::direct_supertypes(&*self.libraries, applied)
-            };
-            let parents = crate::symbol_resolver::with_implicit_any(owner, parents);
-            pending.extend(
-                parents
-                    .into_iter()
-                    .filter_map(|parent| Some((parent.obj_internal()?, parent, depth + 1))),
-            );
-        }
-        hierarchy
     }
 
     pub fn source_constructor_matcher(&self) -> SourceConstructorMatcher<'_> {
@@ -39465,6 +39380,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
             for (internal, supertypes) in resolved_body_local_supertypes {
                 if let Some(class) = syms.class_by_type_name_mut(internal) {
+                    let mut interfaces_seen = 0;
                     for supertype in supertypes.iter().copied() {
                         let Some(super_internal) = supertype.kotlin_class_internal() else {
                             continue;
@@ -39474,12 +39390,14 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                             .iter()
                             .position(|interface| interface == super_internal)
                         {
+                            interfaces_seen += 1;
                             if class.interface_type_args.len() <= ordinal {
                                 class.interface_type_args.resize(ordinal + 1, Vec::new());
                             }
                             class.interface_type_args[ordinal] = supertype.type_args().to_vec();
                         } else {
                             class.super_internal = Some(super_internal);
+                            class.interfaces_before_superclass = interfaces_seen;
                             class.super_type_args = supertype.type_args().to_vec();
                         }
                     }

@@ -372,9 +372,7 @@ impl BackendModuleFacts {
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
             );
             let mut direct_supertypes = classifier
-                .superclass
-                .into_iter()
-                .chain(classifier.interfaces.iter().copied())
+                .declared_supertypes()
                 .filter_map(|ty| ty.get().non_null().obj_internal())
                 .collect::<Vec<_>>();
             if direct_supertypes.is_empty()

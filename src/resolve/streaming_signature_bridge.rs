@@ -15,6 +15,7 @@ use super::{ClassSig, Signature, SymbolTable};
 mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
+mod classifier_parents;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
@@ -3414,182 +3415,6 @@ fn compact_classifier_cycle_edges(
     rejected
 }
 
-/// Publish classifier inheritance from compact Pass-1 syntax. Every source-written edge is resolved
-/// from its compact semantic type. The transitional collector contributes only language-defined
-/// implicit parents, never a fallback spelling or type argument for a source edge.
-fn compact_classifier_parents(
-    headers: &crate::fir::StreamedHeaderModule,
-    semantics: &ProductionSignatureSemantics<'_>,
-    declaration: crate::fir::DeclarationId,
-    source: crate::fir::SourceFileId,
-    classifier: &ClassSig,
-    resolved_local: Option<&(Option<Ty>, Vec<Ty>)>,
-    compact_cycle_edges: &HashSet<(crate::fir::DeclarationId, TypeName)>,
-) -> Option<(Option<Ty>, Vec<Ty>, Vec<Ty>)> {
-    let header = headers.syntax.declaration(declaration)?;
-    let crate::fir::HeaderDeclarationKind::Classifier {
-        supertypes, base, ..
-    } = header.kind
-    else {
-        return None;
-    };
-    let scope = crate::fir::SignatureScope {
-        owner: declaration,
-        source,
-    };
-    let explicit_base = resolved_local
-        .and_then(|(base, _)| *base)
-        .or_else(|| base.and_then(|syntax| semantics.resolve_compact_header_type(scope, syntax)));
-    if base.is_some() && explicit_base.is_none() {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
-        );
-        return None;
-    }
-    let source_syntax = headers.syntax.type_operands(supertypes);
-    if resolved_local.is_some_and(|(_, parents)| parents.len() != source_syntax.len()) {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} compact/source supertype count mismatch compact={} source={}",
-            resolved_local.map_or(0, |(_, parents)| parents.len()),
-            source_syntax.len(),
-        );
-        return None;
-    }
-    let resolved_source_supertypes = source_syntax
-        .iter()
-        .enumerate()
-        .map(|(ordinal, syntax)| {
-            resolved_local
-                .and_then(|(_, parents)| parents.get(ordinal).copied())
-                .or_else(|| semantics.resolve_compact_header_type(scope, *syntax))
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let parent_is_interface = |parent: Ty| {
-        if matches!(parent.non_null(), Ty::Fun(_)) {
-            return Some(true);
-        }
-        let owner = parent.non_null().kotlin_class_internal()?;
-        semantics
-            .table
-            .class_by_type_name(owner)
-            .map(ClassSig::is_interface)
-            .or_else(|| {
-                semantics
-                    .table
-                    .libraries
-                    .classifier(owner)
-                    .map(|classifier| classifier.is_interface())
-            })
-    };
-    let source_superclass = if explicit_base.is_some() {
-        None
-    } else {
-        resolved_source_supertypes
-            .iter()
-            .position(|parent| parent_is_interface(*parent) == Some(false))
-    };
-    if resolved_source_supertypes
-        .iter()
-        .enumerate()
-        .any(|(ordinal, parent)| {
-            parent_is_interface(*parent).is_none()
-                || parent_is_interface(*parent) == Some(false) && Some(ordinal) != source_superclass
-        })
-    {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} has invalid source parents={resolved_source_supertypes:?} classifications={:?} selected_superclass={source_superclass:?}",
-            resolved_source_supertypes
-                .iter()
-                .map(|parent| parent_is_interface(*parent))
-                .collect::<Vec<_>>(),
-        );
-        return None;
-    }
-
-    // Signature collection has already validated the complete module hierarchy and removed only
-    // edges that participate in a source cycle. Compact type resolution above recovers the applied
-    // source shapes, but must not resurrect one of those rejected nominal edges merely because its
-    // syntax still exists in the header inventory.
-    let retained_parent = |parent: Ty| {
-        if matches!(parent.non_null(), Ty::Fun(_)) {
-            return true;
-        }
-        parent
-            .non_null()
-            .kotlin_class_internal()
-            .is_some_and(|owner| {
-                if resolved_local.is_some() {
-                    // A body-local alias is visible only while its bounded Pass-1 unit is live. The
-                    // compact graph has already expanded and resolved that edge; the transitional
-                    // collector can retain only the unresolvable alias spelling and therefore cannot
-                    // validate its identity. Reject semantic cycle edges using the completed compact
-                    // graph, otherwise make its resolved parent authoritative.
-                    return !compact_cycle_edges.contains(&(declaration, owner));
-                }
-                {
-                    classifier.super_internal == Some(owner)
-                        || classifier
-                            .interfaces
-                            .iter_ids()
-                            .any(|parent| parent == owner)
-                }
-            })
-    };
-    let superclass = explicit_base
-        .or_else(|| source_superclass.map(|ordinal| resolved_source_supertypes[ordinal]))
-        .filter(|parent| retained_parent(*parent))
-        .or_else(|| {
-            let owner = classifier.super_internal?;
-            let implicit = semantic_type_with_classifier_captures(
-                semantics.table,
-                Ty::obj_args_name(owner, &classifier.super_type_args),
-            );
-            (!implicit.mentions_error()).then_some(implicit)
-        });
-
-    let mut interfaces = resolved_source_supertypes
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, parent)| (Some(ordinal) != source_superclass).then_some(*parent))
-        .filter(|parent| retained_parent(*parent))
-        .collect::<Vec<_>>();
-    // Add validated implicit language parents from ClassSig. Source interfaces already carry their
-    // compact applied arguments above; compare by resolved identity rather than relying on an
-    // ordinal, because cycle removal can shrink the validated source-interface list.
-    for (ordinal, owner) in classifier.interfaces.iter_ids().enumerate() {
-        if interfaces
-            .iter()
-            .any(|parent| parent.non_null().kotlin_class_internal() == Some(owner))
-        {
-            continue;
-        }
-        let implicit = semantic_type_with_classifier_captures(
-            semantics.table,
-            Ty::obj_args_name(
-                owner,
-                classifier
-                    .interface_type_args
-                    .get(ordinal)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            ),
-        );
-        if implicit.mentions_error() {
-            crate::trace_compiler!(
-                "signature",
-                "classifier parent resolution declaration={declaration:?} implicit interface {owner} is unpublishable as {implicit:?}",
-            );
-            return None;
-        }
-        interfaces.push(implicit);
-    }
-    Some((superclass, interfaces, resolved_source_supertypes))
-}
-
 /// Reapply a compact header's star-projection syntax to a provisionally resolved legacy type.
 ///
 /// The legacy collector has no classifier-shape input while resolving a `TypeRef`, so it represents
@@ -5480,15 +5305,17 @@ pub(crate) fn finalized_streamed_signature_index(
         else {
             unreachable!("a classifier stub must own a classifier header")
         };
-        let Some((superclass, interfaces, source_supertypes)) = compact_classifier_parents(
-            headers,
-            &semantics,
-            stub.id,
-            stub.source,
-            classifier,
-            resolved_classifier_parents.get(&stub.id),
-            &compact_cycle_edges,
-        ) else {
+        let Some((superclass, interfaces, source_supertypes)) =
+            classifier_parents::compact_classifier_parents(
+                headers,
+                &semantics,
+                stub.id,
+                stub.source,
+                classifier,
+                resolved_classifier_parents.get(&stub.id),
+                &compact_cycle_edges,
+            )
+        else {
             // Preserve an undemanded body-local classifier for Pass 2; one demanded by a non-local
             // inferred signature has compact parents and must finalize here.
             if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
