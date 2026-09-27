@@ -1486,7 +1486,7 @@ fn build_class_metadata(
     // descriptor even though those parameters are not Kotlin-visible.
     let ctor_desc = format!(
         "({}{}{})V",
-        if c.enum_entries.is_empty() {
+        if !c.is_enum {
             ""
         } else {
             "Ljava/lang/String;I"
@@ -1510,7 +1510,7 @@ fn build_class_metadata(
     // synthetic marker ctor (`(…;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`) — the private
     // erased `<init>` is not callable cross-class. Both exactly as kotlinc records them.
     let (ctor_params, ctor_desc) = match ir.vc_ctor_declared_params(c.fq_name_id()) {
-        Some(declared) if c.enum_entries.is_empty() => {
+        Some(declared) if !c.is_enum => {
             let named_declared: Vec<Ty> = c
                 .ctor_args
                 .iter()
@@ -2213,7 +2213,7 @@ fn build_class_metadata(
                 Some(crate::types::Visibility::Protected) => SEALED_CTOR_FLAGS,
                 Some(crate::types::Visibility::Private) => OBJECT_CTOR_FLAGS,
                 _ if c.is_sealed => SEALED_CTOR_FLAGS,
-                _ if c.is_singleton() || !c.enum_entries.is_empty() => OBJECT_CTOR_FLAGS,
+                _ if c.is_singleton() || c.is_enum => OBJECT_CTOR_FLAGS,
                 _ => 0,
             },
             primary_ctor_jvm_signature: !c.is_annotation,
@@ -2263,6 +2263,7 @@ fn build_class_metadata(
             primary_ctor_annotations: &primary_ctor_annotations(c),
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::local_classifiers::enum_entry_bodies(ir),
+            is_enum: c.is_enum,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -2322,7 +2323,7 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
         || (!c.has_primary_ctor
             && c.secondary_ctors.is_empty()
             && !c.is_interface
-            && c.enum_entries.is_empty())
+            && !c.is_enum)
         || (c.fields.len() as u32) < c.ctor_param_count)
 }
 
@@ -2519,7 +2520,7 @@ fn attach_synth_debug_tables(
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
     // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
     // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
-    let is_enum = !c.enum_entries.is_empty();
+    let is_enum = c.is_enum;
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
     if is_enum {
@@ -3211,7 +3212,7 @@ fn new_classifier_writer(
 ) -> ClassWriter {
     let formatter = JvmSignatureFormatter::new(ir, env);
     let recorded = ir.class_signature_name(c.fq_name);
-    let signature = if !c.enum_entries.is_empty() {
+    let signature = if c.is_enum {
         jvm_enum_class_signature(&formatter, c, recorded)
     } else {
         recorded.and_then(|signature| jvm_class_signature(&formatter, signature))
@@ -4988,7 +4989,7 @@ fn class_enclosure(
                         .collect::<Vec<_>>(),
                 )
             };
-            if !declaration.enum_entries.is_empty() {
+            if declaration.is_enum {
                 parameters.splice(0..0, [Ty::String, Ty::Int]);
             }
             Some((
@@ -5092,7 +5093,7 @@ fn emit_class(
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
     assert_determined_member_signatures(ir, c);
-    if !c.enum_entries.is_empty() {
+    if c.is_enum {
         return emit_enum_class(ir, c, facade, env, opts);
     }
     if let Some(iface) = &c.annotation_impl_of {

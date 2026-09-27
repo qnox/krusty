@@ -1525,6 +1525,8 @@ pub struct IrClass {
     /// The checker-selected superclass constructor. Backends consume its declaration facts instead
     /// of comparing erased descriptors with the primary shape.
     pub super_ctor: IrConstructorTarget,
+    /// Whether this is an `enum class`, including one that declares no entries.
+    pub is_enum: bool,
     /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
     /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
@@ -1764,6 +1766,7 @@ impl IrClass {
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            is_enum: false,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
@@ -1876,6 +1879,7 @@ impl IrClass {
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            is_enum: flags.has(crate::fir::DeclarationFlags::ENUM),
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,

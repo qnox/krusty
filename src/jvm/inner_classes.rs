@@ -216,7 +216,7 @@ pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
     } else if class.is_interface {
         access |= INTERFACE | ABSTRACT;
-    } else if !class.enum_entries.is_empty() {
+    } else if class.is_enum {
         access |= FINAL | ENUM;
     } else if class.is_sealed || class.is_abstract {
         access |= ABSTRACT;

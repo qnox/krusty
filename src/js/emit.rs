@@ -1058,6 +1058,7 @@ mod tests {
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
             super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            is_enum: false,
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,

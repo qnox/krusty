@@ -87,7 +87,7 @@ pub(super) fn child_cache_element_plan(
         || ir
             .classes
             .iter()
-            .any(|class| class.fq_name_id() == classifier && !class.enum_entries.is_empty())
+            .any(|class| class.fq_name_id() == classifier && class.is_enum)
         || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some()
         || matches!(
             ctx.external_serializer(classifier),
@@ -316,7 +316,7 @@ pub(super) fn element_serializer_plan_in(
     if ir
         .classes
         .iter()
-        .any(|c| c.fq_name_id() == fq_name && !c.enum_entries.is_empty())
+        .any(|c| c.fq_name_id() == fq_name && c.is_enum)
         && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
         return Some(ElementSerializerPlan::Generated {

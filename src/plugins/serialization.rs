@@ -1370,7 +1370,7 @@ impl IrPlugin for SerializationPlugin {
             }
             // A `@Serializable enum`: no generated `$serializer` — `serializer()` lives on a nested
             // `Companion` and returns a runtime `EnumSerializer(name, E.values())` cached in a `Lazy`.
-            if !ir.classes[class_id as usize].enum_entries.is_empty() {
+            if ir.classes[class_id as usize].is_enum {
                 Self::add_enum_serializer_companion(ir, class_id, &class_fq);
                 continue;
             }
@@ -1964,7 +1964,7 @@ impl IrPlugin for SerializationPlugin {
             // `generate_declarations`).
             if custom_serializer_of(ctx, ir, class_id).is_some()
                 || ir.classes[class_id as usize].is_sealed
-                || !ir.classes[class_id as usize].enum_entries.is_empty()
+                || ir.classes[class_id as usize].is_enum
             {
                 continue;
             }

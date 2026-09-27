@@ -656,6 +656,8 @@ pub struct ClassTail<'a> {
     /// The local classifiers whose ids keep their `pkg/Outer.Inner` spelling (enum entry bodies),
     /// together with the classes nested in them.
     pub enum_entry_bodies: &'a std::collections::HashSet<TypeName>,
+    /// Whether the class is an `enum class`, whose implicit `Enum<E>` supertype metadata omits.
+    pub is_enum: bool,
 }
 
 static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeName>> =
@@ -694,6 +696,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_annotations: &[],
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
             enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
+            is_enum: false,
         }
     }
 }
@@ -803,7 +806,7 @@ pub fn build_class(
     // An enum lists its declared interfaces, then the implicit `Enum<E>`; a class without declared
     // supertypes lists `Any`.
     let mut supertype_msgs: Vec<Pb> = Vec::new();
-    if !enum_entries.is_empty() {
+    if tail.is_enum {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
             if matches!(supertype, Ty::Obj(classifier, _) if *classifier == crate::types::wk::kotlin_enum())
             {
