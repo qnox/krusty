@@ -14,6 +14,7 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+mod callable_body_returns;
 mod catch_clauses;
 mod local_classifier_provenance;
 mod lowering_temporaries;
@@ -2982,45 +2983,6 @@ fn default_expressions_are_lowered_but_not_inserted_into_body_roots() {
     assert!(lowered.roots.is_empty());
     assert_eq!(lowered.defaults.as_ref(), &[(1, 0)]);
     assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(12))));
-}
-
-#[test]
-fn implicit_non_unit_callable_result_is_a_terminal_return_statement() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(10));
-    body.set_result_type(resolved(Ty::Int));
-    body.set_implicit_return();
-    let value = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(12)),
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(value),
-    });
-    body.push_root(root);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let callable_body = super::finish_callable_body(
-        &mut ir,
-        lowered.roots.into_vec(),
-        lowered.result_type.unwrap(),
-        lowered.implicit_return,
-        false,
-        origin,
-    )
-    .unwrap();
-
-    let IrExpr::Block { stmts, value } = ir.expr(callable_body) else {
-        panic!("callable body must be a block")
-    };
-    assert!(value.is_none());
-    assert!(matches!(
-        stmts.as_slice(),
-        [returned] if matches!(ir.expr(*returned), IrExpr::Return(Some(_)))
-    ));
 }
 
 #[test]

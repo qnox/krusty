@@ -68,18 +68,14 @@ impl Emitter<'_> {
             None
         };
         // An operand that carried its OWN source line leaves that line in effect. The comparison
-        // belongs to the statement around it, so its instruction is marked back to the statement's
-        // line — the same "return to the statement's line" the `putfield` of a field store gets.
-        if self.statement_line.is_some()
-            && [lhs, rhs]
-                .iter()
-                .any(|operand| self.ir.expr_source_lines.contains_key(operand))
-        {
-            if let Some(line) = self.statement_line {
-                code.mark_line(line);
-            }
-        }
+        // marks its own line at the jump, after a wide operand's three-way `*cmp`
+        // (`mark_comparison_decision`); one without a line of its own belongs to the statement
+        // around it, so the instruction that compares returns to the statement's line.
+        let own_line = self.comparison_line.is_some_and(|line| line != 0);
         if !int_cat {
+            if !own_line {
+                self.return_to_statement_line(&[lhs, rhs], code);
+            }
             // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false
             // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.
             let nan_l = matches!(op, Gt | Ge);
@@ -102,6 +98,7 @@ impl Emitter<'_> {
                 _ => unreachable!("int_cat is false only for Long/Double/Float"),
             }
         }
+        self.mark_comparison_decision(&[lhs, rhs], code);
         match cmp0_int {
             Some(o) => cmp0_branch(o, jt, target, code),
             None if !int_cat => cmp0_branch(op, jt, target, code),

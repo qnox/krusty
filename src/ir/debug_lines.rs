@@ -14,6 +14,9 @@ pub(super) struct GeneratedLineMarks {
     /// expression-bodied callable instead maps its generated return instruction to the end of the
     /// body expression.
     implicit_return_ends: HashMap<ExprId, u32>,
+    /// Return a block body falls off its end into → the body's closing `}` line, which kotlinc's
+    /// `setExtraLineNumberForVoidReturningFunction` marks BEFORE the returned value is loaded.
+    fallthrough_returns: HashMap<ExprId, u32>,
     /// Line a generated call enters only where it dispatches: its operands carry no source
     /// position of their own, so nothing marks the line at its start (a callable-reference
     /// carrier's `invoke`, whose stored receiver is read ahead of the call's line).
@@ -34,6 +37,19 @@ impl IrFile {
             .copied()
     }
 
+    pub(crate) fn mark_fallthrough_return_line(&mut self, returned: ExprId, line: u32) {
+        self.generated_lines
+            .fallthrough_returns
+            .insert(returned, line);
+    }
+
+    pub(crate) fn fallthrough_return_line(&self, returned: ExprId) -> Option<u32> {
+        self.generated_lines
+            .fallthrough_returns
+            .get(&returned)
+            .copied()
+    }
+
     pub(crate) fn mark_dispatch_line(&mut self, call: ExprId, line: u32) {
         self.generated_lines.dispatches.insert(call, line);
     }
@@ -50,6 +66,9 @@ impl IrFile {
         }
         if let Some(&line) = marks.dispatches.get(&source) {
             marks.dispatches.insert(target, line);
+        }
+        if let Some(&line) = marks.fallthrough_returns.get(&source) {
+            marks.fallthrough_returns.insert(target, line);
         }
     }
 }

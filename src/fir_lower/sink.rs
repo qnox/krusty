@@ -1488,6 +1488,7 @@ impl<'a> CommonIrBodySink<'a> {
                 result,
                 lowered.implicit_return,
                 false,
+                0,
                 origin,
             )
             .map_err(FirFileLoweringFailure::Body)?

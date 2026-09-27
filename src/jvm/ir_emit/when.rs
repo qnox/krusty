@@ -238,7 +238,10 @@ impl Emitter<'_> {
     ) {
         let default = code.new_label();
         let case_labels: Vec<Label> = plan.cases.iter().map(|_| code.new_label()).collect();
-        self.emit_value(plan.subject, code);
+        // kotlinc's `SwitchGenerator` loads the `when`'s subject once, not a condition's read of
+        // it, so the load carries none of the conditions' source lines.
+        let subject = self.ir.expr(plan.subject).clone();
+        self.emit_value_node(plan.subject, &subject, code);
         let low = plan.cases.iter().map(|(key, _)| *key).min().expect("keys");
         let high = plan.cases.iter().map(|(key, _)| *key).max().expect("keys");
         let span = i64::from(high) - i64::from(low) + 1;
@@ -360,24 +363,6 @@ impl Emitter<'_> {
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
-                    // A branch whose body is nothing but `break`/`continue` needs no branch AROUND
-                    // it: the condition can jump straight to the loop label. Otherwise the shape is
-                    // `if !cond -> next; goto target; next:`, a branch over a jump where kotlinc
-                    // writes one inverted branch.
-                    if is_stmt {
-                        if let Some(jump) = self.loop_jump_target(*body) {
-                            let unconditional = self.emit_when_condition(*c, jump, true, code);
-                            code.set_stack(entry_height);
-                            // A constant-true guard emitted an unconditional jump. Emitting any
-                            // later arm after it would leave dead bytecode without a stack-map
-                            // frame, which the verifier rejects. A constant-false guard emits no
-                            // jump and must keep scanning the remaining arms.
-                            if unconditional {
-                                break;
-                            }
-                            continue;
-                        }
-                    }
                     // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,

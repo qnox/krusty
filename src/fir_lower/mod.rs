@@ -748,6 +748,7 @@ fn finish_callable_body(
     result: crate::types::Ty,
     implicit_return: bool,
     unit_as_value: bool,
+    close_line: u32,
     origin: crate::fir::OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let first_generated = ir.exprs.len();
@@ -767,6 +768,11 @@ fn finish_callable_body(
         } else {
             ir.add_expr(crate::ir::IrExpr::Return(None))
         };
+        // A lambda falls off its closing brace into this return, which kotlinc marks there
+        // before the `Unit` it returns.
+        if close_line != 0 {
+            ir.mark_fallthrough_return_line(return_unit, close_line);
+        }
         roots.push(return_unit);
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,

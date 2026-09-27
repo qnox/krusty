@@ -55,6 +55,14 @@ impl BodyFirChecker<'_> {
         body.set_result_type(self.resolved_type(function.span, info.sig.ret)?);
         if implicit_return {
             body.set_implicit_return();
+        } else {
+            body.set_close_line(
+                self.file
+                    .expr_end_lines
+                    .get(root.0 as usize)
+                    .copied()
+                    .unwrap_or(0),
+            );
         }
         body.set_debug_name(function.name.clone());
         if let Some(site) = self.file.local_function_lifting_sites.get(&statement) {

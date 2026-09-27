@@ -400,6 +400,8 @@ mod companion_supertype_e2e;
 mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
+#[path = "comparison_jump_line_e2e.rs"]
+mod comparison_jump_line_e2e;
 #[path = "comparison_under_operands_e2e.rs"]
 mod comparison_under_operands_e2e;
 #[path = "compound_index_assign_e2e.rs"]
@@ -676,6 +678,8 @@ mod extension_property_e2e;
 mod extension_receiver_property_smartcast_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "fallthrough_close_line_e2e.rs"]
+mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
 mod feature_box_e2e;
 #[path = "feature_coverage_a_e2e.rs"]
@@ -1058,6 +1062,8 @@ mod local_superclass_capture_e2e;
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
+#[path = "loop_transfer_line_e2e.rs"]
+mod loop_transfer_line_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
@@ -1685,6 +1691,8 @@ mod source_fallback_companion_props_e2e;
 mod source_map_ranges_e2e;
 #[path = "source_map_row_count_e2e.rs"]
 mod source_map_row_count_e2e;
+#[path = "source_when_stepping_nop_e2e.rs"]
+mod source_when_stepping_nop_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
 mod spliced_lambda_nonlocal_return_e2e;
 #[path = "spliced_lambda_try_e2e.rs"]

@@ -8457,6 +8457,50 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
 
+- **A source `when` has a stepping point on its own line** (kotlinc's `visitWhen`): a `when` the
+  source wrote with the `when` keyword (fir2ir's `IrStatementOrigin.WHEN`) that is laid out as a
+  chain of tests rather than a switch marks the `when`'s line and emits a `nop`. The
+  `RedundantNopsCleanup` step keeps that `nop` only when nothing else shares its line, so a
+  subject-less `when` whose first condition starts on the next line keeps it and a one-line `when`
+  loses it. An `if`, `&&`/`||`, a safe call and every lowering-built `when` get none. Common
+  lowering records the origin as a fact copied from checked FIR (`IrFile::whens.source_lines`, together
+  with the `when`'s own source line, which a subject block would otherwise hide); only the JVM
+  emitter turns it into a `nop`. Tests: `tests/source_when_stepping_nop_e2e.rs`,
+  `fir_lower::when_result_type_tests::only_a_source_when_carries_the_when_origin`.
+
+- **A comparison's deciding instruction carries the comparison's own line** (kotlinc's
+  `BooleanComparison`, which calls `markLineNumber(expression)` right before the jump, after the
+  `lcmp`/`dcmp*`/`fcmp*` of a wide comparison). Every comparison form marks it at the instruction
+  that decides it: the jump of a numeric comparison and of reference identity (`if_acmp*`), the
+  `ifnull`/`ifnonnull` of a null comparison (`BooleanNullCheck`), and the `Intrinsics.areEqual`
+  call of structural equality (`Equals`), in value position as in a condition. An operand on a later
+  line therefore never leaves its own line there, and a `when` branch condition on a line of its
+  own keeps that line through its jump rather than returning to the line of the statement holding
+  the `when`. A subject `when`'s comparison, and the subject read in it, are built at the
+  condition's offsets, so common lowering gives both the condition's source line (kotlinc's
+  `visitGetValue` marks a read's line); a `when` laid out as a `tableswitch`/`lookupswitch` loads
+  its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
+  no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
+
+- **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
+  `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
+  closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
+  transfer into one inverted jump itself: it lays down kotlinc's `if<!cond> next; nop; goto target;
+  next:`, `RedundantNopsCleanup` drops the `nop` when the jump shares its line, and `NegatedJumps`
+  then folds the guard into `if<cond> target` exactly when no line entry separates the two jumps.
+  A transfer written on a line of its own therefore keeps the guard as a branch around a `goto`
+  carrying that line. Test: `tests/loop_transfer_line_e2e.rs`.
+
+- **A local function or lambda that falls off its end marks its closing line**
+  (`setExtraLineNumberForVoidReturningFunction`), as a declared `Unit` function already did. The
+  checker records the closing `}` line of a block-bodied local function's body and of a lambda on
+  its FIR body (`FirBody::close_line`); lowering turns the former into the lifted function's
+  `fn_close_lines` entry and the latter into a fall-through mark on the `return` it appends
+  (`IrFile::fallthrough_return_line`), which the emitter writes BEFORE the returned `Unit` is
+  loaded. kotlinc's `nop` after that mark always shares its line with the load or the `return`
+  and is cleaned up, so it is not written. An expression-bodied local function ends in a return
+  of its own and gets no mark. Test: `tests/fallthrough_close_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
