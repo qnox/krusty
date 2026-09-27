@@ -773,7 +773,7 @@ fn a_throwing_lambda_ends_the_walk_that_called_it() {
 }
 
 #[test]
-fn an_exhausted_array_or_string_iterator_raises_no_such_element() {
+fn an_exhausted_iterator_raises_what_kotlin_raises_through_either_protocol() {
     run_driver("iterator_exhausted");
 }
 

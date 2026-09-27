@@ -40,6 +40,13 @@ __attribute__((weak)) kt_boolean kt_is_map(KRef value) {
 
 /* `kt_equals` and `kt_hash_code` come from `later_tiers.h`, which this header includes. */
 
+/* A boxed `UInt`, which a later tier boxes: its bits in the `Int` field, under its own descriptor. */
+__attribute__((weak)) KRef kt_box_uint(kt_int value) {
+    DriverValue *box = (DriverValue *)kt_gc_allocate(&kt_type_uint, sizeof(DriverValue));
+    box->as.int_value = value;
+    return (KRef)box;
+}
+
 /* Take the exception in flight off the slot and say whether it has the expected type. NULL, when
    nothing is in flight, has none. */
 static inline kt_boolean took(const KType *expected) {

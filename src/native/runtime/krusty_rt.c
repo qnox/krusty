@@ -2595,7 +2595,10 @@ kt_long kt_range_iterator_next(KRef iterator) {
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
     if (!self->has_next) {
-        KT_FAIL("krusty: no more elements in this range\n");
+        /* Kotlin's `IntProgressionIterator` and its kin throw `NoSuchElementException()`, which a
+           program may catch; the zero returned beside it is no element. */
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return 0;
     }
     kt_long value = self->next;
     /* Stopping at the LAST ELEMENT rather than by comparing against the bound is what keeps this

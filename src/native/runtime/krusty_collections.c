@@ -809,14 +809,36 @@ kt_boolean kt_walk_has_next(KRef iterator) {
     return walk->at < kt_length_of(walk->over);
 }
 
+/* `next()` on an exhausted array or string iterator, which raises and answers whether it did.
+
+   An array's is Kotlin/Native's `ArrayIterator` (and `IntArrayIterator` and kin):
+   `NoSuchElementException` whose message is the index asked for, `"1"` for the second `next()` of
+   a one-element array. A string's is Kotlin's `CharSequence.iterator()`, whose `next()` is
+   `get(index++)` with no check of its own, so it raises what reading the text past its end raises
+   — `s[s.length]`'s `IndexOutOfBoundsException` — and never `NoSuchElementException`. Text the
+   PROGRAM implements is asked its own `get` instead, by the caller. */
+static kt_boolean kt_walk_exhausted(KRef iterator) {
+    if (kt_walk_reads_program_text(iterator) || kt_walk_has_next(iterator)) {
+        return false;
+    }
+    const KWalk *walk = (const KWalk *)iterator;
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        (void)kt_string_get(walk->over, walk->at);
+        return true;
+    }
+    KRef index = kt_to_string(kt_box_int(walk->at));
+    kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, index));
+    return true;
+}
+
 /* The element as the 64 bits the narrow iterator protocol carries. A REFERENCE array's element is
    not a number and must never arrive here: an `Array<T>`'s iterator has the static type
    `Iterator<T>`, which routes to the general dispatch instead, so reaching this with one means the
    routing above went wrong rather than that a pointer should be returned as an integer. */
 kt_long kt_walk_next_long(KRef iterator) {
     KWalk *walk = (KWalk *)iterator;
-    if (!kt_walk_reads_program_text(iterator) && !kt_walk_has_next(iterator)) {
-        KT_FAIL("krusty: no more elements in this iterator\n");
+    if (kt_walk_exhausted(iterator)) {
+        return 0;
     }
     if (iterator->header.type == &kt_type_chars_iterator) {
         return kt_chars_next(walk);
@@ -1765,11 +1787,9 @@ KRef kt_iterator_next(KRef iterator) {
         return kt_list_iterator_next(iterator);
     }
     if (kt_walk_is(iterator)) {
-        /* Asked before the read, because neither read checks: an array's element past the end is
-           whatever follows the storage, and a string's raises the wrong exception. Kotlin's
-           iterators raise `NoSuchElementException`. */
-        if (!kt_walk_reads_program_text(iterator) && !kt_walk_has_next(iterator)) {
-            kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        /* Asked before the read, because the array read does not check: an element past the end
+           is whatever follows the storage. */
+        if (kt_walk_exhausted(iterator)) {
             return NULL;
         }
         KWalk *walk = (KWalk *)iterator;
@@ -1796,6 +1816,10 @@ KRef kt_iterator_next(KRef iterator) {
         return iterator->header.type->walk_next(iterator);
     }
     kt_long value = kt_range_iterator_next(iterator);
+    /* An exhausted range raised, and its zero is no element to box. */
+    if (kt_raised()) {
+        return NULL;
+    }
     if (iterator->header.type == &kt_type_long_progression_iterator) {
         return kt_box_long(value);
     }
