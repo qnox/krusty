@@ -1785,6 +1785,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **A lambda's implicit return lines.** kotlinc maps a `Unit` lambda's implicit return (the
+  `Unit.INSTANCE` it returns) to the literal's closing `}` line, as for a `Unit` function. A lambda
+  that returns a value marks nothing for the return: it stays on the value's own line, not the
+  closing `}` of the body block around it (`tests/lambda_implicit_return_lines_e2e.rs`).
 - **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
   established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
   that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
