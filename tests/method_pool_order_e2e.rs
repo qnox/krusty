@@ -29,6 +29,8 @@
 //! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
 //!   `toString`/`hashCode`/`equals`, whose bodies and local-variable tables intern where they are
 //!   emitted.
+//! - A constant a rewrite removed from one method's body interns where a later body first names
+//!   it: an always-true type check leaves no class entry ahead of the next method.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
 //!
@@ -314,5 +316,24 @@ fn a_data_class_declared_function_interns_before_its_synthesized_members() {
          \x20   fun merge(other: Cell): Cell = other\n\
          }\n",
         &["Cell"],
+    );
+}
+
+#[test]
+fn a_class_an_elided_type_check_named_interns_where_a_later_body_names_it() {
+    assert_identical(
+        "ElidedCheck",
+        r#"class Marker
+
+class Cell<T>(val value: T)
+
+fun isCell(cell: Cell<out Any?>): Boolean = cell is Cell<*>
+
+fun pick(first: Any): Any {
+    val marker = first as Marker
+    return Cell(marker)
+}
+"#,
+        &["ElidedCheckKt"],
     );
 }

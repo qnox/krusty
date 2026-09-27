@@ -4611,6 +4611,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lowered like any other, and the multi-property `hashCode` accumulator is a named local
   `result`, which its LocalVariableTable lists after the body's constants. Test:
   `tests/method_pool_order_e2e.rs::a_data_class_declared_function_interns_before_its_synthesized_members`.
+- **A constant only an optimized-away instruction named interns where later code names it.**
+  kotlinc's writer interns a body after its bytecode passes run, so a cast or type check a pass
+  removes (the `checkcast java/lang/String` after `values.get(0)` on an `Array<String>`, or an
+  always-true `is`) interns nothing there, and the class interns where the next unoptimized body
+  first names it, after what that body named before. The pool relayout moves such an entry to that point. Tests:
+  `src/jvm/classfile/pool_layout/tests.rs::a_constant_only_later_code_still_names_moves_to_that_code`
+  and `tests/method_pool_order_e2e.rs::a_class_an_elided_type_check_named_interns_where_a_later_body_names_it`.
 - **Inherited forwarders and bridges precede `<clinit>`.** kotlinc appends a class's
   default-method forwarders and then its bridges to the lowered declarations, and writes the
   static initializer last, so an object's forwarder and an enum's erased bridge come before

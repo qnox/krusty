@@ -71,6 +71,46 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 }
 
 #[test]
+fn a_constant_only_later_code_still_names_moves_to_that_code() {
+    // `fun f(s: String): Any = s as String` interned `java/lang/String` for a cast its rewrite
+    // removes; `g` names the class after casting to `B`, which is where ASM interns it.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let f = "(Ljava/lang/String;)Ljava/lang/Object;";
+    writer.reserve_method_pool("f", f, None, &[]);
+    add_static(&mut writer, "f", f, |code, writer| {
+        code.aload(0);
+        code.checkcast(writer.class_ref("java/lang/String"));
+        code.areturn();
+    });
+    let g = "(Ljava/lang/Object;)Ljava/lang/Object;";
+    writer.reserve_method_pool("g", g, None, &[]);
+    add_static(&mut writer, "g", g, |code, writer| {
+        code.aload(0);
+        code.checkcast(writer.class_ref("B"));
+        code.checkcast(writer.class_ref("java/lang/String"));
+        code.areturn();
+    });
+    assert_eq!(
+        pool(&writer.finish()),
+        [
+            "T",
+            "Class T",
+            "java/lang/Object",
+            "Class java/lang/Object",
+            "f",
+            "(Ljava/lang/String;)Ljava/lang/Object;",
+            "g",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            "B",
+            "Class B",
+            "java/lang/String",
+            "Class java/lang/String",
+            "Code",
+        ]
+    );
+}
+
+#[test]
 fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
     // `g`'s local was interned ahead of the constant its code loads; ASM interns an instruction's
     // operand before the local-variable table.
