@@ -898,6 +898,8 @@ mod inline_value_class_lambda_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
+#[path = "inner_class_declaration_order_e2e.rs"]
+mod inner_class_declaration_order_e2e;
 #[path = "inner_class_name_pool_order_e2e.rs"]
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
@@ -926,6 +928,8 @@ mod interface_static_member_refs_e2e;
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
 mod internal_classpath_access_e2e;
+#[path = "invariant_argument_wildcards_e2e.rs"]
+mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
 #[path = "invoke_operator_lambda_arg_e2e.rs"]
@@ -1050,6 +1054,8 @@ mod literal_escapes_coverage_e2e;
 mod lnt_parity_e2e;
 #[path = "local_capture_coverage_e2e.rs"]
 mod local_capture_coverage_e2e;
+#[path = "local_class_capture_constructors_e2e.rs"]
+mod local_class_capture_constructors_e2e;
 #[path = "local_class_e2e.rs"]
 mod local_class_e2e;
 #[path = "local_class_inherited_members_e2e.rs"]
@@ -1186,6 +1192,8 @@ mod mpp_requires_the_feature_e2e;
 mod nothing_type_argument_signature_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "suspend_under_try_e2e.rs"]
+mod suspend_under_try_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -1210,6 +1218,8 @@ mod value_class_private_member_access_e2e;
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
 mod value_class_secondary_constructor_return_e2e;
+#[path = "value_class_super_call_e2e.rs"]
+mod value_class_super_call_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
@@ -1683,6 +1693,8 @@ mod serializer_operand_cast_e2e;
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
 mod shadowed_method_tparam_e2e;
+#[path = "shared_cell_declaration_e2e.rs"]
+mod shared_cell_declaration_e2e;
 #[path = "short_circuit_condition_e2e.rs"]
 mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]

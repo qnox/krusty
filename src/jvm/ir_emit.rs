@@ -38,6 +38,7 @@ mod comparison_branches;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
+use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod coroutine_machine;
 mod data_class_value_classes;
 mod debug_lines;
@@ -79,6 +80,7 @@ mod property_reference_values;
 mod return_emission;
 mod safe_calls;
 mod scalar_coercion;
+mod shared_cell_declaration;
 mod signature_formatter;
 mod suspend_lambda_class;
 mod transformed_suspensions;
@@ -2379,8 +2381,8 @@ fn instance_field_jvm_name(
         .iter()
         .position(|candidate| std::ptr::eq(candidate, field))
         .expect("an instance field name must belong to its class");
-    if let Some(capture) = super::method_parameters::capture_field_name(class, field_index) {
-        return capture;
+    if let Some(capture) = super::capture_names::field_capture(class, field_index) {
+        return super::capture_names::capture_name(capture);
     }
     let owner = class.fq_name();
     let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
@@ -3250,11 +3252,11 @@ fn jvm_enum_class_signature(
 
     if let Some(generic) = recorded {
         for supertype in generic.supers.iter().skip(1) {
-            signature.push_str(&formatter.ty_at(supertype, Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(supertype, Wildcards::Supertype)?);
         }
     } else {
         for interface in class.interfaces.iter_ids() {
-            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Suppressed)?);
+            signature.push_str(&formatter.ty_at(&Ty::obj_name(interface), Wildcards::Supertype)?);
         }
     }
     Some(signature)
@@ -5473,14 +5475,11 @@ fn emit_class(
             // Debug metadata consumes the position emission actually reached. Reconstructing this
             // later from constructor parameters, constant-pool widths, or assertion policy makes a
             // semantic description masquerade as bytecode layout and can point inside an opcode.
-            primary_ctor_debug = Some((
-                ctor_desc.clone(),
-                u16::try_from(ctor.bytes.len()).expect("a JVM method body fits in u16"),
-            ));
+            let mut debug_start = ctor.bytes.len();
             let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
-            // Store only constructor fields explicitly marked as pre-super. A language-level inner
-            // class marks its enclosing-instance field because a superclass argument may read it; an
-            // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
+            // Store only constructor fields explicitly marked as pre-super: an inner class's
+            // enclosing instance and a local class's captured values, which a superclass argument
+            // may read. Keeping this as ordering metadata avoids interpreting a JVM
             // field name as source semantics. A `putfield` of the current class's own field on the
             // still-uninitialized `this` is legal per JVMS 4.10.2.4.
             for &(param_i, field_i) in &c.pre_super_param_fields {
@@ -5498,6 +5497,15 @@ fn emit_class(
                     e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(field.ty));
                 ctor.putfield(fref, slot_words(field.ty) as i32);
             }
+            // A local class's captured values are stored without a line; its first line is the
+            // delegation that follows them. An inner class's enclosing-instance store has one.
+            if c.is_local_class {
+                debug_start = ctor.bytes.len();
+            }
+            primary_ctor_debug = Some((
+                ctor_desc.clone(),
+                u16::try_from(debug_start).expect("a JVM method body fits in u16"),
+            ));
             for &statement in &c.super_arg_prelude {
                 e.emit(statement, &mut ctor);
             }
@@ -8647,10 +8655,10 @@ fn jvm_class_signature(
         // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
         // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic
         // return. A class header is not a method-parameter position: declaration-site variance is
-        // suppressed (`interface L<E> : List<E>` implements Java `List<E>`, not `List<? extends E>`).
+        // not written on its own arguments (`interface L<E> : List<E>` implements Java `List<E>`).
         // An explicit source projection remains encoded by `ty_at` itself.
         for sup in &g.supers {
-            s.push_str(&formatter.ty_at(sup, Wildcards::Suppressed)?);
+            s.push_str(&formatter.ty_at(sup, Wildcards::Supertype)?);
         }
     }
     Some(s).filter(|signature| signature.contains('<'))
@@ -9018,34 +9026,6 @@ fn full_default_masks(param_count: usize) -> Vec<i32> {
         .collect()
 }
 
-fn emit_constructor_default_arguments(
-    omitted: &[u32],
-    parameter_count: usize,
-    code: &mut CodeBuilder,
-    cw: &mut ClassWriter,
-) {
-    if omitted.is_empty() {
-        return;
-    }
-    let masks = constructor_default_masks(omitted, parameter_count);
-    for mask in masks {
-        code.push_int(mask, cw);
-    }
-    code.aconst_null();
-}
-
-fn constructor_default_masks(omitted: &[u32], parameter_count: usize) -> Vec<i32> {
-    if omitted.is_empty() {
-        return Vec::new();
-    }
-    let mut masks = vec![0; default_mask_count(parameter_count)];
-    for &parameter in omitted {
-        let parameter = parameter as usize;
-        masks[parameter / 32] |= default_mask_bit(parameter);
-    }
-    masks
-}
-
 /// A value class's (erased) underlying JVM type — its single field's type.
 fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
     vc.obj_internal()
@@ -9149,6 +9129,9 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    /// Captured-local declarations whose holder only inlined lambdas capture: see
+    /// `shared_cell_declaration`.
+    inlined_only_cells: HashSet<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -9251,6 +9234,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: HashMap::new(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
+            inlined_only_cells: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -10275,6 +10259,14 @@ impl<'a> Emitter<'a> {
                 let entered = reuse.or_else(|| {
                     (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
+                if let Some(cell) = init.and_then(|i| self.stored_shared_cell(e, i)) {
+                    let slot = entered
+                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
+                    self.unassigned_values.remove(&index);
+                    self.slots.insert(index, (slot, jt));
+                    self.emit_shared_cell_declaration(e, slot, cell, code);
+                    return;
+                }
                 let slot = if let Some(i) = init {
                     let source = self.emit_consumed_operand(i, code);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
@@ -10299,21 +10291,7 @@ impl<'a> Emitter<'a> {
                 // one (`lateinit var`) still has a lexical lifetime: its declaration emits no
                 // store, so its debug range opens here, and the later checked assignment only
                 // initializes the already-live slot.
-                if let Some(name) = self
-                    .record_locals
-                    .then(|| super::debug_local_names::name(self.ir, e))
-                    .flatten()
-                {
-                    if code.bytes.len() <= u16::MAX as usize {
-                        self.open_locals.push((
-                            self.block_depth,
-                            slot,
-                            code.bytes.len() as u16,
-                            name,
-                            local_variable_desc(jt),
-                        ));
-                    }
-                }
+                self.open_declared_local(e, slot, jt, code);
             }
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
@@ -10365,7 +10343,7 @@ impl<'a> Emitter<'a> {
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
         self.machine_after(suspension, code);
-        self.close_transformed_suspension(e, false, code);
+        self.close_declared_suspension(e, code);
     }
 
     /// Open a suspension this emission's machine owns, if `e` is one.
@@ -13306,34 +13284,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.emit_try(e, parts, false, code);
             }
-            IrExpr::RefNew { elem, init } => {
-                let (cls, fdesc) = ref_class(elem);
-                let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
-                // A branchy initializer can't run with `[holder, holder]` on the stack — spill it.
-                if self.emits_control_flow(*init) {
-                    let temps = self.spill_to_temps(&[*init], code);
-                    let ci = self.cw.class_ref(cls);
-                    code.new_obj(ci);
-                    code.dup();
-                    let m = self.cw.methodref(cls, "<init>", "()V");
-                    code.invokespecial(m, 0, 0);
-                    code.dup();
-                    for &(slot, t, _) in &temps {
-                        load(t, slot, code);
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    let ci = self.cw.class_ref(cls);
-                    code.new_obj(ci);
-                    code.dup();
-                    let m = self.cw.methodref(cls, "<init>", "()V");
-                    code.invokespecial(m, 0, 0);
-                    code.dup();
-                    self.emit_value(*init, code);
-                }
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                code.putfield(f, ew);
-            }
+            IrExpr::RefNew { elem, init } => self.emit_shared_cell(*elem, *init, code),
             IrExpr::RefGet { holder, elem } => {
                 self.emit_value(*holder, code);
                 let (cls, fdesc) = ref_class(elem);
@@ -13741,7 +13692,7 @@ impl<'a> Emitter<'a> {
             IrExpr::RefSet { holder, value, .. } => {
                 self.emits_control_flow(*holder) || self.emits_control_flow(*value)
             }
-            IrExpr::RefNew { init, .. } => self.emits_control_flow(*init),
+            IrExpr::RefNew { init, .. } => init.is_some_and(|init| self.emits_control_flow(init)),
             IrExpr::Throw { operand } => self.emits_control_flow(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.emits_control_flow(a)),
             IrExpr::NewArray { size, .. } => self.emits_control_flow(*size),

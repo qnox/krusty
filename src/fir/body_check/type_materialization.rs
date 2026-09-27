@@ -294,6 +294,7 @@ impl BodyFirChecker<'_> {
                 lexical_owner,
                 segments: provenance.segments.clone().into_boxed_slice(),
                 ordinal: provenance.ordinal,
+                parents: provenance.parents.clone().into_boxed_slice(),
             },
         );
     }

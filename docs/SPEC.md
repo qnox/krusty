@@ -4644,6 +4644,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after its metadata or when it is written; a single pass at write time dropped `A$B` and left `A`
   and `B` to intern after the attribute names. Test:
   `tests/inner_class_name_pool_order_e2e.rs::a_facade_interns_an_enclosing_row_its_nested_row_keeps`.
+- **`InnerClasses` rows sort by the declaration path kotlinc's IR gives each class.** kotlinc sorts
+  the table stably by `fqNameWhenAvailable`, and a class declared in executable code is named by
+  its owner, then every declaration its IR nests it in (functions, accessors, `<anonymous>` for a
+  lambda, but not local variables), then its own name or `<no name provided>`. A property
+  initializer or `init` block of a class runs in `<init>`; one of an object, of a top-level property
+  or of an enum's entry arguments runs in `<clinit>`, and a companion's runs in its outer class's
+  `<clinit>` unless that outer class is an interface or an annotation class. A suspend function's
+  continuation class is declared in the function it drives (`Task.run.<no name provided>`). So `Holder.<init>.<no name provided>` sorts ahead of `Holder.Alpha`, where sorting by
+  the internal name `Holder$second$1` put it after. Rows with an equal name keep the order their
+  classes enter the constant pool. The frontend records the enclosing declarations as typed
+  roles and source names in the naming provenance (`enclosing_declarations::EnclosingDeclaration`:
+  a function, an accessor, a lambda, instance or static initialization, an enum entry), and only
+  the JVM local-class naming spells them (`<init>`, `<clinit>`, `<get-x>`, `<anonymous>`) into the
+  sort key. Tests: `tests/inner_class_declaration_order_e2e.rs`,
+  `src/frontend/tests/streaming/local_class_provenance.rs::an_initializer_object_records_the_instance_or_static_initialization_it_runs_in`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
@@ -6072,6 +6087,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/class_member_order_e2e.rs::a_class_appends_private_member_bridges_after_its_members`,
   `tests/value_class_member_order_e2e.rs`, box
   `inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion*.kt`.
+- **A `super` call inside a value-class member runs on the box.** The member's static `-impl` holds
+  `this` as its carrier, and `invokespecial` needs an instance of the class itself, so kotlinc boxes
+  the carrier with `box-impl` before `super.hashCode()` or `super<IFoo>.foo()`. krusty boxed it as the
+  carrier's own wrapper (`Integer.valueOf`), which the verifier rejects. Every `invokespecial`
+  receiver of an unboxed value class now takes the `box-impl` box. Tests:
+  `tests/value_class_super_call_e2e.rs`, box `inlineClasses/anySuperCall{,Generic}.kt`,
+  `inlineClasses/interfaceMethodCalls/interfaceSuperCall{,Generic}.kt`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is

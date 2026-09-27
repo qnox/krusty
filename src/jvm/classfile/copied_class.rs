@@ -40,9 +40,9 @@ impl ClassWriter {
     /// What the pool relayout does with an entry nothing names: a copied class, whose table keeps
     /// the rows as they were visited, keeps what its visits interned.
     pub(super) fn unnamed_entries(&self) -> Unnamed {
-        match self.inner_class_table {
+        match &self.inner_class_table {
             InnerClassTable::Visited => Unnamed::Kept,
-            InnerClassTable::Referenced => Unnamed::Dropped,
+            InnerClassTable::Referenced(_) => Unnamed::Dropped,
         }
     }
 

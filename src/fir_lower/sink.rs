@@ -953,6 +953,7 @@ impl<'a> CommonIrBodySink<'a> {
                             lexical_owner,
                             segments: provenance.segments,
                             ordinal: provenance.ordinal,
+                            parents: provenance.parents,
                         },
                     )
                     .is_none(),
@@ -1028,6 +1029,7 @@ impl<'a> CommonIrBodySink<'a> {
                     is_vararg: false,
                     type_param: None,
                     check: None,
+                    capture: None,
                 },
             );
             class.ctor_param_count += 1;

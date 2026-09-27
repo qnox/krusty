@@ -133,3 +133,14 @@ pub struct IrJvmValueClassSecondaryCtor {
     pub metadata_visibility: crate::types::Visibility,
     pub descriptor: String,
 }
+
+/// A constructor parameter that carries a value a local or anonymous class captures from its
+/// enclosing scope. kotlinc's LocalDeclarationsLowering adds it ahead of the declared parameters,
+/// stores it before the super call, and leaves it out of the class's metadata: it has no source
+/// value parameter, so [`IrCtorArg::name`](super::IrCtorArg::name) stays `None`. The captured
+/// declaration's source identity is kept here, and a backend formats it for its own ABI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrConstructorCapture {
+    /// The captured declaration's source name (`a` for a captured `val a`).
+    pub source_name: Box<str>,
+}

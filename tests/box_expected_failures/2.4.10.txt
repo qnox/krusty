@@ -43,8 +43,6 @@ controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
 controlflow/for_loops_array_nested.kt
-coroutines/controlFlow/breakFinally.kt
-coroutines/controlFlow_finally2.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
@@ -145,8 +143,6 @@ initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
-inlineClasses/anySuperCall.kt
-inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunction.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric2.kt
@@ -169,8 +165,6 @@ inlineClasses/inlineClassCollection/inlineListOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
-inlineClasses/interfaceMethodCalls/interfaceSuperCall.kt
-inlineClasses/interfaceMethodCalls/interfaceSuperCallGeneric.kt
 inlineClasses/jvmInline.kt
 inlineClasses/kt25771.kt
 inlineClasses/kt27096_enum.kt
@@ -196,7 +190,6 @@ innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-localClass/virtualCallFromConstructor.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt
 localClasses/localClassInParameterInitializer.kt
@@ -269,7 +262,6 @@ specialBuiltins/explicitSuperCall.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 statics/syntheticAccessor.kt
-super/kt4982.kt
 syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt

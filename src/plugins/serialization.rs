@@ -1514,6 +1514,7 @@ impl IrPlugin for SerializationPlugin {
                     is_vararg: false,
                     type_param: None,
                     check: None,
+                    capture: None,
                 })
                 .collect();
             // kotlinc's `$serializer` member order is `<init>`, `serialize`, `deserialize`,
