@@ -8349,6 +8349,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
 
+- **A source `when` has a stepping point on its own line** (kotlinc's `visitWhen`): a `when` the
+  source wrote with the `when` keyword (fir2ir's `IrStatementOrigin.WHEN`) that is laid out as a
+  chain of tests rather than a switch marks the `when`'s line and emits a `nop`. The
+  `RedundantNopsCleanup` step keeps that `nop` only when nothing else shares its line, so a
+  subject-less `when` whose first condition starts on the next line keeps it and a one-line `when`
+  loses it. An `if`, `&&`/`||`, a safe call and every lowering-built `when` get none. Common
+  lowering records the origin as a fact copied from checked FIR (`IrFile::source_whens`, together
+  with the `when`'s own source line, which a subject block would otherwise hide); only the JVM
+  emitter turns it into a `nop`. Tests: `tests/source_when_stepping_nop_e2e.rs`,
+  `fir_lower::when_result_type_tests::only_a_source_when_carries_the_when_origin`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's

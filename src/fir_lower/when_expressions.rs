@@ -87,7 +87,9 @@ impl BodyLowering<'_> {
         let when = self.ir.add_expr(IrExpr::When {
             branches: lowered_branches,
         });
-        if line != 0 {
+        // fir2ir gives a `when` without branches no `IrWhen` at all, only the block holding its
+        // subject, so it has no `when` line of its own.
+        if line != 0 && !branches.is_empty() {
             self.ir.whens.source_lines.insert(when, line);
         }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());

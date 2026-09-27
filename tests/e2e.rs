@@ -1677,6 +1677,8 @@ mod source_fallback_companion_props_e2e;
 mod source_map_ranges_e2e;
 #[path = "source_map_row_count_e2e.rs"]
 mod source_map_row_count_e2e;
+#[path = "source_when_stepping_nop_e2e.rs"]
+mod source_when_stepping_nop_e2e;
 #[path = "spliced_lambda_nonlocal_return_e2e.rs"]
 mod spliced_lambda_nonlocal_return_e2e;
 #[path = "spliced_lambda_try_e2e.rs"]

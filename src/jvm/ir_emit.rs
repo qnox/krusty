@@ -10612,7 +10612,7 @@ impl<'a> Emitter<'a> {
             match self.inlined_literal_positions(
                 call_expression,
                 leading_non_argument_operands,
-                &args,
+                args,
             ) {
                 Ok(positions) if positions.is_empty() => {
                     return self.try_inline_classpath_body(&inline_call, code).is_some();
