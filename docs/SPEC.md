@@ -8962,10 +8962,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the JVM runs it. The program is the one home of the Kotlin being compared with; the driver keeps
   its own checks of what Kotlin has no counterpart for (which exception is pending, the exact calls
   into the program, the message a failure ends with). An answer the JVM cannot give within the
-  harness's limit, or one where the native runtime deliberately follows Kotlin/Native, stays pinned
-  in the driver and says why. From the range tier on, every driver that cites kotlinc runs this way.
-  Tests: `tests/native_runtime_e2e.rs` (`a_transcript_differs_at_its_first_differing_line`, and every
-  driver registered with `run_driver_against_kotlin`).
+  harness's limit stays pinned in the driver, with kotlinc's answer recorded in the program. From
+  the range tier on, every driver that cites kotlinc runs this way.
+  Tests: `tests/native_runtime_e2e.rs` (`a_transcript_differs_only_where_a_divergence_declares_it`,
+  and every driver registered with `run_driver_against_kotlin` or `run_driver_against_kotlin_with`).
+- **The native runtime behaves as Kotlin/Native and speaks as the JVM where that is cheap.** Where
+  the two platforms differ, the native runtime's behaviour is Kotlin/Native's: which exception type
+  is thrown, a class's identity and its qualified and simple names, what an `is` answers, iteration
+  order, a collection's implementation semantics, and the order of the `equals`/`hashCode` calls it
+  makes into the program. Its messages and diagnostics -- an exception's message text, the report of
+  an uncaught exception -- are the JVM's wherever reproducing them is cheap, and Kotlin/Native's
+  where the JVM's is not meaningful or not cheap (a `NullPointerException` message describing a Java
+  call). Every observable divergence from the JVM is declared in the test that observes it
+  (`Divergence` in `tests/native_runtime_e2e.rs`), with its rule and the Kotlin/Native source it
+  follows, and the harness checks both sides of it on every run.
+  Tests: `tests/native_runtime_e2e.rs` (every `run_driver_against_kotlin_with` declaration).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
   flag for which it is, because the two classes differ observably and the step cannot tell them

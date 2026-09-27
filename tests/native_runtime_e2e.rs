@@ -14,7 +14,9 @@
 //!
 //! A driver whose expected answers are Kotlin's prints them as a transcript instead of comparing
 //! them with values copied into C, and the harness compares that transcript with the one the Kotlin
-//! program beside it (`<driver>.kt`) answers under the reference kotlinc (`run_driver_against_kotlin`).
+//! program beside it (`<driver>.kt`) answers under the reference kotlinc
+//! (`run_driver_against_kotlin`). Where the native runtime answers differently from the JVM on
+//! purpose, the test declares the line (`run_driver_against_kotlin_with`, `Divergence`).
 //!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
@@ -172,6 +174,64 @@ fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
 /// every answer the driver prints is Kotlin's by execution, not a value copied into C. The driver's
 /// own checks of what Kotlin has no counterpart for still end it on failure.
 fn run_driver_against_kotlin(driver: &str) {
+    run_driver_against_kotlin_with(driver, &[]);
+}
+
+/// Which of the native runtime's rules a line the JVM answers differently follows. The runtime
+/// BEHAVES as Kotlin/Native does -- which exception type is thrown, a class's identity and names,
+/// what an `is` answers, iteration order, a collection's semantics, the order of the calls it makes
+/// into the program -- and SAYS what the JVM says -- an exception's message, a diagnostic's wording
+/// -- wherever that is cheap. A JVM message is therefore no divergence; these two are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    /// The runtime behaves as Kotlin/Native does, and the JVM behaves otherwise.
+    NativeBehaviour,
+    /// The runtime keeps Kotlin/Native's message, because the JVM's is not cheap to reproduce.
+    NativeMessage,
+}
+
+/// A line of a driver's transcript on which the native runtime answers differently from the JVM,
+/// by one of the runtime's rules: kotlinc's program must answer exactly `jvm` there, and the driver
+/// exactly `native`. Each declaration cites, beside it, where the Kotlin/Native answer comes from,
+/// since no Kotlin/Native compiler runs here.
+#[derive(Clone, Copy, Debug)]
+struct Divergence {
+    rule: Rule,
+    jvm: &'static str,
+    native: &'static str,
+}
+
+impl Divergence {
+    const fn native_behaviour(jvm: &'static str, native: &'static str) -> Self {
+        Divergence {
+            rule: Rule::NativeBehaviour,
+            jvm,
+            native,
+        }
+    }
+
+    const fn native_message(jvm: &'static str, native: &'static str) -> Self {
+        Divergence {
+            rule: Rule::NativeMessage,
+            jvm,
+            native,
+        }
+    }
+}
+
+/// `run_driver_against_kotlin`, for a driver some of whose lines the native runtime answers
+/// differently from the JVM on purpose. Each such line is declared: kotlinc's program must answer
+/// exactly the declared JVM line and the driver exactly the declared native line, at the same place
+/// in the two transcripts, so the oracle still checks the JVM's side and the driver's side is
+/// pinned. Every other line must be identical; an undeclared difference fails, and so does a
+/// declared one that no longer occurs, so a declaration cannot outlive the difference it explains.
+fn run_driver_against_kotlin_with(driver: &str, divergences: &[Divergence]) {
+    for divergence in divergences {
+        assert!(
+            divergence.jvm != divergence.native && !divergence.jvm.contains('\n'),
+            "{driver}: a divergence must be one line that differs: {divergence:?}"
+        );
+    }
     let Some(native) = run_payload_driver(driver) else {
         return;
     };
@@ -181,11 +241,11 @@ fn run_driver_against_kotlin(driver: &str) {
     let kotlin = common::kotlinc_box_result(&source);
     assert!(
         !kotlin.starts_with("ERROR:") && kotlin.ends_with('\n'),
-        "{driver}: the Kotlin program must run and answer a transcript of whole lines, got {kotlin:?}"
+        "{driver}: the Kotlin program must run and answer whole lines, got {kotlin:?}"
     );
     let native = String::from_utf8(native)
         .unwrap_or_else(|error| panic!("{driver}: the native transcript is not UTF-8: {error}"));
-    if let Some(difference) = transcript_difference(&kotlin, &native) {
+    if let Some(difference) = transcript_difference(&kotlin, &native, divergences) {
         panic!(
             "{driver}: the native transcript differs from Kotlin's: {difference}\n\
              Kotlin:\n{kotlin}native:\n{native}"
@@ -193,16 +253,31 @@ fn run_driver_against_kotlin(driver: &str) {
     }
 }
 
-/// Where the native transcript first departs from Kotlin's, or `None` when they are identical.
-fn transcript_difference(kotlin: &str, native: &str) -> Option<String> {
-    if kotlin == native {
-        return None;
-    }
+/// Where the native transcript departs from Kotlin's other than as `divergences` declare, or a
+/// declared divergence that occurs on no line; `None` when the two agree line for line.
+fn transcript_difference(kotlin: &str, native: &str, divergences: &[Divergence]) -> Option<String> {
     let mut kotlin_lines = kotlin.split_inclusive('\n');
     let mut native_lines = native.split_inclusive('\n');
+    let mut occurs = vec![false; divergences.len()];
     for line in 1.. {
         match (kotlin_lines.next(), native_lines.next()) {
+            (None, None) => break,
             (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) => {
+                let declared = divergences.iter().position(|divergence| {
+                    expected.strip_suffix('\n') == Some(divergence.jvm)
+                        && actual.strip_suffix('\n') == Some(divergence.native)
+                });
+                match declared {
+                    Some(at) => occurs[at] = true,
+                    None => {
+                        return Some(format!(
+                            "line {line}: Kotlin {expected:?}, native {actual:?}, and no \
+                             divergence declares it"
+                        ))
+                    }
+                }
+            }
             (expected, actual) => {
                 return Some(format!(
                     "line {line}: Kotlin {:?}, native {:?}",
@@ -212,24 +287,43 @@ fn transcript_difference(kotlin: &str, native: &str) -> Option<String> {
             }
         }
     }
-    unreachable!("two different transcripts differ at some line")
+    let stale = &divergences[occurs.iter().position(|occurs| !occurs)?];
+    Some(format!(
+        "the declared {:?} divergence, Kotlin {:?} and native {:?}, occurs on no line",
+        stale.rule, stale.jvm, stale.native
+    ))
 }
 
 #[test]
-fn a_transcript_differs_at_its_first_differing_line() {
-    assert_eq!(transcript_difference("a\nb\n", "a\nb\n"), None);
+fn a_transcript_differs_only_where_a_divergence_declares_it() {
+    assert_eq!(transcript_difference("a\nb\n", "a\nb\n", &[]), None);
     assert_eq!(
-        transcript_difference("a\nb\n", "a\nc\n").as_deref(),
-        Some("line 2: Kotlin \"b\\n\", native \"c\\n\"")
+        transcript_difference("a\nb\n", "a\nc\n", &[]).as_deref(),
+        Some("line 2: Kotlin \"b\\n\", native \"c\\n\", and no divergence declares it")
     );
     assert_eq!(
-        transcript_difference("a\n", "a\nb\n").as_deref(),
+        transcript_difference("a\n", "a\nb\n", &[]).as_deref(),
         Some("line 2: Kotlin \"<end>\", native \"b\\n\"")
     );
     assert_eq!(
-        transcript_difference("a\n", "a").as_deref(),
-        Some("line 1: Kotlin \"a\\n\", native \"a\"")
+        transcript_difference("a\n", "a", &[]).as_deref(),
+        Some("line 1: Kotlin \"a\\n\", native \"a\", and no divergence declares it")
     );
+    let declared = [Divergence::native_behaviour("b", "c")];
+    assert_eq!(transcript_difference("a\nb\n", "a\nc\n", &declared), None);
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nd\n", &declared).as_deref(),
+        Some("line 2: Kotlin \"b\\n\", native \"d\\n\", and no divergence declares it")
+    );
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nb\n", &declared).as_deref(),
+        Some(concat!(
+            "the declared NativeBehaviour divergence, Kotlin \"b\" and native \"c\", ",
+            "occurs on no line"
+        ))
+    );
+    let message = [Divergence::native_message("x: 1", "x: one")];
+    assert_eq!(transcript_difference("x: 1\n", "x: one\n", &message), None);
 }
 
 /// Run `driver`, which must end the way the runtime ends a program it cannot continue
