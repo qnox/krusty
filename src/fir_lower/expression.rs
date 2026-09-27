@@ -747,6 +747,34 @@ impl BodyLowering<'_> {
                 nullable,
                 primitive,
                 primitive_ty,
+                nullable_first,
+            } if super::floating_equality::is_floating(primitive_ty.get()) => {
+                let (lhs, rhs) = if *nullable_first {
+                    (*nullable, *primitive)
+                } else {
+                    (*primitive, *nullable)
+                };
+                self.floating_equality(expression_id, *operation, lhs, rhs, primitive_ty.get())?
+            }
+            FirExprKind::NullableNumericComparison {
+                operation,
+                lhs,
+                rhs,
+                lhs_primitive,
+                rhs_primitive,
+                comparison,
+            } if super::floating_equality::is_floating(comparison.get())
+                && lhs_primitive.get() == comparison.get()
+                && rhs_primitive.get() == comparison.get() =>
+            {
+                self.floating_equality(expression_id, *operation, *lhs, *rhs, comparison.get())?
+            }
+            FirExprKind::NullablePrimitiveComparison {
+                operation,
+                nullable,
+                primitive,
+                primitive_ty,
+                nullable_first: _,
             } => {
                 let nullable_value = self.expression(*nullable)?;
                 let temporary = self.allocate_temporary();

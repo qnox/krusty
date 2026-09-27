@@ -9114,6 +9114,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Checked classifier declarations: which kind of classifier an operand's type names.
+    classifiers: &'a dyn BackendClassifierSource,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -9242,6 +9244,7 @@ impl<'a> Emitter<'a> {
             default_call_operands: env.default_call_operands,
             unit_result_tail_forwards: env.unit_result_tail_forwards,
             static_owner,
+            classifiers: env.signature_symbols,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -11967,20 +11970,7 @@ impl<'a> Emitter<'a> {
                         self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::NullableAnyToString => {
-                        let receiver = dispatch_receiver.unwrap();
-                        let ty = self.value_ty(receiver);
-                        self.emit_value(receiver, code);
-                        let descriptor = match ty {
-                            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
-                            Ty::Long => "(J)Ljava/lang/String;",
-                            Ty::Boolean => "(Z)Ljava/lang/String;",
-                            Ty::Char => "(C)Ljava/lang/String;",
-                            Ty::Double => "(D)Ljava/lang/String;",
-                            Ty::Float => "(F)Ljava/lang/String;",
-                            _ => "(Ljava/lang/Object;)Ljava/lang/String;",
-                        };
-                        let method = self.cw.methodref("java/lang/String", "valueOf", descriptor);
-                        code.invokestatic(method, slot_words(ty) as i32, 1);
+                        self.emit_string_conversion(e, dispatch_receiver.unwrap(), code)
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
                         // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows
@@ -12101,40 +12091,10 @@ impl<'a> Emitter<'a> {
                         code.invokestatic(method, 2, 1);
                     }
                     crate::ir::IrIntrinsic::DataClassFieldHash { ty } => {
-                        let value = args[0];
-                        if self.emit_data_class_value_hash(*ty, value, code) {
-                            return;
-                        }
-                        if ty.is_array() {
-                            self.emit_value(value, code);
-                            let descriptor = format!("({})I", type_descriptor(*ty));
-                            let method =
-                                self.cw
-                                    .methodref("java/util/Arrays", "hashCode", &descriptor);
-                            code.invokestatic(method, 1, 1);
-                        } else if ty.non_null().is_jvm_scalar() && !ty.is_nullable() {
-                            let scalar = ty.non_null();
-                            self.emit_value(value, code);
-                            let (owner, descriptor) = match scalar {
-                                Ty::Int => ("java/lang/Integer", "(I)I"),
-                                Ty::Short => ("java/lang/Short", "(S)I"),
-                                Ty::Byte => ("java/lang/Byte", "(B)I"),
-                                Ty::Char => ("java/lang/Character", "(C)I"),
-                                Ty::Boolean => ("java/lang/Boolean", "(Z)I"),
-                                Ty::Long => ("java/lang/Long", "(J)I"),
-                                Ty::Double => ("java/lang/Double", "(D)I"),
-                                Ty::Float => ("java/lang/Float", "(F)I"),
-                                _ => unreachable!("scalar data hash"),
-                            };
-                            let method = self.cw.methodref(owner, "hashCode", descriptor);
-                            code.invokestatic(method, slot_words(scalar) as i32, 1);
-                        } else {
-                            self.emit_value(value, code);
-                            let owner = data_class_hashcode_owner(self.ir, self.bodies, *ty)
-                                .expect("checked reference data-class field has a JVM hash owner");
-                            let method = self.cw.methodref(&owner, "hashCode", "()I");
-                            code.invokevirtual(method, 0, 1);
-                        }
+                        self.emit_data_class_field_hash(*ty, args[0], code)
+                    }
+                    crate::ir::IrIntrinsic::Ieee754Equals { operand } => {
+                        self.emit_nullable_ieee754_equals(e, *operand, args, code)
                     }
                     crate::ir::IrIntrinsic::DataClassArrayToString { ty } => {
                         self.emit_value(args[0], code);

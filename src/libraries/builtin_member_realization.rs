@@ -366,6 +366,21 @@ pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<T
     }
 }
 
+/// The `next()` a `kotlin.collections` primitive iterator declares (`IntIterator.next(): Int`),
+/// which a target may realize through the iterator's unboxed element operation.
+pub(crate) fn primitive_iterator_next(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<MemberRealization> {
+    (facts.name == "next"
+        && facts.is_operator
+        && !facts.is_property
+        && facts.params.is_empty()
+        && crate::types::wk::primitive_iterator_element(facts.owner) == Some(facts.ret))
+    .then_some(MemberRealization::Intrinsic(
+        CompilerIntrinsic::PrimitiveIteratorNext,
+    ))
+}
+
 /// Attach a compiler realization only to an exact normalized builtin declaration.
 pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
     if facts.is_property {
@@ -432,6 +447,20 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
             .contains(&crate::types::wk::intrinsic_const_evaluation())
     {
         return MemberRealization::Intrinsic(CompilerIntrinsic::StringGet);
+    }
+
+    // kotlinc's `FlattenStringConcatenationLowering` turns `toString()` on a primitive receiver into
+    // a one-argument string concatenation: the value's string conversion, as `Any?.toString()` is.
+    if facts.name == "toString"
+        && facts.params.is_empty()
+        && facts.ret == Ty::String
+        && receiver.is_some()
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::NullableAnyToString);
+    }
+
+    if let Some(realization) = primitive_iterator_next(&facts) {
+        return realization;
     }
 
     match range_construction(&facts) {

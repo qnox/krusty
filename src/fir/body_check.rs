@@ -2174,6 +2174,11 @@ impl BodyFirChecker<'_> {
                             "fir",
                             "checked equality expression={expression:?} lhs={lhs_ty:?} rhs={rhs_ty:?}"
                         );
+                        let operation = if *op == BinOp::Eq {
+                            FirBinaryOperation::Equal
+                        } else {
+                            FirBinaryOperation::NotEqual
+                        };
                         let nullable_numeric = lhs_ty
                             .nullable_primitive()
                             .zip(rhs_ty.nullable_primitive())
@@ -2192,11 +2197,7 @@ impl BodyFirChecker<'_> {
                                 )
                             };
                             FirExprKind::NullableNumericComparison {
-                                operation: if *op == BinOp::Eq {
-                                    FirBinaryOperation::Equal
-                                } else {
-                                    FirBinaryOperation::NotEqual
-                                },
+                                operation,
                                 lhs: self.expression(*lhs)?,
                                 rhs: self.expression(*rhs)?,
                                 lhs_primitive: resolved(self, *lhs, lhs_primitive)?,
@@ -2204,23 +2205,19 @@ impl BodyFirChecker<'_> {
                                 comparison: resolved(self, expression, comparison)?,
                             }
                         } else {
-                            let nullable_primitive = lhs_ty
+                            let operands = lhs_ty
                                 .nullable_primitive()
                                 .filter(|primitive| *primitive == rhs_ty)
-                                .map(|primitive| (*lhs, *rhs, primitive))
+                                .map(|primitive| (*lhs, *rhs, primitive, true))
                                 .or_else(|| {
                                     rhs_ty
                                         .nullable_primitive()
                                         .filter(|primitive| *primitive == lhs_ty)
-                                        .map(|primitive| (*rhs, *lhs, primitive))
+                                        .map(|primitive| (*rhs, *lhs, primitive, false))
                                 });
-                            if let Some((nullable, primitive, primitive_ty)) = nullable_primitive {
+                            if let Some((nullable, primitive, primitive_ty, first)) = operands {
                                 FirExprKind::NullablePrimitiveComparison {
-                                    operation: if *op == BinOp::Eq {
-                                        FirBinaryOperation::Equal
-                                    } else {
-                                        FirBinaryOperation::NotEqual
-                                    },
+                                    operation,
                                     nullable: self.expression(nullable)?,
                                     primitive: self.expression(primitive)?,
                                     primitive_ty: self.resolved_type(
@@ -2232,6 +2229,7 @@ impl BodyFirChecker<'_> {
                                         })?,
                                         primitive_ty,
                                     )?,
+                                    nullable_first: first,
                                 }
                             } else {
                                 self.builtin_binary_expression(expression, *op, *lhs, *rhs)?

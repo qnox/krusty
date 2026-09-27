@@ -48,6 +48,13 @@ pub enum IrIntrinsic {
     PrimitiveArrayNew {
         element: Ty,
     },
+    /// Kotlin's IEEE-754 `==` between two operands of the floating type `operand`, at least one of
+    /// them nullable: two nulls are equal, a null and a value are not, and two values compare as
+    /// IEEE primitives. The arguments are the operands in source order, each with its own
+    /// nullability; `!=` is the Boolean negation of this operation.
+    Ieee754Equals {
+        operand: Ty,
+    },
     /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
     /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
     DataClassFieldEquals {

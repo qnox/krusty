@@ -1170,6 +1170,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
             classifier: operand,
         }
         | IrIntrinsic::DataClassFieldEquals { ty: operand }
+        | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::DataClassFieldHash { ty: operand }
         | IrIntrinsic::DataClassArrayToString { ty: operand }
         | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),

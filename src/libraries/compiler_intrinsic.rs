@@ -81,4 +81,9 @@ pub enum CompilerIntrinsic {
     UnsignedCompare {
         carrier: crate::types::Ty,
     },
+    /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
+    /// A target may call the iterator's unboxed element operation instead of the boxed
+    /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the
+    /// declaration is ordinary virtual dispatch.
+    PrimitiveIteratorNext,
 }

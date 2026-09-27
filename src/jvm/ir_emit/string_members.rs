@@ -1,5 +1,6 @@
 //! JVM emission of the `String` members checked IR keeps as intrinsics: `get` and `length` are
-//! the `java/lang/String` methods `charAt` and `length`.
+//! the `java/lang/String` methods `charAt` and `length`; a value's string conversion is
+//! `String.valueOf`.
 
 use super::*;
 
@@ -28,5 +29,30 @@ impl Emitter<'_> {
             }
             _ => unreachable!("{operation:?} is not a String member"),
         }
+    }
+
+    /// A value's string conversion (`Any?.toString()`, or `toString()` on a primitive): kotlinc's
+    /// one-argument string concatenation, `String.valueOf` overloaded by the value's JVM type (a
+    /// `Byte`/`Short` widened to `int`). The call marks its own line, as kotlinc's `visitCall` does.
+    pub(super) fn emit_string_conversion(
+        &mut self,
+        expression: u32,
+        receiver: u32,
+        code: &mut CodeBuilder,
+    ) {
+        let ty = self.value_ty(receiver);
+        self.emit_value(receiver, code);
+        let descriptor = match ty {
+            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
+            Ty::Long => "(J)Ljava/lang/String;",
+            Ty::Boolean => "(Z)Ljava/lang/String;",
+            Ty::Char => "(C)Ljava/lang/String;",
+            Ty::Double => "(D)Ljava/lang/String;",
+            Ty::Float => "(F)Ljava/lang/String;",
+            _ => "(Ljava/lang/Object;)Ljava/lang/String;",
+        };
+        self.mark_dispatch_line(expression, code);
+        let method = self.cw.methodref("java/lang/String", "valueOf", descriptor);
+        code.invokestatic(method, slot_words(ty) as i32, 1);
     }
 }

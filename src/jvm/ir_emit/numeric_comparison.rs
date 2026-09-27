@@ -110,7 +110,7 @@ impl Emitter<'_> {
     ///
     /// A later operand with control flow is evaluated into temporaries first, as every operand
     /// sequence is; those temporaries hold the operands exactly as checked IR computes them.
-    fn emit_comparison_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+    pub(super) fn emit_comparison_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         if self.emits_control_flow(rhs) {
             self.emit_operands(&[lhs, rhs], code);
             return;
