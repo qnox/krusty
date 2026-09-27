@@ -6111,6 +6111,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver of an unboxed value class now takes the `box-impl` box. Tests:
   `tests/value_class_super_call_e2e.rs`, box `inlineClasses/anySuperCall{,Generic}.kt`,
   `inlineClasses/interfaceMethodCalls/interfaceSuperCall{,Generic}.kt`.
+- **A value class's `equals-impl`/`hashCode-impl` treat the sole property as a data class treats
+  one.** kotlinc builds both with the generator it uses for data classes. The hash is the declared
+  type's own (`String.hashCode()`, `Integer.hashCode(I)`, `Arrays.hashCode`, a nested value class's
+  `hashCode-impl`, `UInt.hashCode-impl`), behind `v == null ? 0 : …` whenever the type's upper
+  bound admits null (`String?`, `Int?`, `IntArray?`, an unbounded `T`; `T : Any` hashes directly).
+  krusty used `Objects.hashCode` for every reference that could be null, and unboxed an `Int?`
+  carrier with `intValue()`, which threw on null. Equality unboxes the other value into a
+  temporary and compares `arg0` with it through the declared type's equality (a nested value
+  class's `equals-impl0`, otherwise `Intrinsics.areEqual`). Temporary elimination keeps a
+  reference temporary on the stack (`aload_0; swap`), where krusty evaluated `arg0` first. Both use
+  the data-class property intrinsics, whose hash now also takes a nullable array by content. A
+  nested value class is addressed through its JVM carrier: `NestedBox(MaybeCountBox)` over
+  `MaybeCountBox(Count?)` calls `MaybeCountBox.hashCode-impl(Count)`, the boxed carrier the nested
+  class erases to, not the terminal primitive.
+  Tests: `tests/value_class_equals_hash_e2e.rs`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
