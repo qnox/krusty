@@ -73,7 +73,7 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 #[test]
 fn a_constant_only_later_code_still_names_moves_to_that_code() {
     // `fun f(s: String): Any = s as String` interned `java/lang/String` for a cast its rewrite
-    // removes; `g` names the class after casting to `B`, which is where ASM interns it.
+    // removes; `g` names the class between its casts to `B` and `C`, which is where ASM interns it.
     let mut writer = ClassWriter::new("T", "java/lang/Object");
     let f = "(Ljava/lang/String;)Ljava/lang/Object;";
     writer.reserve_method_pool("f", f, None, &[]);
@@ -88,6 +88,7 @@ fn a_constant_only_later_code_still_names_moves_to_that_code() {
         code.aload(0);
         code.checkcast(writer.class_ref("B"));
         code.checkcast(writer.class_ref("java/lang/String"));
+        code.checkcast(writer.class_ref("C"));
         code.areturn();
     });
     assert_eq!(
@@ -105,6 +106,8 @@ fn a_constant_only_later_code_still_names_moves_to_that_code() {
             "Class B",
             "java/lang/String",
             "Class java/lang/String",
+            "C",
+            "Class C",
             "Code",
         ]
     );

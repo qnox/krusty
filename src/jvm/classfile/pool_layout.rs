@@ -132,7 +132,7 @@ impl<'a> Layout<'a> {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class => None,
+                Holder::Class | Holder::AttributeName => None,
             };
             match rewritten {
                 Some((at, part)) => {
@@ -241,9 +241,10 @@ impl<'a> Layout<'a> {
 }
 
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
-/// code no longer names, first named by the code of a method emitted as it was, is placed before
-/// the first entry that code names for the first time after it, or right after the last entry
-/// that code names when none follows. An entry some other slot names first stays where it is.
+/// code no longer names, first named (in kotlinc's visit order) by the code of a method emitted
+/// as it was, is placed before the first entry that code names for the first time with or after
+/// it, or right after the last entry that method names when none follows. An entry some other
+/// slot names first stays where it is.
 fn orphan_anchors(
     read: &ClassSlots,
     by_method: &HashMap<usize, usize>,
@@ -256,7 +257,10 @@ fn orphan_anchors(
     }
     let mut seen = vec![false; count];
     let mut method = None;
+    // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
+    // The last entry the slots since the last code slot name: the next method's header.
+    let mut header_max = 0;
     let mut pending: Vec<usize> = Vec::new();
     let settle = |pending: &mut Vec<usize>, anchor: usize, anchored: &mut [Option<usize>]| {
         for orphan in pending.drain(..) {
@@ -265,33 +269,46 @@ fn orphan_anchors(
             }
         }
     };
-    for slot in &read.slots {
+    for slot in read.visit_order() {
         let code = match slot.holder {
             Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
             _ => None,
         };
-        if code.is_some() && code != method {
-            settle(&mut pending, named_max + 1, &mut anchored);
-            method = code;
-            named_max = 0;
-        }
         let reached = reached_from(read, slot.index);
-        if code.is_some() {
-            let fresh = reached
-                .iter()
-                .copied()
-                .filter(|&index| !seen[index] && !orphaned[index])
-                .min();
-            if let Some(fresh) = fresh {
-                settle(&mut pending, fresh, &mut anchored);
+        let Some(at) = code else {
+            for &index in &reached {
+                seen[index] = true;
+                if !orphaned[index] && slot.holder == Holder::Class {
+                    header_max = header_max.max(index);
+                }
             }
+            if matches!(slot.holder, Holder::Code(..)) {
+                header_max = 0;
+            }
+            continue;
+        };
+        if method != Some(at) {
+            settle(&mut pending, named_max + 1, &mut anchored);
+            method = Some(at);
+            named_max = header_max;
         }
-        for index in reached {
-            if orphaned[index] && !seen[index] && code.is_some() {
+        header_max = 0;
+        for &index in &reached {
+            if orphaned[index] && !seen[index] {
                 pending.push(index);
             }
+        }
+        let fresh = reached
+            .iter()
+            .copied()
+            .filter(|&index| !seen[index] && !orphaned[index])
+            .min();
+        if let Some(fresh) = fresh {
+            settle(&mut pending, fresh, &mut anchored);
+        }
+        for index in reached {
             seen[index] = true;
-            if code.is_some() && !orphaned[index] {
+            if !orphaned[index] {
                 named_max = named_max.max(index);
             }
         }

@@ -4615,9 +4615,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's writer interns a body after its bytecode passes run, so a cast or type check a pass
   removes (the `checkcast java/lang/String` after `values.get(0)` on an `Array<String>`, or an
   always-true `is`) interns nothing there, and the class interns where the next unoptimized body
-  first names it, after what that body named before. The pool relayout moves such an entry to that point. Tests:
-  `src/jvm/classfile/pool_layout/tests.rs::a_constant_only_later_code_still_names_moves_to_that_code`
-  and `tests/method_pool_order_e2e.rs::a_class_an_elided_type_check_named_interns_where_a_later_body_names_it`.
+  first names it, after what that body named before (its header included). Fields are written
+  after the methods, so a field's name does not claim the entry first; an attribute's name, which
+  the writer interns with the attribute, does not count as the header. The pool relayout moves
+  such an entry to that point. Tests:
+  `src/jvm/classfile/pool_layout/tests.rs::a_constant_only_later_code_still_names_moves_to_that_code`,
+  `tests/method_pool_order_e2e.rs::a_class_an_elided_type_check_named_interns_where_a_later_body_names_it`,
+  `::a_field_an_elided_read_named_interns_after_the_next_body_s_header` and
+  `::an_object_s_elided_instance_read_interns_its_name_at_the_static_initializer`.
 - **Inherited forwarders and bridges precede `<clinit>`.** kotlinc appends a class's
   default-method forwarders and then its bridges to the lowered declarations, and writes the
   static initializer last, so an object's forwarder and an enum's erased bridge come before
