@@ -3,6 +3,7 @@
 use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::libraries::EmptySymbolSource;
+use crate::program_entry::MainEntryParameters;
 use crate::source::SourceInput;
 
 use super::*;

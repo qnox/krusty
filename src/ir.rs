@@ -81,7 +81,7 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
-    IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter,
+    IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, MainEntryParameters,
 };
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{

@@ -2,7 +2,8 @@
 //! source unit's Kotlin `main` entry point, which is part of that classification.
 
 use super::super::*;
-use crate::fir::{DeclarationId, MainEntryParameters};
+use crate::fir::DeclarationId;
+use crate::program_entry::MainEntryParameters;
 use std::collections::BTreeMap;
 
 /// Classify top-level overload conflicts after the compact signature graph has finalized every

@@ -2,8 +2,7 @@
 //! realizes it. Which function is the entry is the frontend's decision (`fir::entry_point_tests`).
 
 use super::tests::lower_single_source;
-use crate::fir::MainEntryParameters;
-use crate::ir::{IrEntryPoint, IrFile};
+use crate::ir::{IrEntryPoint, IrFile, MainEntryParameters};
 
 /// The published entry point, and every package function in source order with its `FunId`.
 fn entry(source: &str) -> (Option<IrEntryPoint>, Vec<(String, u32)>) {

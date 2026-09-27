@@ -3,6 +3,7 @@
 //! metadata or chooses an ABI from them without reopening the frontend index.
 
 use super::FunId;
+pub use crate::program_entry::MainEntryParameters;
 use crate::types::{Ty, TypeName};
 
 /// The Kotlin `main` a file declares, as the frontend selected it (`fir::ResolvedEntryPoint`) and
@@ -11,7 +12,7 @@ use crate::types::{Ty, TypeName};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrEntryPoint {
     pub function: FunId,
-    pub parameters: crate::fir::MainEntryParameters,
+    pub parameters: MainEntryParameters,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

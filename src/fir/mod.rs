@@ -36,7 +36,7 @@ pub use body_check::*;
 pub use body_work::*;
 pub use capture::*;
 pub use delegate_calls::*;
-pub use entry_point::{MainEntryParameters, MainEntryShape, ResolvedEntryPoint};
+pub use entry_point::{MainEntryShape, ResolvedEntryPoint};
 pub use header::*;
 pub use inline_body::*;
 pub use local_callables::BodyLocalCallableDeclarationId;

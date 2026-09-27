@@ -7,16 +7,8 @@
 //! applies the rule again. The rule genuinely names a declaration (`main`), so it is stated here.
 
 use super::{CallableId, ResolvedModuleIndex, SourceFileId};
+use crate::program_entry::MainEntryParameters;
 use crate::types::Ty;
-
-/// The parameter form of a Kotlin `main` entry point.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MainEntryParameters {
-    /// `fun main()`.
-    None,
-    /// `fun main(args: Array<String>)`, including `vararg args: String`.
-    Arguments,
-}
 
 /// The finalized header facts the entry-point rule reads from one top-level function.
 #[derive(Clone, Copy, Debug)]

@@ -47,6 +47,7 @@ pub mod name_tree;
 pub mod names;
 pub mod parser;
 pub mod plugins;
+mod program_entry;
 mod resolve;
 pub mod runtime;
 pub mod source;
