@@ -379,11 +379,20 @@ impl LocalCallableRealization {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct CaptureSlot {
     slot: u32,
     ty: crate::fir::ResolvedTy,
     shared_cell: bool,
+    /// The captured declaration as the callable that supplies this slot named and classified it.
+    /// A callable nested deeper captures the same value through this slot, and names it the same.
+    declared: CapturedDeclaration,
+}
+
+#[derive(Clone, Debug)]
+struct CapturedDeclaration {
+    name: Option<String>,
+    declaration: crate::ir::IrCapturedDeclaration,
 }
 
 impl<'a> BodyLowering<'a> {

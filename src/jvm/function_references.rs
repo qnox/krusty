@@ -690,6 +690,10 @@ mod tests {
             let mut identities = vec![crate::ir::IrParameterIdentity::captured_value(
                 Some("prefix".to_string()),
                 0,
+                crate::ir::IrValueCapture {
+                    declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                    capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                },
             )];
             identities.extend(
                 (0..signature.params.len())

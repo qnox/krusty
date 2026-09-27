@@ -4,7 +4,10 @@
 //! spelling contract. Keeping their projections separate prevents a physical JVM name from becoming
 //! common-IR identity or leaking onto another class-file surface.
 
-use crate::ir::{IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole};
+use crate::ir::{
+    IrCapturedDeclaration, IrCapturingCallable, IrFile, IrGeneratedParameterRole,
+    IrParameterIdentity, IrParameterRole,
+};
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -28,7 +31,7 @@ pub(super) fn local_variable(
             Some(format!("$context_receiver_{ordinal}"))
         }
         IrParameterRole::ExtensionReceiver => Some(format!("$this${function_name}")),
-        IrParameterRole::CapturedValue { ordinal } => Some(format!("$capture{ordinal}")),
+        IrParameterRole::CapturedValue { ordinal, .. } => Some(format!("$capture{ordinal}")),
         IrParameterRole::CapturedReceiver { ordinal } => Some(format!("$this${ordinal}")),
         IrParameterRole::PropertySetterValue => Some("<set-?>".to_string()),
         IrParameterRole::Generated(role) => match role {
@@ -135,14 +138,14 @@ fn function_local_variable(
             .expect("an extension receiver retains its declaration source name");
         return Some(format!("$this${source_name}"));
     }
-    // A shared mutable capture keeps its variable's own name: the parameter holds the variable's
-    // cell rather than a copy of its value.
-    if let (Some(name), IrParameterRole::CapturedValue { ordinal }) =
+    // kotlinc's `LocalDeclarationsLowering` keeps a captured variable's own name when a named
+    // local function or an anonymous function captures it (a shared cell included), and
+    // `$`-prefixes a captured parameter and whatever a lambda literal captures.
+    if let (Some(name), IrParameterRole::CapturedValue { capture, .. }) =
         (&identity.source_name, identity.role)
     {
-        if ir
-            .shared_capture_parameters
-            .contains_key(&(function, ordinal))
+        if capture.declaration == IrCapturedDeclaration::Variable
+            && capture.capturer != IrCapturingCallable::Lambda
         {
             return Some(name.clone());
         }

@@ -798,40 +798,110 @@ const MIXED_CAPTURE_SOURCE: &str = r##"fun mixed(step: Int): Int {
 fun box(): String = if (mixed(2) == 2) "OK" else "fail"
 "##;
 
-/// The lifted function names a shared cell after the variable, and a copied capture of the
-/// enclosing function's parameter with kotlinc's `$` prefix. Its code and `LocalVariableTable`
-/// match kotlinc for every shared-cell kind and for a function that takes a shared cell and a
-/// copied value together.
+const CAPTURE_NAMES_SOURCE: &str = r##"fun literal(): Int {
+    var c = 0
+    val l = { c += 1 }
+    l()
+    return c
+}
+
+fun anonymous(): Int {
+    var c = 0
+    val l = fun(): Int {
+        c += 1
+        return c
+    }
+    return l()
+}
+
+fun copied(): Int {
+    val step = 2
+    fun bump(by: Int): Int = by * step
+    return bump(1)
+}
+
+fun nested(): Int {
+    val a = 1
+    fun outer(): Int {
+        val b = 2
+        fun inner(): Int = a + b
+        return inner()
+    }
+    return outer()
+}
+
+fun looped(): Int {
+    var t = 0
+    for (i in 0..2) {
+        fun f(): Int = i
+        t += f()
+    }
+    return t
+}
+"##;
+
+/// kotlinc's `LocalDeclarationsLowering` names a lifted parameter after what it captures: a
+/// variable keeps its own name when a named local function or an anonymous function captures it,
+/// a shared cell included; a captured parameter, and whatever a lambda literal captures, gets a
+/// `$` prefix. A value captured from further out is named where it was declared. The lifted
+/// functions' code and `LocalVariableTable` match kotlinc for each form.
 #[test]
-fn lifted_functions_name_shared_cells_and_copied_captures_like_kotlinc() {
+fn lifted_functions_name_their_captures_like_kotlinc() {
     let lifted = [
         (
             SHARED_CAPTURE_SOURCE,
             "SharedCaptureLifted",
-            "SharedCaptureLiftedKt",
             "private static final int carriers$bump",
         ),
         (
             SHARED_CAPTURE_SOURCE,
             "SharedCaptureLifted",
-            "SharedCaptureLiftedKt",
             "private static final long carriers$add",
         ),
         (
             SHARED_CAPTURE_SOURCE,
             "SharedCaptureLifted",
-            "SharedCaptureLiftedKt",
             "private static final java.lang.String carriers$note",
         ),
         (
             MIXED_CAPTURE_SOURCE,
             "MixedCaptureLifted",
-            "MixedCaptureLiftedKt",
             "private static final int mixed$bump",
         ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final kotlin.Unit literal$lambda$0",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int anonymous$lambda$0",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int copied$bump",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int nested$outer",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int nested$outer$inner",
+        ),
+        (
+            CAPTURE_NAMES_SOURCE,
+            "CaptureNames",
+            "private static final int looped$f",
+        ),
     ];
-    for (source, stem, class, method) in lifted {
-        common::method_code_diff_against_kotlinc(stem, &[], source, class, method)
+    for (source, stem, method) in lifted {
+        let class = format!("{stem}Kt");
+        common::method_code_diff_against_kotlinc(stem, &[], source, &class, method)
             .expect("reference kotlinc is provisioned")
             .unwrap_or_else(|diff| panic!("{diff}"));
     }
