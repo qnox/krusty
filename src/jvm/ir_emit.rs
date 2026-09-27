@@ -10827,8 +10827,8 @@ impl<'a> Emitter<'a> {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }
             IrExpr::While { .. } => self.emit_while(e, code),
-            IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
-            IrExpr::Continue { label } => self.emit_loop_transfer(&label, false, code),
+            IrExpr::Break { label } => self.emit_loop_transfer(e, &label, true, code),
+            IrExpr::Continue { label } => self.emit_loop_transfer(e, &label, false, code),
             other => {
                 self.emit_discarding_node(e, &other, code);
             }
@@ -11680,10 +11680,10 @@ impl<'a> Emitter<'a> {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
-                self.emit_loop_transfer(label, true, code);
+                self.emit_loop_transfer(e, label, true, code);
             }
             IrExpr::Continue { label } => {
-                self.emit_loop_transfer(label, false, code);
+                self.emit_loop_transfer(e, label, false, code);
             }
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
@@ -14751,35 +14751,6 @@ impl<'a> Emitter<'a> {
             return None;
         };
         Some((*receiver, *argument, direct))
-    }
-
-    /// The loop label a branch body jumps to when it does nothing else.
-    ///
-    /// `None` unless the body IS a `break` or `continue` — one that also computed something would
-    /// have to emit that first, and the jump could then not be fused into the condition. Leaving a
-    /// `try` counts as computing something: the transfer runs every `finally` it leaves, so a fused
-    /// jump would skip them.
-    fn loop_jump_target(&self, body: u32) -> Option<Label> {
-        let mut node = self.ir.expr(body);
-        if let IrExpr::Block { stmts, value } = node {
-            let [only] = stmts.as_slice() else {
-                return None;
-            };
-            if value.is_some() {
-                return None;
-            }
-            node = self.ir.expr(*only);
-        }
-        let (label, brk) = match node {
-            IrExpr::Break { label } => (label, true),
-            IrExpr::Continue { label } => (label, false),
-            _ => return None,
-        };
-        let (cont, end, depth) = self.loop_transfer_target(label)?;
-        if self.return_finalizers.len() > depth {
-            return None;
-        }
-        Some(if brk { end } else { cont })
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control

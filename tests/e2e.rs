@@ -1056,6 +1056,8 @@ mod local_superclass_capture_e2e;
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
+#[path = "loop_transfer_line_e2e.rs"]
+mod loop_transfer_line_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]

@@ -8368,6 +8368,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generated `==` the condition's source line. A comparison with no line of its own still returns
   to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
 
+- **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
+  `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
+  closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
+  transfer into one inverted jump itself: it lays down kotlinc's `if<!cond> next; nop; goto target;
+  next:`, `RedundantNopsCleanup` drops the `nop` when the jump shares its line, and `NegatedJumps`
+  then folds the guard into `if<cond> target` exactly when no line entry separates the two jumps.
+  A transfer written on a line of its own therefore keeps the guard as a branch around a `goto`
+  carrying that line. Test: `tests/loop_transfer_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
