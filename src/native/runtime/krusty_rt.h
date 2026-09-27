@@ -902,6 +902,9 @@ extern const KType kt_type_assertion_error;
 extern const KType kt_type_null_pointer_exception;
 extern const KType kt_type_class_cast_exception;
 extern const KType kt_type_index_out_of_bounds_exception;
+/* Kotlin/Native's `ArrayIndexOutOfBoundsException`, a subclass of the one above: what its runtime
+   throws for an index outside a `String`. */
+extern const KType kt_type_array_index_out_of_bounds_exception;
 extern const KType kt_type_arithmetic_exception;
 extern const KType kt_type_unsupported_operation_exception;
 extern const KType kt_type_number_format_exception;

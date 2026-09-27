@@ -412,12 +412,82 @@ fn an_array_too_large_for_the_allocator_is_out_of_memory() {
 
 #[test]
 fn a_negative_string_index_is_out_of_bounds() {
-    run_driver("string_get_negative_index");
+    // Kotlin/Native's type: its runtime reads a `String` in `KString.cpp`
+    // (`boundsCheckedIteratorAt`, `Kotlin_String_subSequence`, JetBrains/kotlin v2.4.10,
+    // kotlin-native/runtime/src/main/cpp), which calls `ThrowArrayIndexOutOfBoundsException`, and
+    // `RuntimeUtils.kt` throws `ArrayIndexOutOfBoundsException()`. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "string_get_negative_index",
+        &[
+            Divergence::native_behaviour(
+                "\"abc\"[-1]: threw StringIndexOutOfBoundsException: Index -1 out of bounds \
+                 for length 3",
+                "\"abc\"[-1]: threw ArrayIndexOutOfBoundsException: Index -1 out of bounds for \
+                 length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[-100]: threw StringIndexOutOfBoundsException: Index -100 out of \
+                 bounds for length 3",
+                "\"abc\"[-100]: threw ArrayIndexOutOfBoundsException: Index -100 out of bounds \
+                 for length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[-2147483648]: threw StringIndexOutOfBoundsException: Index \
+                 -2147483648 out of bounds for length 3",
+                "\"abc\"[-2147483648]: threw ArrayIndexOutOfBoundsException: Index -2147483648 \
+                 out of bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[3]: threw StringIndexOutOfBoundsException: Index 3 out of bounds for \
+                 length 3",
+                "\"abc\"[3]: threw ArrayIndexOutOfBoundsException: Index 3 out of bounds for \
+                 length 3",
+            ),
+        ],
+    );
 }
 
 #[test]
 fn a_substring_outside_the_text_is_out_of_bounds() {
-    run_driver("string_substring_bounds");
+    // Kotlin/Native's type: its runtime reads a `String` in `KString.cpp`
+    // (`boundsCheckedIteratorAt`, `Kotlin_String_subSequence`, JetBrains/kotlin v2.4.10,
+    // kotlin-native/runtime/src/main/cpp), which calls `ThrowArrayIndexOutOfBoundsException`, and
+    // `RuntimeUtils.kt` throws `ArrayIndexOutOfBoundsException()`. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "string_substring_bounds",
+        &[
+            Divergence::native_behaviour(
+                "substring(-1, 2): threw StringIndexOutOfBoundsException: Range [-1, 2) out of \
+                 bounds for length 3",
+                "substring(-1, 2): threw ArrayIndexOutOfBoundsException: Range [-1, 2) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(-1): threw StringIndexOutOfBoundsException: Range [-1, 3) out of \
+                 bounds for length 3",
+                "substring(-1): threw ArrayIndexOutOfBoundsException: Range [-1, 3) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(2, 1): threw StringIndexOutOfBoundsException: Range [2, 1) out of \
+                 bounds for length 3",
+                "substring(2, 1): threw ArrayIndexOutOfBoundsException: Range [2, 1) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(2, 10): threw StringIndexOutOfBoundsException: Range [2, 10) out of \
+                 bounds for length 3",
+                "substring(2, 10): threw ArrayIndexOutOfBoundsException: Range [2, 10) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(4): threw StringIndexOutOfBoundsException: Range [4, 3) out of \
+                 bounds for length 3",
+                "substring(4): threw ArrayIndexOutOfBoundsException: Range [4, 3) out of \
+                 bounds for length 3",
+            ),
+        ],
+    );
 }
 
 #[test]
