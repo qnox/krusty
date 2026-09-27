@@ -18,6 +18,7 @@ mod bridge_returns;
 mod call_arguments;
 mod call_result_boundaries;
 mod call_results;
+mod constructor_bodies;
 mod declaration_inventory;
 mod default_calls;
 mod descriptor_parameters;
@@ -439,43 +440,9 @@ pub(crate) fn lower_value_classes(
                 .collect()
         })
         .collect();
-    // Slot types inside constructor-owned bodies must be captured before expression erasure. These
-    // bodies contain compiler-introduced temporaries for property initializers and delegation
-    // arguments; rebuilding their maps after erasure turns `val tmp: Money` into `Int` and hides the
-    // required box at a generic `T` constructor slot.
-    let orig_class_init_slots = ir
-        .classes
-        .iter()
-        .enumerate()
-        .map(|(class, declaration)| {
-            declaration
-                .init_body
-                .map(|root| body_slot_map(&ir.exprs, root, &orig_ctor_args[class]))
-        })
-        .collect::<Vec<_>>();
-    let orig_secondary_slots = ir
-        .classes
-        .iter()
-        .enumerate()
-        .map(|(class, declaration)| {
-            declaration
-                .secondary_ctors
-                .iter()
-                .enumerate()
-                .map(|(constructor, body)| {
-                    secondary_ctor_slot_map(&ir.exprs, body, &orig_secondary[class][constructor])
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let orig_super_slots = ir
-        .classes
-        .iter()
-        .enumerate()
-        .map(|(class, declaration)| {
-            primary_super_slot_map(&ir.exprs, declaration, &orig_ctor_args[class])
-        })
-        .collect::<Vec<_>>();
+    // Constructor-owned bodies' slot types, captured before expression erasure.
+    let constructor_slots =
+        constructor_bodies::ConstructorSlots::capture(ir, &orig_ctor_args, &orig_secondary);
     // Top-level initializers also own compiler-generated temporaries (notably the array-constructor
     // fill loop). Capture their semantic slot types before expression erasure; rebuilding this map
     // later would turn `Array<Value>` into its carrier-shaped type and hide the boxed reference-array
@@ -483,7 +450,7 @@ pub(crate) fn lower_value_classes(
     let orig_static_slots = ir
         .statics
         .iter()
-        .map(|property| body_slot_map(&ir.exprs, property.init, &[]))
+        .map(|property| constructor_bodies::slot_map(&ir.exprs, [property.init], &[]))
         .collect::<Vec<_>>();
 
     // Value-class-FIELD getters: `(class-index, method-index)` → the field's (pre-erasure) value-class
@@ -2143,42 +2110,15 @@ pub(crate) fn lower_value_classes(
             }
         }
     }
-    for (cidx, c) in ir.classes.iter().enumerate() {
-        // A class's `init { … }` block runs in `<init>` over the unboxed ctor params; a regular class's
-        // secondary `<init>` body + `this(…)` args over the secondary params; enum-entry args in `<clinit>`
-        // (static, no params); base-class `super(…)` args in the subclass `<init>` over its ctor params.
-        if let Some(root) = c.init_body {
-            s4_bodies.push((
-                root,
-                orig_class_init_slots[cidx].clone().unwrap_or_default(),
-            ));
-        }
-        for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
-            let slots = orig_secondary_slots[cidx][sidx].clone();
-            if let Some(b) = sc.body {
-                s4_bodies.push((b, slots.clone()));
-            }
-            for &statement in &sc.delegate_prelude {
-                s4_bodies.push((statement, slots.clone()));
-            }
-            for &a in &sc.delegate_args {
-                s4_bodies.push((a, slots.clone()));
-            }
-            for &default in sc.defaults.iter().flatten() {
-                s4_bodies.push((default, slots.clone()));
-            }
-        }
-        for entry in &c.enum_entries {
-            for &a in &entry.args {
-                s4_bodies.push((a, HashMap::new()));
-            }
-        }
-        let super_slots = &orig_super_slots[cidx];
-        for &statement in &c.super_arg_prelude {
-            s4_bodies.push((statement, super_slots.clone()));
-        }
-        for &argument in &c.super_args {
-            s4_bodies.push((argument, super_slots.clone()));
+    for class in 0..ir.classes.len() {
+        constructor_slots.push_bodies(ir, class, &mut s4_bodies);
+        for entry in &ir.classes[class].enum_entries {
+            s4_bodies.extend(
+                entry
+                    .args
+                    .iter()
+                    .map(|&argument| (argument, HashMap::new())),
+            );
         }
     }
     // Top-level property initializers run in the facade `<clinit>` (static, no params). A value-class
@@ -3027,38 +2967,8 @@ pub(crate) fn lower_value_classes(
             }
         }
     }
-    for (cidx, c) in ir.classes.iter().enumerate() {
-        if let Some(root) = c.init_body {
-            bodies.push((
-                root,
-                orig_class_init_slots[cidx].clone().unwrap_or_default(),
-            ));
-        }
-        // A regular class's secondary `<init>` body + its `this(…)` delegation args run over the secondary
-        // params — box/unbox their value-class accesses/constructions.
-        for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
-            let slots = orig_secondary_slots[cidx][sidx].clone();
-            if let Some(b) = sc.body {
-                bodies.push((b, slots.clone()));
-            }
-            for &statement in &sc.delegate_prelude {
-                bodies.push((statement, slots.clone()));
-            }
-            for &a in &sc.delegate_args {
-                bodies.push((a, slots.clone()));
-            }
-            for &default in sc.defaults.iter().flatten() {
-                bodies.push((default, slots.clone()));
-            }
-        }
-        // Base-class constructor args run in the subclass `<init>` over its primary ctor params.
-        let super_slots = &orig_super_slots[cidx];
-        for &statement in &c.super_arg_prelude {
-            bodies.push((statement, super_slots.clone()));
-        }
-        for &argument in &c.super_args {
-            bodies.push((argument, super_slots.clone()));
-        }
+    for class in 0..ir.classes.len() {
+        constructor_slots.push_bodies(ir, class, &mut bodies);
     }
     // Top-level property initializers (facade `<clinit>`, static) — box/unbox their value-class accesses
     // and boundary constructions just like any function body.
@@ -3926,7 +3836,7 @@ pub(crate) fn lower_value_classes(
                 funcs: &ir.functions,
                 rets: &orig_rets,
                 fields: &orig_fields,
-                slots: &orig_super_slots[class_index],
+                slots: constructor_slots.super_args(class_index),
                 under: &under,
                 types: CallTypes::of(ir),
                 physical: &ir.physical_types,
@@ -5861,80 +5771,6 @@ fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
 
 /// Collect every `ExprId` reachable from `root` (a function body), so rewrites stay within bodies that
 /// own value-class values unboxed.
-/// Slot-type map for a body rooted at `root` running over `params` (slot 0 = `this`, params at 1..), plus
-/// any local `Variable`s declared inside it — used to give an `init`/secondary-ctor/super-arg body the same
-/// slot-typed box/unbox analysis a function body gets from its captured `slot_types`.
-fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[Ty]) -> HashMap<u32, Ty> {
-    let mut slots: HashMap<u32, Ty> = HashMap::new();
-    for (i, t) in params.iter().enumerate() {
-        slots.insert(1 + i as u32, t.clone());
-    }
-    let mut reach = HashSet::new();
-    collect_reachable(exprs, root, &mut reach);
-    for id in reach {
-        if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, *ty);
-        }
-    }
-    slots
-}
-
-fn primary_super_slot_map(
-    exprs: &[IrExpr],
-    class: &crate::ir::IrClass,
-    params: &[Ty],
-) -> HashMap<u32, Ty> {
-    let mut slots = params
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| (1 + index as u32, *ty))
-        .collect::<HashMap<_, _>>();
-    let mut reach = HashSet::new();
-    for root in class
-        .super_arg_prelude
-        .iter()
-        .chain(&class.super_args)
-        .copied()
-    {
-        collect_reachable(exprs, root, &mut reach);
-    }
-    for id in reach {
-        if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, *ty);
-        }
-    }
-    slots
-}
-
-fn secondary_ctor_slot_map(
-    exprs: &[IrExpr],
-    constructor: &crate::ir::IrSecondaryCtor,
-    params: &[Ty],
-) -> HashMap<u32, Ty> {
-    let mut slots: HashMap<u32, Ty> = params
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| (1 + index as u32, *ty))
-        .collect();
-    let mut reach = HashSet::new();
-    for root in constructor
-        .delegate_prelude
-        .iter()
-        .chain(&constructor.delegate_args)
-        .chain(constructor.defaults.iter().flatten())
-        .copied()
-        .chain(constructor.body)
-    {
-        collect_reachable(exprs, root, &mut reach);
-    }
-    for id in reach {
-        if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, *ty);
-        }
-    }
-    slots
-}
-
 fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) {
     if !out.insert(root) {
         return;
