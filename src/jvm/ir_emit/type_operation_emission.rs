@@ -50,6 +50,10 @@ impl Emitter<'_> {
                 value.map(|expression| (expression, self.ir.expr(expression))),
             );
         }
+        if op == IrTypeOp::ImplicitCoercion && self.emit_erased_suspension_result(arg, jvm_ty, code)
+        {
+            return;
+        }
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
         let (physical_arg, semantic_arg) = match op {
             // A reference target materializes an erased result at its own type, so the result's

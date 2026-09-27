@@ -8,12 +8,11 @@
 //! the spill fields and `@DebugMetadata` come from the transformer.
 //!
 //! The functions taken so far are top-level functions and class members whose suspension points
-//! are all plain calls outside any `try`, and which call no inline function; a call to a member,
-//! on any receiver, is as plain as a call to a top-level function. An overridable member's machine
-//! is built in the `$suspendImpl` its body moves to (`jvm::suspend_impls`).
-//! Suspend lambdas of that shape go through `suspend_lambda`, which shares the eligibility and
-//! suspension collection here. Interface bodies, `try` and spliced inline bodies are the next steps
-//! of the plan; until then they keep the IR machine.
+//! are all plain calls and which call no inline function; a call to a member, on any receiver, is
+//! as plain as a call to a top-level function. An overridable member's machine is built in the
+//! `$suspendImpl` its body moves to (`jvm::suspend_impls`). Suspend lambdas of that shape go through
+//! `suspend_lambda`, which shares the eligibility and suspension collection here. Interface bodies
+//! and spliced inline bodies keep the IR machine until their steps land.
 
 use std::collections::HashSet;
 
@@ -25,8 +24,8 @@ use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
     continuation_class_name, continuation_ordinal, continuation_source_name, ensure_tail_return,
-    expr_calls_suspend, recorded_suspension_result, shift_locals, suspend_call_fid,
-    value_class_suspension_result, EmitTimeMachines, MachineContext,
+    recorded_suspension_result, shift_locals, suspend_call_fid, value_class_suspension_result,
+    EmitTimeMachines, MachineContext,
 };
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
@@ -208,7 +207,7 @@ pub(super) fn eligible_points(
         });
     let suspend_set = route.suspend_set;
     // Checked in order, each only while every earlier one holds.
-    let declines: [(&dyn Fn() -> bool, &str); 9] = [
+    let declines: [(&dyn Fn() -> bool, &str); 8] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -236,10 +235,6 @@ pub(super) fn eligible_points(
         (
             &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
             "suspends in a spliced inline body",
-        ),
-        (
-            &|| suspends_under_try(ir, body, suspend_set),
-            "suspends under a try",
         ),
         (
             &|| reads_current_continuation(ir, body),
@@ -286,24 +281,6 @@ pub(super) fn eligible_points(
         return None;
     }
     Some(points)
-}
-
-/// Whether a suspension point runs inside a `try`, which FixStack's handler bookkeeping and the
-/// transformer's try/catch splitting do not take yet.
-fn suspends_under_try(ir: &IrFile, expression: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if let IrExpr::Try { .. } = ir.exprs[expression as usize] {
-        return expr_calls_suspend(ir, expression, suspend_set);
-    }
-    if let IrExpr::Lambda { captures, .. } = &ir.exprs[expression as usize] {
-        return captures
-            .iter()
-            .any(|&capture| suspends_under_try(ir, capture, suspend_set));
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || suspends_under_try(ir, child, suspend_set);
-    });
-    found
 }
 
 /// Whether the body calls an inline function, whose body the emitter splices into this one.
