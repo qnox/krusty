@@ -1,6 +1,7 @@
 //! Method access flags kotlinc derives from a declaration's shape. `ACC_VARARGS` marks a method
 //! whose LAST physical parameter is its declared `vararg`, so Java can pass it in element form.
-//! `ACC_FINAL` follows the member's own modality, not its class's.
+//! `ACC_FINAL` follows the member's own modality, not its class's. A reifiable function (one with a
+//! `reified` type parameter) is `ACC_SYNTHETIC` and carries no nullability annotations.
 
 use super::common;
 
@@ -57,6 +58,43 @@ fun box(): String {\n\
     return if (total == 66) \"OK\" else \"fail: \" + total\n\
 }\n";
 
+/// Reifiable functions at every placement: top level, member, companion, extension and private,
+/// beside inline and generic functions that are not reifiable.
+const REIFIED: &str = "class Holder {\n\
+    inline fun <reified T> holds(value: Any): Boolean = value is T\n\
+    inline fun <T> plain(value: T, pick: (T) -> Boolean): Boolean = pick(value)\n\
+    companion object {\n\
+        inline fun <reified T : Any> pick(value: Any, fallback: T): T = value as? T ?: fallback\n\
+    }\n\
+}\n\
+inline fun <reified T> matches(value: Any, label: String): String = if (value is T) label else \"no\"\n\
+inline fun <reified T, U> mixed(value: Any, other: U): U = if (value is T) other else other\n\
+inline fun <reified T> Any.asOrNull(): T? = this as? T\n\
+private inline fun <reified T> hidden(value: Any): Boolean = value is T\n\
+fun <T> generic(value: T): T = value\n\
+fun box(): String {\n\
+    val holder = Holder()\n\
+    val ok = holder.holds<String>(\"a\") && Holder.pick(\"b\", \"c\") == \"b\" && matches<String>(\"d\", \"e\") == \"e\" &&\n\
+        mixed<String, Int>(\"f\", 1) == 1 && \"g\".asOrNull<String>() == \"g\" &&\n\
+        hidden<String>(\"i\") && generic(2) == 2 && holder.plain(3) { it == 3 }\n\
+    return if (ok) \"OK\" else \"fail\"\n\
+}\n";
+
+#[test]
+fn reifiable_functions_run() {
+    common::expect_box_ok_with_stdlib(REIFIED, "Reified");
+}
+
+#[test]
+fn reifiable_functions_are_synthetic_and_unannotated_like_kotlinc() {
+    assert_methods_match_kotlinc(
+        "Reified",
+        REIFIED,
+        &["Holder", "Holder$Companion", "ReifiedKt"],
+        method_shape,
+    );
+}
+
 #[test]
 fn modality_members_run() {
     common::expect_box_ok_with_stdlib(MODALITY, "Modality");
@@ -84,6 +122,15 @@ fn vararg_method_flags_match_kotlinc() {
 }
 
 fn assert_method_flags_match_kotlinc(name: &str, src: &str, classes: &[&str]) {
+    assert_methods_match_kotlinc(name, src, classes, method_flags);
+}
+
+fn assert_methods_match_kotlinc<T: PartialEq + std::fmt::Debug>(
+    name: &str,
+    src: &str,
+    classes: &[&str],
+    project: fn(&[u8]) -> Vec<T>,
+) {
     let krusty = common::expect_classes_with_stdlib(src, name);
     let dir = common::scratch_dir().expect("scratch directory");
     let path = dir.join(format!("{name}.kt"));
@@ -103,11 +150,7 @@ fn assert_method_flags_match_kotlinc(name: &str, src: &str, classes: &[&str]) {
             .iter()
             .find(|(emitted, _)| emitted == class)
             .unwrap_or_else(|| panic!("krusty did not emit {class}"));
-        assert_eq!(
-            method_flags(emitted),
-            method_flags(&reference),
-            "{class}: method access flags"
-        );
+        assert_eq!(project(emitted), project(&reference), "{class}: methods");
     }
 }
 
@@ -122,6 +165,27 @@ fn method_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
                 method.name.clone(),
                 method.descriptor.clone(),
                 method.access,
+            )
+        })
+        .collect()
+}
+
+/// Each method's name, descriptor, access flags, generic signature and nullability annotations, in
+/// classfile order.
+fn method_shape(bytes: &[u8]) -> Vec<String> {
+    let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
+    class
+        .methods
+        .iter()
+        .map(|method| {
+            format!(
+                "{}{} {:#06x} {:?} returns {:?} parameters {:?}",
+                method.name,
+                method.descriptor,
+                method.access,
+                method.signature,
+                method.return_nullability,
+                method.parameter_nullability,
             )
         })
         .collect()
