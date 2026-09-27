@@ -9106,8 +9106,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   raise `NoSuchElementException()`; a `String`'s or `StringBuilder`'s raises what `text[length]`
   raises, `IndexOutOfBoundsException`, because Kotlin's `CharSequence.iterator()` is
   `get(index++)` with no check of its own (kotlinc throws the JVM's subclass,
-  `StringIndexOutOfBoundsException`). Everything but the arrays' message is compared with kotlinc's
-  answers for `iterator_exhausted.kt` on every run.
+  `StringIndexOutOfBoundsException`); the index moves on before the read raises, so a second
+  `next()` on `"a".iterator()` asks for index 2, where an array's asks for the same index again.
+  Everything but the arrays' message is compared with kotlinc's answers for `iterator_exhausted.kt`
+  on every run.
   Tests: `tests/native_runtime_e2e.rs` (`iterator_exhausted`).
 - **Native walk counters raise Kotlin's overflow, and no runtime counter overflows signed.** A walk
   counting with an `Int` raises what Kotlin's `checkIndexOverflow`/`checkCountOverflow` raise when

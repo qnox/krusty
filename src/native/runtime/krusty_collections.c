@@ -842,15 +842,19 @@ kt_boolean kt_walk_has_next(KRef iterator) {
    `NoSuchElementException` whose message is the index asked for, `"1"` for the second `next()` of
    a one-element array. A string's is Kotlin's `CharSequence.iterator()`, whose `next()` is
    `get(index++)` with no check of its own, so it raises what reading the text past its end raises
-   — `s[s.length]`'s `IndexOutOfBoundsException` — and never `NoSuchElementException`. Text the
+   — `s[s.length]`'s `IndexOutOfBoundsException` — and never `NoSuchElementException`; and the
+   index moves on before the read raises, so a second `next()` asks for the index after. Text the
    PROGRAM implements is asked its own `get` instead, by the caller. */
 static kt_boolean kt_walk_exhausted(KRef iterator) {
     if (kt_walk_reads_program_text(iterator) || kt_walk_has_next(iterator)) {
         return false;
     }
-    const KWalk *walk = (const KWalk *)iterator;
+    KWalk *walk = (KWalk *)iterator;
     if (iterator->header.type == &kt_type_chars_iterator) {
-        (void)kt_string_get(walk->over, walk->at);
+        kt_int at = walk->at;
+        /* On the unsigned ring: a program that catches every failure can ask forever. */
+        walk->at = (kt_int)((uint32_t)at + 1u);
+        (void)kt_string_get(walk->over, at);
         return true;
     }
     KRef index = kt_to_string(kt_box_int(walk->at));

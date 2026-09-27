@@ -19,31 +19,37 @@ fun box(): String = buildString {
         }
         appendLine("$label $answer")
     }
-    // `elements` elements, then one more `next()` through each protocol.
-    fun general(label: String, message: Boolean, elements: Int, make: () -> Iterator<Any?>) {
+    // `elements` elements, then one more `next()` through each protocol, and a second one when
+    // `again` says so: reading text past its end is `get(index++)`, which moves the index on even
+    // though the read throws, so the second asks for the index after.
+    fun general(label: String, message: Boolean, elements: Int, again: Boolean = false,
+                make: () -> Iterator<Any?>) {
         val walk = make()
         repeat(elements) { walk.next() }
         t("$label general", message) { walk.next() }
+        if (again) t("$label general again", message) { walk.next() }
     }
     fun <I : Iterator<*>> narrow(label: String, message: Boolean, elements: Int, make: () -> I,
-                                 next: (I) -> Any?) {
+                                 again: Boolean = false, next: (I) -> Any?) {
         val walk = make()
         repeat(elements) { next(walk) }
         t("$label narrow", message) { next(walk) }
+        if (again) t("$label narrow again", message) { next(walk) }
     }
 
     general("arrayOf(5)", false, 1) { arrayOf<Any?>(5).iterator() }
-    general("IntArray(1)", false, 1) { IntArray(1).iterator() }
-    narrow("IntArray(1)", false, 1, { IntArray(1).iterator() }) { it.nextInt() }
+    general("IntArray(1)", false, 1, again = true) { IntArray(1).iterator() }
+    narrow("IntArray(1)", false, 1, { IntArray(1).iterator() }, again = true) { it.nextInt() }
     general("CharArray(2)", false, 2) { CharArray(2).iterator() }
     narrow("CharArray(2)", false, 2, { CharArray(2).iterator() }) { it.nextChar() }
 
-    general("\"a\"", true, 1) { "a".iterator() }
-    narrow("\"a\"", true, 1, { "a".iterator() }) { it.nextChar() }
+    general("\"a\"", true, 1, again = true) { "a".iterator() }
+    narrow("\"a\"", true, 1, { "a".iterator() }, again = true) { it.nextChar() }
     general("\"\"", true, 0) { "".iterator() }
     narrow("\"\"", true, 0, { "".iterator() }) { it.nextChar() }
-    general("StringBuilder(\"a\")", true, 1) { StringBuilder("a").iterator() }
-    narrow("StringBuilder(\"a\")", true, 1, { StringBuilder("a").iterator() }) { it.nextChar() }
+    general("StringBuilder(\"a\")", true, 1, again = true) { StringBuilder("a").iterator() }
+    narrow("StringBuilder(\"a\")", true, 1, { StringBuilder("a").iterator() },
+        again = true) { it.nextChar() }
 
     general("1..1", true, 1) { (1..1).iterator() }
     narrow("1..1", true, 1, { (1..1).iterator() }) { it.nextInt() }
