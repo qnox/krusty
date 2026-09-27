@@ -4611,6 +4611,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lowered like any other, and the multi-property `hashCode` accumulator is a named local
   `result`, which its LocalVariableTable lists after the body's constants. Test:
   `tests/method_pool_order_e2e.rs::a_data_class_declared_function_interns_before_its_synthesized_members`.
+- **Inherited forwarders and bridges precede `<clinit>`.** kotlinc appends a class's
+  default-method forwarders and then its bridges to the lowered declarations, and writes the
+  static initializer last, so an object's forwarder and an enum's erased bridge come before
+  `<clinit>`. Tests: `tests/class_member_order_e2e.rs::an_object_s_inherited_forwarders_precede_its_static_initializer`
+  and `::an_enum_s_bridges_precede_its_static_initializer`.
 - **Members inherited from sibling interfaces follow their declaration order.** kotlinc builds an
   interface's inherited members supertype by supertype in the order they are written, at every
   level: with `interface Both : Left, Right` and `interface Child : Both`, `Child`'s `access$…$jd`

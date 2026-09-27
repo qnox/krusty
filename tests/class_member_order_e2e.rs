@@ -18,6 +18,8 @@
 //!   supertypes' declaration order at every level of the hierarchy.
 //! - bridges to members of the superclass and of interfaces follow the order the class writes its
 //!   supertypes in, wherever the superclass stands among them.
+//! - a class's inherited default-method forwarders and its bridges precede `<clinit>`, an object's
+//!   and an enum's included, forwarders first.
 //!
 //! Each case asserts the complete member list of every class kotlinc emits — names and descriptors
 //! in order — against the reference compiler. The fixtures use neutral names only.
@@ -245,6 +247,29 @@ fn a_suspend_member_s_static_body_precedes_its_default_stub() {
          \x20   open suspend fun fetch(key: String, retries: Int = 3): String = key + retries\n\
          \x20   fun after(): Int = 1\n\
          \x20   open suspend fun plain(key: String): String = key\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_object_s_inherited_forwarders_precede_its_static_initializer() {
+    assert_same_member_order(
+        "ForwarderBeforeInitializer",
+        "interface Shape { val corners: Int get() = 3 }\n\
+         open class Base : Shape\n\
+         interface Cube : Shape { override val corners: Int get() = 8 }\n\
+         object Leaf : Base(), Cube\n",
+    );
+}
+
+#[test]
+fn an_enum_s_bridges_precede_its_static_initializer() {
+    assert_same_member_order(
+        "EnumBridgeBeforeInitializer",
+        "interface Pick<T> { fun pick(t: T): Int = 0 }\n\
+         enum class Mode : Pick<String> {\n\
+         \x20   ON, OFF;\n\
+         \x20   override fun pick(t: String): Int = 1\n\
          }\n",
     );
 }
