@@ -9751,6 +9751,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
   corpus `reflection/functions/typeParameterInReturnType.kt`.
 
+- **A typealias applied to type arguments on a callable-reference LHS is a type.** kotlinc reads
+  `Alias<Int>::label` as a type LHS even when the alias expands to an `object`, so the reference is
+  unbound (`(Registry) -> String`), while the bare `Alias::label` stays bound to the object's value.
+  The arguments substitute through the alias exactly as in a type position (`Keyed<String>::value` on
+  `typealias Keyed<V> = Tagged<String, V>` reads `Tagged<String, String>`); they never attach to the
+  expanded classifier directly. Whether an unannotated local takes the reflection type is read from the
+  checker's recorded binding, not from re-resolving the receiver's spelling. Test:
+  `callable_ref_e2e::an_applied_typealias_lhs_is_a_type_even_for_an_object`, corpus
+  `callableReference/callableReferenceOnObjectTypealias.kt`.
+
 - **A reference to a dependency's target is not re-mangled, and a generic function's metadata names its
   type-parameter return.** Two emit bugs that only a reflection READ can catch. (1) The value-class
   mangle was applied to a function reference's recorded name even when the target came from a

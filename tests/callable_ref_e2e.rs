@@ -402,3 +402,37 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "CR");
 }
+
+/// A typealias LHS applied to type arguments names the alias's expansion as a TYPE: kotlinc reads
+/// `Alias<Int>::label` on an alias of an `object` as an unbound reference taking the object, while the
+/// bare `Alias::label` is bound to the object's value. The arguments substitute through the alias
+/// (`Keyed<String>` is `Tagged<String, String>`), never onto the expanded classifier directly.
+///
+/// The unbound reference's class is compared with kotlinc's. `box` itself is not: kotlinc casts a
+/// reflection-typed local to its function interface at each call rather than at the store, which
+/// krusty does not model for any callable-reference local.
+const ALIAS_LHS_SOURCE: &str = r#"object Registry { fun label(): String = "O" }
+typealias RegistryOf<T> = Registry
+class Tagged<K, V>(val key: K, val value: V)
+typealias Keyed<V> = Tagged<String, V>
+
+fun box(): String {
+    val unbound = RegistryOf<Int>::label
+    val bound = RegistryOf::label
+    val value = Keyed<String>::value
+    if (unbound.name != bound.name) return "name"
+    if (bound() != "O") return "bound"
+    return unbound(Registry) + value(Tagged("", "K"))
+}
+"#;
+
+#[test]
+fn an_applied_typealias_lhs_is_a_type_even_for_an_object() {
+    common::assert_accepted_like_kotlinc(ALIAS_LHS_SOURCE);
+    common::expect_box_same_as_kotlinc(ALIAS_LHS_SOURCE, "AliasLhsRun");
+    common::assert_class_matches_kotlinc(
+        "AliasLhsRun",
+        ALIAS_LHS_SOURCE,
+        "AliasLhsRunKt$box$unbound$1",
+    );
+}
