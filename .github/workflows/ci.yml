@@ -13,8 +13,12 @@ on:
 permissions:
   contents: read
 
+# A pull request or merge queue ref keeps one run: a new push cancels the old one. Every master push
+# gets its own group instead. GitHub keeps only one pending run per group and cancels the one it
+# displaces, so a shared master group cancelled each queued push when the next one arrived, and the
+# cancelled run turned the commit and the CI badge red although nothing had failed.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
@@ -244,34 +248,51 @@ jobs:
     needs: [ci, klib-semantics, conformance, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    concurrency:
-      group: release
-      cancel-in-progress: false
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # Master runs overlap, so an older run can reach this job after a newer one. Only the commit at
+      # the tip of master publishes, so the release, the latest-release marker and the badges never
+      # move backwards. That also serializes publishing without a concurrency group, which would
+      # cancel a queued release (and with it the whole run) just as the run-level group did.
+      - name: publish only the tip of master
+        id: tip
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin master
+          if [ "$(git rev-parse origin/master)" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "master has moved past $GITHUB_SHA; its successor publishes"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: taiki-e/install-action@v2
+        if: steps.tip.outputs.publish == 'true'
         with:
           tool: just
       - name: collect all target artifacts
+        if: steps.tip.outputs.publish == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: krusty-*
           path: dist
           merge-multiple: true
       - name: compute version + tag
+        if: steps.tip.outputs.publish == 'true'
         id: v
         run: |
           ver=$(just version)
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
       - name: package Zed extension
+        if: steps.tip.outputs.publish == 'true'
         shell: bash
         run: just package-zed
       - name: publish
+        if: steps.tip.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
@@ -281,12 +302,12 @@ jobs:
           fail_on_unmatched_files: true
       # Badge: read the max version's pct (produced by the conformance matrix) and publish to the gist.
       - name: download max-version pct
-        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
           name: pct-${{ needs.versions.outputs.max }}
       - name: compute badge color
-        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
         run: |
           set -euo pipefail
@@ -299,7 +320,7 @@ jobs:
             echo "pct=$pct"; echo "passed=$passed"; echo "applicable=$applicable"; echo "color=$color"
           } >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
-        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -309,7 +330,7 @@ jobs:
           message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.applicable }})
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
-        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
