@@ -340,7 +340,16 @@ pub(super) fn emit_func_ref_class(
     // A singleton carrier's `<clinit>` follows its methods, as kotlinc orders them.
     let singleton = field_capture_tys.is_empty() && !fr.bound;
     if let Some(invoke) = fr.invoke {
-        emit_method(ir, invoke, &fq, facade, &mut cw, true, env);
+        emit_method(
+            ir,
+            invoke,
+            StaticOwner::Class(c.fq_name),
+            &fq,
+            facade,
+            &mut cw,
+            true,
+            env,
+        );
         function_reference_invoke::emit_reference_invoke_bridge(
             ir,
             &mut cw,
@@ -490,20 +499,28 @@ pub(super) fn emit_func_ref_class(
     } else {
         slot_words(target_ret_jvm) as i32
     };
-    // A reference to a PRIVATE same-file top-level function can't invokestatic it from this
-    // (separate) class — call kotlinc's `access$<name>` facade bridge instead (`emit_pass` emits it
-    // for exactly these referenced targets).
-    let static_call_name = if fr.call_owner_is_facade()
-        && function_reference_target(ir, fr)
-            .is_some_and(|target| ir.method_visibility(target).is_private())
-    {
+    // A reference to a PRIVATE same-file static function can't invokestatic it from this
+    // (separate) class — call its static owner's `access$<name>` accessor instead.
+    let static_owner = StaticOwner::of(fr.call_owner);
+    let static_call_name = if function_reference_target(ir, fr).is_some_and(|target| {
+        static_accessors::routes_through_accessor(
+            ir,
+            static_owner == StaticOwner::Class(c.fq_name),
+            target,
+        )
+    }) {
         format!("access${}", fr.call_name)
     } else {
         fr.call_name.clone()
     };
     match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound => {
-            let m = cw.methodref(&call_owner, &static_call_name, &call_desc);
+            // A static of an interface is named by an `InterfaceMethodref`.
+            let m = if static_owner.is_interface(ir) {
+                cw.interface_methodref(&call_owner, &static_call_name, &call_desc)
+            } else {
+                cw.methodref(&call_owner, &static_call_name, &call_desc)
+            };
             inv.invokestatic(m, call_arg_words, ret_words);
         }
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM

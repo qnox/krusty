@@ -3948,6 +3948,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class of this compilation is always answered from its declaration, never from the naming-convention
   fallback, which has no class file and would mistake an interface for a class.
 
+- **A private static declaration used from another class goes through its static owner's
+  synthetic accessor.** A private top-level function or property lives on its file facade and a
+  private `companion { … }` block member on its declaring class (`IrStaticPlacement`). Code emitted
+  into any other class — a nested class, a lambda or anonymous object there, a callable- or
+  property-reference carrier — calls the owner's `public static final synthetic` accessor, one per
+  target: `access$<name>` forwarding to a function, `access$get<X>$p` / `access$set<X>$p` over a
+  field. Measured against kotlinc 2.4.20, the owner appends them after every declared and lifted
+  member and before `<clinit>`, in the order the file first uses them (evaluation order, a
+  reference counting where it is written). Each maps its body to the owner's declaration line (a
+  facade's is line 1): a function accessor at its forwarding call, with its parameters' names in
+  the `LocalVariableTable`; a setter's value is `<set-?>`. A reference carrier for a block member
+  reflects the declaring class, not the facade, with flags 0, and its classes (and every local
+  class of a block body) are named in that class's chain: `C$ref$g$1`, not `<File>Kt$ref$g$1`. A
+  property reference to a private static property reflects its declared getter (`getP()I`) while
+  calling `access$getP$p`. The owner is an identity (facade or declaring class) from planning to
+  emission; which private storage is bridged is selected once, by storage identity, and both the
+  use sites and a reference's realization consume that selection. An **interface** owner (a block
+  member of an interface) declares its accessor `public static synthetic` — an interface method
+  cannot be `final` — at the interface's declaration line, before the `access$…$jd` bridges, and
+  every use names it by an `InterfaceMethodref`, as does a reference carrier's static call to any
+  interface static. kotlinc treats an interface's block property as an interface property: one
+  without a getter body is abstract whatever its initializer, so a `private` one is rejected with
+  `abstract property in interface cannot be private.` at its `private` modifier, and no private
+  interface storage is ever bridged. Tests: `tests/companion_block_members_e2e.rs`
+  (`private_block_members_used_from_other_classes_go_through_class_accessors`,
+  `private_interface_block_functions_go_through_interface_accessors`,
+  `private_interface_block_property_without_a_getter_is_rejected`),
+  `tests/synthetic_accessor_e2e.rs`
+  (`private_top_level_declarations_used_from_classes_go_through_facade_accessors`).
 - **A private property reached from outside its class gets kotlinc's `access$get<X>$p` bridge.** An
   `inline` body is spliced into its caller, where the private backing field is unreachable. krusty used to
   decline the read, which made the splice bail and emit an ordinary call — silently turning an `inline`

@@ -207,12 +207,15 @@ fn realize_adapter_reference(
                 .referenced_module_callables
                 .get(&target)
                 .ok_or(FunctionReferenceRealizationTarget::Module(target))?;
-            (
-                declaration.owner,
-                declaration.name.to_string(),
-                declaration.owner.is_none(),
-                None,
-            )
+            // A companion-block member is reflected on the class that declared its block, like
+            // any member of it; only a package declaration is owned by a file facade.
+            let owner = match declaration.placement {
+                crate::ir::IrStaticPlacement::CompanionBlock { declaring_class } => {
+                    Some(declaring_class)
+                }
+                crate::ir::IrStaticPlacement::Package => declaration.owner,
+            };
+            (owner, declaration.name.to_string(), owner.is_none(), None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
             (Some(classifier), "<init>".to_string(), false, None)
