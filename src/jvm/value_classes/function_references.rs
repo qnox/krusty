@@ -8,27 +8,23 @@
 
 use super::*;
 
-pub(super) fn realize(
-    ir: &mut IrFile,
-    callable_under: &Under,
-    suspend_sig: &HashSet<(Option<TypeName>, String, usize)>,
-    renamed_functions: &HashSet<u32>,
-) {
+pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions: &HashSet<u32>) {
     for c in &mut ir.classes {
         let owner_fq = c.fq_name();
         let Some(fr) = &mut c.func_ref else {
             continue;
         };
-        let local_target = fr.local_target.and_then(|target| {
-            ir.functions
-                .get(target as usize)
-                .map(|function| (function.name.clone(), function.params.clone(), function.ret))
+        // The carrier calls an exact generated common-IR adapter. Its signature has already gone
+        // through the function erasure/boxing pass, so reuse that physical ABI verbatim instead of
+        // independently erasing the adapter's logical function type.
+        let local_target = fr.local_target.map(|target| {
+            let function = &ir.functions[target as usize];
+            (function.name.clone(), function.params.clone(), function.ret)
         });
         let first_call_arg = match fr.dispatch {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
             _ => usize::from(fr.reflection_receiver_parameter),
         };
-        let call_owner = fr.call_owner;
         // The lowerer records the already-selected callable's exact target signature. Do not rebuild it
         // from `(owner, name, arity)`: overloads with equal arity are deliberately indistinguishable by
         // that key, and whichever declaration was visited last would corrupt every other reference.
@@ -37,86 +33,62 @@ pub(super) fn realize(
             .clone()
             .unwrap_or_else(|| fr.target_param_tys[first_call_arg..].to_vec());
         let target_decl_ret = fr.reflection_target_ret_ty.unwrap_or(fr.target_ret_ty);
-        // A BOUND extension reference on a VALUE-CLASS receiver (`Z(42)::test`, `FrDispatch::StaticBound`)
-        // targets a facade static whose leading param is the receiver — that receiver lives in
-        // `target_param_tys` (the `target_override`), NOT in the invoke `param_tys`. Mangle against that
-        // full sig (so `test` → `test-<hash>`), treat it as a file-class member, and erase THAT sig (so the
-        // target descriptor keeps the receiver `int`, not an empty `()`), else the impl calls a
-        // non-existent unmangled `test()`.
+        // A bound extension reference on a value-class receiver (`Z(42)::test`) targets a facade
+        // static whose leading parameter is that receiver; the emitter unboxes it at `invoke`.
         let staticbound = matches!(fr.dispatch, crate::ir::FrDispatch::StaticBound);
-        let call_is_file_class =
-            matches!(fr.dispatch, crate::ir::FrDispatch::Static) || staticbound;
-        let call_mangle_params = if staticbound {
-            fr.target_param_tys.clone()
-        } else {
-            fr.target_param_tys[first_call_arg..].to_vec()
-        };
-        let fr_suspend =
-            suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
-        // Mangling is IDEMPOTENT here. A target from a DEPENDENCY already carries its final JVM name —
-        // kotlinc mangled it when that dependency was built, and the lowerer recorded that physical
-        // name — so a second pass produced `decode-X4E9McA-X4E9McA`: a method that exists nowhere, and
-        // a reflection signature kotlin-reflect cannot resolve. `vc_mangle_once` leaves a name that
-        // already carries exactly the suffix this signature would append. (Origin cannot be the test:
-        // this pass sees one FILE, so a sibling source file's target looks foreign while its own run
-        // does mangle it — skipping there emitted a call to an unmangled method that never exists.)
-        let mangle_call_once = |base: &str| {
-            vc_mangle_once(
-                base,
-                &call_mangle_params,
-                &fr.target_ret_ty,
-                callable_under,
-                call_is_file_class,
-                fr_suspend,
-            )
-        };
-        let mangle_reflection_once = |base: &str| {
-            vc_mangle_once(
-                base,
-                &target_decl_params,
-                &target_decl_ret,
-                callable_under,
-                fr.owner_class.is_none(),
-                fr_suspend,
-            )
-        };
-        // A structural adapter invokes an exact generated common-IR function. Its signature has
-        // already gone through the function erasure/boxing pass above; reuse that physical ABI
-        // verbatim instead of independently erasing the adapter's logical function type.
-        let mangled_call_name = local_target
-            .as_ref()
-            .map(|(name, _, _)| name.clone())
-            .unwrap_or_else(|| mangle_call_once(&fr.call_name));
         let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
-        // A source value-class member is reflected as its static implementation over the carrier:
-        // `name-impl`, or its hash-mangled name, taking the receiver first. A dependency target
-        // already carries that physical name, and a constructor is reflected as `<init>`.
-        let value_class_member = match fr.reflected {
-            crate::ir::ReflectedCallable::Source => fr
+        // How the reflected name is realized follows from what was selected, never from its
+        // spelling. A source declaration's JVM name derives from its semantic signature: a
+        // value-class member is reflected as its static implementation over the carrier
+        // (`name-impl`, or its hash-mangled name) taking the receiver first. A constructor stays
+        // `<init>`, reached through kotlinc's `DefaultConstructorMarker` accessor when it declares a
+        // value-class parameter. A dependency declaration keeps the name and signature its provider
+        // published.
+        let mangled_reflection_name = match fr.reflected {
+            crate::ir::ReflectedCallable::Source => match fr
                 .owner_class
-                .filter(|owner| callable_under.contains_key(owner)),
-            crate::ir::ReflectedCallable::Constructor | crate::ir::ReflectedCallable::Physical => {
-                None
-            }
-        };
-        let mangled_reflection_name = match value_class_member {
-            Some(owner) => {
-                if let Some(parameters) = &mut fr.reflection_target_param_tys {
-                    parameters.insert(0, Ty::obj_name(owner));
+                .filter(|owner| callable_under.contains_key(owner))
+            {
+                Some(owner) => {
+                    if let Some(parameters) = &mut fr.reflection_target_param_tys {
+                        parameters.insert(0, Ty::obj_name(owner));
+                    }
+                    vc_member_impl_name(
+                        reflection_base,
+                        &target_decl_params,
+                        &target_decl_ret,
+                        callable_under,
+                        fr.declaration_suspend,
+                    )
                 }
-                vc_member_impl_name(
+                None => vc_mangle(
                     reflection_base,
                     &target_decl_params,
                     &target_decl_ret,
                     callable_under,
-                    fr_suspend,
-                )
+                    fr.owner_class.is_none(),
+                    fr.declaration_suspend,
+                ),
+            },
+            crate::ir::ReflectedCallable::Constructor | crate::ir::ReflectedCallable::Physical => {
+                reflection_base.to_string()
             }
-            None => mangle_reflection_once(reflection_base),
         };
+        let hidden_constructor = matches!(fr.reflected, crate::ir::ReflectedCallable::Constructor)
+            && fr
+                .owner_class
+                .is_some_and(|owner| !callable_under.contains_key(&owner))
+            && target_decl_params.iter().any(|parameter| {
+                parameter
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|fq| callable_under.contains_key(&fq))
+            });
         fr.reflection_name =
             (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
-        fr.call_name = mangled_call_name;
+        if let Some((name, _, _)) = &local_target {
+            fr.call_name = name.clone();
+        }
         // Preserve classpath erasure already recorded in the target shape.
         let erase_src = fr.target_param_tys.clone();
         let erase_ret = fr.target_ret_ty;
@@ -142,6 +114,11 @@ pub(super) fn realize(
         }
         if let Some(result) = &mut fr.reflection_target_ret_ty {
             *result = erase(result, callable_under);
+        }
+        if hidden_constructor {
+            if let Some(parameters) = &mut fr.reflection_target_param_tys {
+                parameters.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+            }
         }
         let target_offset = usize::from(staticbound);
         fr.unbox_params = fr

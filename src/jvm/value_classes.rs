@@ -1516,7 +1516,7 @@ pub(crate) fn lower_value_classes(
             *ret = erase(ret, &under);
         }
     }
-    function_references::realize(ir, &callable_under, &suspend_sig, &renamed_functions);
+    function_references::realize(ir, &callable_under, &renamed_functions);
     let interface_entries =
         interface_entries::materialize(ir, &lowered_value_members, |ir: &IrFile, member: u32| {
             let (name, params, ret) = ir

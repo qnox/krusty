@@ -241,6 +241,7 @@ fn realize_adapter_reference(
             .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
         arity,
         is_suspend: function_type.suspend,
+        declaration_suspend: reference.declaration_suspend,
         module_target: None,
         local_target: Some(reference.adapter),
         owner_class,
