@@ -4676,6 +4676,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
   package-private class itself. Test:
   `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
+- **A string template's concat call site is interned after its operands.** From JVM 9 kotlinc
+  compiles a template to one `invokedynamic makeConcatWithConstants`, and its writer interns
+  constants in instruction order: every entry the operands introduce comes first, then the recipe
+  string, the `StringConcatFactory` bootstrap handle and the call site. Test:
+  `tests/string_concat_pool_order_e2e.rs`.
 - **An annotation instance's implementation class is anonymous, synthetic and enclosed by its
   owner.** kotlinc generates `Owner$annotationImpl$Tag$0` for the class or file facade whose code
   first instantiates `Tag`, as a child of that owner. `InnerClasses` lists it with no outer class
