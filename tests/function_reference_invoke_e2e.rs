@@ -785,6 +785,58 @@ fn shared_capture_reference_carriers_store_the_cell() {
     });
 }
 
+const MIXED_CAPTURE_SOURCE: &str = r##"fun mixed(step: Int): Int {
+    var count = 0
+    fun bump(by: Int): Int {
+        count += by * step
+        return count
+    }
+    val counter = ::bump
+    return counter(1)
+}
+
+fun box(): String = if (mixed(2) == 2) "OK" else "fail"
+"##;
+
+/// The lifted function names a shared cell after the variable, and a copied capture of the
+/// enclosing function's parameter with kotlinc's `$` prefix. Its code and `LocalVariableTable`
+/// match kotlinc for every shared-cell kind and for a function that takes a shared cell and a
+/// copied value together.
+#[test]
+fn lifted_functions_name_shared_cells_and_copied_captures_like_kotlinc() {
+    let lifted = [
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "SharedCaptureLiftedKt",
+            "private static final int carriers$bump",
+        ),
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "SharedCaptureLiftedKt",
+            "private static final long carriers$add",
+        ),
+        (
+            SHARED_CAPTURE_SOURCE,
+            "SharedCaptureLifted",
+            "SharedCaptureLiftedKt",
+            "private static final java.lang.String carriers$note",
+        ),
+        (
+            MIXED_CAPTURE_SOURCE,
+            "MixedCaptureLifted",
+            "MixedCaptureLiftedKt",
+            "private static final int mixed$bump",
+        ),
+    ];
+    for (source, stem, class, method) in lifted {
+        common::method_code_diff_against_kotlinc(stem, &[], source, class, method)
+            .expect("reference kotlinc is provisioned")
+            .unwrap_or_else(|diff| panic!("{diff}"));
+    }
+}
+
 const HIGH_ARITY_SOURCE: &str = r##"class Held(vararg val all: Any)
 
 fun wide(
