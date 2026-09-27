@@ -907,13 +907,14 @@ kt_boolean kt_walk_has_next(KRef iterator) {
 
 /* `next()` on an exhausted array or string iterator, which raises and answers whether it did.
 
-   An array's is Kotlin/Native's `ArrayIterator` (and `IntArrayIterator` and kin):
-   `NoSuchElementException` whose message is the index asked for, `"1"` for the second `next()` of
-   a one-element array. A string's is Kotlin's `CharSequence.iterator()`, whose `next()` is
-   `get(index++)` with no check of its own, so it raises what reading the text past its end raises
-   — `s[s.length]`'s `IndexOutOfBoundsException` — and never `NoSuchElementException`; and the
-   index moves on before the read raises, so a second `next()` asks for the index after. Text the
-   PROGRAM implements is asked its own `get` instead, by the caller. */
+   An array's raises what Kotlin/Native's `ArrayIterator` (and `IntArrayIterator` and kin) raises,
+   `NoSuchElementException`, with the JVM's message: `Index 1 out of bounds for length 1` for the
+   second `next()` of a one-element array, where Kotlin/Native's is the index alone. A string's is
+   Kotlin's `CharSequence.iterator()`, whose `next()` is `get(index++)` with no check of its own, so
+   it raises what reading the text past its end raises -- `s[s.length]`'s out-of-bounds exception --
+   and never `NoSuchElementException`; and the index moves on before the read raises, so a second
+   `next()` asks for the index after. Text the PROGRAM implements is asked its own `get` instead, by
+   the caller. */
 static kt_boolean kt_walk_exhausted(KRef iterator) {
     if (kt_walk_reads_program_text(iterator) || kt_walk_has_next(iterator)) {
         return false;
@@ -926,8 +927,10 @@ static kt_boolean kt_walk_exhausted(KRef iterator) {
         (void)kt_string_get(walk->over, at);
         return true;
     }
-    KRef index = kt_to_string(kt_box_int(walk->at));
-    kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, index));
+    KRef message = kt_string_plus(kt_string_utf8("Index ", 6), kt_box_int(walk->at));
+    message = kt_string_plus(message, kt_string_utf8(" out of bounds for length ", 26));
+    message = kt_string_plus(message, kt_box_int(kt_length_of(walk->over)));
+    kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, message));
     return true;
 }
 

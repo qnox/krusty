@@ -779,7 +779,77 @@ fn a_throwing_lambda_ends_the_walk_that_called_it() {
 
 #[test]
 fn an_exhausted_iterator_raises_what_kotlin_raises_through_either_protocol() {
-    run_driver_against_kotlin("iterator_exhausted");
+    // Reading text past its end raises Kotlin/Native's class with the JVM's message. A `String`'s
+    // is `ArrayIndexOutOfBoundsException`, as in `a_negative_string_index_is_out_of_bounds`; a
+    // `StringBuilder`'s is `IndexOutOfBoundsException`, because Kotlin/Native 2.4.10's
+    // `StringBuilder#get` calls `AbstractList.Companion#checkElementIndex` (disassembly of the
+    // distribution's linux_x64 stdlib cache), which throws it
+    // (libraries/stdlib/src/kotlin/collections/AbstractList.kt).
+    run_driver_against_kotlin_with(
+        "iterator_exhausted",
+        &[
+            Divergence::native_behaviour(
+                "\"a\" general threw StringIndexOutOfBoundsException: Index 1 out of bounds \
+                 for length 1",
+                "\"a\" general threw ArrayIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" general again threw StringIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+                "\"a\" general again threw ArrayIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" narrow threw StringIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+                "\"a\" narrow threw ArrayIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" narrow again threw StringIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+                "\"a\" narrow again threw ArrayIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"\" general threw StringIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+                "\"\" general threw ArrayIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+            ),
+            Divergence::native_behaviour(
+                "\"\" narrow threw StringIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+                "\"\" narrow threw ArrayIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") general threw StringIndexOutOfBoundsException: Index 1 \
+                 out of bounds for length 1",
+                "StringBuilder(\"a\") general threw IndexOutOfBoundsException: Index 1 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") general again threw StringIndexOutOfBoundsException: \
+                 Index 2 out of bounds for length 1",
+                "StringBuilder(\"a\") general again threw IndexOutOfBoundsException: Index 2 \
+                 out of bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") narrow threw StringIndexOutOfBoundsException: Index 1 \
+                 out of bounds for length 1",
+                "StringBuilder(\"a\") narrow threw IndexOutOfBoundsException: Index 1 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") narrow again threw StringIndexOutOfBoundsException: \
+                 Index 2 out of bounds for length 1",
+                "StringBuilder(\"a\") narrow again threw IndexOutOfBoundsException: Index 2 \
+                 out of bounds for length 1",
+            ),
+        ],
+    );
 }
 
 #[test]

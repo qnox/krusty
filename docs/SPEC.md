@@ -9100,16 +9100,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_runtime_e2e.rs` (`walk_polls_program_calls`, `member_stops_at_throw`).
 - **An exhausted native iterator raises what Kotlin raises there, and never ends the program.**
   Through the general (boxed) and the narrow (primitive) protocol alike: an array's `next()` raises
-  `NoSuchElementException` whose message is the index asked for (`"1"`), Kotlin/Native's
-  `ArrayIterator`/`IntArrayIterator` wording (the JVM's says `Index 1 out of bounds for length 1`,
-  so the message is platform-defined); a range's, a progression's, a list's and `withIndex()`'s
-  raise `NoSuchElementException()`; a `String`'s or `StringBuilder`'s raises what `text[length]`
-  raises, `IndexOutOfBoundsException`, because Kotlin's `CharSequence.iterator()` is
-  `get(index++)` with no check of its own (kotlinc throws the JVM's subclass,
-  `StringIndexOutOfBoundsException`); the index moves on before the read raises, so a second
-  `next()` on `"a".iterator()` asks for index 2, where an array's asks for the same index again.
-  Everything but the arrays' message is compared with kotlinc's answers for `iterator_exhausted.kt`
-  on every run.
+  Kotlin/Native's `ArrayIterator`/`IntArrayIterator` exception, `NoSuchElementException`, with the
+  JVM's message, `Index 1 out of bounds for length 1` (Kotlin/Native's is the index alone); a
+  range's, a progression's, a list's and `withIndex()`'s raise `NoSuchElementException()`; a
+  `String`'s or `StringBuilder`'s raises what `text[length]` raises, because Kotlin's
+  `CharSequence.iterator()` is `get(index++)` with no check of its own: Kotlin/Native's class
+  (`ArrayIndexOutOfBoundsException` for a `String`, `IndexOutOfBoundsException` for a
+  `StringBuilder`, whose `get` calls `AbstractList.checkElementIndex`) with the JVM's message,
+  where kotlinc throws `StringIndexOutOfBoundsException` for both -- a declared divergence. The
+  index moves on before the read raises, so a second `next()` on `"a".iterator()` asks for index
+  2, where an array's asks for the same index again. Compared with kotlinc's answers for
+  `iterator_exhausted.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`iterator_exhausted`).
 - **Native walk counters raise Kotlin's overflow, and no runtime counter overflows signed.** A walk
   counting with an `Int` raises what Kotlin's `checkIndexOverflow`/`checkCountOverflow` raise when
