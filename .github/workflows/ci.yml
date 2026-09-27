@@ -248,27 +248,25 @@ jobs:
     needs: [ci, klib-semantics, conformance, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      # Master runs overlap, so an older run can reach this job after a newer one. Only the commit at
-      # the tip of master publishes, so the release, the latest-release marker and the badges never
-      # move backwards. That also serializes publishing without a concurrency group, which would
-      # cancel a queued release (and with it the whole run) just as the run-level group did.
-      - name: publish only the tip of master
+      # Master runs overlap, so two release jobs can run at once and an older commit can reach
+      # this job after a newer one. A concurrency group would cancel a queued release, and with it
+      # the whole run, so publishing takes a lock held in a ref instead. Under it, only the tip of
+      # master that descends from the last published commit publishes: the release, the
+      # latest-release marker and the badges never move backwards.
+      - name: take the release lock
+        id: lock
+        run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
+      - name: publish only the newest master commit
         id: tip
-        run: |
-          set -euo pipefail
-          git fetch --quiet origin master
-          if [ "$(git rev-parse origin/master)" = "$GITHUB_SHA" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "master has moved past $GITHUB_SHA; its successor publishes"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@v2
         if: steps.tip.outputs.publish == 'true'
         with:
@@ -300,6 +298,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: dist/**
           fail_on_unmatched_files: true
+      - name: record the published commit
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/release-publisher.sh record
       # Badge: read the max version's pct (produced by the conformance matrix) and publish to the gist.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
@@ -339,3 +340,6 @@ jobs:
           label: Kotlin
           message: ${{ needs.versions.outputs.max }}
           color: blue
+      - name: drop the release lock
+        if: always() && steps.lock.outputs.lock != ''
+        run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"
