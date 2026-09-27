@@ -69,9 +69,6 @@ impl MethodSig {
     pub fn is_final(&self) -> bool {
         self.access & ACC_FINAL != 0
     }
-    pub fn is_bridge(&self) -> bool {
-        self.access & ACC_BRIDGE != 0
-    }
     /// A compiler-generated method (`ACC_BRIDGE` or `ACC_SYNTHETIC`): javac's bridges and
     /// accessors are ABI, never source declarations.
     pub fn is_compiler_generated(&self) -> bool {
