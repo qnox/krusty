@@ -5924,6 +5924,10 @@ fn emit_class(
             &mut cw,
         );
     }
+    // `-jvm-default=disable`: an inherited body gets an explicit override forwarding to the holder,
+    // or every inherited call is an `AbstractMethodError`. kotlinc adds them before the bridges, and
+    // `<clinit>` follows both.
+    emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
@@ -5955,10 +5959,6 @@ fn emit_class(
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
-    // `-jvm-default=disable`: the interface holds no bodies, so a class that inherits one gets an
-    // explicit override forwarding to the holder. Without these the class does not implement its own
-    // interface and every inherited call is an `AbstractMethodError`.
-    emit_default_impls_forwarders(ir, c, &mut cw, env);
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
@@ -7153,6 +7153,12 @@ fn emit_enum_class(
 
     emit_members(&mut cw, &schedule.lambdas);
     emit_members(&mut cw, &schedule.plugin_generated);
+    // An `enum class` implementing an interface needs the same holder forwarders an ordinary class
+    // does, and the erased bridges for a generic-interface method it overrides (`enum E : A<String>
+    // { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`). kotlinc adds both
+    // before `<clinit>`, forwarders first.
+    emit_default_impls_forwarders(ir, c, &mut cw, env);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -7324,14 +7330,8 @@ fn emit_enum_class(
     // <clinit> is added LAST (built earlier), matching kotlinc's member order.
     cw.add_method(0x0008, "<clinit>", "()V", &clinit);
 
-    // Erased bridges for a generic-interface method overridden at the enum level
-    // (`enum E : A<String> { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`).
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     // An enum is a VIEW of the same `IrClass` — compute its `@Metadata` (and hence debug tables /
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
-    // An `enum class` implementing an interface needs the same holder forwarders an ordinary class
-    // does — it reaches emission through this function, not `emit_class`.
-    emit_default_impls_forwarders(ir, c, &mut cw, env);
     let class_metadata = opts
         .emit_class_metadata
         .then(|| build_class_metadata(ir, c, opts))
