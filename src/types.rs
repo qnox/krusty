@@ -2,10 +2,13 @@
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
 mod interning;
+mod spelling;
+
 pub use crate::context_parameters::ContextParameterKind;
 pub use crate::inline_parameter_modifier::InlineParameterModifier;
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
+pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -57,40 +60,6 @@ fn type_names() -> &'static NameTree {
     })
 }
 
-pub fn type_name(internal: &str) -> TypeName {
-    if let Some(id) = type_names().get(internal) {
-        return TypeName(id);
-    }
-    let Some((base, nested)) = split_nested_name(internal) else {
-        return TypeName(type_names().insert(internal));
-    };
-    let mut name = TypeName(type_names().insert(base));
-    for segment in nested
-        .split(['.', '$'])
-        .filter(|segment| !segment.is_empty())
-    {
-        name = type_name_nested_child(name, segment);
-    }
-    name
-}
-
-pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
-    let Some((base, nested)) = split_nested_name(names.segment(id)) else {
-        return TypeName(type_names().insert_from(names, id));
-    };
-    let parent = names.parent(id).map_or(NameTree::ROOT, |parent| {
-        type_names().insert_from(names, parent)
-    });
-    let mut name = TypeName(type_names().child_of(parent, base));
-    for segment in nested
-        .split(['.', '$'])
-        .filter(|segment| !segment.is_empty())
-    {
-        name = type_name_nested_child(name, segment);
-    }
-    name
-}
-
 /// Find a global type-name identity in another name tree without mutating either tree.
 pub(crate) fn existing_type_name_in(names: &NameTree, internal: TypeName) -> Option<NameId> {
     names.existing_from(type_names(), internal.name_id())
@@ -99,17 +68,6 @@ pub(crate) fn existing_type_name_in(names: &NameTree, internal: TypeName) -> Opt
 /// Copy a global type-name identity into another name tree without rendering it to text.
 pub(crate) fn insert_type_name_in(names: &NameTree, internal: TypeName) -> NameId {
     names.insert_from(type_names(), internal.name_id())
-}
-
-fn split_nested_name(internal: &str) -> Option<(&str, &str)> {
-    let classifier_start = internal.rfind('/').map_or(0, |slash| slash + 1);
-    let classifier = &internal[classifier_start..];
-    let separator = classifier
-        .as_bytes()
-        .iter()
-        .position(|byte| matches!(byte, b'.' | b'$'))?;
-    let base_end = classifier_start + separator;
-    Some((&internal[..base_end], &internal[base_end + 1..]))
 }
 
 const KOTLIN_BOOLEAN: TypeName = TypeName(NameId(2));
@@ -156,42 +114,6 @@ pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
 
 pub fn type_name_nested_child(owner: TypeName, nested: &str) -> TypeName {
     TypeName(type_names().nested_child_of(owner.name_id(), nested))
-}
-
-pub fn existing_type_name(internal: &str) -> Option<TypeName> {
-    if let Some(id) = type_names().get(internal) {
-        return Some(TypeName(id));
-    }
-    let (base, nested) = split_nested_name(internal)?;
-    let mut name = TypeName(type_names().get(base)?);
-    for segment in nested
-        .split(['.', '$'])
-        .filter(|segment| !segment.is_empty())
-    {
-        name = TypeName(type_names().existing_nested_child_of(name.name_id(), segment)?);
-    }
-    Some(name)
-}
-
-pub fn existing_type_name_child(parent: TypeName, segment: &str) -> Option<TypeName> {
-    // Generated local/anonymous classifier names are exact declaration identities and may contain
-    // `$` without having separately interned every synthetic owner prefix. Prefer that already-
-    // interned child before interpreting a source-qualified/nested spelling segment by segment.
-    // This performs no interning: a miss still falls through to the structural lookup below.
-    if let Some(exact) = type_names().existing_child_of(parent.name_id(), segment) {
-        return Some(TypeName(exact));
-    }
-    let Some((base, nested)) = split_nested_name(segment) else {
-        return None;
-    };
-    let mut name = TypeName(type_names().existing_child_of(parent.name_id(), base)?);
-    for segment in nested
-        .split(['.', '$'])
-        .filter(|segment| !segment.is_empty())
-    {
-        name = TypeName(type_names().existing_nested_child_of(name.name_id(), segment)?);
-    }
-    Some(name)
 }
 
 pub fn existing_type_name_nested_child(owner: TypeName, segment: &str) -> Option<TypeName> {
