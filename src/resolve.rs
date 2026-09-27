@@ -24919,7 +24919,7 @@ impl<'a> Checker<'a> {
         // Propagate an annotation's expected type through the initializer.
         let init_diag_mark = self.diags.diags.len();
         let it = match declared {
-            Some(d) => self.expr_expected(scope, init, d),
+            Some(d) => self.expr_declared(scope, init, d),
             _ => self.expr(scope, init),
         };
         let unbound_initializer =
@@ -25410,7 +25410,7 @@ impl<'a> Checker<'a> {
                 .or_else(|| property.storage().map(|(ty, _)| ty))
         };
         let vt = match assignment_expected {
-            Some(expected) => self.expr_expected(scope, value, expected),
+            Some(expected) => self.expr_declared(scope, value, expected),
             None => self.expr(scope, value),
         };
         // One narrowing record for every assignment target below (local, backing field, member or
@@ -26300,7 +26300,7 @@ impl<'a> Checker<'a> {
         let rt = self.ret_ty;
         match e {
             Some(ex) => {
-                let t = self.expr_expected(scope, ex, rt);
+                let t = self.expr_declared(scope, ex, rt);
                 let actual = self.recorded_expression_type_for_expected(scope, ex, t, rt);
                 self.narrow_platform_value(rt, ex, PlatformNarrowing::Declaration);
                 self.expect_assignable(rt, actual, self.span(ex), "return");
@@ -37543,7 +37543,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
-        call_arguments: None,
+        expected_declared: false,
+        expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
         discovers_captures_at_construction: false,
@@ -40527,8 +40528,11 @@ struct Checker<'a> {
     /// constraints, but it cannot finalize an inference diagnostic; the selected argument check
     /// immediately following overload selection owns that decision.
     postponed_argument_depth: usize,
-    /// Every expression written as a call's value argument, collected on first use.
-    call_arguments: Option<std::collections::HashSet<ExprId>>,
+    /// Whether [`Self::expected`] comes from a declaration, assignment or return (see
+    /// [`Self::expr_declared`]). Consumed with it.
+    expected_declared: bool,
+    /// The expressions being checked, innermost last, each with its expectation's provenance.
+    expectation_frames: Vec<conditional_branch::ExpectationFrame>,
     /// Nonzero while checking a statement that cannot execute because an earlier statement in the
     /// same block always transfers control. The statement is still checked enough to build local
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
@@ -57126,7 +57130,7 @@ impl<'a> Checker<'a> {
                 (!resolved_property_ty.mentions_error()).then_some(resolved_property_ty)
             };
             let it = match declared.filter(|_| p.declared_ty().is_some()) {
-                Some(expected) => self.expr_expected(scope, init, expected),
+                Some(expected) => self.expr_declared(scope, init, expected),
                 None => self.expr(scope, init),
             };
             if p.declared_ty().is_none() {
@@ -59197,7 +59201,7 @@ impl<'a> Checker<'a> {
                         };
                         if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
                             let declared = self.type_ref_ty(&property_scope, r);
-                            let it = self.expr_expected(&property_scope, init, declared);
+                            let it = self.expr_declared(&property_scope, init, declared);
                             let sp = self.value_diagnostic_span(init, it);
                             self.narrow_platform_value(
                                 declared,
@@ -60321,7 +60325,7 @@ impl<'a> Checker<'a> {
                         let it = match (prechecked_storage, declared) {
                             (Some(storage), _) => storage,
                             (None, Some(expected)) => {
-                                self.expr_expected(&initializer_scope, init, expected)
+                                self.expr_declared(&initializer_scope, init, expected)
                             }
                             (None, None) => self.expr(&initializer_scope, init),
                         };
@@ -61073,7 +61077,7 @@ impl<'a> Checker<'a> {
                     .then_some(inherited_result)
                     .flatten();
                     let inferred = if let Some(expected) = exposed_override_result {
-                        let checked = self.expr_expected(scope, *e, expected);
+                        let checked = self.expr_declared(scope, *e, expected);
                         let actual = self
                             .recorded_expression_type_for_expected(scope, *e, checked, expected);
                         self.narrow_platform_value(expected, *e, PlatformNarrowing::Declaration);
@@ -61143,7 +61147,7 @@ impl<'a> Checker<'a> {
     fn check_fun_body(&mut self, scope: &CheckerScope<'_>, f: &FunDecl) {
         match &f.body {
             FunBody::Expr(e) => {
-                let t = self.expr_expected(scope, *e, self.ret_ty);
+                let t = self.expr_declared(scope, *e, self.ret_ty);
                 let actual = self.recorded_expression_type_for_expected(scope, *e, t, self.ret_ty);
                 self.narrow_platform_value(self.ret_ty, *e, PlatformNarrowing::Declaration);
                 self.expect_assignable(self.ret_ty, actual, self.span(*e), "function body");
@@ -63795,6 +63799,7 @@ impl<'a> Checker<'a> {
             self.expr_stack.push(e);
         }
         let expected = self.expected.take();
+        let declared = std::mem::take(&mut self.expected_declared) && expected.is_some();
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
@@ -63812,9 +63817,12 @@ impl<'a> Checker<'a> {
         // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
         // is a stack-pointer read; `stacker` chains further segments only when the current one
         // runs low (see [`crate::wide_stack`]).
+        self.expectation_frames
+            .push(conditional_branch::ExpectationFrame::new(e, declared));
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
+        self.expectation_frames.pop();
         self.expr_depth -= 1;
         // A statement is done: a probe verdict no closed re-check superseded is authoritative.
         if self.expr_depth == 0 {
@@ -63855,6 +63863,7 @@ impl<'a> Checker<'a> {
                 return expected;
             }
         }
+        self.expected_declared |= self.block_forwards_declared_expectation();
         self.expected = Some(expected);
         self.expr(scope, e)
     }
@@ -74128,7 +74137,7 @@ impl<'a> Checker<'a> {
             };
         }
         match expected_return {
-            Some(expected) => self.expr_expected(scope, body, expected),
+            Some(expected) => self.expr_declared(scope, body, expected),
             None => self.expr(scope, body),
         }
     }

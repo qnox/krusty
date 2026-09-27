@@ -98,42 +98,52 @@ impl Checker<'_> {
     ///
     /// kotlinc gives a declared expectation to every branch of an `if`, `when` or elvis:
     /// `val i: I = if (c) materialize() else B()` fixes `materialize`'s `T` to `I`, not to the
-    /// sibling's `B`. An expectation of `Any` or `Any?` constrains nothing and leaves the sibling to
-    /// decide, as without one (`val x: Any = if (c) materialize() else B()` binds `T` to `B`). So
-    /// does a call argument's: the conditional is then part of the enclosing call's inference, and
-    /// `sink(if (c) materialize() else B())` binds `T` to `B` whatever `sink`'s parameter type.
+    /// sibling's `B`. A declared expectation is a declaration's, an assignment target's, a return's
+    /// or a lambda body's type (see [`Checker::expr_declared`]), given to the conditional itself or
+    /// through a block's result. A conditional nested in another's branch is part of the outer
+    /// one's inference, as a call argument is, so kotlinc lets its sibling decide, as it does under
+    /// a call argument's expectation (`sink(if (c) materialize() else B())` binds `T` to `B`) or
+    /// none. An expectation of `Any` or `Any?` constrains nothing and leaves the sibling to decide
+    /// too.
     pub(super) fn expectation_fixes_branches(
-        &mut self,
+        &self,
         scope: &CheckerScope<'_>,
         conditional: ExprId,
         expected: Option<Ty>,
     ) -> Option<Ty> {
-        usable_expected(scope, expected)
-            .filter(|ty| {
-                !matches!(ty.non_null(), Ty::Obj(name, _)
+        let declared = self
+            .expectation_frames
+            .last()
+            .is_some_and(|frame| frame.expression == conditional && frame.declared);
+        usable_expected(scope, expected).filter(|ty| {
+            declared
+                && !matches!(ty.non_null(), Ty::Obj(name, _)
                     if crate::types::same(name, crate::types::wk::any()))
-            })
-            .filter(|_| !self.is_call_argument(conditional))
+        })
     }
 
-    /// Whether `expression` is written as a value argument of a call.
-    fn is_call_argument(&mut self, expression: ExprId) -> bool {
-        let file = self.file;
-        self.call_arguments
-            .get_or_insert_with(|| {
-                file.expr_arena
-                    .iter()
-                    .flat_map(|candidate| match candidate {
-                        Expr::Call { args, .. }
-                        | Expr::SafeCall {
-                            args: Some(args), ..
-                        } => args.as_slice(),
-                        _ => &[],
-                    })
-                    .copied()
-                    .collect()
-            })
-            .contains(&expression)
+    /// Check `e` against a declared expectation: a declaration's type, an assignment target's, or
+    /// a return's.
+    pub(super) fn expr_declared(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        expected: Ty,
+    ) -> Ty {
+        self.expected_declared = true;
+        let checked = self.expr_expected(scope, e, expected);
+        // A lambda converted to a SAM type is checked without consuming the mark.
+        self.expected_declared = false;
+        checked
+    }
+
+    /// Whether a block being checked against a declared expectation forwards it to its result
+    /// expression: a lambda body's `run { decode() ?: fallback }` elvis keeps the declared type.
+    /// A conditional's branch is not declared itself, so a block there forwards nothing.
+    pub(super) fn block_forwards_declared_expectation(&self) -> bool {
+        self.expectation_frames.last().is_some_and(|frame| {
+            frame.declared && matches!(self.file.expr(frame.expression), Expr::Block { .. })
+        })
     }
 
     /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
@@ -191,5 +201,20 @@ impl Checker<'_> {
             "conditional branch {branch:?} rebinds against sibling {sibling:?} as {expectation:?}"
         );
         recheck(self, expectation)
+    }
+}
+
+/// One expression being checked, and whether its expectation is declared.
+pub(super) struct ExpectationFrame {
+    expression: ExprId,
+    declared: bool,
+}
+
+impl ExpectationFrame {
+    pub(super) fn new(expression: ExprId, declared: bool) -> Self {
+        Self {
+            expression,
+            declared,
+        }
     }
 }
