@@ -17,8 +17,7 @@ static void expect_unchanged(KRef list, KRef first, KRef second) {
 }
 
 void kt_program_entry(void) {
-    int stack_bottom;
-    kt_runtime_init(&stack_bottom);
+    DRIVER_BEGIN();
     KRef first = kt_box_int(1000);
     KRef second = kt_box_int(2000);
     KRef intruder = kt_box_int(3000);
@@ -27,25 +26,37 @@ void kt_program_entry(void) {
     kt_mutable_list_add(list, second);
     KRef walk = kt_iterable_iterator(list);
 
-    CHECK(kt_mutable_list_set(list, -1, intruder) == NULL, "set(-1) answered an old element\n");
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "set(-1) raised no IOOBE\n");
+    (void)kt_mutable_list_set(list, -1, intruder);
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index -1 out of bounds for length 2"),
+          "set(-1) raised no IOOBE\n");
     expect_unchanged(list, first, second);
-    CHECK(kt_mutable_list_set(list, 2, intruder) == NULL, "set(size) answered an old element\n");
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "set(size) raised no IOOBE\n");
+    (void)kt_mutable_list_set(list, 2, intruder);
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index 2 out of bounds for length 2"),
+          "set(size) raised no IOOBE\n");
     expect_unchanged(list, first, second);
 
     kt_mutable_list_add_at(list, 5, intruder);
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "add(5, e) raised no IOOBE\n");
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index 5 out of bounds for length 2"),
+          "add(5, e) raised no IOOBE\n");
     expect_unchanged(list, first, second);
     kt_mutable_list_add_at(list, -1, intruder);
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "add(-1, e) raised no IOOBE\n");
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index -1 out of bounds for length 2"),
+          "add(-1, e) raised no IOOBE\n");
     expect_unchanged(list, first, second);
 
-    CHECK(kt_mutable_list_remove_at(list, 2) == NULL, "removeAt(size) answered an element\n");
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "removeAt(size) raised no IOOBE\n");
+    (void)kt_mutable_list_remove_at(list, 2);
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index 2 out of bounds for length 2"),
+          "removeAt(size) raised no IOOBE\n");
     expect_unchanged(list, first, second);
-    CHECK(kt_mutable_list_remove_at(list, -1) == NULL, "removeAt(-1) answered an element\n");
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "removeAt(-1) raised no IOOBE\n");
+    (void)kt_mutable_list_remove_at(list, -1);
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index -1 out of bounds for length 2"),
+          "removeAt(-1) raised no IOOBE\n");
     expect_unchanged(list, first, second);
 
     CHECK(kt_iterator_next(walk) == first, "the walk lost the first element\n");
@@ -54,8 +65,10 @@ void kt_program_entry(void) {
     CHECK(!kt_iterator_has_next(walk), "the walk found a third element\n");
 
     KRef empty = kt_mutable_list_new();
-    CHECK(kt_mutable_list_remove_at(empty, 0) == NULL, "removeAt(0) of nothing answered\n");
-    CHECK(took(&kt_type_index_out_of_bounds_exception), "removeAt(0) of nothing raised no IOOBE\n");
+    (void)kt_mutable_list_remove_at(empty, 0);
+    CHECK(took_message(&kt_type_index_out_of_bounds_exception,
+                       "Index 0 out of bounds for length 0"),
+          "removeAt(0) of nothing raised no IOOBE\n");
     CHECK(kt_list_size(empty) == 0, "removeAt(0) of nothing changed the size\n");
     kt_sys_write(1, "OK\n", 3);
 }

@@ -47,6 +47,25 @@ __attribute__((weak)) KRef kt_box_uint(kt_int value) {
     return (KRef)box;
 }
 
+/* Take the exception in flight off the slot and say whether it has the expected type and exactly
+   the expected message (NULL for none). */
+static inline kt_boolean took_message(const KType *expected, const char *message) {
+    KRef thrown = kt_pending_exception();
+    kt_clear_pending();
+    if (thrown == NULL || type_of(thrown) != expected) {
+        return 0;
+    }
+    KRef text = kt_throwable_message(thrown);
+    if (message == NULL || text == NULL) {
+        return message == NULL && text == NULL;
+    }
+    kt_int length = 0;
+    while (message[length] != 0) {
+        length++;
+    }
+    return text_is(text, message, length);
+}
+
 /* Take the exception in flight off the slot and say whether it has the expected type. NULL, when
    nothing is in flight, has none. */
 static inline kt_boolean took(const KType *expected) {

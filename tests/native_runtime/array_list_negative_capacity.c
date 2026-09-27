@@ -4,10 +4,10 @@
 #include "collections_later_tiers.h"
 
 void kt_program_entry(void) {
-    int stack_bottom;
-    kt_runtime_init(&stack_bottom);
-    CHECK(kt_mutable_list_with_capacity(-1) == NULL, "ArrayList(-1) answered a list\n");
-    CHECK(took(&kt_type_illegal_argument_exception), "ArrayList(-1) raised no IAE\n");
+    DRIVER_BEGIN();
+    (void)kt_mutable_list_with_capacity(-1);
+    CHECK(took_message(&kt_type_illegal_argument_exception, "Illegal Capacity: -1"),
+          "ArrayList(-1) raised no IAE\n");
     KRef list = kt_mutable_list_with_capacity(0);
     CHECK(list != NULL && kt_list_size(list) == 0, "ArrayList(0) is not an empty list\n");
     kt_mutable_list_add(list, kt_box_int(1));
