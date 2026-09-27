@@ -12,28 +12,11 @@
    `ULong` above 2^63 reads as a negative `Long` and lands on the wrong residue, so a short `ULong`
    walk across 2^63 misreported its members.
 
-   Every expected answer is Kotlin's, from this program compiled and run with the reference kotlinc
-   2.4.10 on the JVM (each line printing `true`, `false` or `threw ArithmeticException: Index
-   overflow has happened.`, recorded beside its case below):
-
-       fun t(label: String, f: () -> Boolean) = println("$label " + try { f().toString() }
-           catch (e: Throwable) { "threw ${e::class.simpleName}: ${e.message}" })
-       fun main() {
-           val first = 9223372036854775806uL
-           val p = first..(first + 12uL) step 3
-           val q = (first + 12uL) downTo first step 3
-           t("") { 9223372036854775809uL in p }
-           ...   // one `t` per case below, the expression its comment or call spells
-       }
-
-   and, for the walks of exactly 2^31 and 2^31 + 1 elements,
-
-       t("fits -1") { -1L in (0L..2147483647L step 1) }          // false
-       t("fits last") { 2147483647L in (0L..2147483647L step 1) } // true
-       t("over last-1") { 2147483647L in (0L..2147483648L step 1) } // true
-       t("over last") { 2147483648L in (0L..2147483648L step 1) }  // threw
-       t("over -5") { -5L in (0L..2147483648L step 1) }            // threw */
-#include "later_tiers.h"
+   The driver prints each answer, and the harness compares the lines with what
+   `range_contains_unsigned.kt` answers under the reference kotlinc. The questions whose walk
+   reaches index 2^31 cost the JVM 5 to 13 seconds each, past the harness's limit on one run, so
+   the driver pins those answers, which the program lists beside the ones it runs. */
+#include "transcript.h"
 
 #define ULONG_MAX_BITS ((kt_long)UINT64_MAX)
 /* 2^63 + offset, as the bits of a `ULong`. */
@@ -41,7 +24,23 @@
 
 enum { FALSE, TRUE, THROWS };
 
-/* `value in range` answers `expected`: false, true, or Kotlin's index-overflow exception. */
+/* `label` and the answer to `value in range`: `true`, `false`, or the exception it threw. */
+static void ask(const char *label, KRef range, kt_long value) {
+    kt_boolean answer = kt_range_contains(range, value);
+    KRef thrown = kt_pending_exception();
+    say(label);
+    say(" ");
+    if (thrown != NULL) {
+        say_thrown(thrown);
+        kt_clear_pending();
+    } else {
+        say_bool(answer);
+    }
+    say("\n");
+}
+
+/* `value in range` answers `expected`: false, true, or Kotlin's index-overflow exception. Only the
+   questions too costly for the JVM to answer each run are pinned this way. */
 static void expect(KRef range, kt_long value, int expected) {
     kt_boolean answer = kt_range_contains(range, value);
     KRef thrown = kt_pending_exception();
@@ -63,46 +62,49 @@ void kt_program_entry(void) {
     /* p = first..(first + 12uL) step 3 with first = 2^63 - 2, whose walk is 2^63-2, 2^63+1,
        2^63+4, 2^63+7, 2^63+10; q is the same walk descending. */
     KRef p = kt_range_step(kt_ulong_range(TWO_63(-2), TWO_63(10)), 3);
-    expect(p, TWO_63(1), TRUE);  /* 9223372036854775809uL in p */
-    expect(p, TWO_63(0), FALSE); /* 9223372036854775808uL in p */
-    expect(p, TWO_63(5), FALSE); /* 9223372036854775813uL in p */
-    expect(p, TWO_63(6), FALSE); /* 9223372036854775814uL in p */
+    ask("9223372036854775809uL in p", p, TWO_63(1));
+    ask("9223372036854775808uL in p", p, TWO_63(0));
+    ask("9223372036854775813uL in p", p, TWO_63(5));
+    ask("9223372036854775814uL in p", p, TWO_63(6));
     KRef q = kt_range_step(kt_ulong_range_down_to(TWO_63(10), TWO_63(-2)), 3);
-    expect(q, TWO_63(4), TRUE);  /* 9223372036854775812uL in q */
-    expect(q, TWO_63(3), FALSE); /* 9223372036854775811uL in q */
+    ask("9223372036854775812uL in q", q, TWO_63(4));
+    ask("9223372036854775811uL in q", q, TWO_63(3));
 
     /* 0uL..ULong.MAX_VALUE step 3 and ULong.MAX_VALUE downTo 0uL step 3: far more than 2^31
        elements. */
     KRef ascending = kt_range_step(kt_ulong_range(0, ULONG_MAX_BITS), 3);
-    expect(ascending, TWO_63(1), THROWS);
-    expect(ascending, 3, TRUE);
-    expect(ascending, ULONG_MAX_BITS, THROWS);
+    ask("3uL in (0uL..ULong.MAX_VALUE step 3)", ascending, 3);
     KRef descending = kt_range_step(kt_ulong_range_down_to(ULONG_MAX_BITS, 0), 3);
-    expect(descending, ULONG_MAX_BITS - 3, TRUE);
-    expect(descending, 4, THROWS);
+    ask("ULong.MAX_VALUE - 3uL in (ULong.MAX_VALUE downTo 0uL step 3)", descending,
+        ULONG_MAX_BITS - 3);
 
     /* A `UInt` walk: bounds and value arrive zero-extended, above the signed `Int` maximum. */
     KRef uints = kt_range_step(kt_uint_range(1, (kt_int)4000000000u), 7);
-    expect(uints, 2999999997u, TRUE);
-    expect(uints, 3000000000u, FALSE);
-    expect(kt_uint_range(1, (kt_int)4000000000u), 3000000000u, TRUE);
-    expect(kt_ulong_range(0, ULONG_MAX_BITS), ULONG_MAX_BITS, TRUE);
+    ask("2999999997u in (1u..4000000000u step 7)", uints, 2999999997u);
+    ask("3000000000u in (1u..4000000000u step 7)", uints, 3000000000u);
+    ask("3000000000u in 1u..4000000000u", kt_uint_range(1, (kt_int)4000000000u), 3000000000u);
+    ask("ULong.MAX_VALUE in 0uL..ULong.MAX_VALUE", kt_ulong_range(0, ULONG_MAX_BITS),
+        ULONG_MAX_BITS);
 
     /* The signed kinds. */
     KRef longs = kt_range_step(kt_long_range(INT64_MIN, INT64_MAX), 3);
-    expect(longs, INT64_MIN + 3, TRUE);
-    expect(longs, 0, THROWS);
-    expect(kt_long_range(INT64_MIN, INT64_MAX), 0, TRUE);
+    ask("Long.MIN_VALUE + 3 in (Long.MIN_VALUE..Long.MAX_VALUE step 3)", longs, INT64_MIN + 3);
+    ask("0L in Long.MIN_VALUE..Long.MAX_VALUE", kt_long_range(INT64_MIN, INT64_MAX), 0);
     KRef evens = kt_range_step(kt_int_range_down_to(10, 1), 2);
-    expect(evens, 5, FALSE);
-    expect(evens, 4, TRUE);
+    ask("5 in (10 downTo 1 step 2)", evens, 5);
+    ask("4 in (10 downTo 1 step 2)", evens, 4);
     KRef sevens = kt_range_step(kt_int_range(-10, 10), 7);
-    expect(sevens, -3, TRUE);
-    expect(sevens, 10, FALSE);
-    expect(kt_int_range_down_to(10, 1), 5, TRUE);
-    expect(kt_range_step(kt_long_range(10, 0), 1), 5, FALSE);
+    ask("-3 in (-10..10 step 7)", sevens, -3);
+    ask("10 in (-10..10 step 7)", sevens, 10);
+    ask("5 in 10 downTo 1", kt_int_range_down_to(10, 1), 5);
+    ask("5L in (10L..0L step 1)", kt_range_step(kt_long_range(10, 0), 1), 5);
 
-    /* Walks of exactly 2^31 and 2^31 + 1 elements. */
+    /* The walks that reach index 2^31, pinned (see `range_contains_unsigned.kt`): the three
+       progressions above, and walks of exactly 2^31 and 2^31 + 1 elements. */
+    expect(ascending, TWO_63(1), THROWS);
+    expect(ascending, ULONG_MAX_BITS, THROWS);
+    expect(descending, 4, THROWS);
+    expect(longs, 0, THROWS);
     KRef fits = kt_range_step(kt_long_range(0, 2147483647), 1);
     expect(fits, -1, FALSE);
     expect(fits, 2147483647, TRUE);

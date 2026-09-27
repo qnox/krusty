@@ -391,6 +391,34 @@ Use the shared helpers in `tests/common`:
 These helpers compile in process where possible and reuse persistent JVM runners/servers inside a test
 binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
 
+## Native Runtime Drivers
+
+`tests/native_runtime_e2e.rs` (in the `e2e` binary; filter `native_runtime`) builds each C driver under
+`tests/native_runtime/` with the host clang against the freestanding runtime and runs it. A driver
+succeeds with exactly `OK\n` on stdout and nothing on stderr (`run_driver`), or ends the way the
+runtime ends a program with exactly the runtime's message (`run_driver_expecting_failure`).
+
+A driver whose expected answers are Kotlin's does not copy them into C. It prints a transcript — one
+observation per line, runtime objects rendered through the runtime's own `toString` where that is the
+claim — before its `OK`, and `run_driver_against_kotlin` compares it with the Kotlin program beside
+it, `tests/native_runtime/<driver>.kt`. That program's `fun box(): String` builds the same lines;
+the harness compiles it with the persistent reference kotlinc and runs it on the shared JVM
+(`common::kotlinc_box_result`), requires it to succeed with whole lines, and fails on the first line
+where the two transcripts differ, printing both. `tests/native_runtime/transcript.h` holds the C side
+(`say`, `say_value`, `say_thrown`, …). Checks with no Kotlin counterpart — the pending exception's
+identity, the exact calls into a program stand-in, failure messages — stay `CHECK`s in the driver, and
+an answer the JVM cannot give within the box runner's 10-second limit, or one where the runtime
+deliberately follows Kotlin/Native, stays pinned in the driver with the reason beside it.
+
+These drivers need the reference kotlinc like every other differential test: `just` provisions it, or
+point `KRUSTY_KOTLINC` at a provisioned dist when running the filter by hand, for example from a
+worktree:
+
+```sh
+KRUSTY_KOTLINC=/path/to/kotlinc/bin/kotlinc \
+CARGO_TARGET_DIR=/path/to/main/target cargo test --profile gate --test e2e native_runtime
+```
+
 ## Environment Overrides
 
 The harness usually sets these itself through `just`. Override them only when testing a specific local

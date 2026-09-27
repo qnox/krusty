@@ -8954,6 +8954,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     half, as the JVM does — growth past the capacity, identity equality and self-append.
   Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
   `builder_operations`, with `class_names` and `result_operations` above).
+- **A native runtime driver's Kotlin answers are checked against Kotlin when the test runs.** A
+  driver whose expected answers are Kotlin's prints what the runtime answered as a transcript, one
+  observation per line, and the harness (`run_driver_against_kotlin` in
+  `tests/native_runtime_e2e.rs`) requires it to equal what the program beside it,
+  `tests/native_runtime/<driver>.kt`, answers from `box()` when the reference kotlinc compiles it and
+  the JVM runs it. The program is the one home of the Kotlin being compared with; the driver keeps
+  its own checks of what Kotlin has no counterpart for (which exception is pending, the exact calls
+  into the program, the message a failure ends with). An answer the JVM cannot give within the
+  harness's limit, or one where the native runtime deliberately follows Kotlin/Native, stays pinned
+  in the driver and says why. From the range tier on, every driver that cites kotlinc runs this way.
+  Tests: `tests/native_runtime_e2e.rs` (`a_transcript_differs_at_its_first_differing_line`, and every
+  driver registered with `run_driver_against_kotlin`).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
   flag for which it is, because the two classes differ observably and the step cannot tell them
@@ -8968,22 +8980,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
-  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`), each compared with its Kotlin
+  program as below.
 - **A native range, a progression and their iterators are Kotlin's classes.** `..` and `until`
   answer `kotlin.ranges.IntRange` (and `LongRange`, `CharRange`, `UIntRange`, `ULongRange`), whose
   superclass is the element's progression; `step`, `downTo` and `reversed()` answer
   `kotlin.ranges.IntProgression` (and kin) itself, even for a step of one; and `iterator()` answers
   `kotlin.ranges.IntProgressionIterator` (and kin), a subclass of the abstract
   `kotlin.collections.IntIterator`/`LongIterator`/`CharIterator`, while the unsigned iterators
-  subclass only `Any` — as kotlinc 2.4.10 reports on the JVM for the program recorded in the driver.
+  subclass only `Any` — as the reference kotlinc reports on the JVM for `range_class_identity.kt`,
+  which the harness runs and compares line by line with what the driver prints.
   The two share one struct and vtable; the descriptor alone says which class an object is.
   Tests: `tests/native_runtime_e2e.rs` (`range_class_identity`, `range_progression_members`).
 - **`value in progression` is Kotlin's `Iterable.contains`, index overflow included.** A range
   (`IntRange` and kin) answers `in` with its own constant-time `contains`. A progression has no
   `contains`, so Kotlin's `in` walks it with an `Int` index and throws
   `ArithmeticException("Index overflow has happened.")` on reaching index 2^31 (checked with kotlinc
-  2.4.10: `0L in (Long.MIN_VALUE..Long.MAX_VALUE step 3)` throws, `(Long.MIN_VALUE + 3) in` it is
+  2.4.20: `0L in (Long.MIN_VALUE..Long.MAX_VALUE step 3)` throws, `(Long.MIN_VALUE + 3) in` it is
   `true`, `-5L in (0L..2147483648L step 1)` throws, `-1L in (0L..2147483647L step 1)` is `false`).
+  The harness asks kotlinc every question in `range_contains_unsigned.kt` on each run and compares
+  the driver's answers with it, except the questions whose walk reaches index 2^31: each costs the
+  JVM 5 to 13 seconds, past the harness's limit on one `box()`, so the driver pins those answers and
+  the program lists them.
   The native runtime answers the same in constant time: a member at walk index below 2^31 is found,
   a walk of at most 2^31 elements ends without one, and any other question throws. Membership in a
   `ULong` walk is reduced on the unsigned ring, so a short walk across 2^63 finds its members.
@@ -8995,7 +9013,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   their hashes differ (`1072693248`, `-1074790400`); a `Float` range never equals a `Double` one.
   `hashCode` is `31 * start.hashCode() + end.hashCode()` at the bound's own width, `-1` when empty,
   and `toString` renders each bound as its type does (`1.0E-5..1.0E10`, `-Infinity..Infinity`). All
-  as kotlinc 2.4.10 answers on the JVM for the program recorded in the driver.
+  as the reference kotlinc answers on the JVM for `floating_range.kt`, which the harness runs and
+  compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`floating_range`).
 - **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
   range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
@@ -9008,8 +9027,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `equals` is `isEmpty() && other.isEmpty() || start == other.start && endInclusive ==
   other.endInclusive` evaluated in Kotlin's order: `other.isEmpty()`, a call into `other`'s
   `compareTo`, happens only when this range is empty. The exact calls each member makes into the
-  program, and where it stops when one throws, are those kotlinc 2.4.10 makes on the JVM for the
-  program recorded in `comparable_range_members`.
+  program, and where it stops when one throws, are those the reference kotlinc makes on the JVM for
+  `comparable_range_members.kt`, which the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type

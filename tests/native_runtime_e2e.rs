@@ -12,6 +12,10 @@
 //! program, as it does on exhausted memory, is instead expected to exit with the runtime's failure
 //! status and exactly the runtime's message; anything the driver prints itself fails the test.
 //!
+//! A driver whose expected answers are Kotlin's prints them as a transcript instead of comparing
+//! them with values copied into C, and the harness compares that transcript with the one the Kotlin
+//! program beside it (`<driver>.kt`) answers under the reference kotlinc (`run_driver_against_kotlin`).
+//!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
 
@@ -157,6 +161,75 @@ fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(stdout[..stdout.len() - b"OK\n".len()].to_vec())
+}
+
+/// Run `driver` against Kotlin: the program `tests/native_runtime/<driver>.kt` answers, in its
+/// `box()`, the transcript of what the driver observes (one observation per line, each ending in a
+/// newline), and the driver prints its own transcript before its `OK` (`transcript.h`). The program
+/// is compiled by the reference kotlinc and run on the shared JVM through the persistent harness
+/// (`common::kotlinc_box_result`); it must compile and answer whole lines, and the driver must
+/// succeed exactly as `run_payload_driver` requires. The two transcripts must then be identical, so
+/// every answer the driver prints is Kotlin's by execution, not a value copied into C. The driver's
+/// own checks of what Kotlin has no counterpart for still end it on failure.
+fn run_driver_against_kotlin(driver: &str) {
+    let Some(native) = run_payload_driver(driver) else {
+        return;
+    };
+    let program = driver_dir().join(format!("{driver}.kt"));
+    let source = fs::read_to_string(&program)
+        .unwrap_or_else(|error| panic!("{driver}: read {}: {error}", program.display()));
+    let kotlin = common::kotlinc_box_result(&source);
+    assert!(
+        !kotlin.starts_with("ERROR:") && kotlin.ends_with('\n'),
+        "{driver}: the Kotlin program must run and answer a transcript of whole lines, got {kotlin:?}"
+    );
+    let native = String::from_utf8(native)
+        .unwrap_or_else(|error| panic!("{driver}: the native transcript is not UTF-8: {error}"));
+    if let Some(difference) = transcript_difference(&kotlin, &native) {
+        panic!(
+            "{driver}: the native transcript differs from Kotlin's: {difference}\n\
+             Kotlin:\n{kotlin}native:\n{native}"
+        );
+    }
+}
+
+/// Where the native transcript first departs from Kotlin's, or `None` when they are identical.
+fn transcript_difference(kotlin: &str, native: &str) -> Option<String> {
+    if kotlin == native {
+        return None;
+    }
+    let mut kotlin_lines = kotlin.split_inclusive('\n');
+    let mut native_lines = native.split_inclusive('\n');
+    for line in 1.. {
+        match (kotlin_lines.next(), native_lines.next()) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (expected, actual) => {
+                return Some(format!(
+                    "line {line}: Kotlin {:?}, native {:?}",
+                    expected.unwrap_or("<end>"),
+                    actual.unwrap_or("<end>")
+                ));
+            }
+        }
+    }
+    unreachable!("two different transcripts differ at some line")
+}
+
+#[test]
+fn a_transcript_differs_at_its_first_differing_line() {
+    assert_eq!(transcript_difference("a\nb\n", "a\nb\n"), None);
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nc\n").as_deref(),
+        Some("line 2: Kotlin \"b\\n\", native \"c\\n\"")
+    );
+    assert_eq!(
+        transcript_difference("a\n", "a\nb\n").as_deref(),
+        Some("line 2: Kotlin \"<end>\", native \"b\\n\"")
+    );
+    assert_eq!(
+        transcript_difference("a\n", "a").as_deref(),
+        Some("line 1: Kotlin \"a\\n\", native \"a\"")
+    );
 }
 
 /// Run `driver`, which must end the way the runtime ends a program it cannot continue
@@ -411,12 +484,12 @@ fn a_builder_appends_copies_and_sets_its_length() {
 
 #[test]
 fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
-    run_driver("range_contains_unsigned");
+    run_driver_against_kotlin("range_contains_unsigned");
 }
 
 #[test]
 fn a_progression_renders_compares_and_hashes_with_its_step() {
-    run_driver("range_progression_members");
+    run_driver_against_kotlin("range_progression_members");
 }
 
 #[test]
@@ -426,32 +499,32 @@ fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
 
 #[test]
 fn an_empty_unsigned_until_is_the_declared_empty_range() {
-    run_driver("range_unsigned_until_empty");
+    run_driver_against_kotlin("range_unsigned_until_empty");
 }
 
 #[test]
 fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
-    run_driver("range_iterator_ulong_crosses_sign");
+    run_driver_against_kotlin("range_iterator_ulong_crosses_sign");
 }
 
 #[test]
 fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
-    run_driver("array_copy_into_bounds");
+    run_driver_against_kotlin("array_copy_into_bounds");
 }
 
 #[test]
 fn a_range_a_progression_and_their_iterators_are_kotlins_classes() {
-    run_driver("range_class_identity");
+    run_driver_against_kotlin("range_class_identity");
 }
 
 #[test]
 fn a_comparable_ranges_members_call_the_program_in_kotlins_order_and_stop_at_a_throw() {
-    run_driver("comparable_range_members");
+    run_driver_against_kotlin("comparable_range_members");
 }
 
 #[test]
 fn a_floating_point_range_compares_by_ieee_and_answers_its_members_as_kotlin_does() {
-    run_driver("floating_range");
+    run_driver_against_kotlin("floating_range");
 }
 
 #[test]

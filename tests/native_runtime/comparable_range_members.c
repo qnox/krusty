@@ -12,67 +12,12 @@
    unconditionally, and `hashCode` folded the second bound's hash without looking for the exception
    it may have left pending.
 
-   The expected calls and answers are Kotlin's, from this program compiled and run with the
-   reference kotlinc 2.4.10 on the JVM (only the parts this driver checks are shown):
-
-       val log = StringBuilder()
-       class Boom(val tag: String) : RuntimeException(tag)
-       class V(val n: Int, val tag: String, val throws: String = "") : Comparable<V> {
-           override fun compareTo(other: V): Int {
-               log.append("cmp($tag,${other.tag}) ")
-               if ('c' in throws) throw Boom("cmp:$tag"); return n.compareTo(other.n)
-           }
-           override fun equals(other: Any?): Boolean {
-               log.append("eq($tag) ")
-               if ('e' in throws) throw Boom("eq:$tag"); return other is V && other.n == n
-           }
-           override fun hashCode(): Int {
-               log.append("hash($tag) "); if ('h' in throws) throw Boom("hash:$tag"); return n
-           }
-           override fun toString(): String {
-               log.append("str($tag) "); if ('s' in throws) throw Boom("str:$tag"); return "V$n"
-           }
-       }
-       fun show(label: String, block: () -> Any?) {
-           val r = try { block().toString() } catch (b: Boom) { "threw ${b.message}" }
-           println("$label = $r | $log"); log.setLength(0)
-       }
-       fun main() {
-           val a = V(1, "a")..V(3, "b"); val same = V(1, "c")..V(3, "d")
-           val empty1 = V(5, "e")..V(2, "f"); val empty2 = V(9, "g")..V(0, "h")
-           val other = V(1, "i")..V(4, "j")
-           show("a==same") { a == same }              // true  | cmp(a,b) eq(a) eq(b)
-           show("a==empty1") { a == empty1 }          // false | cmp(a,b) eq(a)
-           show("empty1==empty2") { empty1 == empty2 } // true | cmp(e,f) cmp(g,h)
-           show("empty1==a") { empty1 == a }          // false | cmp(e,f) cmp(a,b) eq(e)
-           show("a==other") { a == other }            // false | cmp(a,b) eq(a) eq(b)
-           show("a.hash") { a.hashCode() }            // 34 | cmp(a,b) hash(a) hash(b)
-           show("empty1.hash") { empty1.hashCode() }  // -1 | cmp(e,f)
-           show("a.str") { a.toString() }             // V1..V3 | str(a) str(b)
-           show("empty1.str") { empty1.toString() }   // V5..V2 | str(e) str(f)
-           val cmpThrows = V(1, "p", "c")..V(3, "q")
-           show("cmpThrows==a") { cmpThrows == a }    // threw cmp:p | cmp(p,q)
-           val emptyOtherThrows = V(1, "r", "c")..V(0, "s")
-           show("empty1==emptyOtherThrows") { empty1 == emptyOtherThrows }
-                                                      // threw cmp:r | cmp(e,f) cmp(r,s)
-           val eqThrows = V(1, "t", "e")..V(3, "u")
-           show("eqThrows==same") { eqThrows == same } // threw eq:t | cmp(t,u) eq(t)
-           val endEqThrows = V(1, "v")..V(3, "w", "e")
-           show("endEqThrows==same") { endEqThrows == same }
-                                                      // threw eq:w | cmp(v,w) eq(v) eq(w)
-           val endHashThrows = V(1, "k")..V(3, "l", "h")
-           show("endHashThrows.hash") { endHashThrows.hashCode() }
-                                                      // threw hash:l | cmp(k,l) hash(k) hash(l)
-           val startHashThrows = V(1, "m", "h")..V(3, "n", "h")
-           show("startHashThrows.hash") { startHashThrows.hashCode() }
-                                                      // threw hash:m | cmp(m,n) hash(m)
-           val startStrThrows = V(1, "o", "s")..V(3, "y", "s")
-           show("startStrThrows.str") { startStrThrows.toString() } // threw str:o | str(o)
-           val endStrThrows = V(1, "z")..V(3, "zz", "s")
-           show("endStrThrows.str") { endStrThrows.toString() } // threw str:zz | str(z) str(zz)
-       }
-*/
-#include "later_tiers.h"
+   The driver prints each member's answer, or the message of the exception it stopped at, with the
+   calls it made, and the harness compares the lines with what `comparable_range_members.kt`
+   answers under the reference kotlinc, where `V` is the program class this driver stands in for.
+   The driver itself checks that the exception left pending is the very one the member threw, and
+   the exact calls again. */
+#include "transcript.h"
 
 typedef struct V {
     KObjectHeader header;
@@ -122,12 +67,23 @@ static kt_boolean log_is(const char *expected) {
     return same;
 }
 
-/* Whether `self`'s member `member` throws, and if so, throws. */
-static kt_boolean throws(KRef self, char member) {
+static kt_int length_of(const char *text) {
+    kt_int length = 0;
+    while (text[length] != 0) {
+        length++;
+    }
+    return length;
+}
+
+/* Whether `self`'s member `member` throws, and if so, throws with the message `<prefix><tag>`, as
+   the program's `Boom("cmp:$tag")` does. */
+static kt_boolean throws(KRef self, char member, const char *prefix) {
     V *v = (V *)self;
     for (kt_int at = 0; v->throws[at] != 0; at++) {
         if (v->throws[at] == member) {
-            v->thrown = kt_throwable_new(&kt_type_illegal_state_exception, NULL);
+            KRef message = kt_string_plus(kt_string_utf8(prefix, length_of(prefix)),
+                                          kt_string_utf8(v->tag, length_of(v->tag)));
+            v->thrown = kt_throwable_new(&kt_type_illegal_state_exception, message);
             kt_throw(v->thrown);
             return true;
         }
@@ -137,7 +93,7 @@ static kt_boolean throws(KRef self, char member) {
 
 static kt_int v_compare(KRef self, KRef other) {
     log_call("cmp", self, other);
-    if (throws(self, 'c')) {
+    if (throws(self, 'c', "cmp:")) {
         return 0;
     }
     kt_int a = ((const V *)self)->n;
@@ -149,7 +105,7 @@ static const KType v_type;
 
 static kt_boolean v_equals(KRef self, KRef other) {
     log_call("eq", self, NULL);
-    if (throws(self, 'e')) {
+    if (throws(self, 'e', "eq:")) {
         return true;
     }
     return other != NULL && type_of(other) == &v_type &&
@@ -158,7 +114,7 @@ static kt_boolean v_equals(KRef self, KRef other) {
 
 static kt_int v_hash_code(KRef self) {
     log_call("hash", self, NULL);
-    if (throws(self, 'h')) {
+    if (throws(self, 'h', "hash:")) {
         return 0;
     }
     return ((const V *)self)->n;
@@ -167,7 +123,7 @@ static kt_int v_hash_code(KRef self) {
 /* `kt_string_utf8` names its bytes without copying, so each rendering is a literal. */
 static KRef v_to_string(KRef self) {
     log_call("str", self, NULL);
-    if (throws(self, 's')) {
+    if (throws(self, 's', "str:")) {
         return NULL;
     }
     switch (((const V *)self)->n) {
@@ -208,11 +164,45 @@ static KRef v(kt_int n, const char *tag, const char *throwing) {
 
 static KRef range(KRef start, KRef end) { return kt_comparable_range(start, end, v_compare); }
 
-/* A member that threw: the exception pending is the one `thrower` threw, the call log is exactly
-   `calls`, and the answer returned beside the exception is not looked at. */
-static void expect_threw(KRef thrower, const char *calls) {
+/* The line for a member's answer: `label = answer | calls`, the calls being the log so far. */
+static void say_calls(void) {
+    say(" | ");
+    say_bytes(log_text, log_length);
+    say("\n");
+}
+
+static void show_bool(const char *label, kt_boolean answer) {
+    say(label);
+    say(" = ");
+    say_bool(answer);
+    say_calls();
+}
+
+static void show_int(const char *label, kt_int answer) {
+    say(label);
+    say(" = ");
+    say_long(answer);
+    say_calls();
+}
+
+static void show_text(const char *label, KRef answer) {
+    CHECK(kt_pending_exception() == NULL, "an ordinary member raised\n");
+    say(label);
+    say(" = ");
+    say_text(answer);
+    say_calls();
+}
+
+/* A member that threw: the exception pending is the one `thrower` threw, and the line says what it
+   said; the call log is exactly `calls`, and the answer returned beside the exception is not looked
+   at. */
+static void show_threw(const char *label, KRef thrower, const char *calls) {
     CHECK(kt_pending_exception() != NULL && kt_pending_exception() == ((const V *)thrower)->thrown,
           "the pending exception is not the throwing member's\n");
+    say(label);
+    say(" = threw ");
+    say_text(kt_throwable_message(kt_pending_exception()));
+    say_calls();
     CHECK(log_is(calls), "the calls made before the throw\n");
     kt_clear_pending();
 }
@@ -225,49 +215,57 @@ void kt_program_entry(void) {
     KRef empty2 = range(v(9, "g", ""), v(0, "h", ""));
     KRef other = range(v(1, "i", ""), v(4, "j", ""));
 
-    CHECK(kt_equals(a, same) && log_is("cmp(a,b) eq(a) eq(b) "), "a == same\n");
-    CHECK(!kt_equals(a, empty1) && log_is("cmp(a,b) eq(a) "), "a == empty1\n");
-    CHECK(kt_equals(empty1, empty2) && log_is("cmp(e,f) cmp(g,h) "), "empty1 == empty2\n");
-    CHECK(!kt_equals(empty1, a) && log_is("cmp(e,f) cmp(a,b) eq(e) "), "empty1 == a\n");
-    CHECK(!kt_equals(a, other) && log_is("cmp(a,b) eq(a) eq(b) "), "a == other\n");
-    CHECK(kt_hash_code(a) == 34 && log_is("cmp(a,b) hash(a) hash(b) "), "a.hashCode()\n");
-    CHECK(kt_hash_code(empty1) == -1 && log_is("cmp(e,f) "), "empty1.hashCode()\n");
-    CHECK(text_is(kt_to_string(a), "V1..V3", 6) && log_is("str(a) str(b) "), "a.toString()\n");
-    CHECK(text_is(kt_to_string(empty1), "V5..V2", 6) && log_is("str(e) str(f) "),
-          "empty1.toString()\n");
+    show_bool("a==same", kt_equals(a, same));
+    CHECK(log_is("cmp(a,b) eq(a) eq(b) "), "a == same\n");
+    show_bool("a==empty1", kt_equals(a, empty1));
+    CHECK(log_is("cmp(a,b) eq(a) "), "a == empty1\n");
+    show_bool("empty1==empty2", kt_equals(empty1, empty2));
+    CHECK(log_is("cmp(e,f) cmp(g,h) "), "empty1 == empty2\n");
+    show_bool("empty1==a", kt_equals(empty1, a));
+    CHECK(log_is("cmp(e,f) cmp(a,b) eq(e) "), "empty1 == a\n");
+    show_bool("a==other", kt_equals(a, other));
+    CHECK(log_is("cmp(a,b) eq(a) eq(b) "), "a == other\n");
+    show_int("a.hash", kt_hash_code(a));
+    CHECK(log_is("cmp(a,b) hash(a) hash(b) "), "a.hashCode()\n");
+    show_int("empty1.hash", kt_hash_code(empty1));
+    CHECK(log_is("cmp(e,f) "), "empty1.hashCode()\n");
+    show_text("a.str", kt_to_string(a));
+    CHECK(log_is("str(a) str(b) "), "a.toString()\n");
+    show_text("empty1.str", kt_to_string(empty1));
+    CHECK(log_is("str(e) str(f) "), "empty1.toString()\n");
     CHECK(kt_pending_exception() == NULL, "an ordinary member raised\n");
 
     KRef p = v(1, "p", "c");
     (void)kt_equals(range(p, v(3, "q", "")), a);
-    expect_threw(p, "cmp(p,q) ");
+    show_threw("cmpThrows==a", p, "cmp(p,q) ");
 
     KRef r = v(1, "r", "c");
     (void)kt_equals(empty1, range(r, v(0, "s", "")));
-    expect_threw(r, "cmp(e,f) cmp(r,s) ");
+    show_threw("empty1==emptyOtherThrows", r, "cmp(e,f) cmp(r,s) ");
 
     KRef t = v(1, "t", "e");
     (void)kt_equals(range(t, v(3, "u", "")), same);
-    expect_threw(t, "cmp(t,u) eq(t) ");
+    show_threw("eqThrows==same", t, "cmp(t,u) eq(t) ");
 
     KRef w = v(3, "w", "e");
     (void)kt_equals(range(v(1, "v", ""), w), same);
-    expect_threw(w, "cmp(v,w) eq(v) eq(w) ");
+    show_threw("endEqThrows==same", w, "cmp(v,w) eq(v) eq(w) ");
 
     KRef l = v(3, "l", "h");
     (void)kt_hash_code(range(v(1, "k", ""), l));
-    expect_threw(l, "cmp(k,l) hash(k) hash(l) ");
+    show_threw("endHashThrows.hash", l, "cmp(k,l) hash(k) hash(l) ");
 
     KRef m = v(1, "m", "h");
     (void)kt_hash_code(range(m, v(3, "n", "h")));
-    expect_threw(m, "cmp(m,n) hash(m) ");
+    show_threw("startHashThrows.hash", m, "cmp(m,n) hash(m) ");
 
     KRef o = v(1, "o", "s");
     (void)kt_to_string(range(o, v(3, "y", "s")));
-    expect_threw(o, "str(o) ");
+    show_threw("startStrThrows.str", o, "str(o) ");
 
     KRef zz = v(3, "zz", "s");
     (void)kt_to_string(range(v(1, "z", ""), zz));
-    expect_threw(zz, "str(z) str(zz) ");
+    show_threw("endStrThrows.str", zz, "str(z) str(zz) ");
 
     kt_sys_write(1, "OK\n", 3);
 }

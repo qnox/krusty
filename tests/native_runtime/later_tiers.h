@@ -137,6 +137,22 @@ __attribute__((weak)) void kt_throw_index_overflow(void) {
                               kt_string_utf8(message, sizeof(message) - 1)));
 }
 
+/* An unsigned 64-bit value's decimal digits written to `buffer` (at least 20 bytes), answering how
+   many: how the runtime renders an unsigned number, and an unsigned range's bounds. The runtime
+   declares this `static` and defines it in a later tier. */
+__attribute__((weak)) kt_int kt_render_ulong(uint64_t value, char *buffer) {
+    char digits[20];
+    kt_int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    for (kt_int at = 0; at < count; at++) {
+        buffer[at] = digits[count - 1 - at];
+    }
+    return count;
+}
+
 /* Whether `text` -- a string or a builder -- holds exactly these BYTES. Read through the text
    accessor of `standins.h`, which mirrors both layouts, rather than through a runtime comparison:
    `compareTo` and `startsWith` decode to UTF-16 units, which would call two different encodings of
