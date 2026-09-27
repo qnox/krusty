@@ -100,6 +100,13 @@ impl BodyFirChecker<'_> {
         if signature.has_receiver {
             let receiver = self.resolved_type(span, signature.params[context_count])?;
             body.set_receiver_type(receiver);
+            if let Some(ExprLowering::Lambda(crate::resolve::LambdaInfo {
+                receiver_label: Some(label),
+                ..
+            })) = self.info.expr_lowers.get(&expression)
+            {
+                body.set_receiver_label(label.as_str());
+            }
         }
         let return_target = body.add_control_target(FirControlTarget {
             origin: target_origin,

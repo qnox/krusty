@@ -330,7 +330,7 @@ fn layout(
         let receiver = identity.role == IrParameterRole::ExtensionReceiver;
         let name = match (&identity.source_name, receiver) {
             (Some(name), _) => Some(name.clone()),
-            (None, true) => Some("<this>".to_string()),
+            (None, true) => Some(crate::jvm::parameter_names::lambda_receiver(ir, fid)),
             (None, false) => None,
         };
         let field = if read(parameter) {

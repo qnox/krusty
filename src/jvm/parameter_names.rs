@@ -117,12 +117,26 @@ fn anonymous_context_ordinal_separator() -> char {
     }
 }
 
+/// kotlinc's spelling of a lambda's extension receiver: `$this$<label>` after the label the checker
+/// bound `this@label` to, and `<this>` for a lambda with no label (neither labelled nor a call
+/// argument).
+pub(super) fn lambda_receiver(ir: &IrFile, function: u32) -> String {
+    match ir
+        .lambda_origins
+        .get(&function)
+        .and_then(|origin| origin.receiver_label.as_deref())
+    {
+        Some(label) => format!("$this${}", super::debug_local_names::escaped(label)),
+        None => "<this>".to_string(),
+    }
+}
+
 /// JVM local-table spelling for a parameter of one exact common-IR function, apart from the
 /// anonymous context labels [`function_locals`] adds for the whole parameter list.
 ///
 /// A source extension declaration uses kotlinc's `$this$<function>` spelling. A receiver lambda's
-/// static implementation instead uses `<this>`; the typed lambda edge selects that ABI surface,
-/// without making common IR encode either JVM spelling.
+/// static implementation instead uses [`lambda_receiver`]'s spelling after its checked label; the
+/// typed lambda edge selects that ABI surface, without making common IR encode either JVM spelling.
 fn function_local_variable(
     ir: &IrFile,
     function: u32,
@@ -130,7 +144,7 @@ fn function_local_variable(
 ) -> Option<String> {
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
         if ir.lambda_own_params_from.contains_key(&function) {
-            return Some("<this>".to_string());
+            return Some(lambda_receiver(ir, function));
         }
         let source_name = ir
             .fn_source_names

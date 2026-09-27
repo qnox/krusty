@@ -1878,6 +1878,7 @@ pub struct FirBody {
     vararg_parameter: Option<FirVarargParameter>,
     source_lambda: Option<FirLambdaForm>,
     debug_binding_name: Option<Box<str>>,
+    receiver_label: Option<Box<str>>,
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
@@ -1939,6 +1940,7 @@ impl FirBody {
             vararg_parameter: None,
             source_lambda: None,
             debug_binding_name: None,
+            receiver_label: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
             source_line_count: 0,
@@ -2021,6 +2023,19 @@ impl FirBody {
             self.receiver_type.replace(receiver).is_none(),
             "a FIR body may publish its receiver type only once"
         );
+    }
+
+    /// The checker-selected label of a receiver lambda's receiver (`this@label`): the literal's
+    /// own label, else the call it is an argument of.
+    pub fn set_receiver_label(&mut self, label: impl Into<Box<str>>) {
+        assert!(
+            self.receiver_label.replace(label.into()).is_none(),
+            "a FIR body may publish its receiver label only once"
+        );
+    }
+
+    pub fn receiver_label(&self) -> Option<&str> {
+        self.receiver_label.as_deref()
     }
 
     pub const fn receiver_type(&self) -> Option<ResolvedTy> {
@@ -2796,6 +2811,7 @@ impl FirBody {
                 .map_or(0, |_| std::mem::size_of::<ResolvedTy>())
             + self.debug_name.as_deref().map_or(0, str::len)
             + self.debug_binding_name.as_deref().map_or(0, str::len)
+            + self.receiver_label.as_deref().map_or(0, str::len)
             + self
                 .debug_value_names
                 .values()

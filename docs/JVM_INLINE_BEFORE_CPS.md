@@ -153,9 +153,11 @@ Known gaps, both byte differences in the function's own method (the continuation
   A call to a same-file member suspend function is a plain call, whether its receiver is explicit,
   `this`, or the lambda's own extension receiver. Invoking a suspend function value is not a plain
   call yet. The rest keep the lifted function with an IR-machine continuation.
-* A receiver lambda passed straight to a call names its receiver local after the call's label,
-  `$this$builder` for `builder { … }`; krusty still writes `<this>`, which is right only for a lambda
-  that is not a call argument.
+* A receiver lambda names its receiver local after the label the checker bound `this@label` to:
+  the literal's own label, else the call it is an argument of (`$this$builder` for
+  `builder { … }`). A lambda that is neither keeps `<this>`. kotlinc also labels a lambda reached
+  through an `if` branch or a lambda's result inside a call argument; the checker binds no label
+  there yet, so those still write `<this>`.
 
 Known gaps: the class's `@Metadata` has no lambda `d1`/`d2`, the pool interns the transformer's
 constants last (as for named functions), and a local declared in the lambda's body ends its range

@@ -996,6 +996,7 @@ impl BodyLowering<'_> {
                     implementation_name,
                     implementation_ordinal,
                     receiver_parameter,
+                    receiver_label: body.receiver_label().map(str::to_owned),
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");

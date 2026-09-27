@@ -12083,9 +12083,12 @@ impl CompoundAssignmentTarget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct LambdaInfo {
     pub receiver: Option<Ty>,
+    /// The label a receiver lambda's `this@label` names: the literal's own label, else the call
+    /// it is an argument of. Debug info names the receiver after it.
+    pub receiver_label: Option<String>,
     pub capture: LambdaCapture,
 }
 
@@ -48901,8 +48904,15 @@ impl<'a> Checker<'a> {
             self.update_lambda_info(argument, |info| info.capture = target);
         }
     }
-    fn mark_receiver_lambda(&mut self, e: ExprId, receiver: Ty) {
-        self.update_lambda_info(e, |info| info.receiver = Some(receiver));
+    fn mark_receiver_lambda(&mut self, e: ExprId, receiver: Ty, label: Option<&str>) {
+        self.update_lambda_info(e, |info| {
+            info.receiver = Some(receiver);
+            // A recheck without the call's context (a selected-shape recheck) does not unbind the
+            // label an earlier check of the same literal bound.
+            if let Some(label) = label {
+                info.receiver_label = Some(label.to_string());
+            }
+        });
     }
     fn mark_local_function_ref(&mut self, e: ExprId, stmt_id: StmtId, bound_receiver: bool) {
         self.expr_lowers.insert(
@@ -74300,7 +74310,7 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(receiver) = extension_receiver {
-                self.mark_receiver_lambda(e, receiver);
+                self.mark_receiver_lambda(e, receiver, receiver_label);
             }
             let prev_extension_receiver = self.this_extension_receiver;
             let labels_depth = self.this_labels.len();
