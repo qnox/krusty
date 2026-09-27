@@ -821,34 +821,16 @@ fn retain_conflict_candidate(
 }
 
 fn is_kotlin_main_entry_point(function: &FunDecl, params: &[Ty], ret: Ty) -> bool {
-    is_kotlin_main_entry_point_shape(
-        &function.name,
-        function.receiver.is_some(),
-        function.type_params.len(),
-        function.context_count,
-        params,
-        ret,
-    )
-}
-
-fn is_kotlin_main_entry_point_shape(
-    name: &str,
-    has_receiver: bool,
-    type_parameter_count: usize,
-    context_count: usize,
-    params: &[Ty],
-    ret: Ty,
-) -> bool {
-    name == "main"
-        && !has_receiver
-        && type_parameter_count == 0
-        && context_count == 0
-        && ret == Ty::Unit
-        && match params {
-            [] => true,
-            [parameter] => parameter.array_read_elem() == Some(Ty::String),
-            _ => false,
-        }
+    crate::fir::MainEntryShape {
+        name: &function.name,
+        has_extension_receiver: function.receiver.is_some(),
+        type_parameter_count: function.type_params.len(),
+        context_parameter_count: function.context_count,
+        parameters: params,
+        result: ret,
+    }
+    .entry_parameters()
+    .is_some()
 }
 
 fn register_top_level_function_conflict(

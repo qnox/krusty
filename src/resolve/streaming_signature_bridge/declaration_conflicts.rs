@@ -54,14 +54,16 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         };
         let header = streamed_callable_header_by_declaration(headers, stub.id)
             .expect("a top-level function must retain its compact callable header");
-        let entry_point = is_kotlin_main_entry_point_shape(
+        let entry_point = crate::fir::MainEntryShape {
             name,
-            header.receiver.is_some(),
-            header.type_parameters.len(),
-            header.context_count,
-            &signature.params,
-            signature.ret,
-        );
+            has_extension_receiver: header.receiver.is_some(),
+            type_parameter_count: header.type_parameters.len(),
+            context_parameter_count: header.context_count,
+            parameters: &signature.params,
+            result: signature.ret,
+        }
+        .entry_parameters()
+        .is_some();
         entries.push(Entry {
             declaration: stub.id,
             source: stub.source.raw(),
