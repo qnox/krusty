@@ -10728,6 +10728,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter too many.
   Tests: `tests/context_function_type_e2e.rs`.
 
+- **A context function type's extension receiver is any type, and invoking it takes the context
+  and the receiver from scope independently.** kotlinc's grammar is `context(C…) receiverType '.'
+  (params) -> T`, so the receiver may be parenthesized: `context(String) (String).() -> String`
+  parses to `[String, String] -> String` with one context and a receiver. Called as `a()` or
+  `r.a(v)`, the omitted context arguments are selected as for any context call and the extension
+  receiver is the implicit receiver (or the explicit one); one implicit value may supply both, as in
+  `with("OK") { a() }`. The FunctionN invoke passes `(contexts…, receiver, values…)`. An anonymous
+  extension function `context(p: String) fun String.() = p` has that same type: its named context
+  parameters lead, then its receiver.
+  Tests: `tests/context_function_type_e2e.rs`
+  (`a_context_receiver_function_value_takes_its_context_and_receiver_from_scope`).
+  Corpus: `contextParameters/sameArgForContextAndExtension.kt`.
+
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local
   into a constructor prefix parameter and stores it into a field, but the super-constructor call

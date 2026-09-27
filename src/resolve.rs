@@ -33,6 +33,7 @@ mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod anonymous_extension_functions;
 mod anonymous_object_capture;
 pub use anonymous_object_capture::{AnonymousObjectCapture, AnonymousObjectCaptureSource};
 mod applied_hierarchy;
@@ -100,6 +101,7 @@ mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
 mod receiver_uses;
+mod receiver_function_values;
 mod resolved_type_occurrences;
 mod safe_call_flow;
 mod sam_constructors;
@@ -11816,7 +11818,9 @@ pub enum ExprLowering {
     /// Invocation of a receiver-function value selected after ordinary member resolution.
     ReceiverFnInvoke {
         name: String,
+        /// The complete function-type parameters, `[context…, receiver, value…]`.
         params: Vec<Ty>,
+        context_count: usize,
         ret: Ty,
         origin: ReceiverFnValueOrigin,
         /// Parser-local expression carrying the selected property read when the function value
@@ -21699,17 +21703,17 @@ impl<'a> Checker<'a> {
                             return None;
                         }
                         if signature.has_receiver {
-                            let (receiver, parameters) = Self::receiver_function_parts(signature)?;
-                            return (parameters.len() == args.len()
+                            let parts = Self::receiver_function_parts(signature)?;
+                            return (self.receiver_function_context_available(scope, &parts)
                                 && self
                                     .receiver_function_implicit_receiver(
                                         scope,
-                                        receiver,
-                                        parameters.len(),
+                                        parts.receiver,
+                                        parts.values.len(),
                                         args.len(),
                                     )
                                     .is_some())
-                            .then(|| parameters.to_vec());
+                            .then(|| parts.values.to_vec());
                         }
                         let context_count = signature.context_count.min(signature.params.len());
                         let parameters = &signature.params[context_count..];
@@ -50123,226 +50127,8 @@ impl<'a> Checker<'a> {
         Some((semantic, local.origin))
     }
 
-    fn receiver_function_value(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<(&'static crate::types::FnSig, ReceiverFnValueOrigin)> {
-        if let Some((semantic, origin)) = self.local_callable_type(scope, name) {
-            return match semantic {
-                Ty::Fun(signature) if signature.has_receiver => {
-                    let origin = match origin {
-                        ReceiverFnValueOrigin::DispatchProperty {
-                            owner,
-                            receiver_identity,
-                            declared_ty,
-                            enum_entry_property,
-                        } => {
-                            let receivers = self.implicit_receivers(scope);
-                            let recorded_is_owner = receivers.iter().any(|receiver| {
-                                receiver.identity == receiver_identity
-                                    && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                            });
-                            let receiver_identity = if recorded_is_owner {
-                                receiver_identity
-                            } else {
-                                receivers
-                                    .into_iter()
-                                    .find(|receiver| {
-                                        receiver.extension_receiver.is_none()
-                                            && self.receiver_is_assignable(
-                                                receiver.ty,
-                                                Ty::obj_name(owner),
-                                            )
-                                    })
-                                    .map(|receiver| receiver.identity)
-                                    .unwrap_or(receiver_identity)
-                            };
-                            ReceiverFnValueOrigin::DispatchProperty {
-                                owner,
-                                receiver_identity,
-                                declared_ty,
-                                enum_entry_property,
-                            }
-                        }
-                        origin => origin,
-                    };
-                    Some((signature, origin))
-                }
-                _ => None,
-            };
-        }
-        for receiver in self.implicit_receivers(scope) {
-            let Some(owner) = receiver.ty.obj_internal() else {
-                continue;
-            };
-            if let Some(property) = self
-                .scoped_properties(scope, owner)
-                .into_iter()
-                .rev()
-                .find(|property| property.name == name)
-            {
-                return match property.ty {
-                    Ty::Fun(signature) if signature.has_receiver => Some((
-                        signature,
-                        ReceiverFnValueOrigin::DispatchProperty {
-                            owner: property.owner,
-                            receiver_identity: receiver.identity,
-                            declared_ty: property.ty,
-                            enum_entry_property: property.enum_entry_property,
-                        },
-                    )),
-                    _ => None,
-                };
-            }
-        }
-        match self.select_top_level_property(scope, name) {
-            TopLevelPropertySelection::Selected(property) if matches!(property.property.ty, Ty::Fun(signature) if signature.has_receiver) =>
-            {
-                let Ty::Fun(signature) = property.property.ty else {
-                    unreachable!("guard selected a function-typed property")
-                };
-                Some((signature, ReceiverFnValueOrigin::TopLevelProperty))
-            }
-            _ => None,
-        }
-    }
-
-    fn receiver_function_parts(
-        signature: &'static crate::types::FnSig,
-    ) -> Option<(Ty, &'static [Ty])> {
-        if !signature.has_receiver || signature.context_count != 0 {
-            return None;
-        }
-        let (&receiver, params) = signature.params.split_first()?;
-        Some((receiver, params))
-    }
-
-    fn receiver_function_member_call_params(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver_ty: Ty,
-        name: &str,
-        argument_count: usize,
-    ) -> Option<Vec<Ty>> {
-        let (signature, _) = self.receiver_function_value(scope, name)?;
-        let (expected_receiver, params) = Self::receiver_function_parts(signature)?;
-        if !self.receiver_is_assignable(receiver_ty, expected_receiver) {
-            return None;
-        }
-        let params = params.to_vec();
-        (params.len() == argument_count).then_some(params)
-    }
-
     fn receiver_is_assignable(&self, actual: Ty, expected: Ty) -> bool {
         crate::assignable::is_assignable(&crate::assignable::TyCtx::new(), self, actual, expected)
-    }
-
-    fn receiver_function_implicit_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        expected: Ty,
-        value_parameter_count: usize,
-        actual_argument_count: usize,
-    ) -> Option<ImplicitReceiver> {
-        if value_parameter_count != actual_argument_count {
-            return None;
-        }
-        self.implicit_receivers(scope)
-            .into_iter()
-            .find(|actual| self.receiver_is_assignable(actual.ty, expected))
-    }
-
-    /// Commit invocation of a value whose function type has an extension receiver. The caller chooses
-    /// only whether source syntax supplied that receiver explicitly; argument validation and lowering
-    /// use one path for locals, properties, callable-reference locals, and safe calls.
-    fn record_receiver_function_invoke(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        name: &str,
-        signature: &'static crate::types::FnSig,
-        origin: ReceiverFnValueOrigin,
-        explicit_receiver: Option<Ty>,
-    ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let (expected_receiver, params) = Self::receiver_function_parts(signature)?;
-        if params.len() != arg_tys.len() {
-            return None;
-        }
-        let implicit_receiver = match explicit_receiver {
-            Some(actual) => {
-                if !self.receiver_is_assignable(actual, expected_receiver) {
-                    return None;
-                }
-                None
-            }
-            None => Some(self.receiver_function_implicit_receiver(
-                scope,
-                expected_receiver,
-                params.len(),
-                arg_tys.len(),
-            )?),
-        };
-        let property_callee = match origin {
-            ReceiverFnValueOrigin::TopLevelProperty => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                let TopLevelPropertySelection::Selected(access) =
-                    self.select_top_level_property(scope, name)
-                else {
-                    return None;
-                };
-                self.set(*callee, access.property.ty);
-                self.expr_lowers
-                    .insert(*callee, ExprLowering::TopLevelPropertyGet(access));
-                Some(*callee)
-            }
-            ReceiverFnValueOrigin::DispatchProperty {
-                receiver_identity, ..
-            } => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                let receiver = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    .find(|receiver| receiver.identity == receiver_identity)?;
-                let selection = self
-                    .select_property_read(scope, receiver.ty, name)
-                    .ok()
-                    .flatten()?;
-                let property_ty = self.record_property_read(scope, Some(*callee), selection);
-                self.set(*callee, property_ty);
-                self.mark_implicit_receiver_selection(*callee, receiver);
-                Some(*callee)
-            }
-            ReceiverFnValueOrigin::Local
-            | ReceiverFnValueOrigin::ClassStorage(_)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. } => None,
-        };
-        self.expect_call_args(scope, params, false, args, arg_tys);
-        if let Some(receiver) = implicit_receiver {
-            self.mark_implicit_receiver_selection(call, receiver);
-        }
-        self.expr_lowers.insert(
-            call,
-            ExprLowering::ReceiverFnInvoke {
-                name: name.to_string(),
-                params: signature.params.clone(),
-                ret: signature.ret,
-                origin,
-                property_callee,
-                implicit_receiver: implicit_receiver.map(|receiver| receiver.ty),
-                suspend: signature.suspend,
-            },
-        );
-        Some(signature.ret)
     }
 
     fn lookup(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Local> {
@@ -62831,14 +62617,14 @@ impl<'a> Checker<'a> {
                 (signature.params.len() == args.len())
                     .then(|| signature.params.clone())
                     .or_else(|| {
-                        Self::receiver_function_parts(signature).and_then(|(receiver, params)| {
+                        Self::receiver_function_parts(signature).and_then(|parts| {
                             self.receiver_function_implicit_receiver(
                                 scope,
-                                receiver,
-                                params.len(),
+                                parts.receiver,
+                                parts.values.len(),
                                 args.len(),
                             )
-                            .map(|_| params.to_vec())
+                            .map(|_| parts.values.to_vec())
                         })
                     })
             }
@@ -64956,40 +64742,13 @@ impl<'a> Checker<'a> {
         implicit_label: Option<&str>,
     ) -> Ty {
         let t = {
-            // An anonymous extension function declares its receiver in its own syntax. Feed that
-            // declaration into the ordinary receiver-lambda checker: it owns implicit `this`, member
-            // lookup, the function-type receiver bit, and lowerer's receiver binding metadata.
+            // An anonymous extension function declares its receiver in its own syntax.
             if let Some(receiver_ref) = self.file.anon_fun_receivers.get(&e.0).cloned() {
-                let receiver = self.type_ref_ty(scope, &receiver_ref);
-                let declared = self
-                    .file
-                    .lambda_param_types
-                    .get(&e.0)
-                    .cloned()
-                    .unwrap_or_default();
-                let value_types = declared
-                    .iter()
-                    .map(|parameter| {
-                        parameter
-                            .as_ref()
-                            .map(|ty| self.type_ref_ty(scope, ty))
-                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                    })
-                    .collect::<Vec<_>>();
-                return self.check_lambda_with_implicit_receivers_and_return_labeled(
+                return self.check_anonymous_extension_function(
                     scope,
                     e,
-                    LambdaShape {
-                        context_types: &[],
-                        extension_receiver: Some(receiver),
-                        value_types: &value_types,
-                    },
+                    &receiver_ref,
                     implicit_label,
-                    LambdaCheckMode {
-                        suspend: false,
-                        coerce_return_to_unit: false,
-                        expected_return: None,
-                    },
                 );
             }
             // An EXPECTED function type propagated in from a typed context binds the lambda's
