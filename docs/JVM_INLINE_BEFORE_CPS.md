@@ -77,9 +77,16 @@ Each step reports box passes, byte-identical files and divergent classes before 
   (`state_machine::split_try_catch_blocks`) puts `L1: nop L2` after the point and cuts each range
   around it at `L1`/`L2`, so the restored locals sit outside every range while the rest of the
   region stays protected: a throw after the resume is still caught, and a `finally` runs once on
-  each path. Nothing in the emitter changed. Tested in
-  `tests/suspend_under_try_e2e.rs` (method code against kotlinc for a `catch` and a `finally`, and
-  a run that resumes inside the region).
+  each path. Tested in `tests/suspend_under_try_e2e.rs`: method code and continuation classes
+  against kotlinc for a point in a `try` body, in a `catch` body, in a `finally` body, two points in
+  one range and points in nested ranges, and runs that resume in each, through normal and
+  exceptional exits.
+* Two emitter facts those comparisons needed. A suspension point's erased `Object` result goes
+  straight to a consumer that takes an `Object` (`return step()` returns it as is), without the
+  unbox and rebox; kotlinc coerces it only for a consumer that needs a narrower type. And a catch
+  clause marks its `catch` line where the handler stores the exception (for every function, not
+  only suspend ones), which is the line `@DebugMetadata` records after a point that ends its
+  protected range (`tests/catch_clause_line_e2e.rs`).
 
 ### Step 2 as landed
 
