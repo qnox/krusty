@@ -9088,7 +9088,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   program, whatever placeholder the throwing call answered; no later raise replaces that exception.
   `Iterable.indexOf(x)` asks `x.equals(item)`, the argument's `equals`, as Kotlin's `element ==
   item` does. The calls match kotlinc 2.4.10 on the JVM for the program recorded in the driver.
-  Tests: `tests/native_runtime_e2e.rs` (`walk_polls_program_calls`).
+  `IndexedValue`'s `equals` (which asks the value only when the indices agree) and `hashCode`,
+  `none { }` and `none()` likewise stop at the program's throwing call and compute nothing from its
+  answer.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_polls_program_calls`, `member_stops_at_throw`).
 - **An exhausted native iterator raises what Kotlin raises there, and never ends the program.**
   Through the general (boxed) and the narrow (primitive) protocol alike: an array's `next()` raises
   `NoSuchElementException` whose message is the index asked for (`"1"`), Kotlin/Native's

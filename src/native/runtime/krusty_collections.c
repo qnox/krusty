@@ -967,14 +967,24 @@ static kt_boolean kt_indexed_value_equals(KRef self, KRef other) {
     }
     const KIndexedValue *mine = (const KIndexedValue *)self;
     const KIndexedValue *theirs = (const KIndexedValue *)other;
-    return mine->index == theirs->index && kt_equals(mine->value, theirs->value);
+    if (mine->index != theirs->index) {
+        return 0;
+    }
+    /* The value's `equals` is the program's and may throw; what it returned then is no answer. */
+    kt_boolean equal = kt_equals(mine->value, theirs->value);
+    return !kt_raised() && equal;
 }
 
 static kt_int kt_indexed_value_hash_code(KRef self) {
     const KIndexedValue *indexed = (const KIndexedValue *)self;
+    /* The value's `hashCode` may throw, and its answer is then no hash to fold in. */
+    kt_int value_hash = kt_hash_code(indexed->value);
+    if (kt_raised()) {
+        return 0;
+    }
     /* On the unsigned ring, as `kt_list_hash_code` computes: Kotlin's `Int` wraps, and C's signed
        overflow is undefined rather than a wrap. */
-    return (kt_int)((uint32_t)indexed->index * 31u + (uint32_t)kt_hash_code(indexed->value));
+    return (kt_int)((uint32_t)indexed->index * 31u + (uint32_t)value_hash);
 }
 
 static KRef kt_indexed_value_to_string(KRef self) {
@@ -1441,8 +1451,11 @@ kt_boolean kt_iterable_all(KRef iterable, KRef predicate) {
     return !kt_raised();
 }
 
+/* `none` is `any` negated, but not its placeholder: after a raise `any` answers false, which
+   negated would be a `true` nobody computed. */
 kt_boolean kt_iterable_none(KRef iterable, KRef predicate) {
-    return !kt_iterable_any(iterable, predicate);
+    kt_boolean any = kt_iterable_any(iterable, predicate);
+    return !kt_raised() && !any;
 }
 
 /* `xs.any()` and `xs.none()` with no predicate: whether the walk yields anything at all. */
@@ -1450,7 +1463,10 @@ kt_boolean kt_iterable_is_not_empty(KRef iterable) {
     return kt_more(kt_iterable_iterator(iterable));
 }
 
-kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empty(iterable); }
+kt_boolean kt_iterable_is_empty(KRef iterable) {
+    kt_boolean not_empty = kt_iterable_is_not_empty(iterable);
+    return !kt_raised() && !not_empty;
+}
 
 /* `xs.count()` walks rather than reading a size: `count` is declared over `Iterable`, and the
    walk is the only thing every iterable has. */
@@ -1920,12 +1936,13 @@ static kt_int kt_list_hash_code(KRef self) {
     kt_int length = kt_list_size(self);
     uint32_t hash = 1;
     for (kt_int i = 0; i < length; i++) {
-        hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
-        /* A `hashCode` that threw ends the fold; the zero is no hash, and the caller finds the
-           exception pending before it reads one. */
+        kt_int element_hash = kt_hash_code(kt_elements_of(elements)[i]);
+        /* A `hashCode` that threw ends the fold before its answer is folded in; the zero is no
+           hash, and the caller finds the exception pending before it reads one. */
         if (kt_raised()) {
             return 0;
         }
+        hash = 31u * hash + (uint32_t)element_hash;
     }
     return (kt_int)hash;
 }

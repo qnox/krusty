@@ -832,6 +832,11 @@ fn a_walk_counter_past_the_largest_int_raises_kotlins_overflow() {
     run_driver("walk_count_overflow");
 }
 
+#[test]
+fn an_indexed_value_or_none_stops_at_the_programs_throwing_call() {
+    run_driver("member_stops_at_throw");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
