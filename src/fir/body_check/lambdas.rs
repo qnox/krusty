@@ -1,6 +1,7 @@
 //! Checked FIR construction for body-local anonymous callables.
 
 use super::*;
+use crate::fir::FirValueParameterName;
 
 impl BodyFirChecker<'_> {
     pub(super) fn lambda(
@@ -283,12 +284,9 @@ impl BodyFirChecker<'_> {
         {
             let ty = nested.resolved_type(span, ty)?;
             let value = nested.bind_local(name, ty);
-            nested.body.add_parameter(FirValueParameter {
-                origin: target_origin,
-                value,
-                ty,
-                name: FirValueParameterName::Bound,
-            });
+            nested
+                .body
+                .add_parameter(FirValueParameter::bound(target_origin, value, ty));
         }
         let roles = self.file.lambda_parameter_roles.get(&expression.0);
         for (ordinal, (name, ty)) in parameter_names

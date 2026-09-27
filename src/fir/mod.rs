@@ -29,6 +29,7 @@ mod source_map;
 mod type_parameters;
 
 pub(crate) use active_source::*;
+pub use body::value_parameters::FirValueParameterName;
 pub use body::*;
 pub use body_check::*;
 pub use body_work::*;

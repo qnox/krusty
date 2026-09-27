@@ -739,12 +739,11 @@ fn class_capture_write_lowers_its_declared_cell_type() {
     let origin = OriginId::from_raw(0);
     let mut body = FirBody::new(BodyOwnerId::from_raw(declaration.raw()));
     let parameter = body.allocate_local_value();
-    body.add_parameter(FirValueParameter {
+    body.add_parameter(FirValueParameter::bound(
         origin,
-        value: parameter,
-        ty: ResolvedTy::new(result).unwrap(),
-        name: crate::fir::FirValueParameterName::Bound,
-    });
+        parameter,
+        ResolvedTy::new(result).unwrap(),
+    ));
     let read = body.add_expr(FirExpr {
         origin,
         ty: ResolvedTy::new(result).unwrap(),

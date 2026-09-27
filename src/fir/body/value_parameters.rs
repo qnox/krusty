@@ -22,6 +22,18 @@ pub enum FirValueParameterName {
     Destructured,
 }
 
+impl FirValueParameter {
+    /// A parameter that binds its own name in the body.
+    pub fn bound(origin: OriginId, value: LocalValueId, ty: ResolvedTy) -> Self {
+        Self {
+            origin,
+            value,
+            ty,
+            name: FirValueParameterName::Bound,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirDefaultValue {
     pub origin: OriginId,

@@ -106,10 +106,10 @@ use super::{
     FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
     FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
     FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
-    FirUnaryOperation, FirValueParameter, FirValueParameterName, FirVarargElement, InlineBodyStore,
-    LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore,
-    PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
-    SyntheticOriginKind, UnpublishableType,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
+    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
+    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
+    UnpublishableType,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -457,12 +457,9 @@ fn bind_parameters_and_check_defaults(
             checker.bind_local(parameter.name, parameter.ty)
         };
         let origin = checker.origins.source(checker.source, parameter.span);
-        checker.body.add_parameter(FirValueParameter {
-            origin,
-            value,
-            ty: parameter.ty,
-            name: FirValueParameterName::Bound,
-        });
+        checker
+            .body
+            .add_parameter(FirValueParameter::bound(origin, value, parameter.ty));
     }
     if defaults.next().is_some() {
         return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
