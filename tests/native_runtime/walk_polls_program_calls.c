@@ -6,49 +6,13 @@
    throwing `hasNext()` that answered `true` went on to `next()`, and one that answered `false`
    ended the walk as if complete, where `first { }` then replaced the exception with its own.
 
-   Each case runs with the throwing call answering each placeholder polarity. The calls expected
-   are Kotlin's, from this program compiled and run with the reference kotlinc 2.4.10 on the JVM
-   (the walks below, each over `Seq(listOf(T(0), T(1)), c, 1)`):
-
-       val log = StringBuilder()
-       class Boom : RuntimeException()
-       class T(val n: Int) {
-           override fun equals(other: Any?): Boolean {
-               log.append("eq($n) "); return other is T && other.n == n
-           }
-           override fun hashCode(): Int { log.append("hash($n) "); return n }
-           override fun toString(): String { log.append("str($n) "); return "T$n" }
-       }
-       class Seq(val xs: List<T>, val throws: Char, val at: Int) : Iterable<T> {
-           override fun iterator(): Iterator<T> {
-               log.append("iterator "); if (throws == 'i') throw Boom()
-               return object : Iterator<T> {
-                   var i = 0
-                   override fun hasNext(): Boolean {
-                       log.append("hasNext "); if (throws == 'h' && i == at) throw Boom()
-                       return i < xs.size
-                   }
-                   override fun next(): T {
-                       log.append("next "); if (throws == 'n' && i == at) throw Boom()
-                       return xs[i++]
-                   }
-               }
-           }
-       }
-       // then, for c in 'i', 'h', 'n': s.map { log.append("f "); it }, s.forEach { .. },
-       // s.any { ..; false }, s.all { ..; true }, s.none { ..; false }, s.none(), s.any(),
-       // s.count(), s.count { ..; true }, s.filter { ..; true }, s.firstOrNull { ..; false },
-       // s.first { ..; false }, s.last { ..; false }, s.fold(0) { a, _ -> ..; a },
-       // s.forEachIndexed { _, _ -> .. }, s.toList(), s.reversed(), s.sortedWith { _, _ -> ..; 0 },
-       // s.indexOf(T(9)), s.joinToString(), s + T(5), s.sumOf { ..; 1 }, s.withIndex().toList(),
-       // mutableListOf<T>().addAll(s), printing whether each threw and the log.
-
-   Every walk threw, with the log `iterator ` for c = 'i'; `iterator hasNext next <calls> hasNext `
-   for 'h' and the same followed by `next ` for 'n', where <calls> is `f ` for the walks with a
-   lambda, `eq(9) ` for indexOf (the ARGUMENT's `equals`, as `element == item` asks), `str(0) ` for
-   joinToString and nothing for the rest. `none()` and `any()` returned after `iterator hasNext `,
-   their one `hasNext` coming before the throwing one. */
+   The driver prints, for each walk and each throwing call, whether the walk threw and the calls it
+   made into the program, and the harness compares the lines with what
+   `walk_polls_program_calls.kt` answers under the reference kotlinc. The driver itself checks that
+   the exception pending is the very one the program threw, and runs each case again with the
+   throwing call answering the other placeholder polarity, which must change nothing. */
 #include "program_collections.h"
+#include "transcript.h"
 
 static KRef f_logged(void) {
     log_text("f ");
@@ -130,51 +94,35 @@ static void w_add_all(KRef s) { kt_mutable_list_add_all(kt_mutable_list_new(), s
 typedef struct Walk {
     const char *name;
     void (*run)(KRef seq);
-    /* The calls it makes into the program for the first element. */
-    const char *calls;
 } Walk;
 
 static const Walk walks[] = {
-    {"map", w_map, "f "},
-    {"forEach", w_for_each, "f "},
-    {"any", w_any, "f "},
-    {"all", w_all, "f "},
-    {"none", w_none, "f "},
-    {"count", w_count, ""},
-    {"count { }", w_count_if, "f "},
-    {"filter", w_filter, "f "},
-    {"firstOrNull", w_first_or_null, "f "},
-    {"first", w_first, "f "},
-    {"last", w_last, "f "},
-    {"fold", w_fold, "f "},
-    {"forEachIndexed", w_for_each_indexed, "f "},
-    {"toList", w_to_list, ""},
-    {"reversed", w_reversed, ""},
-    {"sortedWith", w_sorted_with, ""},
-    {"indexOf", w_index_of, "eq(9) "},
-    {"joinToString", w_join, "str(0) "},
-    {"plus", w_plus, ""},
-    {"sumOf", w_sum_of, "f "},
-    {"withIndex", w_with_index, ""},
-    {"addAll", w_add_all, ""},
+    {"map", w_map},
+    {"forEach", w_for_each},
+    {"any", w_any},
+    {"all", w_all},
+    {"none", w_none},
+    {"count", w_count},
+    {"count { }", w_count_if},
+    {"filter", w_filter},
+    {"firstOrNull", w_first_or_null},
+    {"first", w_first},
+    {"last", w_last},
+    {"fold", w_fold},
+    {"forEachIndexed", w_for_each_indexed},
+    {"toList", w_to_list},
+    {"reversed", w_reversed},
+    {"sortedWith", w_sorted_with},
+    {"indexOf", w_index_of},
+    {"joinToString", w_join},
+    {"plus", w_plus},
+    {"sumOf", w_sum_of},
+    {"withIndex", w_with_index},
+    {"addAll", w_add_all},
 };
 
-static char expected[128];
-
-static const char *expect(const char *calls, char throwing) {
-    kt_int length = 0;
-    const char *parts[] = {"iterator ", throwing == 'i' ? NULL : "hasNext next ",
-                           throwing == 'i' ? NULL : calls,
-                           throwing == 'i' ? NULL : "hasNext ",
-                           throwing == 'n' ? "next " : NULL};
-    for (unsigned part = 0; part < sizeof(parts) / sizeof(parts[0]); part++) {
-        for (const char *at = parts[part]; at != NULL && *at != 0; at++) {
-            expected[length++] = *at;
-        }
-    }
-    expected[length] = 0;
-    return expected;
-}
+/* The calls the first polarity's run made, which the second must repeat exactly. */
+static char first_calls[sizeof(call_log) + 1];
 
 void kt_program_entry(void) {
     PROGRAM_BEGIN();
@@ -182,18 +130,25 @@ void kt_program_entry(void) {
     static const char throwing[] = {'i', 'h', 'n'};
     for (unsigned w = 0; w < sizeof(walks) / sizeof(walks[0]); w++) {
         for (unsigned t = 0; t < 3; t++) {
+            char calls[2] = {throwing[t], 0};
             for (int placeholder = 0; placeholder <= 1; placeholder++) {
-                char calls[2] = {throwing[t], 0};
                 KRef seq = seq_throwing(seq_of(&seq_type, elements, 2), calls, 1, placeholder);
                 call_log_length = 0;
                 walks[w].run(seq);
-                if (!threw_last() || !log_is(expect(walks[w].calls, throwing[t]))) {
-                    kt_int length = 0;
-                    while (walks[w].name[length] != 0) {
-                        length++;
+                CHECK(threw_last(), "a walk did not stop at the program's throwing call\n");
+                if (placeholder == 0) {
+                    say(walks[w].name);
+                    say(" ");
+                    say(calls);
+                    say(" threw | ");
+                    say_bytes(call_log, call_log_length);
+                    say("\n");
+                    for (kt_int at = 0; at < call_log_length; at++) {
+                        first_calls[at] = call_log[at];
                     }
-                    kt_sys_write(2, walks[w].name, (size_t)length);
-                    KT_SYS_FAIL(": the walk did not stop at the program's throwing call\n");
+                    first_calls[call_log_length] = 0;
+                } else {
+                    CHECK(log_is(first_calls), "a walk's calls depend on a placeholder\n");
                 }
             }
         }
@@ -204,8 +159,21 @@ void kt_program_entry(void) {
         char calls[2] = {throwing[t], 0};
         KRef seq = seq_throwing(seq_of(&seq_type, elements, 2), calls, 1, 0);
         call_log_length = 0;
-        CHECK(!kt_iterable_is_empty(seq) && log_is("iterator hasNext "), "none()\n");
-        CHECK(kt_iterable_is_not_empty(seq) && log_is("iterator hasNext "), "any()\n");
+        say("none() ");
+        say(calls);
+        say(" ");
+        say_bool(kt_iterable_is_empty(seq));
+        say(" | ");
+        say_bytes(call_log, call_log_length);
+        say("\n");
+        call_log_length = 0;
+        say("any() ");
+        say(calls);
+        say(" ");
+        say_bool(kt_iterable_is_not_empty(seq));
+        say(" | ");
+        say_bytes(call_log, call_log_length);
+        say("\n");
         CHECK(kt_pending_exception() == NULL, "none() or any() raised\n");
     }
     kt_sys_write(1, "OK\n", 3);

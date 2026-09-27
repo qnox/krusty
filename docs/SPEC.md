@@ -9074,10 +9074,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `is` names. The read-only list `listOf` answers is `List`, `Collection`, `Iterable` and
   `RandomAccess` and not mutable, and publishes no class name: that is Kotlin/Native's answer, an
   anonymous read-only `AbstractList` from `Array.asList`, where the JVM's `java.util.Arrays$ArrayList`
-  is a `MutableList` to an `is` (kotlinc 2.4.10 prints `true` there). A list equals any `List` with
-  equal elements in order, a program's own list class included, which it walks as the JVM's
-  `AbstractList.equals` does — `hasNext`, `next`, the element's `equals`, and a final `hasNext` — and
-  a merely `Iterable` object never. A call into the program that throws ends the comparison.
+  is a `MutableList` to an `is` (kotlinc prints `true` there). A list equals any `List` with equal
+  elements in order, a program's own list class included, which it walks as the JVM's
+  `ArrayList.equals` does — `iterator()`, `hasNext`, `next`, the element's `equals`, and a final
+  `hasNext` — and a merely `Iterable` object never. The runtime reaches a program's collection only
+  through its `iterator()`, so the read-only list walks it the same way where the JVM's
+  `AbstractList.equals` asks for `listIterator()`, and `emptyList() == p` walks `p` where Kotlin's
+  `EmptyList.equals` (on both platforms) asks `p.isEmpty()`; the driver pins those calls. A call
+  into the program that throws ends the comparison. The answers, and the calls a growable list makes,
+  are compared with kotlinc's for `list_identity.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`list_identity`).
 - **A native walk stops at the program's first throwing call, `iterator()` and `hasNext()`
   included.** Every runtime walk over an `Iterable` — `map`, `forEach`, `any`/`all`/`none`,
@@ -9087,7 +9092,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `next()`, and after every lambda or element member it calls, and makes no further call into the
   program, whatever placeholder the throwing call answered; no later raise replaces that exception.
   `Iterable.indexOf(x)` asks `x.equals(item)`, the argument's `equals`, as Kotlin's `element ==
-  item` does. The calls match kotlinc 2.4.10 on the JVM for the program recorded in the driver.
+  item` does. The calls are compared with kotlinc's on the JVM for `walk_polls_program_calls.kt` on
+  every run.
   `IndexedValue`'s `equals` (which asks the value only when the indices agree) and `hashCode`,
   `none { }` and `none()` likewise stop at the program's throwing call and compute nothing from its
   answer.
@@ -9099,7 +9105,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the message is platform-defined); a range's, a progression's, a list's and `withIndex()`'s
   raise `NoSuchElementException()`; a `String`'s or `StringBuilder`'s raises what `text[length]`
   raises, `IndexOutOfBoundsException`, because Kotlin's `CharSequence.iterator()` is
-  `get(index++)` with no check of its own (kotlinc 2.4.10 throws `StringIndexOutOfBoundsException`).
+  `get(index++)` with no check of its own (kotlinc throws the JVM's subclass,
+  `StringIndexOutOfBoundsException`). Everything but the arrays' message is compared with kotlinc's
+  answers for `iterator_exhausted.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`iterator_exhausted`).
 - **Native walk counters raise Kotlin's overflow, and no runtime counter overflows signed.** A walk
   counting with an `Int` raises what Kotlin's `checkIndexOverflow`/`checkCountOverflow` raise when
@@ -9118,8 +9126,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   builder changes how many elements it yields (`StringBuilder("ab").map { if (sb.length < 4)
   sb.append('z'); it }` is `[a, b, z, z]`); only an immutable `String` is sized ahead. A list's
   `toString` renders an element that is the list itself as `(this Collection)`, Kotlin's
-  `AbstractCollection.toString`, rather than recursing. Both as kotlinc 2.4.10 answers on the JVM for
-  the program recorded in the driver.
+  `AbstractCollection.toString`, rather than recursing. Both compared with kotlinc's answers on the
+  JVM for `builder_map_and_self_list.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`builder_map_and_self_list`).
 - **The native list, walk and array entry points answer as Kotlin does on the ordinary path.**
   `listOf`/`mutableListOf` and their members (`get`, `first`, `last`, `indexOf`, `lastIndexOf`,
@@ -9129,8 +9137,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `sortedWith`, `forEachIndexed`, `joinToString`, `plus`, the three `sumOf`, `withIndex`,
   `isEmpty`), `IndexedValue`, the array members (`toList`, `reversed`, `reversedArray`, `isEmpty`,
   `contentEquals`, `contentHashCode`, `contentToString`, `toTypedArray`) and walks over ranges,
-  progressions and strings answer what kotlinc 2.4.10 prints on the JVM for the program recorded in
-  the driver.
+  progressions and strings answer what kotlinc answers on the JVM for `list_api_answers.kt`, which
+  the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`list_api_answers`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A

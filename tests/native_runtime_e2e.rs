@@ -779,7 +779,7 @@ fn a_throwing_lambda_ends_the_walk_that_called_it() {
 
 #[test]
 fn an_exhausted_iterator_raises_what_kotlin_raises_through_either_protocol() {
-    run_driver("iterator_exhausted");
+    run_driver_against_kotlin("iterator_exhausted");
 }
 
 #[test]
@@ -814,12 +814,12 @@ fn an_element_member_that_throws_ends_the_walk_that_called_it() {
 
 #[test]
 fn a_list_is_the_collection_interfaces_and_equals_a_program_list() {
-    run_driver("list_identity");
+    run_driver_against_kotlin("list_identity");
 }
 
 #[test]
 fn a_walk_stops_at_a_throwing_iterator_or_has_next_of_the_program() {
-    run_driver("walk_polls_program_calls");
+    run_driver_against_kotlin("walk_polls_program_calls");
 }
 
 #[test]
@@ -839,12 +839,12 @@ fn an_indexed_value_or_none_stops_at_the_programs_throwing_call() {
 
 #[test]
 fn a_builder_map_sees_its_length_change_and_a_self_list_renders() {
-    run_driver("builder_map_and_self_list");
+    run_driver_against_kotlin("builder_map_and_self_list");
 }
 
 #[test]
 fn the_list_walk_and_array_entry_points_answer_as_kotlin_does() {
-    run_driver("list_api_answers");
+    run_driver_against_kotlin("list_api_answers");
 }
 
 fn compiled_build_script() -> PathBuf {

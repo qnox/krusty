@@ -1,0 +1,89 @@
+// Kotlin's answers for `list_identity.c`: what a list is, and what it equals. `T` and `P` are the
+// program classes the driver's `Tag` and `SeqList` (`program_collections.h`) stand in for, and `Q`
+// its `Seq`: an element and a list that log each call made into them, and an `Iterable` that is
+// not a list.
+//
+// Not compared here, and pinned by the driver instead: whether the read-only `listOf` is a
+// `MutableList`, `MutableCollection` or `MutableIterable` (the JVM's `Arrays.asList` is all three,
+// Kotlin/Native's read-only list none, and this runtime is the native one), and the calls a
+// read-only list's `equals` makes into a program list (the JVM's `AbstractList.equals` asks it for
+// `listIterator()`, and `emptyList() == p` asks `p.isEmpty()`; the runtime reaches a program's
+// collection only through its `iterator()`).
+val log = StringBuilder()
+
+class T(val n: Int) {
+    override fun equals(other: Any?): Boolean {
+        log.append("eq($n) ")
+        return other is T && other.n == n
+    }
+
+    override fun hashCode() = n
+    override fun toString() = "T$n"
+}
+
+class P(private vararg val xs: T) : List<T> {
+    override val size: Int get() = xs.size
+    override fun isEmpty() = xs.isEmpty()
+    override fun contains(element: T) = xs.contains(element)
+    override fun containsAll(elements: Collection<T>) = elements.all { xs.contains(it) }
+    override fun get(index: Int) = xs[index]
+    override fun indexOf(element: T) = xs.indexOf(element)
+    override fun lastIndexOf(element: T) = xs.lastIndexOf(element)
+    override fun iterator(): Iterator<T> {
+        log.append("iterator ")
+        return walk(0)
+    }
+    override fun listIterator(): ListIterator<T> = walk(0)
+    override fun listIterator(index: Int): ListIterator<T> = walk(index)
+    override fun subList(fromIndex: Int, toIndex: Int) = xs.toList().subList(fromIndex, toIndex)
+
+    private fun walk(start: Int) = object : ListIterator<T> {
+        var at = start
+        override fun hasNext(): Boolean {
+            log.append("hasNext ")
+            return at < xs.size
+        }
+        override fun next(): T {
+            log.append("next ")
+            return xs[at++]
+        }
+        override fun hasPrevious() = at > 0
+        override fun previous() = xs[--at]
+        override fun nextIndex() = at
+        override fun previousIndex() = at - 1
+    }
+}
+
+class Q(private vararg val xs: T) : Iterable<T> {
+    override fun iterator(): Iterator<T> {
+        log.append("iterator ")
+        return xs.iterator()
+    }
+}
+
+fun box(): String = buildString {
+    val readOnly: Any = listOf(T(1), T(2))
+    val growable: Any = mutableListOf(T(1), T(2))
+    appendLine("mutableListOf: ${growable is List<*>} ${growable is Collection<*>} " +
+        "${growable is Iterable<*>} ${growable is RandomAccess} ${growable is MutableList<*>} " +
+        "${growable is MutableCollection<*>} ${growable is MutableIterable<*>}")
+    appendLine("listOf: ${readOnly is List<*>} ${readOnly is Collection<*>} " +
+        "${readOnly is Iterable<*>} ${readOnly is RandomAccess}")
+    appendLine("mutableListOf::class.simpleName ${growable::class.simpleName}")
+    fun equal(label: String, answer: Boolean, calls: Boolean) {
+        appendLine("$label $answer" + if (calls) " | $log" else "")
+        log.setLength(0)
+    }
+    equal("listOf(1, 2) == P(1, 2)", readOnly == P(T(1), T(2)), false)
+    equal("listOf(1, 2) == P(1, 2, 3)", readOnly == P(T(1), T(2), T(3)), false)
+    equal("listOf(1, 2) == P(1)", readOnly == P(T(1)), false)
+    equal("listOf(1, 2) == P(1, 3)", readOnly == P(T(1), T(3)), false)
+    equal("listOf(1, 2) == Q(1, 2)", readOnly == Q(T(1), T(2)), true)
+    equal("listOf() == P()", listOf<T>() == P(), false)
+    equal("mutableListOf(1, 2) == P(1, 2)", growable == P(T(1), T(2)), true)
+    equal("mutableListOf(1, 2) == P(1, 2, 3)", growable == P(T(1), T(2), T(3)), true)
+    equal("mutableListOf(1, 2) == P(1)", growable == P(T(1)), true)
+    equal("mutableListOf(1, 2) == P(1, 3)", growable == P(T(1), T(3)), true)
+    equal("listOf(1, 2) == mutableListOf(1, 2)", readOnly == growable, false)
+    equal("mutableListOf(1, 2) == listOf(1, 2)", growable == readOnly, false)
+}
