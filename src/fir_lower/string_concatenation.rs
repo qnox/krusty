@@ -20,28 +20,23 @@ pub(super) struct ConcatenationPart {
 }
 
 /// The arguments of `expression` when it is a string concatenation, in evaluation order.
+///
+/// A left-nested `a + b + c + ...` chain is as deep as it is long, so the operands are expanded
+/// from an explicit work stack rather than by recursion.
 pub(super) fn flattened_concatenation(
     body: &FirBody,
     expression: FirExprId,
 ) -> Option<Vec<ConcatenationPart>> {
-    let operands = concatenation_operands(body, expression)?;
+    let mut pending = concatenation_operands(body, expression)?;
+    pending.reverse();
     let mut parts = Vec::new();
-    for operand in operands {
-        collect(body, operand, &mut parts);
+    while let Some(part) = pending.pop() {
+        match concatenation_operands(body, part.value).or_else(|| to_string_operand(body, part)) {
+            Some(operands) => pending.extend(operands.into_iter().rev()),
+            None => parts.push(part),
+        }
     }
     Some(parts)
-}
-
-fn collect(body: &FirBody, part: ConcatenationPart, out: &mut Vec<ConcatenationPart>) {
-    let nested = concatenation_operands(body, part.value).or_else(|| to_string_operand(body, part));
-    match nested {
-        Some(operands) => {
-            for operand in operands {
-                collect(body, operand, out);
-            }
-        }
-        None => out.push(part),
-    }
 }
 
 /// The direct operands of a concatenation expression.

@@ -14,28 +14,30 @@ const UTF8_ENTRY_LIMIT: usize = 65535;
 pub(crate) fn push_string(value: &KtString, code: &mut CodeBuilder, cw: &mut ClassWriter) {
     let parts = split(value);
     let [single] = parts.as_slice() else {
+        // Each constant is interned where the instruction using it is emitted, as kotlinc's
+        // pool order follows its instruction stream.
         let builder = cw.class_ref("java/lang/StringBuilder");
-        let sized = cw.methodref("java/lang/StringBuilder", "<init>", "(I)V");
-        let append = cw.methodref(
-            "java/lang/StringBuilder",
-            "append",
-            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-        );
-        let to_string = cw.methodref(
-            "java/lang/StringBuilder",
-            "toString",
-            "()Ljava/lang/String;",
-        );
         code.new_obj(builder);
         code.dup();
         let length = i32::try_from(value.len_utf16())
             .expect("a class-file string constant is shorter than i32::MAX units");
         code.push_int(length, cw);
+        let sized = cw.methodref("java/lang/StringBuilder", "<init>", "(I)V");
         code.invokespecial(sized, 1, 0);
         for part in &parts {
             code.push_string_kt(part, cw);
+            let append = cw.methodref(
+                "java/lang/StringBuilder",
+                "append",
+                "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            );
             code.invokevirtual(append, 1, 1);
         }
+        let to_string = cw.methodref(
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+        );
         code.invokevirtual(to_string, 0, 1);
         return;
     };

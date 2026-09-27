@@ -12420,14 +12420,6 @@ impl<'a> Emitter<'a> {
                     | crate::ir::IrIntrinsic::StringLength) => {
                         self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
-                    crate::ir::IrIntrinsic::StringPlus => {
-                        // kotlinc flattens a `plus` chain (and any template inside it) into ONE
-                        // concatenation before codegen; every part below is a leaf operand.
-                        let mut parts = Vec::new();
-                        self.flatten_concat_parts(dispatch_receiver.unwrap(), &mut parts);
-                        self.flatten_concat_parts(args[0], &mut parts);
-                        self.emit_string_plus_parts(&parts, code)
-                    }
                     crate::ir::IrIntrinsic::NullableAnyToString => {
                         let receiver = dispatch_receiver.unwrap();
                         let ty = self.value_ty(receiver);
@@ -13913,76 +13905,7 @@ impl<'a> Emitter<'a> {
         code.array_store(operation, words);
     }
 
-    /// The operand a concatenation part really contributes. A part boxed only to satisfy
-    /// `String.plus(Any?)` (`"…" + port` wraps the `Int` through a reference coercion) is
-    /// concatenated as the PRIMITIVE — kotlinc's `append(I)` / indy `I` argument, never `valueOf`
-    /// + `append(Object)`. The box is concat-invisible, so see through it.
-    fn concat_operand(&self, e: u32) -> u32 {
-        match self.ir.expr(e) {
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => {
-                let inner = *arg;
-                let inner_ty = self.value_ty(inner);
-                // An UNSIGNED value's box is NOT concat-invisible: its carrier prints in signed
-                // decimal, the box's own `toString` in unsigned — keep the box.
-                let unsigned_inner = self
-                    .ir
-                    .logical_types
-                    .get(&inner)
-                    .is_some_and(|t| t.is_unsigned())
-                    || inner_ty.is_unsigned();
-                let outer_reference = ir_ty_to_jvm(&self.value_ty(e)).is_reference();
-                let inner_reference = ir_ty_to_jvm(&inner_ty).is_reference();
-                // A reference operand widened to `Any?` for the `plus` parameter is the same value
-                // under its own static type: kotlinc concatenates `b: String` as `String`
-                // (`append(String)`, indy `Ljava/lang/String;`) and folds a widened literal into
-                // the recipe. The upcast is concat-invisible too.
-                if outer_reference && (inner_reference || !unsigned_inner) {
-                    inner
-                } else {
-                    e
-                }
-            }
-            _ => e,
-        }
-    }
-
-    /// Flatten a `String.plus` chain into its leaf operands, left to right: a nested `plus` on
-    /// either side and a string template (`IrExpr::StringConcat`) contribute their own parts,
-    /// exactly as kotlinc's `FlattenStringConcatenationLowering` folds them into one
-    /// concatenation. A boxed primitive operand contributes the primitive
-    /// ([`Self::concat_operand`]).
-    fn flatten_concat_parts(&self, e: u32, out: &mut Vec<u32>) {
-        let e = self.concat_operand(e);
-        match self.ir.expr(e) {
-            IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
-                        ..
-                    },
-                dispatch_receiver: Some(receiver),
-                args,
-                ..
-            } if args.len() == 1 => {
-                let (receiver, arg) = (*receiver, args[0]);
-                self.flatten_concat_parts(receiver, out);
-                self.flatten_concat_parts(arg, out);
-            }
-            IrExpr::StringConcat(parts) => {
-                for part in parts.clone() {
-                    self.flatten_concat_parts(part, out);
-                }
-            }
-            _ => out.push(e),
-        }
-    }
-
     fn append(&mut self, e: u32, code: &mut CodeBuilder) {
-        let e = self.concat_operand(e);
         let ty = self.value_ty(e);
         let semantic = self.ir.logical_types.get(&e).copied().unwrap_or(ty);
         self.emit_value(e, code);
@@ -14019,47 +13942,6 @@ impl<'a> Emitter<'a> {
             }
         }
         self.append_top(ty, code);
-    }
-
-    /// One concatenation over flattened `plus` parts: `invokedynamic makeConcatWithConstants` on
-    /// JVM 9+ (kotlinc's default there), else a single `StringBuilder` with one `append` per part.
-    fn emit_string_plus_parts(&mut self, parts: &[u32], code: &mut CodeBuilder) {
-        if self.try_emit_indy_concat(parts, code) {
-            return;
-        }
-        let sb = self.cw.class_ref("java/lang/StringBuilder");
-        // A branchy operand (`when`/`try`) can't be emitted with the `StringBuilder` on the stack — its
-        // merge frames would omit it. Spill such operands to temps first.
-        if parts.iter().any(|&part| self.emits_control_flow(part)) {
-            let temps = self.spill_to_temps(parts, code);
-            code.new_obj(sb);
-            code.dup();
-            let init = self
-                .cw
-                .methodref("java/lang/StringBuilder", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            for &(slot, t, _) in &temps {
-                load(t, slot, code);
-                self.append_top(t, code);
-            }
-            self.release_operand_spills(&temps);
-        } else {
-            code.new_obj(sb);
-            code.dup();
-            let init = self
-                .cw
-                .methodref("java/lang/StringBuilder", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            for &part in parts {
-                self.append_part(part, code);
-            }
-        }
-        let ts = self.cw.methodref(
-            "java/lang/StringBuilder",
-            "toString",
-            "()Ljava/lang/String;",
-        );
-        code.invokevirtual(ts, 0, 1);
     }
 
     /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single

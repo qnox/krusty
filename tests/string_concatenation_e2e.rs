@@ -66,3 +66,46 @@ fn a_flattened_concatenation_keeps_kotlin_values() {
             .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "sq7nullc17!null");
 }
+
+/// Kotlin source for `fun <name>(): String = "<'a' * count><tail>"`, with `tail` in source spelling.
+fn long_constant(name: &str, count: usize, tail: &str) -> String {
+    format!("fun {name}(): String = \"{}{tail}\"\n", "a".repeat(count))
+}
+
+/// The sources of constants around the 65,535-byte modified-UTF-8 limit of one constant-pool entry:
+/// exactly at it, one byte over, a three-byte character crossing it, and a surrogate pair whose
+/// low half starts the second piece.
+fn boundary_constants() -> String {
+    [
+        long_constant("exact", 65_535, ""),
+        long_constant("over", 65_536, ""),
+        long_constant("wide", 65_534, "\\u0800"),
+        long_constant("pair", 65_532, "\\uD83D\\uDE00"),
+        "fun concatenated(x: Int): String = \"a\".plus(exact()) + x + over()\n".to_string(),
+    ]
+    .concat()
+}
+
+#[test]
+fn constants_beyond_one_pool_entry_split_like_kotlinc() {
+    assert_matches_kotlinc("LongConstants", &boundary_constants());
+}
+
+#[test]
+fn split_constants_rebuild_their_text() {
+    let src = format!(
+        "{}fun box(): String {{\n\
+         \x20   if (exact().length != 65535) return \"exact ${{exact().length}}\"\n\
+         \x20   if (over().length != 65536) return \"over ${{over().length}}\"\n\
+         \x20   val w = wide()\n\
+         \x20   if (w.length != 65535 || w[65534] != '\\u0800' || w[65533] != 'a') return \"wide\"\n\
+         \x20   val p = pair()\n\
+         \x20   if (p.length != 65534 || p[65532] != '\\uD83D' || p[65533] != '\\uDE00') return \"pair\"\n\
+         \x20   return \"OK\"\n\
+         }}\n",
+        boundary_constants()
+    );
+    let actual = common::compile_and_run_box(&src, "long_constants", &[common::stdlib_jar()], None)
+        .expect("the source compiles and the JVM runner is provisioned");
+    assert_eq!(actual, "OK");
+}

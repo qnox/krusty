@@ -721,11 +721,6 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         )
                     }
                 }
-                crate::ir::IrIntrinsic::StringPlus => {
-                    let receiver = emit_expr(ir, dispatch_receiver.unwrap(), inst);
-                    let argument = emit_expr(ir, args[0], inst);
-                    format!("(String({receiver}) + String({argument}))")
-                }
                 crate::ir::IrIntrinsic::StringLength | crate::ir::IrIntrinsic::ArraySize => {
                     format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))
                 }
