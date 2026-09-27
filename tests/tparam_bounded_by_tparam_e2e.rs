@@ -190,8 +190,8 @@ fn incompatible_dependent_bound_calls_are_rejected_exactly() {
         (
             1,
             format!(
-                "{path}:4:45: error: type mismatch: inferred type is U (of fun <U> bad) but \
-                 String was expected\n{path}:5:36: error: none of the following candidates is \
+                "{path}:4:47: error: return type mismatch: expected 'String', actual 'U (of fun \
+                 <U> bad)'.\n{path}:5:36: error: none of the following candidates is \
                  applicable:\n\nfun Box<T>.orElse(fallback: () -> R): R\nkrusty: 2 error(s)\n"
             )
             .as_str()

@@ -212,7 +212,7 @@ pub(crate) fn lower_suspend(
         orig_rets: &orig_rets,
         null_out_dead_spills,
     };
-    let fids = ir.suspend_funs.clone();
+    let fids = suspend_lambda::innermost_first(ir, ir.suspend_funs.clone());
     let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
         std::collections::HashMap::new();
     crate::trace_compiler!(

@@ -33,6 +33,11 @@ pub enum IrCallableReferenceTarget {
         declaration: crate::fir::ExternalCallableId,
         receiver: Option<Ty>,
     },
+    /// The conversion of a function value to another function type: a synthesized declaration
+    /// without a source identity, numbered `ordinal` among the conversions of its callable.
+    FunctionValueConversion {
+        ordinal: u32,
+    },
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact

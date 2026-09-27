@@ -436,6 +436,8 @@ mod constant_pool_order_e2e;
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "consumer_materialized_result_e2e.rs"]
+mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
 mod context_and_loop_wording_e2e;
 #[path = "context_function_type_e2e.rs"]
@@ -666,6 +668,8 @@ mod expression_line_marks_e2e;
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
 mod ext_receiver_tparam_binding_e2e;
+#[path = "extension_call_operands_e2e.rs"]
+mod extension_call_operands_e2e;
 #[path = "extension_default_args_e2e.rs"]
 mod extension_default_args_e2e;
 #[path = "extension_default_stub_e2e.rs"]
@@ -782,6 +786,8 @@ mod function_type_is_e2e;
 mod function_type_supertype_e2e;
 #[path = "function_typed_property_e2e.rs"]
 mod function_typed_property_e2e;
+#[path = "function_value_conversion_e2e.rs"]
+mod function_value_conversion_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
@@ -1014,6 +1020,10 @@ mod labeled_this_e2e;
 mod lambda_e2e;
 #[path = "lambda_exit_join_e2e.rs"]
 mod lambda_exit_join_e2e;
+#[path = "lambda_implicit_return_lines_e2e.rs"]
+mod lambda_implicit_return_lines_e2e;
+#[path = "lambda_receiver_label_e2e.rs"]
+mod lambda_receiver_label_e2e;
 #[path = "lambda_result_inference_e2e.rs"]
 mod lambda_result_inference_e2e;
 #[path = "lambda_result_type_variable_e2e.rs"]
@@ -1174,6 +1184,8 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
+#[path = "splice_nullable_value_class_lambda_e2e.rs"]
+mod splice_nullable_value_class_lambda_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -1790,6 +1802,10 @@ mod suspend_interface_delegation_e2e;
 mod suspend_interface_impl_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
+#[path = "suspend_lambda_metadata_e2e.rs"]
+mod suspend_lambda_metadata_e2e;
+#[path = "suspend_lambda_sites_e2e.rs"]
+mod suspend_lambda_sites_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]

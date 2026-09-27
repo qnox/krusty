@@ -8,7 +8,7 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFunction,
 };
 
-use super::source_calls::{ModuleConstructorRequest, SameFileExtensionReceiverMode};
+use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
 /// A checked callable reference as FIR records it: the resolved target, how it binds its
@@ -436,7 +436,6 @@ impl BodyLowering<'_> {
             callable.id,
             dispatch_receiver,
             extension_receiver,
-            SameFileExtensionReceiverMode::Direct,
             &arguments,
             &signature_parameters,
             substitutions,
@@ -480,9 +479,18 @@ impl BodyLowering<'_> {
             _ => return Ok(None),
         };
         // The declaration's own parameter list: its extension receiver follows its context
-        // parameters, as the declaration takes them.
+        // parameters, as the declaration takes them. A companion-associated declaration's receiver
+        // names the classifier whose static scope it joins; it is not a physical parameter.
+        let companion_associated = self
+            .index
+            .declaration_header(callable.declaration)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::COMPANION));
         let mut declaration_parameters = signature_parameters;
-        if let Some(receiver) = callable.shape.extension_receiver {
+        if let Some(receiver) = callable
+            .shape
+            .extension_receiver
+            .filter(|_| !companion_associated)
+        {
             let position =
                 (callable.shape.context_parameter_count as usize).min(declaration_parameters.len());
             declaration_parameters.insert(position, specialize(receiver.get()));
@@ -584,7 +592,6 @@ impl BodyLowering<'_> {
                         *target,
                         dispatch_receiver,
                         extension_receiver,
-                        SameFileExtensionReceiverMode::Materialized,
                         &arguments,
                         &parameter_types,
                         &call.substitutions,
