@@ -14,6 +14,8 @@ pub enum CompilerIntrinsic {
     ArraySize,
     CharCode,
     StringLength,
+    /// `String.get(Int): Char`, the index operator on a string.
+    StringGet,
     StringPlus,
     NullableAnyToString,
     /// Exact builtin numeric/character conversion declaration selected from Kotlin builtins.

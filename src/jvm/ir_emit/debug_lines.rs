@@ -122,6 +122,35 @@ impl Emitter<'_> {
         result
     }
 
+    /// Emit a `when` branch condition's jump. kotlinc's `visitWhen` keeps a constant source
+    /// condition visible to a debugger: it marks the condition's line on a `nop` before deciding
+    /// the branch statically. A constant the compiler generated has no source line and no
+    /// instruction of its own.
+    pub(super) fn emit_when_condition(
+        &mut self,
+        condition: ExprId,
+        target: crate::jvm::classfile::Label,
+        jump_when_true: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let constant = matches!(
+            self.ir.expr(condition),
+            crate::ir::IrExpr::Const(crate::ir::IrConst::Boolean(_))
+        );
+        if let Some(&line) = self
+            .ir
+            .expr_source_lines
+            .get(&condition)
+            .filter(|_| constant)
+        {
+            if line != 0 {
+                code.mark_line(line);
+                code.nop();
+            }
+        }
+        self.in_condition(|this| this.emit_cond_branch(condition, target, jump_when_true, code))
+    }
+
     /// Put a call's own line back in effect at its physical dispatch.
     ///
     /// A multi-line call's operands each mark their own line as they are pushed, so by the time the

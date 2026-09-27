@@ -133,3 +133,24 @@ fn a_zero_literal_initializer_is_a_constant() {
         }\n";
     assert_identical("ZeroConstants", SRC, "app/K");
 }
+
+#[test]
+fn a_folded_initializer_is_not_a_constant() {
+    const SRC: &str = "package app\n\
+        \n\
+        val top: Int = 1 + 2\n\
+        val literal: Int = -3\n\
+        class K {\n\
+        \x20   companion object {\n\
+        \x20       val hoisted: Int = 2 * 3\n\
+        \x20       val kept: Int = 6\n\
+        \x20   }\n\
+        }\n\
+        object O {\n\
+        \x20   val shifted: Long = 1L shl 4\n\
+        }\n";
+    assert_identical("FoldedConstants", SRC, "app/FoldedConstantsKt");
+    assert_identical("FoldedConstants", SRC, "app/K");
+    assert_identical("FoldedConstants", SRC, "app/K$Companion");
+    assert_identical("FoldedConstants", SRC, "app/O");
+}

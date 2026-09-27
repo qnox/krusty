@@ -59,7 +59,28 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(expression_id))?;
         let origin = expression.origin;
         let first_generated = self.ir.exprs.len();
+        // kotlinc folds an intrinsic-const operation over constants before any other lowering, so
+        // the whole operation becomes its value.
+        let folded = self.constants.fold(self.body, expression_id);
         let lowered = match &expression.kind {
+            _ if folded.is_some() => {
+                let folded = folded.expect("guarded by the arm");
+                let constant = lower_constant(&folded.value, expression.ty.get(), origin)?;
+                let constant = self.ir.add_expr(IrExpr::Const(constant));
+                // A signed literal (`-3`) is still a literal to kotlinc's frontend, which parses
+                // it as one; only a value computed by an operation loses the literal's facts.
+                let signed_literal = matches!(
+                    &expression.kind,
+                    FirExprKind::Unary {
+                        operation: FirUnaryOperation::Negate | FirUnaryOperation::Identity,
+                        operand,
+                    } if matches!(self.body.expr(*operand).map(|operand| &operand.kind), Some(FirExprKind::Constant(_)))
+                );
+                if !signed_literal {
+                    self.ir.folded_constants.insert(constant);
+                }
+                constant
+            }
             FirExprKind::Constant(constant) => {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
                 self.ir.add_expr(IrExpr::Const(constant))
@@ -860,10 +881,19 @@ impl BodyLowering<'_> {
                 origin,
             )?,
             FirExprKind::StringTemplate(parts) => {
-                let parts = parts
+                // kotlinc merges each run of constant parts into one `String` constant.
+                let runs = self.constants.template_runs(self.body, parts);
+                let parts = runs
                     .iter()
-                    .copied()
-                    .map(|part| self.expression(part))
+                    .map(|run| match run {
+                        super::constant_evaluation::TemplateRun::Constant(text) => {
+                            let text = lower_constant(text, Ty::String, origin)?;
+                            Ok(self.ir.add_expr(IrExpr::Const(text)))
+                        }
+                        super::constant_evaluation::TemplateRun::Part(part) => {
+                            self.expression(*part)
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.ir.add_expr(IrExpr::StringConcat(parts))
             }
