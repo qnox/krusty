@@ -47,7 +47,7 @@ mod progression;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod type_check_role;
-mod type_reflection;
+pub(crate) mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
 mod when_facts;

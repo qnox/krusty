@@ -202,49 +202,46 @@ pub(super) fn emit_suspend_lambda_class(
     emit_invoke(&mut cw, &formatter, &shape, &result);
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(lambda).unwrap_or_default();
+    let (d1, d2) = lambda_metadata(ir, lambda);
     cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &d1, &d2);
     env.run.finish_class(cw)
 }
 
-/// The lambda's function, which kotlinc records in the class's `@Metadata` for reflection. Not yet
-/// written for a lambda over context parameters, over a type parameter, or with a parameter no
-/// declaration named (a destructuring one).
-fn lambda_metadata(lambda: &SuspendLambdaClass) -> Option<(Vec<String>, Vec<String>)> {
+/// The lambda's function, which kotlinc records in the class's `@Metadata` for reflection: its
+/// receiver, value parameters and result, without its context parameters.
+fn lambda_metadata(ir: &IrFile, lambda: &SuspendLambdaClass) -> (Vec<String>, Vec<String>) {
     let Ty::Fun(signature) = lambda.function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
-    if signature.context_count != 0 {
-        return None;
-    }
+    let own = &signature.params[signature.context_count..];
     let (receiver, values) = match signature.has_receiver {
-        true => (signature.params.first().copied(), &signature.params[1..]),
-        false => (None, &signature.params[..]),
+        true => (Some(own[0]), &own[1..]),
+        false => (None, own),
     };
     assert_eq!(
         values.len(),
         lambda.metadata_names.len(),
         "a suspend lambda names each value parameter of its function type"
     );
-    let parameters = lambda
+    let parameters: Vec<(&str, Ty)> = lambda
         .metadata_names
         .iter()
-        .zip(values)
-        .map(|(name, &ty)| Some((name.as_deref()?, ty)))
-        .collect::<Option<Vec<_>>>()?;
-    let function = crate::metadata::lambda_function::LambdaFunction {
-        receiver,
-        parameters: &parameters,
-        result: signature.ret,
-    };
-    match crate::metadata::lambda_function::build(&function) {
-        Ok((bytes, strings)) => Some((
-            vec![bytes.iter().map(|&byte| byte as char).collect()],
-            strings,
-        )),
-        Err(crate::metadata::lambda_function::TypeEncodeError::MissingTypeParameter(_)) => None,
-        Err(error) => panic!("invalid suspend lambda metadata type: {error}"),
-    }
+        .map(String::as_str)
+        .zip(values.iter().copied())
+        .collect();
+    let local_classifiers = crate::jvm::local_classifiers::names(ir);
+    let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let (bytes, strings) = crate::metadata::lambda_function::build(
+        &crate::metadata::lambda_function::LambdaFunction {
+            receiver,
+            parameters: &parameters,
+            result: signature.ret,
+            type_parameters: &lambda.type_parameters,
+            local_classifiers: &local_classifiers,
+            enum_entry_bodies: &enum_entry_bodies,
+        },
+    );
+    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.

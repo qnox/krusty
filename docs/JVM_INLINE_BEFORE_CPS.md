@@ -159,11 +159,14 @@ Known gaps, both byte differences in the function's own method (the continuation
 
 The class's `@Metadata` records the lambda's function as kotlinc does: `<anonymous>`, local
 visibility, its receiver, each value parameter under its source name (`_` as `<unused var>`), and
-its result.
+its result, but no context parameters. The type parameters its result, receiver and value
+parameters name become the function's own, numbered in that order of first use, named in its
+types and written with their bounds and variance; one that only a bound names keeps an id after
+them. Lowering records their declarations for each suspend lambda
+(`IrFile::lambda_type_parameters`), and a local classifier is written by its local class id.
+A lambda with a parameter no declaration names (a destructuring one) keeps the IR machine.
 
-Known gaps: that function is not yet written for a lambda over context parameters, over an
-enclosing declaration's type parameter (kotlinc copies those into the lambda's own table), or
-with a destructuring parameter; the pool interns the transformer's
+Known gaps: the pool interns the transformer's
 constants last (as for named functions), and a local declared in the lambda's body ends its range
 before the final `areturn` (the body lowers as `return <block>`; plain lambdas share this).
 
