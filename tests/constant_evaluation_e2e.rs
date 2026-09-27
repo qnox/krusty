@@ -105,6 +105,29 @@ fn constant_template_parts_merge() {
     );
 }
 
+/// A condition folded to a constant still marks its source line, on a `nop`, before the branch is
+/// decided statically, as kotlinc's `visitWhen` does.
+#[test]
+fn a_folded_condition_keeps_its_line_on_a_nop() {
+    assert_matches_kotlinc(
+        "FoldedConditions",
+        "fun sink(value: Any?) {}\n\
+         fun f(x: Int) {\n\
+         \x20   if (1 != 0) {\n\
+         \x20   }\n\
+         \x20   if (2 < 1) sink(x) else sink(1)\n\
+         \x20   if (x > 3) {\n\
+         \x20       sink(0)\n\
+         \x20   } else if ('a' == 'b') {\n\
+         \x20       sink(1)\n\
+         \x20   } else {\n\
+         \x20       sink(x)\n\
+         \x20   }\n\
+         \x20   sink(if (true && x > 0) 1 else 2)\n\
+         }\n",
+    );
+}
+
 #[test]
 fn folded_values_are_kotlin_values() {
     let src = "var failed = \"\"\n\
