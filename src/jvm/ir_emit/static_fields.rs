@@ -43,6 +43,12 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
 }
 
+/// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
+/// `HAS_CONSTANT` describes: a value folded from an operation over constants is not one.
+pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool {
+    const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
+}
+
 pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.

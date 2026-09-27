@@ -12,6 +12,10 @@
 //! so the two representations never both spell the same value. Consumers may therefore rely on
 //! `Eq`/`Hash` being the value's identity — the class-file constant pool dedups on it.
 
+mod float_text;
+
+pub(crate) use float_text::{push_f32, push_f64};
+
 /// A Kotlin `String` value: a sequence of UTF-16 code units.
 ///
 /// Build one from a `&str`/`String` when the content is ordinary text, or through [`KtStringBuf`]

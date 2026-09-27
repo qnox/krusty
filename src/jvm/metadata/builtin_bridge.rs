@@ -114,6 +114,7 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                                 param_names: member.param_names,
                                 param_defaults: member.param_defaults,
                                 vararg: member.vararg,
+                                annotations: member.annotations,
                             })
                             .collect(),
                         constructors: class
@@ -193,6 +194,7 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
                 context_count: function.context_count,
+                annotations: function.annotations,
             })
             .collect(),
     }

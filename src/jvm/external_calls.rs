@@ -411,9 +411,13 @@ pub(super) fn realize(
         // with no JVM method. Checked FIR publishes the operation for an ordinary call; a callable-
         // reference adapter body keeps the provider identity in an ordinary external-call node, so
         // realize that exact declaration with the common primitive operation at this target
-        // boundary. `String.plus` keeps its own intrinsic call below.
+        // boundary. `String.plus` and `String.get` keep their own intrinsic calls below.
         if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
-            if intrinsic != crate::libraries::CompilerIntrinsic::StringPlus {
+            if !matches!(
+                intrinsic,
+                crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::StringGet
+            ) {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
                         dispatch_receiver: Some(receiver),
@@ -728,6 +732,9 @@ pub(super) fn realize(
             Some(crate::libraries::CompilerIntrinsic::StringPlus) => {
                 Some(crate::ir::IrIntrinsic::StringPlus)
             }
+            Some(crate::libraries::CompilerIntrinsic::StringGet) => {
+                Some(crate::ir::IrIntrinsic::StringGet)
+            }
             Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) => {
                 Some(crate::ir::IrIntrinsic::NullableAnyToString)
             }
@@ -890,11 +897,16 @@ pub(super) fn realize(
                     };
                 }
                 crate::libraries::MemberRealization::Intrinsic(
-                    crate::libraries::CompilerIntrinsic::StringPlus,
+                    intrinsic @ (crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::StringGet),
                 ) => {
                     physical_result = semantic_ret;
                     *callee = Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
+                        operation: if intrinsic == crate::libraries::CompilerIntrinsic::StringPlus {
+                            crate::ir::IrIntrinsic::StringPlus
+                        } else {
+                            crate::ir::IrIntrinsic::StringGet
+                        },
                         ret: semantic_ret,
                     };
                 }

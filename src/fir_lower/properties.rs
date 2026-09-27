@@ -1694,6 +1694,7 @@ pub(super) fn accept_property_body(
         && index
             .property(property_id)
             .is_some_and(|property| !property.mutable)
+        && !ir.folded_constants.contains(&value)
         && super::constant_folding::is_metadata_constant(ir.expr(value));
     let companion_block_member = index
         .declaration_header(property_declaration)

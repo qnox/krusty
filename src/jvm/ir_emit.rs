@@ -92,6 +92,7 @@ mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_fields;
+mod string_members;
 mod type_operation_emission;
 mod vararg;
 mod when;
@@ -1210,9 +1211,9 @@ fn build_class_metadata(
                         field.is_final() && index >= c.ctor_param_count
                     }) && property
                         .initializer
-                        .is_some_and(|init| static_fields::const_value_idx_peek(ir, init))
+                        .is_some_and(|init| static_fields::literal_initializer(ir, init))
                         || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
-                            !s.is_var && static_fields::const_value_idx_peek(ir, s.init)
+                            !s.is_var && static_fields::literal_initializer(ir, s.init)
                         }),
                     is_const: false,
                     modifiers: property.modifiers,
@@ -12415,16 +12416,9 @@ impl<'a> Emitter<'a> {
                         self.emit_value(dispatch_receiver.unwrap(), code);
                         code.arraylength();
                     }
-                    crate::ir::IrIntrinsic::StringGet => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        self.emit_value(args[0], code);
-                        let method = self.cw.methodref("java/lang/String", "charAt", "(I)C");
-                        code.invokevirtual(method, 1, 1);
-                    }
-                    crate::ir::IrIntrinsic::StringLength => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        let method = self.cw.methodref("java/lang/String", "length", "()I");
-                        code.invokevirtual(method, 0, 1);
+                    op @ (crate::ir::IrIntrinsic::StringGet
+                    | crate::ir::IrIntrinsic::StringLength) => {
+                        self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::StringPlus => {
                         // kotlinc flattens a `plus` chain (and any template inside it) into ONE

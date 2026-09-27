@@ -366,8 +366,7 @@ impl Emitter<'_> {
                     // writes one inverted branch.
                     if is_stmt {
                         if let Some(jump) = self.loop_jump_target(*body) {
-                            let unconditional = self
-                                .in_condition(|this| this.emit_cond_branch(*c, jump, true, code));
+                            let unconditional = self.emit_when_condition(*c, jump, true, code);
                             code.set_stack(entry_height);
                             // A constant-true guard emitted an unconditional jump. Emitting any
                             // later arm after it would leave dead bytecode without a stack-map
@@ -383,7 +382,7 @@ impl Emitter<'_> {
                     let next = code.new_label();
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,
                     // unframed body. Suspend flattening produces this shape for some do-while loops.
-                    if self.in_condition(|this| this.emit_cond_branch(*c, next, false, code)) {
+                    if self.emit_when_condition(*c, next, false, code) {
                         self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;
