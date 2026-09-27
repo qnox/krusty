@@ -8,7 +8,7 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFunction,
 };
 
-use super::source_calls::{ModuleConstructorRequest, SameFileExtensionReceiverMode};
+use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
 /// A checked callable reference as FIR records it: the resolved target, how it binds its
@@ -436,7 +436,6 @@ impl BodyLowering<'_> {
             callable.id,
             dispatch_receiver,
             extension_receiver,
-            SameFileExtensionReceiverMode::Direct,
             &arguments,
             &signature_parameters,
             substitutions,
@@ -584,7 +583,6 @@ impl BodyLowering<'_> {
                         *target,
                         dispatch_receiver,
                         extension_receiver,
-                        SameFileExtensionReceiverMode::Materialized,
                         &arguments,
                         &parameter_types,
                         &call.substitutions,

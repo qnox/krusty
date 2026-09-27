@@ -660,6 +660,8 @@ mod expression_line_marks_e2e;
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
 mod ext_receiver_tparam_binding_e2e;
+#[path = "extension_call_operands_e2e.rs"]
+mod extension_call_operands_e2e;
 #[path = "extension_default_args_e2e.rs"]
 mod extension_default_args_e2e;
 #[path = "extension_default_stub_e2e.rs"]
