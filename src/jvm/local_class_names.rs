@@ -82,3 +82,18 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
 pub(crate) fn callable_reference_name(ir: &IrFile, expression: u32) -> Option<TypeName> {
     ir.callable_reference_names.get(&expression).copied()
 }
+
+/// The class the source naming walk gave the lambda implemented by `impl_fn`. A pass that rebuilt
+/// the enclosing body may have moved the lambda to a fresh node; the name stays with the source
+/// literal's own node, and both build the same implementation.
+pub(crate) fn lambda_class_name(ir: &IrFile, impl_fn: u32) -> Option<TypeName> {
+    let mut names = ir
+        .callable_reference_names
+        .iter()
+        .filter(|(&node, _)| {
+            matches!(ir.exprs.get(node as usize), Some(crate::ir::IrExpr::Lambda { impl_fn: f, .. }) if *f == impl_fn)
+        })
+        .map(|(_, &name)| name);
+    let name = names.next()?;
+    names.all(|other| other == name).then_some(name)
+}

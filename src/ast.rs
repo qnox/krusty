@@ -440,6 +440,18 @@ pub enum Stmt {
     },
 }
 
+/// How one lambda parameter was written. Like [`DestructureEntry::ignored`] this is syntax, not a
+/// spelling test: a bare `_` is unused, while a backtick-escaped `` `_` `` is an ordinary name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LambdaParameterRole {
+    /// An ordinary parameter name.
+    Named,
+    /// `_`: the parameter is declared but binds no name.
+    Unused,
+    /// `(a, b)`: one parameter whose components the body destructures.
+    Destructured,
+}
+
 /// One destructuring binding. `ignored` is syntax, not a spelling test: bare `_` skips a component,
 /// while backtick-escaped `` `_` `` declares an ordinary local whose source name is `_`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1091,6 +1103,18 @@ pub struct ClassDecl {
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
     pub ctor_close_line: u32,
+    /// The file-level declarations this classifier's `companion { … }` blocks introduced, in
+    /// source order. They are hoisted beside the classifier, which remains their lexical owner.
+    pub companion_block_members: Vec<CompanionBlockMember>,
+}
+
+/// A declaration a classifier's `companion { … }` block introduced.
+#[derive(Clone, Copy, Debug)]
+pub struct CompanionBlockMember {
+    pub declaration: DeclId,
+    /// The member's own `private` modifier: kotlinc reports there a private member its classifier
+    /// cannot declare.
+    pub private_modifier: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
@@ -1640,6 +1664,10 @@ pub struct File {
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
     pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// How each parameter of a lambda literal was written, keyed by the lambda's `ExprId` and
+    /// parallel to its `params`. Recorded only for a lambda with an `_` or a destructuring
+    /// parameter; every other lambda's parameters are all [`LambdaParameterRole::Named`].
+    pub lambda_parameter_roles: std::collections::HashMap<u32, Vec<LambdaParameterRole>>,
     /// Lambda literals with a source `->`, including the arity-zero form `{ -> body }`. An empty
     /// `params` vector otherwise means `{ body }`, which may acquire the implicit unary `it` from an
     /// expected function type; the explicit-arrow form must remain zero-arity.
@@ -1657,6 +1685,10 @@ pub struct File {
     /// id, from the file's local-class naming walk. A backend that realizes one as a class of its
     /// own (a suspend lambda's `SuspendLambda`) names it from this.
     pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
+    /// The value each generated-class sequence the naming walk touched had before this file (or
+    /// declaration unit) numbered anything in it. Settling the walk after resolution replays the
+    /// same sequences from these positions.
+    pub generated_class_sequence_starts: std::collections::HashMap<Vec<String>, u32>,
     /// Lifting provenance of each lambda literal, by expression id, from the file's local-function
     /// naming walk.
     pub lambda_lifting_sites: std::collections::HashMap<u32, LiftingSite>,
@@ -1676,6 +1708,10 @@ pub struct File {
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
     /// the lambda is unlabelled and keeps the implicit callee-name label.
     pub lambda_labels: std::collections::HashMap<u32, String>,
+    /// kotlinc's implicit label of a lambda literal, keyed by the lambda's `ExprId.0`: the name of
+    /// the innermost call it is written in (`parser::lambda_literals`). Absent for a lambda in a
+    /// scope that names none. An explicit label in `lambda_labels` replaces it.
+    pub lambda_call_labels: std::collections::HashMap<u32, String>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1786,6 +1822,9 @@ pub struct File {
     /// instead of being unconditionally public. The per-class `kotlin.ConsistentCopyVisibility` /
     /// `kotlin.ExposedCopyVisibility` annotation overrides are unhandled.
     pub data_copy_respects_ctor_visibility: bool,
+    /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
+    /// non-`Unit` may be converted to a function type returning `Unit`.
+    pub unit_conversions_on_arbitrary_expressions: bool,
 }
 
 impl File {
@@ -1844,16 +1883,19 @@ impl File {
         self.local_class_nested = Default::default();
         self.hoisted_classifier_source_names = Default::default();
         self.lambda_param_types = Default::default();
+        self.lambda_parameter_roles = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();
         self.callable_reference_provenance = Default::default();
+        self.generated_class_sequence_starts = Default::default();
         self.lambda_lifting_sites = Default::default();
         self.local_function_lifting_sites = Default::default();
         self.local_delegate_lifting_sites = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();
+        self.lambda_call_labels = Default::default();
         self.destructure_source_props = Default::default();
         self.destructure_entry_types = Default::default();
         self.base_arg_names = Default::default();

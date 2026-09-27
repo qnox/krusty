@@ -309,9 +309,6 @@ try/finally12.kt
 try/try5.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
-unitConversion/basicUnitConversion.kt
-unitConversion/unitConversionForSubtype.kt
-unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt25784.kt

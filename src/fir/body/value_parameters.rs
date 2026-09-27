@@ -7,6 +7,31 @@ pub struct FirValueParameter {
     pub origin: OriginId,
     pub value: LocalValueId,
     pub ty: ResolvedTy,
+    pub name: FirValueParameterName,
+}
+
+/// What names a value parameter. Kotlin gives the two parameters that bind no name of their own
+/// special names (`<unused var>`, `<destruct>`), which declaration metadata records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirValueParameterName {
+    /// The name the parameter binds in its body, source-written or the implicit `it`.
+    Bound,
+    /// A lambda's `_` parameter.
+    Unused,
+    /// A lambda parameter written as a destructuring declaration `(a, b)`.
+    Destructured,
+}
+
+impl FirValueParameter {
+    /// A parameter that binds its own name in the body.
+    pub fn bound(origin: OriginId, value: LocalValueId, ty: ResolvedTy) -> Self {
+        Self {
+            origin,
+            value,
+            ty,
+            name: FirValueParameterName::Bound,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

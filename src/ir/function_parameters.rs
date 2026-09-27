@@ -9,6 +9,10 @@ use super::{ExprId, FunId, IrFile};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrParameterRole {
     Value,
+    /// A lambda's `_` parameter, which binds no name.
+    UnusedValue,
+    /// A lambda parameter written as a destructuring declaration `(a, b)`.
+    DestructuredValue,
     ContextValue,
     AnonymousContextParameter {
         ordinal: u32,
