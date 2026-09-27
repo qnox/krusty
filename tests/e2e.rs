@@ -436,6 +436,8 @@ mod constant_pool_order_e2e;
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "consumer_materialized_result_e2e.rs"]
+mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
 mod context_and_loop_wording_e2e;
 #[path = "context_function_type_e2e.rs"]
