@@ -48,6 +48,9 @@ struct Parameter {
     ty: Ty,
     /// The local-variable name its read-back takes.
     name: Option<String>,
+    /// The name Kotlin metadata records, for a value parameter: neither the receiver nor a
+    /// context parameter.
+    metadata_name: Option<String>,
     /// The field it is kept in, when the body reads it.
     field: Option<SpillName>,
 }
@@ -196,6 +199,11 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
                     (parameter.ty, field)
                 })
                 .collect(),
+            metadata_names: parameters
+                .iter()
+                .filter_map(|parameter| parameter.metadata_name.clone())
+                .collect(),
+            type_parameters: ir.lambda_type_parameters(fid).to_vec(),
         },
     );
     route.machines.record_transformed(
@@ -330,7 +338,14 @@ fn layout(
         let receiver = identity.role == IrParameterRole::ExtensionReceiver;
         let name = match (&identity.source_name, receiver) {
             (Some(name), _) => Some(name.clone()),
-            (None, true) => Some("<this>".to_string()),
+            (None, true) => Some(crate::jvm::parameter_names::lambda_receiver(
+                ir.lambda_origins
+                    .get(&fid)
+                    .expect("a suspend lambda class is a source lambda's"),
+            )),
+            (None, false) if identity.role == IrParameterRole::DestructuredValue => {
+                Some(crate::jvm::parameter_names::DESTRUCTURED.to_string())
+            }
             (None, false) => None,
         };
         let field = if read(parameter) {
@@ -354,7 +369,25 @@ fn layout(
         } else {
             None
         };
-        parameters.push(Parameter { ty, name, field });
+        let value_parameter = !matches!(
+            identity.role,
+            IrParameterRole::ExtensionReceiver
+                | IrParameterRole::ContextValue
+                | IrParameterRole::AnonymousContextParameter { .. }
+                | IrParameterRole::ContextReceiver { .. }
+        );
+        // A value parameter no declaration names (a destructuring one) has no metadata name to
+        // record yet, so the lambda keeps the IR machine.
+        let metadata_name = match value_parameter {
+            true => Some(crate::jvm::parameter_names::metadata(identity)?.to_owned()),
+            false => None,
+        };
+        parameters.push(Parameter {
+            ty,
+            name,
+            metadata_name,
+            field,
+        });
     }
     Some((captures, parameters))
 }

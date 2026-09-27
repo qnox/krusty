@@ -24,10 +24,12 @@ mod parameters;
 mod retained_bodies;
 mod signature;
 mod signature_extract;
+mod source_lambda;
 mod source_map;
 mod type_parameters;
 
 pub(crate) use active_source::*;
+pub use body::value_parameters::FirValueParameterName;
 pub use body::*;
 pub use body_check::*;
 pub use body_work::*;
@@ -44,6 +46,7 @@ pub use parameters::*;
 pub use retained_bodies::*;
 pub use signature::*;
 pub use signature_extract::*;
+pub use source_lambda::*;
 pub use type_parameters::*;
 
 #[cfg(test)]

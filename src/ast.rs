@@ -440,6 +440,18 @@ pub enum Stmt {
     },
 }
 
+/// How one lambda parameter was written. Like [`DestructureEntry::ignored`] this is syntax, not a
+/// spelling test: a bare `_` is unused, while a backtick-escaped `` `_` `` is an ordinary name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LambdaParameterRole {
+    /// An ordinary parameter name.
+    Named,
+    /// `_`: the parameter is declared but binds no name.
+    Unused,
+    /// `(a, b)`: one parameter whose components the body destructures.
+    Destructured,
+}
+
 /// One destructuring binding. `ignored` is syntax, not a spelling test: bare `_` skips a component,
 /// while backtick-escaped `` `_` `` declares an ordinary local whose source name is `_`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1640,6 +1652,10 @@ pub struct File {
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
     pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// How each parameter of a lambda literal was written, keyed by the lambda's `ExprId` and
+    /// parallel to its `params`. Recorded only for a lambda with an `_` or a destructuring
+    /// parameter; every other lambda's parameters are all [`LambdaParameterRole::Named`].
+    pub lambda_parameter_roles: std::collections::HashMap<u32, Vec<LambdaParameterRole>>,
     /// Lambda literals with a source `->`, including the arity-zero form `{ -> body }`. An empty
     /// `params` vector otherwise means `{ body }`, which may acquire the implicit unary `it` from an
     /// expected function type; the explicit-arrow form must remain zero-arity.
@@ -1676,6 +1692,10 @@ pub struct File {
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
     /// the lambda is unlabelled and keeps the implicit callee-name label.
     pub lambda_labels: std::collections::HashMap<u32, String>,
+    /// kotlinc's implicit label of a lambda literal, keyed by the lambda's `ExprId.0`: the name of
+    /// the innermost call it is written in (`parser::lambda_literals`). Absent for a lambda in a
+    /// scope that names none. An explicit label in `lambda_labels` replaces it.
+    pub lambda_call_labels: std::collections::HashMap<u32, String>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1844,6 +1864,7 @@ impl File {
         self.local_class_nested = Default::default();
         self.hoisted_classifier_source_names = Default::default();
         self.lambda_param_types = Default::default();
+        self.lambda_parameter_roles = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();
@@ -1854,6 +1875,7 @@ impl File {
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();
+        self.lambda_call_labels = Default::default();
         self.destructure_source_props = Default::default();
         self.destructure_entry_types = Default::default();
         self.base_arg_names = Default::default();

@@ -7531,6 +7531,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **A lambda's `_` and destructuring parameters have Kotlin's special names.** A bare `_` lambda
+  parameter binds no name and is `<unused var>`; a parameter written `(a, b)` is `<destruct>`. The
+  parser records how each parameter was written (`File::lambda_parameter_roles`, syntax, so an
+  escaped `` `_` `` stays an ordinary name) and common IR carries it as the parameter's role
+  (`IrParameterRole::{UnusedValue, DestructuredValue}`). Declaration metadata records the special
+  names; a JVM lambda method writes no `LocalVariableTable` row for either, as kotlinc does, while a
+  suspend lambda reads a destructured parameter back into a local named `<destruct>`. The class of
+  a suspend lambda records the lambda as a local `<anonymous>` function in its `@Metadata`
+  (`docs/METADATA_NOTES.md`). Tests: `tests/metadata_suspend_lambda_classes_e2e.rs`.
+
+- **A lambda literal's label.** kotlinc names a lambda literal after the innermost call it is
+  written in: a lambda in a call's argument list, its trailing lambda or an infix call's operand
+  takes the call's simple name, and a call whose callee is not a simple name is `invoke`. `if`,
+  `when`, `try`, parentheses, `!!` and an enclosing lambda's body or local function pass that name
+  through (`b(run2 { { … } })` is labelled `run2`); a property initializer, an assignment and a
+  non-infix binary operator (`?:`, `+`, `..`, `in`, …) name nothing. A label written on the literal
+  replaces the call's, and an anonymous function has none. The parser records the label
+  (`parser::lambda_literals`); a receiver lambda's receiver local is `$this$<label>`, or `<this>`
+  without one. Test: `tests/lambda_receiver_label_e2e.rs`.
 - **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
   native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
