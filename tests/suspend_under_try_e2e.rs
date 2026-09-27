@@ -118,6 +118,26 @@ fn a_function_suspending_under_try_keeps_kotlinc_s_continuation_class() {
     }
 }
 
+#[test]
+fn a_suspend_lambda_with_points_in_try_catch_and_finally_matches_kotlinc() {
+    let src = "suspend fun step(): Int = 1\n\
+fun make(): suspend () -> Int = {\n\
+    try {\n\
+        step()\n\
+    } catch (e: Throwable) {\n\
+        step() + 1\n\
+    } finally {\n\
+        step()\n\
+    }\n\
+}\n";
+    expect_method_matches(
+        "SuspendLambdaUnderTry",
+        src,
+        "SuspendLambdaUnderTryKt$make$1",
+        "public final java.lang.Object invokeSuspend(",
+    );
+}
+
 // The handler still covers the code after the resume: an exception thrown there is caught, and
 // the `finally` runs once on each path.
 #[test]

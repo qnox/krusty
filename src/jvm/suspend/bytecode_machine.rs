@@ -8,12 +8,11 @@
 //! the spill fields and `@DebugMetadata` come from the transformer.
 //!
 //! The functions taken so far are top-level functions and class members whose suspension points
-//! are all plain calls outside any `try`, and which call no inline function; a call to a member,
-//! on any receiver, is as plain as a call to a top-level function. An overridable member's machine
-//! is built in the `$suspendImpl` its body moves to (`jvm::suspend_impls`).
-//! Suspend lambdas of that shape go through `suspend_lambda`, which shares the eligibility and
-//! suspension collection here. Interface bodies, `try` and spliced inline bodies are the next steps
-//! of the plan; until then they keep the IR machine.
+//! are all plain calls and which call no inline function; a call to a member, on any receiver, is
+//! as plain as a call to a top-level function. An overridable member's machine is built in the
+//! `$suspendImpl` its body moves to (`jvm::suspend_impls`). Suspend lambdas of that shape go through
+//! `suspend_lambda`, which shares the eligibility and suspension collection here. Interface bodies
+//! and spliced inline bodies keep the IR machine until their steps land.
 
 use std::collections::HashSet;
 
