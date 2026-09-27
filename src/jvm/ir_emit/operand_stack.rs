@@ -58,7 +58,13 @@ impl Emitter<'_> {
     {
         let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
-            let temps = self.spill_to_temps(ops, code);
+            let temps = ops
+                .iter()
+                .map(|&o| {
+                    let source = self.emit_sequenced_operand(o, operand_use, code);
+                    self.spill_operand(o, source, code)
+                })
+                .collect::<Vec<_>>();
             for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
                 self.mark_synthesized_operand_run(
                     default_plan,
@@ -78,14 +84,24 @@ impl Emitter<'_> {
                     &mut inside_run,
                     code,
                 );
-                let source = match operand_use {
-                    OperandUse::Materialized => self.emit_consumed_operand(o, code),
-                    OperandUse::AsEmitted => {
-                        self.emit_value(o, code);
-                        self.value_ty(o)
-                    }
-                };
+                let source = self.emit_sequenced_operand(o, operand_use, code);
                 adapt(self, source, code);
+            }
+        }
+    }
+
+    /// Emit one operand of a sequence, answering the stack type its adapter or spill receives.
+    fn emit_sequenced_operand(
+        &mut self,
+        o: u32,
+        operand_use: OperandUse,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        match operand_use {
+            OperandUse::Materialized => self.emit_consumed_operand(o, code),
+            OperandUse::AsEmitted => {
+                self.emit_value(o, code);
+                self.value_ty(o)
             }
         }
     }

@@ -3,7 +3,7 @@
 //! structural or identity comparison takes the erased `Object` as it is, and a `CharSequence` local
 //! casts to `CharSequence`, not to the substituted `String`. Provider (Java) results follow the same
 //! rule as source declarations, and so does a function value's `invoke`.
-use super::common::{self, compare_with_kotlinc_plugin};
+use super::common::{self, compare_with_kotlinc_plugin, method_instructions};
 use std::path::PathBuf;
 
 /// A generic Java class compiled by javac, so its `get` is a provider declaration.
@@ -53,6 +53,73 @@ fn an_erased_result_is_cast_only_to_its_consumers_type() {
         built.reference,
         built.krusty
     );
+}
+
+/// A later branchy operand makes krusty spill the operands before it, where kotlinc keeps them on
+/// the stack; that spill shape is a separate difference. The erased result is still spilled as
+/// `Object` and narrowed only for a consumer that needs `String`, so each method's casts match.
+const BRANCHY: &str = "class Box<T>(val v: T) { fun get(): T = v }\n\
+    class Pairing(val a: Any?, val b: String)\n\
+    var sink: Any? = \"none\"\n\
+    fun take(a: Any?, b: String) { sink = a }\n\
+    fun needs(a: String, b: String) { sink = a }\n\
+    fun branchyArgument(b: Box<String>, flag: Boolean) = take(b.get(), if (flag) \"a\" else \"b\")\n\
+    fun branchyNarrowed(b: Box<String>, flag: Boolean) = needs(b.get(), if (flag) \"a\" else \"b\")\n\
+    fun branchyEquality(b: Box<String>, flag: Boolean) = b.get() == (if (flag) \"a\" else \"b\")\n\
+    fun branchyConstructor(b: Box<String>, flag: Boolean) = Pairing(b.get(), if (flag) \"a\" else \"b\")\n";
+
+#[test]
+fn a_spilled_erased_result_is_cast_only_for_its_consumer() {
+    let built = compare_with_kotlinc_plugin(
+        "BranchyConsumer",
+        BRANCHY,
+        "BranchyConsumerKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("the reference kotlinc is provisioned");
+    let casts = |disassembly: &str, method: &str| {
+        method_instructions(disassembly, method)
+            .into_iter()
+            .filter_map(|row| {
+                row.split_once(": ")
+                    .map(|(_, code)| code.to_string())
+                    .filter(|code| code.starts_with("checkcast"))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (method, expected) in [
+        ("branchyArgument(", 0),
+        ("branchyNarrowed(", 1),
+        ("branchyEquality(", 0),
+        ("branchyConstructor(", 0),
+    ] {
+        let reference = casts(&built.reference, method);
+        assert_eq!(reference.len(), expected, "kotlinc {method}: {reference:?}");
+        assert_eq!(casts(&built.krusty, method), reference, "{method}");
+    }
+}
+
+#[test]
+fn a_spilled_erased_result_reaches_its_consumer_intact() {
+    let src = format!(
+        "{BRANCHY}\
+         fun box(): String {{\n\
+         \x20   val b = Box(\"x\")\n\
+         \x20   branchyArgument(b, true)\n\
+         \x20   if (sink !== b.v) return \"argument\"\n\
+         \x20   branchyNarrowed(b, false)\n\
+         \x20   if (sink !== b.v) return \"narrowed\"\n\
+         \x20   if (!branchyEquality(Box(\"a\"), true) || branchyEquality(b, false)) return \"equality\"\n\
+         \x20   if (branchyConstructor(b, true).a !== b.v) return \"constructor\"\n\
+         \x20   return \"OK\"\n\
+         }}\n"
+    );
+    let actual =
+        common::compile_and_run_box(&src, "branchy_consumer", &[common::stdlib_jar()], None)
+            .expect("the source compiles and the JVM runner is provisioned");
+    assert_eq!(actual, "OK");
 }
 
 #[test]
