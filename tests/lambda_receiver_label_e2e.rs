@@ -84,29 +84,33 @@ fun use(f: Boolean, n: (C.() -> Unit)?, v: (C.() -> Unit) -> Unit) {\n\
     b(if (f) { lbl@{ s(16) } } else { { s(17) } })\n\
 }\n";
 
-/// The receiver row of every receiver lambda's `LocalVariableTable`, in method order, from
-/// `javap -p -l`: the lambda's own receiver, where its label shows. The rows are compared whole.
+/// The receiver row of every receiver lambda's `LocalVariableTable`, in method order, read from the
+/// class file: the lambda's own receiver, where its label shows. The rows are compared whole.
 fn lambda_receiver_rows(class_file: &std::path::Path) -> Vec<String> {
-    let path = class_file.to_string_lossy().into_owned();
-    let text = common::javap(&["-p", "-l", &path]).expect("javap runs");
-    let mut rows = Vec::new();
-    let mut in_lambda = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(';') {
-            in_lambda = trimmed.contains("$lambda$");
-            continue;
-        }
-        let row = trimmed.split_whitespace().collect::<Vec<_>>();
-        if in_lambda
-            && row.len() == 5
-            && row[2] == "0"
-            && (row[3].starts_with("$this$") || row[3] == "<this>")
-        {
-            rows.push(row.join(" "));
-        }
-    }
-    rows
+    let bytes = std::fs::read(class_file).expect("the class file is written");
+    let class = krusty::jvm::classreader::parse_class(&bytes).expect("the class file parses");
+    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes))
+        .expect("the class file's bodies parse");
+    class
+        .methods
+        .iter()
+        .filter(|method| method.name.contains("$lambda$"))
+        .flat_map(|method| {
+            bodies
+                .method_code(&method.name, &method.descriptor)
+                .expect("a lambda method has code")
+                .locals
+        })
+        .filter(|local| {
+            local.slot == 0 && (local.name.starts_with("$this$") || local.name == "<this>")
+        })
+        .map(|local| {
+            format!(
+                "{} {} {} {} {}",
+                local.start_pc, local.length, local.slot, local.name, local.descriptor
+            )
+        })
+        .collect()
 }
 
 #[test]
