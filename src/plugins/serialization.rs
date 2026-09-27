@@ -1578,10 +1578,6 @@ impl IrPlugin for SerializationPlugin {
                     type_safe_barrier: false,
                     special: false,
                     target_name: None,
-                    box_ret: None,
-                    box_ret_nullable: false,
-                    unbox_params: Vec::new(),
-                    unbox_param_nullable: Vec::new(),
                 },
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
@@ -1598,10 +1594,6 @@ impl IrPlugin for SerializationPlugin {
                     type_safe_barrier: false,
                     special: false,
                     target_name: None,
-                    box_ret: None,
-                    box_ret_nullable: false,
-                    unbox_params: Vec::new(),
-                    unbox_param_nullable: Vec::new(),
                 },
             ];
             let serializer_identity = ser.fq_name_id();

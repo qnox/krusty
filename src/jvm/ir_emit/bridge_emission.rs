@@ -150,13 +150,13 @@ pub(super) fn emit_bridges(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
-    return_adaptations: &crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    adaptations: &crate::jvm::bridge_adaptations::BridgeAdaptations,
     run: &EmitRun,
 ) {
     let class = ClassBridges {
         ir,
         class: c,
-        return_adaptations,
+        adaptations,
         run,
     };
     for (bridge_index, b) in c.bridges.iter().enumerate() {
@@ -172,7 +172,7 @@ pub(super) fn emit_bridges(
 struct ClassBridges<'a> {
     ir: &'a IrFile,
     class: &'a crate::ir::IrClass,
-    return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     run: &'a EmitRun,
 }
 
@@ -187,12 +187,18 @@ fn emit_bridge(
     let ClassBridges {
         ir,
         class: c,
-        return_adaptations,
+        adaptations,
         run,
     } = *class;
-    let return_unboxing = u32::try_from(bridge_index)
-        .ok()
-        .and_then(|index| return_adaptations.get(c.fq_name_id(), index));
+    let adapter = adaptations.get(
+        c.fq_name_id(),
+        u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
+    );
+    let result_adapter = adapter.and_then(|adapter| adapter.result);
+    let return_unboxing = match result_adapter {
+        Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Unbox(plan)) => Some(plan),
+        _ => None,
+    };
     let ep = jvm_tys(&b.erased_params);
     let static_target = b.target_function.and_then(|function| {
         let target = ir.functions.get(function as usize)?;
@@ -284,9 +290,8 @@ fn emit_bridge(
         // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
         // then `unbox-impl` it to the underlying `ct` the target expects.
         // A carrier that holds null (`X?` over a non-null reference) takes a null past `unbox-impl`.
-        if let Some(Some(vc)) = b.unbox_params.get(k) {
-            let nullable = b.unbox_param_nullable.get(k).copied().unwrap_or(false);
-            emit_value_class_unbox_adapter(cw, &mut code, *vc, *ct, nullable);
+        if let Some(plan) = adapter.and_then(|adapter| adapter.parameter(k)) {
+            emit_value_class_unbox_adapter(cw, &mut code, plan.owner, *ct, plan.null_preserving);
         } else if et != ct {
             if et.is_reference() && ct.is_reference() {
                 let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
@@ -376,8 +381,8 @@ fn emit_bridge(
         attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
         return;
     }
-    if let Some(owner) = b.box_ret {
-        emit_value_class_box_adapter(cw, &mut code, owner, cr, b.box_ret_nullable);
+    if let Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Box(plan)) = result_adapter {
+        emit_value_class_box_adapter(cw, &mut code, plan.owner, cr, plan.null_preserving);
     } else if let Some(plan) = return_unboxing.filter(|_| unboxes_result) {
         // The supertype declares a VALUE CLASS in its UNBOXED form, so this bridge returns that
         // class's carrier and the carrier comes out of the class's own `unbox-impl` — whether
@@ -594,7 +599,7 @@ pub(super) fn emit_value_class_interface_entries(
     cw: &mut ClassWriter,
     member: u32,
     formatter: &JvmSignatureFormatter<'_>,
-    return_adaptations: &crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    adaptations: &crate::jvm::bridge_adaptations::BridgeAdaptations,
     run: &EmitRun,
 ) {
     for (bridge_index, b) in c.bridges.iter().enumerate() {
@@ -608,7 +613,7 @@ pub(super) fn emit_value_class_interface_entries(
         let class = ClassBridges {
             ir,
             class: c,
-            return_adaptations,
+            adaptations,
             run,
         };
         emit_bridge(&class, cw, bridge_index, b, Some(&header));

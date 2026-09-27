@@ -32,6 +32,8 @@ mod bytecode_machine;
 mod continuation_class;
 use continuation_class::build_continuation_class;
 mod call_operand_realization;
+mod cps_bridges;
+pub(crate) use cps_bridges::finalize_suspend_bridges;
 mod cps_returns;
 use cps_returns::{box_returns, ensure_tail_return};
 pub(crate) mod cps;
@@ -590,7 +592,6 @@ pub(crate) fn lower_suspend(
             }
         }
     }
-    finalize_suspend_bridges(ir);
     default_call_operands.synchronize(ir)
 }
 
@@ -1008,103 +1009,6 @@ fn realize_safe_coroutine_points(ir: &mut IrFile) {
             "suspend",
             "realize safe coroutine point expression={expression} safe_slot={safe_slot}"
         );
-    }
-}
-
-/// Convert already-derived suspend override bridges from their declared Kotlin signature to the JVM
-/// CPS signature. Bridge derivation intentionally runs before value-class realization, so that pass can
-/// reuse its normal target mangling and argument/return adaptation. Once concrete suspend methods have
-/// gained their trailing continuation, both sides of each matching bridge gain the same parameter and
-/// return `Object`; any pre-CPS result boxing is removed because the concrete suspend method already
-/// crosses the continuation boundary in boxed form.
-fn finalize_suspend_bridges(ir: &mut IrFile) {
-    let continuation = continuation_ty();
-    let object = object_ty();
-    let suspend_targets: HashSet<(TypeName, String, usize)> = ir
-        .classes
-        .iter()
-        .flat_map(|class| {
-            class.methods.iter().filter_map(|&fid| {
-                ir.suspend_funs.contains(&fid).then(|| {
-                    let function = &ir.functions[fid as usize];
-                    (
-                        class.fq_name,
-                        function.name.clone(),
-                        function.params.len().saturating_sub(1),
-                    )
-                })
-            })
-        })
-        .collect();
-    let boxed_suspend_targets: HashSet<(TypeName, String, usize)> = ir
-        .classes
-        .iter()
-        .flat_map(|class| {
-            class.methods.iter().filter_map(|&fid| {
-                matches!(
-                    ir.value_class_suspend_returns.get(&fid),
-                    Some(crate::ir::IrValueClassSuspendResult::Boxed { .. })
-                )
-                .then(|| {
-                    let function = &ir.functions[fid as usize];
-                    (
-                        class.fq_name,
-                        function.name.clone(),
-                        function.params.len().saturating_sub(1),
-                    )
-                })
-            })
-        })
-        .collect();
-    for class in &mut ir.classes {
-        for bridge in &mut class.bridges {
-            let target = bridge.target_name.as_deref().unwrap_or(&bridge.name);
-            if !suspend_targets.contains(&(
-                class.fq_name,
-                target.to_string(),
-                bridge.concrete_params.len(),
-            )) {
-                continue;
-            }
-            bridge.erased_params.push(continuation);
-            bridge.concrete_params.push(continuation);
-            bridge
-                .parameter_identities
-                .push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
-            if !bridge.unbox_params.is_empty() {
-                bridge.unbox_params.push(None);
-            }
-            bridge.erased_ret = object;
-            let target_key = (
-                class.fq_name,
-                target.to_string(),
-                bridge.concrete_params.len().saturating_sub(1),
-            );
-            let target_returns_boxed = boxed_suspend_targets.contains(&target_key);
-            if bridge.box_ret.is_some()
-                && bridge.concrete_ret.is_reference()
-                && !target_returns_boxed
-            {
-                // A generic supertype boundary needs a BOX, while a reference-carrier suspend target
-                // returns the raw carrier as Object. Preserve the pre-CPS carrier adaptation and record
-                // only the target descriptor's erased return separately.
-                bridge.target_ret = Some(object);
-            } else {
-                // A scalar-carrier suspend target already boxed its value class before `areturn`; a
-                // non-value-class bridge needs no result adaptation either. Forward Object directly.
-                bridge.concrete_ret = object;
-                bridge.target_ret = None;
-                bridge.box_ret = None;
-            }
-            crate::trace_compiler!(
-                "bridges",
-                "finalized suspend bridge {}::{} -> {} arity={} target_boxed={target_returns_boxed}",
-                class.fq_name,
-                bridge.name,
-                target,
-                bridge.erased_params.len()
-            );
-        }
     }
 }
 

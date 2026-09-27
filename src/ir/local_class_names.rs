@@ -632,15 +632,6 @@ impl super::IrFile {
                 tys(&mut bridge.concrete_params, names);
                 bridge.concrete_ret = ty(bridge.concrete_ret, names);
                 bridge.target_ret = bridge.target_ret.map(|value| ty(value, names));
-                bridge
-                    .box_ret
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                bridge
-                    .unbox_params
-                    .iter_mut()
-                    .flatten()
-                    .for_each(|value| name(value, names));
             }
             class
                 .interfaces

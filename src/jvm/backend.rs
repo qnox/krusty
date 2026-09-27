@@ -45,7 +45,7 @@ pub(crate) struct BackendPassFacts {
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     unit_result_tail_forwards: crate::jvm::suspend::UnitResultTailForwards,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
-    bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -181,7 +181,7 @@ fn run_backend_passes_after_plugins(
         classifiers,
         module_value_classes,
         module_readable_value_classes,
-        &mut facts.bridge_return_adaptations,
+        &mut facts.bridge_adaptations,
         &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
@@ -213,6 +213,7 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::Suspend);
     }
+    crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
@@ -848,7 +849,7 @@ impl JvmBackend {
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
             unit_result_tail_forwards: &pass_facts.unit_result_tail_forwards,
-            bridge_returns: &pass_facts.bridge_return_adaptations,
+            bridge_adaptations: &pass_facts.bridge_adaptations,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
@@ -1546,6 +1547,10 @@ mod tests {
             (
                 "lower_suspend(",
                 &["src/jvm/suspend.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "finalize_suspend_bridges(",
+                &["src/jvm/suspend/cps_bridges.rs", "src/jvm/backend.rs"],
             ),
             (
                 "mark_must_inline_lambdas(",

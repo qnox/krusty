@@ -86,10 +86,6 @@ pub(super) fn materialize(
                 type_safe_barrier: false,
                 special: false,
                 target_name: None,
-                box_ret: None,
-                box_ret_nullable: false,
-                unbox_params: Vec::new(),
-                unbox_param_nullable: Vec::new(),
             });
         }
         targets.insert(implementation);
