@@ -88,7 +88,7 @@ impl BodyLowering<'_> {
             branches: lowered_branches,
         });
         if line != 0 {
-            self.ir.source_whens.insert(when, line);
+            self.ir.whens.source_lines.insert(when, line);
         }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
         // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever
@@ -100,7 +100,7 @@ impl BodyLowering<'_> {
             } else {
                 Ty::Unit
             };
-            self.ir.exhaustive_whens.insert(when, result_ty);
+            self.ir.whens.exhaustive.insert(when, result_ty);
         }
         if prefix.is_empty() {
             Ok(when)

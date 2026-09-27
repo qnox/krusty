@@ -157,3 +157,105 @@ fun box(): String {{\n\
     );
     common::expect_box_ok_with_stdlib(&src, "SafeCallsRun");
 }
+
+// A defaulted member call goes through the member's `$default` stub. Only the stub's invoke is the
+// suspension point: the placeholders and the mask group before it mark the call's line and no
+// suspension marker.
+const DEFAULTED: &str = "class Api(val base: Int) {\n\
+    suspend fun get(n: Int = 1): Int = n + base\n\
+}\n\
+suspend fun useDefault(api: Api): Int {\n\
+    val a = api.get()\n\
+    return a + api.get(2)\n\
+}\n";
+
+#[test]
+fn a_defaulted_member_call_matches_kotlinc() {
+    expect_method_matches(
+        "DefaultedMember",
+        DEFAULTED,
+        "DefaultedMemberKt",
+        "public static final java.lang.Object useDefault(",
+    );
+    common::byte_diff_against_kotlinc_cp(
+        "DefaultedMember",
+        DEFAULTED,
+        "DefaultedMemberKt$useDefault$1",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .expect("the continuation class is byte-identical to kotlinc's");
+}
+
+#[test]
+fn a_defaulted_member_call_that_suspends_resumes_once() {
+    let src = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+var parked: Continuation<Unit>? = null\n\
+var calls = 0\n\
+class Api(val tag: String) {\n\
+    suspend fun get(n: Int = 1): String {\n\
+        calls++\n\
+        suspendCoroutine<Unit> { parked = it }\n\
+        return tag + n\n\
+    }\n\
+}\n\
+suspend fun useDefault(api: Api): String {\n\
+    val a = api.get()\n\
+    return a + api.get(2)\n\
+}\n\
+fun box(): String {\n\
+    var r = \"none\"\n\
+    suspend { r = useDefault(Api(\"a\")) }.startCoroutine(Done())\n\
+    parked!!.resume(Unit)\n\
+    parked!!.resume(Unit)\n\
+    return if (r == \"a1a2\" && calls == 2) \"OK\" else \"F:$r:$calls\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "DefaultedMemberResume");
+}
+
+// A member extension called inside its class: `this` is the dispatch receiver and the written
+// receiver the extension receiver. Each receiver and argument is evaluated once, left to right,
+// though the call suspends between them. Its instructions are not yet kotlinc's: common lowering
+// still copies a same-file extension call's receiver and arguments to locals before the call,
+// suspending or not.
+#[test]
+fn a_member_extension_call_evaluates_its_receivers_once_across_suspension() {
+    let src = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+var parked: Continuation<Unit>? = null\n\
+class Recorder {\n\
+    var log = \"\"\n\
+    fun <T> note(tag: String, value: T): T {\n\
+        log += tag\n\
+        return value\n\
+    }\n\
+}\n\
+class Api(val tag: String)\n\
+class Scope(val name: String) {\n\
+    suspend fun Api.fetch(n: Int): String {\n\
+        suspendCoroutine<Unit> { parked = it }\n\
+        return name + tag + n\n\
+    }\n\
+    suspend fun go(r: Recorder, api: Api): String =\n\
+        r.note(\"e\", api).fetch(r.note(\"v\", 1)) + r.note(\"w\", api).fetch(2)\n\
+}\n\
+fun box(): String {\n\
+    val r = Recorder()\n\
+    var s = \"none\"\n\
+    suspend { s = Scope(\"s\").go(r, Api(\"a\")) }.startCoroutine(Done())\n\
+    val first = r.log\n\
+    parked!!.resume(Unit)\n\
+    val second = r.log\n\
+    parked!!.resume(Unit)\n\
+    val ok = first == \"ev\" && second == \"evw\" && r.log == \"evw\" && s == \"sa1sa2\"\n\
+    return if (ok) \"OK\" else \"F:$first:$second:${r.log}:$s\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "MemberExtensionResume");
+}

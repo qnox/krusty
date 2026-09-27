@@ -12229,7 +12229,7 @@ impl<'a> Emitter<'a> {
                                 }
                             }
                             None => {
-                                self.mark_call_start(e, code);
+                                self.mark_dispatch_line(e, code);
                                 push_zero(stub_param_tys[i], code, self.cw);
                                 let li = i
                                     .checked_sub(recv_offset)
@@ -12238,7 +12238,7 @@ impl<'a> Emitter<'a> {
                             }
                         }
                     }
-                    self.mark_call_start(e, code);
+                    self.mark_dispatch_line(e, code);
                     for mask in masks {
                         code.push_int(mask, self.cw);
                     }
@@ -15004,151 +15004,6 @@ impl<'a> Emitter<'a> {
         Some(if brk { end } else { cont })
     }
 
-    fn emit_when(
-        &mut self,
-        expression: u32,
-        branches: &[(Option<u32>, u32)],
-        discarded: bool,
-        code: &mut CodeBuilder,
-    ) {
-        let end = code.new_label();
-        // Each branch starts at the pre-condition height, not the linear counter left by the prior
-        // body. Resetting at `next` prevents a phantom operand in later branch bodies.
-        let entry_height = code.stack_height().max(0) as u16;
-        let has_else = branches.iter().any(|(c, _)| c.is_none());
-        let exhaustive_result = self.ir.exhaustive_whens.get(&expression).copied();
-        // A no-`else` or `Unit` `when` is a statement, so nothing reaches the stack at `end`.
-        // Exhaustive results use their checked JVM erasure; other joins derive it from branch values.
-        let result_ty = exhaustive_result
-            .map(|result| ir_ty_to_jvm(&result))
-            .unwrap_or_else(|| self.value_ty_of_when(branches));
-        let is_stmt =
-            (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit || discarded;
-        let enclosing_terminal_target = self.terminal_statement_target.take();
-        if self.emit_safe_call_when(
-            expression,
-            branches,
-            when::Emission::new(is_stmt, result_ty, entry_height, end, None),
-            code,
-        ) {
-            return;
-        }
-        let exhaustive = has_else || exhaustive_result.is_some();
-        let keeps_value = discarded && when::keeps_discarded_value(exhaustive, result_ty);
-        let is_stmt = is_stmt && !keeps_value;
-        let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
-        // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
-        // of comparisons. Everything above (the result type, the statement/value decision, the entry
-        // height) applies unchanged; only the dispatch differs.
-        if let Some(plan) = self.int_switch_plan(branches) {
-            self.emit_int_switch(
-                &plan,
-                when::Emission::new(is_stmt, result_ty, entry_height, end, terminal_target),
-                code,
-            );
-            when::discard_joined_value(keeps_value, result_ty, code);
-            return;
-        }
-        // kotlinc's `visitWhen` marks a source `when`'s own line and writes a `nop` on it before
-        // the first branch, so a debugger stops on the `when` line. The nop survives only where a
-        // debug point needs it, as every nop does.
-        if let Some(&line) = self.ir.source_whens.get(&expression) {
-            code.mark_line(line);
-            code.nop();
-        }
-        for (index, (cond, body)) in branches.iter().enumerate() {
-            match cond {
-                Some(c) => {
-                    // A branch whose body is nothing but `break`/`continue` needs no branch AROUND
-                    // it: the condition can jump straight to the loop label. Otherwise the shape is
-                    // `if !cond -> next; goto target; next:`, a branch over a jump where kotlinc
-                    // writes one inverted branch.
-                    if is_stmt {
-                        if let Some(jump) = self.loop_jump_target(*body) {
-                            let unconditional = self
-                                .in_condition(|this| this.emit_cond_branch(*c, jump, true, code));
-                            code.set_stack(entry_height);
-                            // A constant-true guard emitted an unconditional jump. Emitting any
-                            // later arm after it would leave dead bytecode without a stack-map
-                            // frame, which the verifier rejects. A constant-false guard emits no
-                            // jump and must keep scanning the remaining arms.
-                            if unconditional {
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                    // Skip to the next branch when this condition is false (fused comparison branch).
-                    let next = code.new_label();
-                    // A constant-false condition emits `goto next`; do not lay down its unreachable,
-                    // unframed body. Suspend flattening produces this shape for some do-while loops.
-                    if self.in_condition(|this| this.emit_cond_branch(*c, next, false, code)) {
-                        self.bind(next, code);
-                        code.set_stack(entry_height);
-                        continue;
-                    }
-                    if is_stmt {
-                        // Statement emission handles both physical-void operations and explicit
-                        // `Unit.INSTANCE`; semantic `Ty::Unit` alone cannot distinguish them.
-                        self.emit(*body, code);
-                    } else {
-                        self.emit_value(*body, code);
-                        self.adapt_physical_operand_for(
-                            *body,
-                            self.value_ty(*body),
-                            result_ty,
-                            code,
-                        );
-                    }
-                    let body_diverges = if is_stmt {
-                        self.discarding_diverges(*body)
-                    } else {
-                        self.diverges(*body)
-                    };
-                    if !body_diverges {
-                        // Fall through only across empty ELSE branches. An empty conditional branch
-                        // still evaluates its condition, which the selected arm must skip.
-                        let nothing_follows = branches[index + 1..]
-                            .iter()
-                            .all(|(condition, rest)| {
-                                condition.is_none()
-                                    && matches!(self.ir.expr(*rest), IrExpr::Block { stmts, value } if stmts.is_empty() && value.is_none())
-                            })
-                            && (has_else || exhaustive_result.is_none());
-                        let falls_into_end = is_stmt && nothing_follows;
-                        if !falls_into_end {
-                            code.goto(end);
-                        }
-                    }
-                    self.bind(next, code);
-                    // `next` is reached only via the conditional jump above, where the stack is back at the
-                    // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
-                    // value on the counter, but not on this control path).
-                    code.set_stack(entry_height);
-                }
-                None => {
-                    if is_stmt {
-                        self.emit(*body, code);
-                    } else {
-                        self.emit_value(*body, code);
-                        self.adapt_physical_operand_for(
-                            *body,
-                            self.value_ty(*body),
-                            result_ty,
-                            code,
-                        );
-                    }
-                    // The else is last — it falls through to `end` (no goto needed).
-                }
-            }
-        }
-        if !has_else && exhaustive_result.is_some() {
-            self.emit_no_when_branch_matched(code);
-        }
-        self.bind(end, code);
-        when::discard_joined_value(keeps_value, result_ty, code);
-    }
-
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
@@ -15235,7 +15090,7 @@ impl<'a> Emitter<'a> {
             return jvm_declared_ty(&result);
         }
         if matches!(self.ir.expr(e), IrExpr::When { .. }) {
-            if let Some(result) = self.ir.exhaustive_whens.get(&e) {
+            if let Some(result) = self.ir.whens.exhaustive.get(&e) {
                 return ir_ty_to_jvm(result);
             }
         }

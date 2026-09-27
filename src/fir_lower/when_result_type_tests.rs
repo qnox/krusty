@@ -13,7 +13,7 @@ fn when_types(function: &str) -> Vec<Option<Ty>> {
     );
     (0..ir.exprs.len() as u32)
         .filter(|expression| matches!(ir.expr(*expression), IrExpr::When { .. }))
-        .map(|expression| ir.exhaustive_whens.get(&expression).copied())
+        .map(|expression| ir.whens.exhaustive.get(&expression).copied())
         .collect()
 }
 
