@@ -37,3 +37,75 @@ fn inner_class_calls_outer_private() {
         "Inner",
     );
 }
+
+/// Private top-level declarations used from a class — directly, from a lambda there, and from the
+/// carriers of `::tf`, `::tp` and `::tv` — go through the facade's synthetic accessors, which
+/// follow its members in first-use order with kotlinc's bodies and debug tables.
+#[test]
+fn private_top_level_declarations_used_from_classes_go_through_facade_accessors() {
+    const SRC: &str = "private fun tf(x: Int): Int = x\n\
+        private val tp: Int = 2\n\
+        private var tv: Int = 3\n\
+        class D {\n\
+        \x20   fun m(): Int {\n\
+        \x20       val g = ::tf\n\
+        \x20       val h = ::tp\n\
+        \x20       tv = 5\n\
+        \x20       return g(1) + h() + tv\n\
+        \x20   }\n\
+        \x20   fun lambda(): Int {\n\
+        \x20       val l = { y: Int -> tf(y) + tp }\n\
+        \x20       return l(1)\n\
+        \x20   }\n\
+        \x20   fun write(): Int {\n\
+        \x20       val k = ::tv\n\
+        \x20       k.set(7)\n\
+        \x20       return k.get()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val r = D().m() + D().lambda() + D().write()\n\
+        \x20   return if (r == 18) \"OK\" else \"fail \" + r\n\
+        }\n";
+    let compare = |class: &str| {
+        let comparison = common::compare_with_kotlinc_plugin(
+            "FacadeAccessors",
+            SRC,
+            class,
+            &[common::stdlib_jar()],
+            "17",
+            &[],
+        )
+        .expect("reference kotlinc and javap are provisioned");
+        assert_eq!(
+            common::member_table(&comparison.krusty_bytes),
+            common::member_table(&comparison.reference_bytes),
+            "{class}: kotlinc's member table"
+        );
+        comparison
+    };
+    let facade = compare("FacadeAccessorsKt");
+    for header in [
+        "public static final int access$tf(int);",
+        "public static final int access$getTp$p();",
+        "public static final void access$setTv$p(int);",
+        "public static final int access$getTv$p();",
+    ] {
+        let accessor = common::method_block(&facade.reference, header);
+        assert!(!accessor.is_empty(), "kotlinc declares {header}");
+        assert_eq!(
+            common::method_block(&facade.krusty, header),
+            accessor,
+            "{header}"
+        );
+    }
+    for class in ["D$m$g$1", "D$m$h$1", "D$write$k$1"] {
+        let carrier = compare(class);
+        assert_eq!(
+            common::member_blocks(&carrier.krusty),
+            common::member_blocks(&carrier.reference),
+            "{class}: kotlinc's members"
+        );
+    }
+    common::expect_box_same_as_kotlinc(SRC, "FacadeAccessors");
+}

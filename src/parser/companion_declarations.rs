@@ -7,6 +7,15 @@
 //! representation a written `companion fun C.name` has.
 
 use super::*;
+use crate::ast::CompanionBlockMember;
+
+/// What a classifier body's `companion` declarations contribute to the classifier: its
+/// `companion object`, and the members its `companion { … }` blocks introduced, in source order.
+#[derive(Default)]
+pub(super) struct ClassifierCompanions {
+    pub(super) object: Option<DeclId>,
+    pub(super) block_members: Vec<CompanionBlockMember>,
+}
 
 impl Parser<'_> {
     /// `+CompanionBlocksAndExtensions`: `companion fun/val/var C.member …` is a real top-level
@@ -59,10 +68,31 @@ impl Parser<'_> {
                 .get(self.i + 1)
                 .is_some_and(|token| self.token_keyword_text(*token, "object"))
     }
+    /// Parse the `companion object` or `companion { … }` block at the cursor in the body of the
+    /// classifier `outer`, recording what it contributes in `companions`.
+    pub(super) fn parse_classifier_companion(
+        &mut self,
+        outer: &str,
+        modifiers: &[String],
+        companions: &mut ClassifierCompanions,
+    ) {
+        if self.at_companion_object_declaration() {
+            companions.object = Some(self.parse_companion(outer, modifiers));
+        } else {
+            self.parse_companion_block(outer, modifiers, &mut companions.block_members);
+        }
+    }
+
     /// Parse a `companion { ... }` block as associated declarations on its containing classifier.
     /// Unlike `companion object`, a block introduces no singleton classifier: its members use the
-    /// same receiver-less associated-call representation as `companion fun/val C.name`.
-    pub(super) fn parse_companion_block(&mut self, outer: &str, modifiers: &[String]) {
+    /// same receiver-less associated-call representation as `companion fun/val C.name`, and are
+    /// appended to `members`, the classifier's record of them.
+    fn parse_companion_block(
+        &mut self,
+        outer: &str,
+        modifiers: &[String],
+        members: &mut Vec<CompanionBlockMember>,
+    ) {
         let start = self.tok().span;
         self.bump(); // `companion`
         self.expect(TokenKind::LBrace, "'{'");
@@ -72,6 +102,8 @@ impl Parser<'_> {
                 break;
             }
             let mut member_modifiers = self.parse_member_decl_prefix();
+            // The member's own `private`, not one the block itself carries.
+            let private_modifier = declaration_modifiers::span(self, &member_modifiers, "private");
             member_modifiers.extend(modifiers.iter().cloned());
             member_modifiers.push("companion".to_string());
             let receiver = || TypeRef {
@@ -90,6 +122,10 @@ impl Parser<'_> {
                     function.flags = function.flags.with_is_companion_block_member(true);
                     let declaration = self.file.add_decl(Decl::Fun(function));
                     self.file.decls.push(declaration);
+                    members.push(CompanionBlockMember {
+                        declaration,
+                        private_modifier,
+                    });
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
                     let lateinit = member_modifiers
@@ -121,6 +157,10 @@ impl Parser<'_> {
                     property.is_companion_block_member = true;
                     let declaration = self.file.add_decl(Decl::Property(property));
                     self.file.decls.push(declaration);
+                    members.push(CompanionBlockMember {
+                        declaration,
+                        private_modifier,
+                    });
                 }
                 _ => {
                     self.diags.error(

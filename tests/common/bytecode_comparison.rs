@@ -138,6 +138,59 @@ pub fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
     out
 }
 
+/// One method's verbose disassembly — flags, instructions and its line and local-variable tables —
+/// from its `javap` header line (`public static final int access$f(int);`) to the blank line
+/// ending it, with only constant-pool indices erased. Empty when the class has no such method.
+pub fn method_block(disassembly: &str, header: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| *line != header)
+        .take_while(|line| !line.is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| if token.starts_with('#') { "#" } else { token })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// A class's verbose member disassembly — every field and method with its flags, instructions and
+/// debug tables — with only constant-pool indices erased.
+pub fn member_blocks(disassembly: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .skip_while(|line| *line != "{")
+        .take_while(|line| *line != "}")
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| if token.starts_with('#') { "#" } else { token })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// A class file's fields and methods in class-file order, each with its access flags, descriptor
+/// and generic signature, and a field with its `ConstantValue`.
+pub fn member_table(bytes: &[u8]) -> Vec<String> {
+    let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
+    let fields = info.fields.iter().map(|field| {
+        format!(
+            "field {:#06x} {} {} {:?} {:?}",
+            field.access, field.name, field.descriptor, field.signature, field.const_value
+        )
+    });
+    let methods = info.methods.iter().map(|method| {
+        format!(
+            "method {:#06x} {}{} {:?}",
+            method.access, method.name, method.descriptor, method.signature
+        )
+    });
+    fields.chain(methods).collect()
+}
+
 /// Every class kotlinc and krusty write for `src`, compiled over one library that kotlinc compiled
 /// from `lib`, by internal name.
 pub struct ClassSets {

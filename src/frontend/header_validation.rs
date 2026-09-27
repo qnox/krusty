@@ -43,6 +43,7 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                             diagnostics.error(diagnostic.span, diagnostic.message.to_string());
                         }
                     }
+                    validate_interface_block_members(file, class, diagnostics);
                 }
                 for entry in &class.enum_entries {
                     for function in &entry.methods {
@@ -50,6 +51,26 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                     }
                 }
             }
+        }
+    }
+}
+
+fn validate_interface_block_members(
+    file: &File,
+    class: &crate::ast::ClassDecl,
+    diagnostics: &mut DiagSink,
+) {
+    for member in &class.companion_block_members {
+        let Decl::Property(property) = file.decl(member.declaration) else {
+            continue;
+        };
+        if let Some(diagnostic) =
+            crate::declaration_validation::interface_block_property_diagnostics(
+                property,
+                member.private_modifier,
+            )
+        {
+            diagnostics.error(diagnostic.span, diagnostic.message.to_string());
         }
     }
 }

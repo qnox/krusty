@@ -60,12 +60,12 @@ pub enum FirConversionKind {
         narrowing: FirPlatformNarrowingId,
         to: ResolvedTy,
     },
-    /// Kotlin's one-way adaptation of an already-materialized regular function value to a suspend
-    /// function value. Both complete callable shapes were selected by the frontend; lowering only
-    /// synthesizes the forwarding closure.
-    SuspendFunction {
+    /// A regular function value converted to a suspend and/or `Unit`-returning function type, both
+    /// shapes selected by the frontend; `ordinal` is its source-order place in its innermost callable.
+    FunctionValue {
         from: ResolvedTy,
         to: ResolvedTy,
+        ordinal: u32,
     },
     CoerceToUnit,
 }
