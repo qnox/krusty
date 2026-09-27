@@ -374,7 +374,9 @@ fn remap_declaration(
 /// The lambdas the copy inlines, each with the original's field for it and the copy's fields for
 /// its captured values, which `plan` now takes in the lambdas' place
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
-/// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`).
+/// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
+/// field the original declares is taken first, as kotlinc's `visitField` records each one it
+/// copies before the constructor is patched.
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
     regeneration: &Regeneration<'a>,
@@ -383,6 +385,9 @@ fn plan_lambdas<'a>(
         return Ok(Vec::new());
     }
     let mut taken: HashMap<String, usize> = HashMap::new();
+    for field in &regeneration.original.fields {
+        *taken.entry(field.name.clone()).or_default() += 1;
+    }
     let mut lambdas = Vec::with_capacity(regeneration.lambdas.len());
     for passed in regeneration.lambdas {
         let types = passed

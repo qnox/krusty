@@ -131,3 +131,46 @@ fn a_lambda_writing_a_backing_field_runs_like_the_reference_compiler() {
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+const NESTED_LIB: &str = r#"
+package lib
+
+interface Source {
+    fun read(): String
+}
+
+inline fun source(crossinline read: () -> String): Source = object : Source {
+    override fun read(): String = read()
+}
+
+inline fun prefixed(crossinline rest: () -> String): Source {
+    val x = "p"
+    return source { x + rest() }
+}
+"#;
+
+const NESTED_MAIN: &str = r#"
+import lib.*
+
+fun twice(x: String): String = prefixed { x + x }.read()
+
+fun box(): String {
+    if (twice("a") != "paa") return "FAIL twice: " + twice("a")
+    return "OK"
+}
+"#;
+
+/// The library's copy already has an `$x$inlined` field, so the call site's `x` takes the next
+/// number (`addUniqueField` counts every field the original declares).
+#[test]
+fn a_captured_field_name_the_object_already_has_is_numbered() {
+    let classes =
+        common::classes_against_kotlinc_lib("Nested", &[("Lib.kt", NESTED_LIB)], NESTED_MAIN)
+            .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["NestedKt", "NestedKt$twice$$inlined$prefixed$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
