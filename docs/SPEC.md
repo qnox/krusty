@@ -9060,13 +9060,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison threw removes nothing. An out-of-bounds
   `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
   was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
-  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
-  `xs.addAll(list)` appends the argument's elements as they were when the call began, so
-  `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
-  more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
-  of memory. An `ArrayList` grown past what an `Int` capacity can double to stops the program as
-  out of memory, as the JVM's does, before any element is copied. `IndexedValue.hashCode` wraps
-  like Kotlin's `Int`. A string iterator is linear in the string's length.
+  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException` (both platforms'
+  type) with the JVM's message, `Illegal Capacity: -1`, compared with kotlinc's on every run
+  (`array_list_negative_capacity`). `xs.addAll(list)` appends the argument's elements as they were
+  when the call began, so `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does.
+  Collecting a range of 2^31 or more elements (up to the full 64-bit span) stops the program as too
+  long, where kotlinc runs out of memory. An `ArrayList` grown past what an `Int` capacity can
+  double to stops the program as out of memory, as the JVM's does, before any element is copied.
+  `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
+  length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,

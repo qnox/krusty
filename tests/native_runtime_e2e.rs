@@ -872,7 +872,7 @@ fn an_indexed_value_hash_code_wraps() {
 
 #[test]
 fn an_array_list_of_negative_capacity_raises() {
-    run_driver("array_list_negative_capacity");
+    run_driver_against_kotlin("array_list_negative_capacity");
 }
 
 #[test]
