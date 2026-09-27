@@ -1097,6 +1097,9 @@ pub struct IrCatch {
     /// JVM internal name of the caught exception type.
     pub exc_internal: TypeName,
     pub body: ExprId,
+    /// The source line of the clause's `catch` keyword, marked at the handler's entry; absent for a
+    /// compiler-generated handler, which has no clause of its own.
+    pub line: Option<u32>,
 }
 
 impl IrCatch {

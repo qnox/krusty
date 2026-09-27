@@ -241,6 +241,7 @@ impl BodyLowering<'_> {
             catches: vec![crate::ir::IrCatch {
                 var: caught,
                 binding: None,
+                line: None,
                 exc_internal: caught_internal,
                 body: failed,
             }],
@@ -626,6 +627,7 @@ impl BodyLowering<'_> {
                 vec![crate::ir::IrCatch {
                     var: caught,
                     binding: None,
+                    line: None,
                     exc_internal: cause_ty.non_null().obj_internal()?,
                     body: self.ir.add_expr(IrExpr::Block {
                         stmts: vec![record, rethrow],

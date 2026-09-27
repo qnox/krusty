@@ -137,6 +137,7 @@ fn catch_parameter_name_survives_checked_fir_lowering() {
                 parameter,
                 parameter_ty: resolved(Ty::obj("java/lang/Exception")),
                 body: two,
+                debug_line: 0,
             }]),
             finally: None,
         },

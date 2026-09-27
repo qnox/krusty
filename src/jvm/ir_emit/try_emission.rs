@@ -266,6 +266,11 @@ impl Emitter<'_> {
             // body leaves the stream dead exactly here, so binding must revive on the range it guards
             // rather than on an incoming branch.
             code.bind_handler(handler, &typed_catch_ranges);
+            // kotlinc marks the clause's own line, its `catch` keyword's, at the handler's entry: the
+            // store of the caught exception belongs to the clause, not to its body's first line.
+            if let Some(line) = c.line {
+                code.mark_line(line);
+            }
             let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.

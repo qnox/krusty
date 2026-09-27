@@ -2453,6 +2453,7 @@ impl BodyFirChecker<'_> {
                             parameter,
                             parameter_ty,
                             body: checked_body?,
+                            debug_line: catch.line,
                         });
                     }
                     FirExprKind::Try {

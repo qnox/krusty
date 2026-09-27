@@ -1639,6 +1639,8 @@ pub struct FirCatch {
     pub parameter: LocalValueId,
     pub parameter_ty: ResolvedTy,
     pub body: FirExprId,
+    /// The `catch` keyword's source line, a line-only output fact; 0 when unknown.
+    pub debug_line: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
