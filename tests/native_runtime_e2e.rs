@@ -842,6 +842,11 @@ fn a_builder_map_sees_its_length_change_and_a_self_list_renders() {
     run_driver("builder_map_and_self_list");
 }
 
+#[test]
+fn the_list_walk_and_array_entry_points_answer_as_kotlin_does() {
+    run_driver("list_api_answers");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

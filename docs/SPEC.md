@@ -9121,6 +9121,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `AbstractCollection.toString`, rather than recursing. Both as kotlinc 2.4.10 answers on the JVM for
   the program recorded in the driver.
   Tests: `tests/native_runtime_e2e.rs` (`builder_map_and_self_list`).
+- **The native list, walk and array entry points answer as Kotlin does on the ordinary path.**
+  `listOf`/`mutableListOf` and their members (`get`, `first`, `last`, `indexOf`, `lastIndexOf`,
+  `contains`, `add`, `add(i, e)`, `set`, `removeAt`, `remove`, `addAll`, `+=`, `sortWith`,
+  `clear`, `equals`, `hashCode`, `toString`), the `Iterable` walks (`map`, `filter`, `filterNot`,
+  `any`, `all`, `none`, `count`, `first`, `firstOrNull`, `last`, `fold`, `toList`, `reversed`,
+  `sortedWith`, `forEachIndexed`, `joinToString`, `plus`, the three `sumOf`, `withIndex`,
+  `isEmpty`), `IndexedValue`, the array members (`toList`, `reversed`, `reversedArray`, `isEmpty`,
+  `contentEquals`, `contentHashCode`, `contentToString`, `toTypedArray`) and walks over ranges,
+  progressions and strings answer what kotlinc 2.4.10 prints on the JVM for the program recorded in
+  the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`list_api_answers`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
