@@ -293,7 +293,11 @@ There is no conformance number written down in this repository, deliberately. Ev
 to a document went stale within days of the commit that changed it, and a stale number read as
 current is worse than no number. The live measure is the **conformance badge** in `README.md`: the
 `conformance` job recomputes it per reference version on every master build and publishes the share
-of the `codegen/box` corpus whose `box()` returns `OK` on krusty-emitted bytecode. Read the badge, or
+of the applicable `codegen/box` cases whose `box()` returns `OK` on krusty-emitted bytecode. A case is
+applicable when kotlinc's own JVM box runner expects it to pass (`src/conformance.rs`
+`backend_applicable`, mirroring `InTextDirectivesUtils.isPassingTarget`): cases restricted to other
+backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the `IGNORE_BACKEND`
+family, count in neither the numerator nor the denominator. Read the badge, or
 the `conformance` job of the latest master CI run, when you need today's figure; run the gate locally
 when you need this checkout's.
 

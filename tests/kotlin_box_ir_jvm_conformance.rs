@@ -891,13 +891,16 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     runner_dir
 }
 
-fn conformance_report(scanned: usize, passed: usize) -> String {
-    let pct = if scanned == 0 {
+/// The badge's machine report, `<pct> <passed> <applicable>`. The denominator is the cases kotlinc's
+/// own JVM box runner expects to pass (`backend_applicable`: `TARGET_BACKEND`,
+/// `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole corpus.
+fn conformance_report(applicable: usize, passed: usize) -> String {
+    let pct = if applicable == 0 {
         0.0
     } else {
-        100.0 * passed as f64 / scanned as f64
+        100.0 * passed as f64 / applicable as f64
     };
-    format!("{pct:.1} {passed} {scanned}\n")
+    format!("{pct:.1} {passed} {applicable}\n")
 }
 
 fn conformance_shard() -> Option<(usize, usize)> {
@@ -1620,7 +1623,8 @@ fn kotlin_codegen_box_conformance() {
         }
     }
     if let Some(path) = env("KRUSTY_CONFORMANCE_REPORT") {
-        fs::write(&path, conformance_report(files.len(), passed))
+        let applicable = files.len() - not_applicable;
+        fs::write(&path, conformance_report(applicable, passed))
             .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
     if no_run {

@@ -164,8 +164,8 @@ jobs:
           set -euo pipefail
           chmod +x conformance-bin
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
-          read -r pct passed scanned < pct.txt
-          echo "pct=$pct passed=$passed scanned=$scanned"
+          read -r pct passed applicable < pct.txt
+          echo "pct=$pct passed=$passed applicable=$applicable"
       - name: upload pct
         if: always()
         uses: actions/upload-artifact@v7
@@ -290,13 +290,13 @@ jobs:
         id: c
         run: |
           set -euo pipefail
-          read -r pct passed scanned < pct.txt
+          read -r pct passed applicable < pct.txt
           color=red
           awk "BEGIN{exit !($pct>=10)}" && color=orange || true
           awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
           awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
           {
-            echo "pct=$pct"; echo "passed=$passed"; echo "scanned=$scanned"; echo "color=$color"
+            echo "pct=$pct"; echo "passed=$passed"; echo "applicable=$applicable"; echo "color=$color"
           } >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
@@ -306,7 +306,7 @@ jobs:
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}
           filename: krusty-conformance.json
           label: Kotlin ${{ needs.versions.outputs.max }} conformance
-          message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.scanned }})
+          message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.applicable }})
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
         if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
