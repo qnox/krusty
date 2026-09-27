@@ -743,6 +743,7 @@ fn class_capture_write_lowers_its_declared_cell_type() {
         origin,
         value: parameter,
         ty: ResolvedTy::new(result).unwrap(),
+        name: crate::fir::FirValueParameterName::Bound,
     });
     let read = body.add_expr(FirExpr {
         origin,

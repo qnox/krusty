@@ -436,6 +436,18 @@ pub enum Stmt {
     },
 }
 
+/// How one lambda parameter was written. Like [`DestructureEntry::ignored`] this is syntax, not a
+/// spelling test: a bare `_` is unused, while a backtick-escaped `` `_` `` is an ordinary name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LambdaParameterRole {
+    /// An ordinary parameter name.
+    Named,
+    /// `_`: the parameter is declared but binds no name.
+    Unused,
+    /// `(a, b)`: one parameter whose components the body destructures.
+    Destructured,
+}
+
 /// One destructuring binding. `ignored` is syntax, not a spelling test: bare `_` skips a component,
 /// while backtick-escaped `` `_` `` declares an ordinary local whose source name is `_`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1636,6 +1648,10 @@ pub struct File {
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
     pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// How each parameter of a lambda literal was written, keyed by the lambda's `ExprId` and
+    /// parallel to its `params`. Recorded only for a lambda with an `_` or a destructuring
+    /// parameter; every other lambda's parameters are all [`LambdaParameterRole::Named`].
+    pub lambda_parameter_roles: std::collections::HashMap<u32, Vec<LambdaParameterRole>>,
     /// Lambda literals with a source `->`, including the arity-zero form `{ -> body }`. An empty
     /// `params` vector otherwise means `{ body }`, which may acquire the implicit unary `it` from an
     /// expected function type; the explicit-arrow form must remain zero-arity.
@@ -1844,6 +1860,7 @@ impl File {
         self.local_class_nested = Default::default();
         self.hoisted_classifier_source_names = Default::default();
         self.lambda_param_types = Default::default();
+        self.lambda_parameter_roles = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();

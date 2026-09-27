@@ -236,6 +236,7 @@ impl BodyFirChecker<'_> {
                 origin: nested.origins.source(nested.source, parameter.ty.span),
                 value,
                 ty,
+                name: FirValueParameterName::Bound,
             });
         }
         for capture in &info.captures {

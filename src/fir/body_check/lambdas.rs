@@ -287,18 +287,31 @@ impl BodyFirChecker<'_> {
                 origin: target_origin,
                 value,
                 ty,
+                name: FirValueParameterName::Bound,
             });
         }
-        for (name, ty) in parameter_names
+        let roles = self.file.lambda_parameter_roles.get(&expression.0);
+        for (ordinal, (name, ty)) in parameter_names
             .into_iter()
             .zip(value_parameters.iter().copied())
+            .enumerate()
         {
             let ty = nested.resolved_type(span, ty)?;
             let value = nested.bind_local(name, ty);
+            let role = roles.map(|roles| roles[named_context_count + ordinal]);
             nested.body.add_parameter(FirValueParameter {
                 origin: target_origin,
                 value,
                 ty,
+                name: match role {
+                    None | Some(crate::ast::LambdaParameterRole::Named) => {
+                        FirValueParameterName::Bound
+                    }
+                    Some(crate::ast::LambdaParameterRole::Unused) => FirValueParameterName::Unused,
+                    Some(crate::ast::LambdaParameterRole::Destructured) => {
+                        FirValueParameterName::Destructured
+                    }
+                },
             });
         }
         // The lambda's callable result is a real value boundary. Keep the source expression's
