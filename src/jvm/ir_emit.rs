@@ -9921,17 +9921,10 @@ impl<'a> Emitter<'a> {
                     }
                     let body_ret =
                         self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
-                    if body_ret.is_jvm_scalar() {
-                        // The erased `invoke` result is `Object`, so reverse the same semantic adapter
-                        // choice after the inline body leaves its physical carrier on the stack. Use
-                        // the BODY's value type, not the contextual lambda declaration return: a block
-                        // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
-                        box_prim_free(
-                            self.cw,
-                            &mut scratch,
-                            semantic_scalar_adapter(body_value_ty, body_ret),
-                        );
-                    }
+                    // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not
+                    // the contextual lambda declaration return: a block accepted as `() -> Any?` can
+                    // still produce a primitive `Boolean`/`Int` here.
+                    self.coerce_invoke_result(body_value_ty, body_ret, &mut scratch);
                     scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
                     let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
                         &scratch.bytes,
