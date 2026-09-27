@@ -1165,17 +1165,33 @@ pub fn facade_package_metadata_from_ir(
         .package_properties
         .iter()
         .map(|declaration| {
-            let setter_function = match ir.local_property_layouts.get(&declaration.property) {
-                Some(
-                    crate::ir::IrLocalPropertyLayout::TopLevelStorage { setter, .. }
-                    | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. },
-                ) => *setter,
-                Some(
-                    crate::ir::IrLocalPropertyLayout::Member { .. }
-                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
-                )
-                | None => None,
-            };
+            // Which accessors the facade really declares, declared or compiler-default: a private
+            // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
+            // names neither.
+            let (has_getter, has_setter, setter_function) =
+                match ir.local_property_layouts.get(&declaration.property) {
+                    Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                        storage,
+                        getter,
+                        setter,
+                        ..
+                    }) => {
+                        let default = ir.has_jvm_default_static_accessors(*storage);
+                        (
+                            getter.is_some() || default,
+                            setter.is_some() || default && declaration.mutable,
+                            *setter,
+                        )
+                    }
+                    Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. }) => {
+                        (true, setter.is_some(), *setter)
+                    }
+                    Some(
+                        crate::ir::IrLocalPropertyLayout::Member { .. }
+                        | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                    )
+                    | None => (true, declaration.mutable, None),
+                };
             let companion = declaration.is_companion_extension();
             let accessor_parameters = declaration
                 .context_parameters
@@ -1188,11 +1204,13 @@ pub fn facade_package_metadata_from_ir(
                 .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
                 .collect::<String>();
             let ty_descriptor = crate::jvm::names::type_descriptor(declaration.ty);
-            let getter = (
-                crate::jvm::names::property_getter_name(&declaration.name),
-                format!("({descriptor_parameters}){ty_descriptor}"),
-            );
-            let setter = declaration.mutable.then(|| {
+            let getter = has_getter.then(|| {
+                (
+                    crate::jvm::names::property_getter_name(&declaration.name),
+                    format!("({descriptor_parameters}){ty_descriptor}"),
+                )
+            });
+            let setter = has_setter.then(|| {
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&ty_descriptor);
                 (
@@ -1449,6 +1467,21 @@ mod tests {
             )]),
         );
         let property_id = crate::fir::PropertyId::from_raw(0);
+        let init = ir.add_expr(crate::ir::IrExpr::Const(crate::ir::IrConst::Int(0)));
+        ir.statics.push(crate::ir::IrStatic {
+            name: "topLevel".to_string(),
+            ty: Ty::Int,
+            init,
+            is_var: true,
+            is_const: false,
+            owner: None,
+            visibility: crate::types::Visibility::Public,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
+            custom_accessor: true,
+            line: 0,
+            source_order: 0,
+        });
         ir.local_property_layouts.insert(
             property_id,
             crate::ir::IrLocalPropertyLayout::TopLevelStorage {

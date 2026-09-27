@@ -60,4 +60,16 @@ impl IrFile {
     pub(crate) fn is_jvm_field_static(&self, index: u32) -> bool {
         self.jvm_field_statics.contains(&index)
     }
+
+    /// Whether static `index` is published through compiler-default `getX`/`setX` methods. A
+    /// `const val` inlines, a `@JvmField` is its own surface, a custom-accessor property's
+    /// accessors are ordinary functions, and a private property is reached only through its field
+    /// or `access$…$p` bridges, so none of those has default accessors.
+    pub(crate) fn has_jvm_default_static_accessors(&self, index: u32) -> bool {
+        let storage = &self.statics[index as usize];
+        !(storage.is_const
+            || storage.custom_accessor
+            || self.is_jvm_field_static(index)
+            || storage.visibility.is_private())
+    }
 }

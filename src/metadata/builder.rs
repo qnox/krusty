@@ -615,7 +615,9 @@ pub struct PropMeta {
     /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
     /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
     pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
-    pub getter: (String, String),
+    /// The accessors the facade declares, by JVM name and descriptor. A private property with
+    /// default accessors has none, and its `JvmPropertySignature` names neither.
+    pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore leaves `Property.setter_value_parameter`
@@ -848,8 +850,10 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     if !m.is_const {
-        let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
-        jvm.field_message(3, &getter);
+        if let Some((gn, gd)) = &m.getter {
+            let getter = jvm_method_sig(st, gn, gd);
+            jvm.field_message(3, &getter);
+        }
         if let Some((sn, sd)) = &m.setter {
             let setter = jvm_method_sig(st, sn, sd);
             jvm.field_message(4, &setter);
@@ -1022,7 +1026,7 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: None,
                 context_params: Vec::new(),
-                getter: ("getAnswer".into(), "()I".into()),
+                getter: Some(("getAnswer".into(), "()I".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
@@ -1070,10 +1074,10 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: Some(Ty::String),
                 context_params: Vec::new(),
-                getter: (
+                getter: Some((
                     "getDoubled".into(),
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
-                ),
+                )),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
@@ -1126,7 +1130,7 @@ mod tests {
                     crate::types::ContextParameterKind::LegacyReceiver,
                     Ty::Int,
                 )],
-                getter: ("getAnswer".into(), "(I)I".into()),
+                getter: Some(("getAnswer".into(), "(I)I".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
@@ -1181,7 +1185,7 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: None,
                 context_params: Vec::new(),
-                getter: ("getRef".into(), "()Lkotlin/reflect/KProperty0;".into()),
+                getter: Some(("getRef".into(), "()Lkotlin/reflect/KProperty0;".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
@@ -1224,7 +1228,7 @@ mod tests {
                 type_param_bounds: vec![Vec::new()],
                 receiver: Some(receiver),
                 context_params: Vec::new(),
-                getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
+                getter: Some(("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into())),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 setter_parameter_name: Some("replacement".into()),
                 is_const: false,

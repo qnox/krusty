@@ -238,10 +238,15 @@ Decoded from kotlinc output over a top-level property shape matrix (`Package.pro
 | `var e: Double? = null` | 1798 | `isVar`(1<<8)+`hasSetter`(1<<10); field entry records desc `Ljava/lang/Double;` (boxed) |
 | `lateinit var f: String` | 5894 | + `isLateinit`(1<<12) |
 | `private val p1 = 3` | 8706 | visibility bits (f>>1)&7: INTERNAL=0, PRIVATE=1, PUBLIC=3; NO getter sig |
+| `private var p3 = ""` | 1794 | neither getter nor setter sig: a private property's default accessors are never generated. f100 names exactly the accessors the facade declares, so a private property with a declared setter records only that setter. Test: `tests/metadata_property_flags_e2e.rs` |
 | `internal val p2` | 8704 | getter sig present, unmangled |
 | `var s1 … set(v){…}` | 1798 | f6 = setter value parameter `{name,type}`; f8 = 70 |
 | `val String.doubled get()` | omitted | f5 receiver; f7 = 70; NO field entry |
 | `val lz by lazy { … }` | 33286 | + `isDelegated`(1<<15); field entry `{name="lz$delegate", desc="Lkotlin/Lazy;"}` |
+
+Still open (kotlinc 2.4.20): a private property's declared accessor is a private method, so its
+accessor word is 66 (private, `isNotDefault`); krusty emits it public and writes 70. A bodiless
+`private set` on a public `var` generates no setter method, while f6 and f8 = 66 are still recorded.
 
 Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
 8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.

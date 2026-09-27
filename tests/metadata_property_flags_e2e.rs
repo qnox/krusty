@@ -133,3 +133,19 @@ fn a_zero_literal_initializer_is_a_constant() {
         }\n";
     assert_identical("ZeroConstants", SRC, "app/K");
 }
+
+#[test]
+fn a_private_top_level_property_with_default_accessors_names_none() {
+    const SRC: &str = "package app\n\
+        \n\
+        private var log = \"\"\n\
+        private val fixed = 1\n\
+        var shared = 0\n\
+        \n\
+        fun touch(): Int {\n\
+        \x20   log = log + \"x\"\n\
+        \x20   shared = 2\n\
+        \x20   return fixed + log.length\n\
+        }\n";
+    assert_identical("PrivateAccessors", SRC, "app/PrivateAccessorsKt");
+}

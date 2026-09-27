@@ -275,14 +275,10 @@ pub(super) fn emit_static_accessors(
     param_assertions: bool,
     static_index: u32,
 ) {
-    let s = &ir.statics[static_index as usize];
-    if s.is_const
-        || s.custom_accessor
-        || ir.is_jvm_field_static(static_index)
-        || s.visibility.is_private()
-    {
+    if !ir.has_jvm_default_static_accessors(static_index) {
         return;
     }
+    let s = &ir.statics[static_index as usize];
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let jt = jvm_declared_ty(&s.ty);
     let desc = type_descriptor(jt);
