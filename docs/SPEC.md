@@ -6109,6 +6109,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MaybeCountBox(Count?)` calls `MaybeCountBox.hashCode-impl(Count)`, the boxed carrier the nested
   class erases to, not the terminal primitive.
   Tests: `tests/value_class_equals_hash_e2e.rs`.
+- **A library's `Tag?` parameter or result is read as `Tag?`, not its descriptor's `String`.**
+  kotlinc erases a nullable value class to its underlying when the underlying chain ends in a
+  non-null reference with no nullable or scalar link (`Tag(val name: String)`), so `take(tag: Tag?)`
+  is `take-<hash>(Ljava/lang/String;)`; `Duration?`, `UInt?` and a class over `String?` stay boxed.
+  The classpath reader recovered only non-null value classes from `@Metadata`, so metadata alignment
+  failed for these and the call saw `String`, rejecting a `Tag` argument and `null`. Tests:
+  `tests/classpath_nullable_value_class_e2e.rs`.
 - **A function returning `X?` over a non-null reference carrier unboxes a boxed result
   null-safely.** `X?` is then the carrier (`fun apply(f: (Tag?) -> Tag?, t: Tag?): Tag?` returns
   `String`), but a function value's `invoke` answers the box through its `Object` slot. kotlinc
