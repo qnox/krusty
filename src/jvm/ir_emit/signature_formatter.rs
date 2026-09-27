@@ -12,12 +12,41 @@ mod type_arguments;
 /// List<U>>` signs its parameter `Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;` and its
 /// return `Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;`). An explicit `in`/`out`
 /// projection the user wrote is not declaration-site variance and renders in either mode.
+///
+/// Inside a parameter, kotlinc's `TypeMappingMode` changes with each argument's effective variance.
+/// Below an INVARIANT argument (or an array element) declaration-site variance is no longer
+/// written: `Box<List<Any>>` signs `LBox<Ljava/util/List<Ljava/lang/Object;>;>;`, since `Box<T>`
+/// would not accept a `Box<List<? extends Object>>` anyway. A contravariant argument below that
+/// writes them again, now for its whole subtree: `Box<Comparable<List<Any>>>` signs
+/// `LBox<Ljava/lang/Comparable<Ljava/util/List<+Ljava/lang/Object;>;>;>;`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wildcards {
     /// A parameter position: realize declaration-site variance as `+`/`-`.
     Declared,
+    /// Below an invariant argument of a parameter: declaration-site variance is not written.
+    BelowInvariant,
+    /// Below a contravariant argument inside an invariant one: declaration-site variance is written
+    /// again, and stays written however the arguments below nest.
+    BelowInvariantContravariant,
     /// A return or field position: spell every argument invariantly.
     Suppressed,
+}
+
+impl Wildcards {
+    /// Whether declaration-site variance is written as a wildcard at this position.
+    pub(super) fn writes_declaration_site(self) -> bool {
+        matches!(self, Self::Declared | Self::BelowInvariantContravariant)
+    }
+
+    /// The mode for an argument whose effective variance is `variance` (an array element is
+    /// invariant): kotlinc's `TypeMappingMode.toGenericArgumentMode`.
+    pub(super) fn for_argument(self, variance: TypeVariance) -> Self {
+        match (self, variance) {
+            (Self::Declared, TypeVariance::Invariant) => Self::BelowInvariant,
+            (Self::BelowInvariant, TypeVariance::In) => Self::BelowInvariantContravariant,
+            (mode, _) => mode,
+        }
+    }
 }
 
 /// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
@@ -300,13 +329,13 @@ impl<'a> JvmSignatureFormatter<'a> {
         if signature.suspend {
             // The continuation's own `in` projection is part of the type; the wildcards on the
             // `FunctionN` arguments follow the position, like every other argument's.
-            if wildcards == Wildcards::Declared {
+            if wildcards.writes_declaration_site() {
                 rendered.push('-');
             }
             rendered.push_str("Lkotlin/coroutines/Continuation<-");
             rendered.push_str(&self.ty_at(&signature.ret, wildcards)?);
             rendered.push_str(">;");
-            if wildcards == Wildcards::Declared {
+            if wildcards.writes_declaration_site() {
                 rendered.push('+');
             }
             rendered.push_str("Ljava/lang/Object;");
@@ -380,13 +409,21 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::Obj(owner, arguments) if owner.matches("kotlin/Array") && arguments.len() == 1 => {
                 // The element's own variance is not written: a JVM array type has no argument list to
                 // put it on. `Array<out String>` erases to `[Ljava/lang/String;`, as kotlinc emits.
-                let element = match &arguments[0] {
-                    Ty::InProjection(inner)
-                    | Ty::OutProjection(inner)
-                    | Ty::StarProjection(inner) => inner,
-                    argument => argument,
+                // Its projection still decides the element's mode: `Array<List<Any>>` is an
+                // invariant argument, `Array<out List<Any>>` a covariant one.
+                let (variance, element) = match arguments[0] {
+                    // A consumer's elements are read as `Any?`: `Array<in List<Any>>` is
+                    // `[Ljava/lang/Object;`, whose signature adds nothing.
+                    Ty::InProjection(_) => (TypeVariance::In, Ty::obj("kotlin/Any")),
+                    Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                        (TypeVariance::Out, *inner)
+                    }
+                    argument => (TypeVariance::Invariant, argument),
                 };
-                Some(format!("[{}", self.ty_at(element, wildcards)?))
+                Some(format!(
+                    "[{}",
+                    self.ty_at(&element, wildcards.for_argument(variance))?
+                ))
             }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
                 "L{};",

@@ -17,14 +17,31 @@ impl JvmSignatureFormatter<'_> {
         argument: Ty,
         wildcards: Wildcards,
     ) -> Option<String> {
+        // Below an invariant argument a projection that only restates the parameter's declared
+        // variance is declaration-site variance too, and is not written.
+        let restated = |projection: TypeVariance| {
+            wildcards == Wildcards::BelowInvariant && declaration == projection
+        };
         match argument {
             Ty::StarProjection(_) => Some("*".to_string()),
             argument if is_star(declaration, argument) => Some("*".to_string()),
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
+            Ty::InProjection(inner) if restated(TypeVariance::In) => {
+                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))
+            }
+            Ty::OutProjection(inner) if restated(TypeVariance::Out) => {
+                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))
+            }
+            Ty::InProjection(inner) => Some(format!(
+                "-{}",
+                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))?
+            )),
+            Ty::OutProjection(inner) => Some(format!(
+                "+{}",
+                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))?
+            )),
             argument => {
                 let mut signature = String::new();
-                if wildcards == Wildcards::Declared
+                if wildcards.writes_declaration_site()
                     && !self.wildcard_is_redundant(declaration, argument)?
                 {
                     match declaration {
@@ -33,7 +50,7 @@ impl JvmSignatureFormatter<'_> {
                         TypeVariance::Invariant => {}
                     }
                 }
-                signature.push_str(&self.ty_at(&argument, wildcards)?);
+                signature.push_str(&self.ty_at(&argument, wildcards.for_argument(declaration))?);
                 Some(signature)
             }
         }

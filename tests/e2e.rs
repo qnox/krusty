@@ -920,6 +920,8 @@ mod interface_static_member_refs_e2e;
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
 mod internal_classpath_access_e2e;
+#[path = "invariant_argument_wildcards_e2e.rs"]
+mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
 #[path = "invoke_operator_lambda_arg_e2e.rs"]
