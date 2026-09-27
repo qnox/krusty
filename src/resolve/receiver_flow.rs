@@ -143,6 +143,75 @@ impl Checker<'_> {
         })
     }
 
+    pub(super) fn path_narrowed_read_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        name: &str,
+        declared: Ty,
+    ) -> Ty {
+        let Some(mut path) = self.expr_access_path(receiver) else {
+            return declared;
+        };
+        path.segments.push(name.to_string());
+        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
+            return declared;
+        };
+        let current = self.stable_path_ty(scope, &path, self.span(receiver));
+        let still_valid = current.is_some_and(|current| current.non_null() == declared.non_null());
+        crate::trace_compiler!(
+            "smartcast",
+            "read path={path:?} declared={declared:?} narrowed={narrowed:?} current={current:?} valid={still_valid}",
+        );
+        if narrowed != declared && still_valid {
+            narrowed
+        } else {
+            declared
+        }
+    }
+
+    /// A bare name read through the current implicit receiver is `this.<name>`, the path its proof
+    /// is filed under (see [`Self::apply_narrowing_unchecked`]).
+    pub(super) fn receiver_name_narrowed_read_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        read: ExprId,
+        name: &str,
+        receiver: ImplicitReceiver,
+        declared: Ty,
+    ) -> Ty {
+        let owning = self.receiver_owning(scope, name);
+        if !receiver.current || owning.map(|owner| owner.identity) != Some(receiver.identity) {
+            return declared;
+        }
+        self.this_property_narrowed_read_ty(scope, read, name, declared)
+    }
+
+    /// The type a proof on `this.<name>` gives a read of that property, under the explicit-receiver
+    /// read's rule: the proof holds while the property's stable type is still the declared one.
+    pub(super) fn this_property_narrowed_read_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        read: ExprId,
+        name: &str,
+        declared: Ty,
+    ) -> Ty {
+        let path = NarrowPath {
+            root: "this".to_string(),
+            segments: vec![name.to_string()],
+        };
+        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
+            return declared;
+        };
+        let current = self.stable_path_ty(scope, &path, self.span(read));
+        let still_valid = current.is_some_and(|current| current.non_null() == declared.non_null());
+        if narrowed != declared && still_valid {
+            narrowed
+        } else {
+            declared
+        }
+    }
+
     pub(super) fn lookup_path_narrowing(
         &self,
         scope: &CheckerScope<'_>,

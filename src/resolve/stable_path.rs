@@ -18,7 +18,10 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
     /// proof and its later use, so retaining a smart cast would be unsound.
     pub(super) fn ty(&self, scope: &CheckerScope<'_>, path: &NarrowPath, site: Span) -> Option<Ty> {
         let mut ty = if path.root == "this" {
-            scope.this_ty()?
+            // A property of a smart-cast `this` is read through the narrowed receiver.
+            self.checker
+                .actual_this_narrow(scope)
+                .or_else(|| scope.this_ty())?
         } else {
             let Some(local) = self.checker.lookup(scope, &path.root) else {
                 // A bare name with no lexical binding can still be a property of an implicit

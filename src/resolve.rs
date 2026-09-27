@@ -55710,33 +55710,6 @@ impl<'a> Checker<'a> {
     /// narrowed type, and the lowerer emits the `checkcast`/unbox from its generic per-expression
     /// coercion (`info.ty(e)` against the property's physical type). Re-validated against the
     /// CURRENT scope state — a changed binding or an unstable step drops the narrowing.
-    fn path_narrowed_read_ty(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-        declared: Ty,
-    ) -> Ty {
-        let Some(mut path) = self.expr_access_path(receiver) else {
-            return declared;
-        };
-        path.segments.push(name.to_string());
-        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
-            return declared;
-        };
-        let current = self.stable_path_ty(scope, &path, self.span(receiver));
-        let still_valid = current.is_some_and(|current| current.non_null() == declared.non_null());
-        crate::trace_compiler!(
-            "smartcast",
-            "read path={path:?} declared={declared:?} narrowed={narrowed:?} current={current:?} valid={still_valid}",
-        );
-        if narrowed != declared && still_valid {
-            narrowed
-        } else {
-            declared
-        }
-    }
-
     fn check_duplicate_param_names(
         &mut self,
         params: &[Param],
@@ -68438,6 +68411,7 @@ impl<'a> Checker<'a> {
                     if let Some(bi) = bt.obj_internal() {
                         if let Some(ty) = self.try_member_read(scope, bt, &n, self.span(e), Some(e))
                         {
+                            let ty = self.this_property_narrowed_read_ty(scope, e, &n, ty);
                             self.narrowed_this_member.insert(e, bi);
                             if let Some(receiver) =
                                 self.implicit_receivers(scope).into_iter().next()
@@ -68494,6 +68468,13 @@ impl<'a> Checker<'a> {
                         self.read_implicit_receiver_name(scope, e, &n, implicit_receiver)
                     {
                         self.mark_implicit_receiver_selection(e, implicit_receiver);
+                        let ty = self.receiver_name_narrowed_read_ty(
+                            scope,
+                            e,
+                            &n,
+                            implicit_receiver,
+                            ty,
+                        );
                         return self.set(e, ty);
                     }
                 }
