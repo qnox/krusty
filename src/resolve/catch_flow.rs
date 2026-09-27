@@ -9,23 +9,25 @@ use std::collections::HashSet;
 use crate::types::Ty;
 
 use super::lexical_bindings::BindingIdentity;
+use super::scope::PathRoot;
 use super::{Checker, CheckerScope};
 
 impl Checker<'_> {
     /// Record the flow-narrowed read type a write leaves on the innermost `name` binding, and note
-    /// that binding as written by every try body being checked.
+    /// that binding as written by every try body being checked. The write replaces the value, so
+    /// every path fact rooted at the old one goes.
     pub(super) fn set_local_narrow(
         &mut self,
         scope: &CheckerScope<'_>,
         name: &str,
         narrowed: Option<Ty>,
     ) {
-        if let Some(identity) = self
-            .lookup(scope, name)
-            .and_then(|local| local.lexical_capture_identity)
-        {
-            for written in &mut self.try_body_writes {
-                written.insert(BindingIdentity::new(identity));
+        if let Some(local) = self.lookup(scope, name) {
+            scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
+            if let Some(identity) = local.lexical_capture_identity {
+                for written in &mut self.try_body_writes {
+                    written.insert(BindingIdentity::new(identity));
+                }
             }
         }
         scope.narrow_local(name, narrowed);
@@ -52,7 +54,8 @@ impl Checker<'_> {
         written: &HashSet<BindingIdentity>,
     ) {
         for &identity in written {
-            if let Some((name, _)) = self.visible_local_binding(scope, identity) {
+            if let Some((name, local)) = self.visible_local_binding(scope, identity) {
+                scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
                 scope.narrow_local(&name, None);
             }
         }

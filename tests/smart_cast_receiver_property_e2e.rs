@@ -60,3 +60,34 @@ fn a_receiver_property_smart_cast_throws_the_narrowed_value() {
     );
     common::expect_box_same_as_kotlinc(&source, "SmartCastReceiverProperty");
 }
+
+/// A proof is about one receiver's selected property. Inside a receiver lambda the nearest
+/// receiver's `x` is another value, whether it is the same declaration on another instance or a
+/// same-named declaration of another class, and kotlinc keeps it unproven.
+#[test]
+fn a_proof_does_not_reach_the_same_named_property_of_a_nearer_receiver() {
+    const SOURCE: &str = "\
+        class Target { fun member(): Int = 1 }\n\
+        class Holder(val x: Any)\n\
+        class Other(val x: Any)\n\
+        fun <T> within(receiver: T, block: T.() -> Int): Int = receiver.block()\n\
+        fun Holder.sameDeclaration(other: Holder): Int {\n\
+        \x20   if (x is Target) return within(other) { x.member() }\n\
+        \x20   return 0\n\
+        }\n\
+        fun Holder.otherDeclaration(other: Other): Int {\n\
+        \x20   if (x is Target) return within(other) { x.member() }\n\
+        \x20   return 0\n\
+        }\n\
+        fun Holder.explicitReceiver(other: Holder): Int {\n\
+        \x20   if (this.x is Target) return within(other) { this.x.member() }\n\
+        \x20   return 0\n\
+        }\n\
+        fun Holder.proven(other: Other): Int {\n\
+        \x20   if (x is Target) return within(other) { this@proven.x.member() }\n\
+        \x20   return 0\n\
+        }\n\
+        ";
+    let result = common::compiler_diagnostics(&[("Receiver.kt", SOURCE)], &[]);
+    common::expect_identical_rejection(&result, "a nearer receiver's same-named property");
+}
