@@ -74,6 +74,10 @@ impl MethodSig {
     pub fn is_compiler_generated(&self) -> bool {
         self.access & (ACC_BRIDGE | ACC_SYNTHETIC) != 0
     }
+    /// An `ACC_BRIDGE` method: a special bridge a subclass inherits (see `jvm::bridges`).
+    pub fn is_bridge(&self) -> bool {
+        self.access & ACC_BRIDGE != 0
+    }
     pub fn is_vararg(&self) -> bool {
         self.access & ACC_VARARGS != 0
     }
