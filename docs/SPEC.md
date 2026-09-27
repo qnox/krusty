@@ -7339,6 +7339,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
   like the supertype's member that casts the argument and calls the override. Tests:
   `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **A generic bridge over `X?` keeps null when `X?` is erased to its carrier.** `X?` over a
+  non-null reference is `X`'s carrier holding the null, so an override `echo(t: Tag?): Tag?` of
+  `Echo<T>.echo(t: T): T` is `echo-<hash>(String)String`. Its bridge `echo(Object)Object` unboxes
+  the argument with `dup; ifnull; unbox-impl; goto; pop; aconst_null`, calls the override by the
+  carrier descriptor, and boxes the result the same null-safe way with `box-impl`. krusty called
+  `echo-<hash>(LTag;)LTag;`, which does not exist. A boxed `X?` (over a primitive or a nullable
+  underlying) is the reference the bridge already has. Only the Kotlin type decides the null
+  guard, never the carrier's: a non-null `X(val any: Any?)` returned where `X?` is declared boxes
+  its carrier whatever it holds, since `X(null)` is a value. Tests:
+  `tests/value_class_nullable_bridge_e2e.rs`. Corpus:
+  `inlineClasses/boxReturnValueOnOverride/overrideNullableInlineClassWithNonNullNullableAnyNull`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
