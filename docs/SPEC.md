@@ -7813,6 +7813,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   program, and where it stops when one throws, are those kotlinc 2.4.10 makes on the JVM for the
   program recorded in `comparable_range_members`.
   Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
+- **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
+  top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
+  parameters or context parameters, returns `Unit`, and takes nothing or one array of `String`
+  (`Array<String>`, `Array<out String>`, or `vararg args: String`). A member `main` of a class or
+  object, `main(x: Int)`, `fun <T> main()`, `fun String.main()` and `fun main(): Int` are ordinary
+  functions. The rule is stated once (`fir::MainEntryShape`) and the resolver applies it once,
+  after signatures are final, where it classifies top-level overload conflicts: an entry point is
+  file-local there, and the entry each source unit selects is recorded in the module index
+  (`ResolvedModuleIndex::source_entry_point`, a `CallableId` and its parameter form). When a unit
+  declares both forms, `main(args: Array<String>)` is the entry and the parameterless `main()` is
+  an ordinary function, as on kotlinc's JVM (no launcher bridge for it) and Kotlin/Native (the
+  array form is chosen first); two functions of one form are conflicting overloads the same pass
+  reports, and no entry is recorded. Common lowering only maps the recorded callable to its function
+  (`IrFile::entry_point`); an unmapped one is an internal error. The entry is a Kotlin rule; a
+  harness's `box(): String` is not, and a backend receives it as a driver-selected identity instead
+  of finding it by name. Tests: `src/fir/entry_point_tests.rs`, `src/fir_lower/entry_point_tests.rs`.
+
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
   `@IntrinsicConstEvaluation` builtin (`Int.plus`, `toByte()`, `compareTo`, `String.length`, ...) or

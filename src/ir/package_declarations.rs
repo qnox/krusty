@@ -1,9 +1,18 @@
-//! Package-level declaration records copied from finalized headers. These are backend-neutral
-//! Kotlin declaration facts: a target formats metadata or chooses an ABI from them without
-//! reopening the frontend index.
+//! Package-level declaration records copied from finalized headers, plus the file's selected
+//! program entry point. These are backend-neutral Kotlin declaration facts: a target formats
+//! metadata or chooses an ABI from them without reopening the frontend index.
 
 use super::FunId;
 use crate::types::{Ty, TypeName};
+
+/// The Kotlin `main` a file declares, as the frontend selected it (`fir::ResolvedEntryPoint`) and
+/// common lowering realized it in this file's function arena. A backend that produces a program
+/// starts here; it never looks for a function by its spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrEntryPoint {
+    pub function: FunId,
+    pub parameters: crate::fir::MainEntryParameters,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrPackageTypeParameter {

@@ -80,7 +80,9 @@ pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
-pub use package_declarations::{IrPackageFunction, IrPackageProperty, IrPackageTypeParameter};
+pub use package_declarations::{
+    IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter,
+};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
@@ -2059,6 +2061,8 @@ pub struct IrFile {
     /// declaration records copied from finalized Pass-1 headers. A backend may combine them with
     /// the post-pass physical function realization, but must not reopen the frontend index.
     pub package_functions: Vec<IrPackageFunction>,
+    /// The Kotlin `main` this file declares, if any. See [`IrEntryPoint`].
+    pub entry_point: Option<IrEntryPoint>,
     /// Source properties declared directly in this file's package. Storage/accessor representation
     /// remains target-owned; this record contains only checked Kotlin declaration semantics.
     pub package_properties: Vec<IrPackageProperty>,
