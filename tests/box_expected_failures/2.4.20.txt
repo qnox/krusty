@@ -322,8 +322,6 @@ specialBuiltins/explicitSuperCall.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 statics/syntheticAccessor.kt
-strings/kt13213.kt
-strings/kt47917.kt
 super/kt4982.kt
 suspendConversion/suspendConversionNullableCCE.kt
 syntheticAccessors/kt10047.kt

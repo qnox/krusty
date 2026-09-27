@@ -584,6 +584,13 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *rhs, inst)
             )
         }
+        IrExpr::StringConcat(parts) => {
+            let parts = parts
+                .iter()
+                .map(|&part| format!(" + String({})", emit_expr(ir, part, inst)))
+                .collect::<String>();
+            format!("(\"\"{parts})")
+        }
         IrExpr::PrimitiveNeg { operand, .. } => {
             format!("(-{})", emit_expr(ir, *operand, inst))
         }

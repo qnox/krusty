@@ -11704,7 +11704,7 @@ impl<'a> Emitter<'a> {
                 IrConst::Long(v) => code.push_long(*v, self.cw),
                 IrConst::Double(v) => code.push_double(*v, self.cw),
                 IrConst::Float(v) => code.push_float(*v, self.cw),
-                IrConst::String(s) => code.push_string_kt(s, self.cw),
+                IrConst::String(s) => super::string_constant::push_string(s, code, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
             IrExpr::ClassConst { internal } => {
