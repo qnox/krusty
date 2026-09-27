@@ -140,13 +140,15 @@ impl ClassWriter {
     pub(super) fn resolve_inner_classes(&mut self) {
         if let Some(resolve) = self.inner_class_resolver.clone() {
             // Class constants first, then annotation types (an applied annotation is a reference
-            // even though only its descriptor string reaches the pool). kotlinc's writer sorts the
-            // final table by inner name, so collection order does not leak into the attribute.
+            // even though only its descriptor string reaches the pool), then the classes that
+            // descriptors and generic signatures name. kotlinc's writer sorts the final table by
+            // inner name, so collection order does not leak into the attribute.
             let mut referenced = self.cp.class_names();
             let mut annotation_refs: Vec<String> =
                 self.annotation_class_refs.iter().cloned().collect();
             annotation_refs.sort();
             referenced.extend(annotation_refs);
+            referenced.extend(self.signature_classes());
             for inner in referenced {
                 if self
                     .inner_class_candidates

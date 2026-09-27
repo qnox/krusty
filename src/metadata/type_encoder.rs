@@ -193,7 +193,28 @@ impl StringTable {
 fn predefined_index(classifier: TypeName) -> Option<usize> {
     PREDEFINED_STRINGS
         .iter()
-        .position(|candidate| classifier.matches(candidate))
+        .position(|candidate| is_class_id(classifier, candidate))
+}
+
+/// Whether `classifier` is the class `class_id` names: a `/`-separated package path and top-level
+/// class, then one `.`-separated segment per nesting level (`kotlin/collections/Map.Entry`).
+/// Nesting is compared through the classifier's recorded owners, never through a flattened `$`
+/// spelling, so `Map.Entry` is its nested `Entry` of `Map` and nothing else.
+fn is_class_id(classifier: TypeName, class_id: &str) -> bool {
+    let mut segments = class_id.split('.');
+    let top_level = segments.next().expect("split yields at least one segment");
+    let nested: Vec<&str> = segments.collect();
+    let mut current = classifier;
+    for segment in nested.iter().rev() {
+        let Some(owner) = current.nested_owner() else {
+            return false;
+        };
+        if current.nested_segment_within(owner) != Some(*segment) {
+            return false;
+        }
+        current = owner;
+    }
+    current.nested_owner().is_none() && current.matches(top_level)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -985,8 +1006,37 @@ fn class_id_of(classifier: TypeName) -> EncodedClassId {
 
 #[cfg(test)]
 mod class_id_tests {
-    use super::class_id_of;
+    use super::{class_id_of, predefined_index, PREDEFINED_STRINGS};
     use crate::types::type_name;
+
+    /// The two nested builtins are predefined names, as kotlinc writes them: `Map.Entry` is the
+    /// nested `Entry` of `Map`, and a top-level class merely spelled like it is not.
+    #[test]
+    fn nested_builtins_resolve_to_their_predefined_names() {
+        let entry = type_name("kotlin/collections/Map").nested_child("Entry");
+        let mutable_entry = type_name("kotlin/collections/MutableMap").nested_child("MutableEntry");
+        assert_eq!(
+            predefined_index(entry).map(|index| PREDEFINED_STRINGS[index]),
+            Some("kotlin/collections/Map.Entry")
+        );
+        assert_eq!(
+            predefined_index(mutable_entry).map(|index| PREDEFINED_STRINGS[index]),
+            Some("kotlin/collections/MutableMap.MutableEntry")
+        );
+        assert_eq!(
+            predefined_index(type_name("kotlin/collections/Map"))
+                .map(|index| PREDEFINED_STRINGS[index]),
+            Some("kotlin/collections/Map")
+        );
+        assert_eq!(
+            predefined_index(type_name("kotlin/collections/Entry")),
+            None
+        );
+        assert_eq!(
+            predefined_index(type_name("pkg/Map").nested_child("Entry")),
+            None
+        );
+    }
 
     /// A reader expands `DESC_TO_CLASS_ID` by replacing every `$`; the shortcut is only usable when
     /// that reproduces the class id. These are the cases on both sides of that line.
