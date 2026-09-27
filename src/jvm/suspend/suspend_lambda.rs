@@ -402,6 +402,9 @@ fn layout(
                     .get(&fid)
                     .expect("a suspend lambda class is a source lambda's"),
             )),
+            (None, false) if identity.role == IrParameterRole::DestructuredValue => {
+                Some(crate::jvm::parameter_names::DESTRUCTURED.to_string())
+            }
             (None, false) => None,
         };
         let field = if read(parameter) {

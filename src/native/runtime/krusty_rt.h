@@ -104,7 +104,32 @@ typedef struct KType {
        runtime answers about TEXT be asked of text the program wrote. */
     kt_int (*walk_length)(struct KObject *self);
     kt_char (*walk_char_at)(struct KObject *self, kt_int index);
+    /* The class's reflection identity: what `KClass.qualifiedName` and `KClass.simpleName` answer,
+       published by whoever emits the descriptor rather than reconstructed from `name`. `name` is
+       the rendered name `toString` prints, and no split of it recovers the identity: a nested
+       class and a backticked name holding a `$` or a `.` spell their separators alike, and a local
+       or anonymous class has names Kotlin does not answer at all. `class_names` says which of the
+       two this class has (`KT_CLASS_NAMES_*`); a name the kind does not include is NULL. Appended
+       after every other field, and every descriptor names its fields, so no existing initializer
+       moves. */
+    const char *qualified_name;
+    uint32_t qualified_name_length;
+    const char *simple_name;
+    uint32_t simple_name_length;
+    uint32_t class_names;
 } KType;
+
+/* What a descriptor publishes about its class's names, in `KType.class_names`.
+
+   UNPUBLISHED is the zero a descriptor gets by not saying: asking such a class for its names is a
+   loud failure naming the descriptor, since any answer would be a guess. A MEMBER class — at top
+   level or nested in another — has both names: `pkg.Outer.Inner` and `Inner`. A LOCAL class has
+   only its simple name; Kotlin's `qualifiedName` is `null` for it. An ANONYMOUS object has
+   neither. */
+#define KT_CLASS_NAMES_UNPUBLISHED 0u
+#define KT_CLASS_NAMES_MEMBER 1u
+#define KT_CLASS_NAMES_LOCAL 2u
+#define KT_CLASS_NAMES_ANONYMOUS 3u
 
 
 typedef struct KObjectHeader {
@@ -135,7 +160,9 @@ void *kt_gc_allocate(const KType *type, uint32_t size);
 void kt_gc_collect(void);
 
 /* Register a global slot that may hold a reference, so it is treated as a root. Static storage
-   is not scanned — a freestanding program has no portable way to find its own data section. */
+   is not scanned — a freestanding program has no portable way to find its own data section. The
+   slot may be declared as any pointer type: the collector reads a root, a stack word, a field or
+   an element as bytes, never through an lvalue of a type the slot was not declared with. */
 void kt_gc_add_global_root(void **slot);
 
 /* Introspection, for tests: allocated objects, bytes mapped for the heap, and bytes held by
@@ -475,7 +502,8 @@ kt_boolean kt_lazy_is_initialized(KRef lazy);
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`: two references, with the three `kotlin.Any` members answering componentwise the way
-   Kotlin's data class does. `Triple` is not one of these and is not realized. */
+   Kotlin's data class does. A member whose first component's call throws returns with that
+   exception pending and never asks the second. `Triple` is not one of these and is not realized. */
 extern const KType kt_type_pair;
 
 KRef kt_pair_of(KRef first, KRef second);
@@ -573,7 +601,8 @@ KRef kt_observable(KRef initial, KRef on_change);
 /* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
    it is, no static type separating them. `get` takes the property's NAME, the only thing it can
    need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. */
+   observable passes to its callback. Any object other than those two delegates ends the program
+   with a message naming its descriptor. */
 KRef kt_rw_property_get(KRef self, KRef name);
 void kt_rw_property_set(KRef self, KRef property, KRef value);
 
@@ -688,10 +717,11 @@ kt_int kt_string_length(KRef self);
 /* `s[index]` — the UTF-16 code unit at `index`, walking the UTF-8 bytes to find it. */
 kt_char kt_string_get(KRef self, kt_int index);
 
-/* `s.substring(start, end)` and `s.subSequence(start, end)`, both by UTF-16 unit as Kotlin indexes.
-   The result SHARES the receiver's storage — a substring is a view, and the text it names is
-   already there. Slicing BETWEEN the halves of a surrogate pair is a loud failure: UTF-8 has no
-   encoding for half a character, so there is no string to hand back. */
+/* `s.substring(start, end)` and `s.subSequence(start, end)`, both by UTF-16 unit as Kotlin indexes,
+   on a `String` or a `StringBuilder`. A string's result SHARES its storage — a substring is a view,
+   and the text it names is already there; a builder's is a copy, because the next `append` may
+   rewrite what a view would name. A bound BETWEEN the halves of a surrogate pair answers the half
+   on its side of the bound, stored as the three bytes its code unit encodes to, as on the JVM. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end);
 
 /* `s.substring(start)`: from there to the end. */
@@ -701,9 +731,9 @@ KRef kt_string_substring_from(KRef self, kt_int start);
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
 
-/* `s.removeSuffix(suffix)`: the receiver without it, or the receiver itself when it does not end
-   there. Bytes settle it — UTF-8 is a prefix code, so two texts end the same way exactly when
-   their trailing bytes do. */
+/* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
+   `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
+   as itself, and a builder as a copy of its text. */
 KRef kt_string_remove_suffix(KRef self, KRef suffix);
 
 /* `s.isEmpty()` / `s.isNotEmpty()`: a text has zero UTF-16 units exactly when it has zero bytes. */
@@ -722,9 +752,10 @@ KRef kt_string_trim(KRef self);
 KRef kt_string_trim_start(KRef self);
 KRef kt_string_trim_end(KRef self);
 
-/* `s.startsWith(prefix)`, `s.endsWith(suffix)`, `s.contains(other)`. Bytes settle all three, the
-   way they settle `removeSuffix`. Only the case-SENSITIVE forms arrive: the generator declines
-   `ignoreCase = true`, which asks about Unicode case folding rather than about text. */
+/* `s.startsWith(prefix)`, `s.endsWith(suffix)`, `s.contains(other)`, by UTF-16 unit: `"😀"` holds
+   and ends with its own low half. Bytes settle them while neither text holds a lone surrogate.
+   Only the case-SENSITIVE forms arrive: the generator declines `ignoreCase = true`, which asks
+   about Unicode case folding rather than about text. */
 kt_boolean kt_string_starts_with(KRef self, KRef prefix);
 kt_boolean kt_string_ends_with(KRef self, KRef suffix);
 kt_boolean kt_string_contains(KRef self, KRef other);
@@ -754,11 +785,13 @@ KRef kt_to_string(KRef value);
    answer for either shape. */
 extern const KType kt_type_string_builder;
 
-/* `StringBuilder()` and `StringBuilder(capacity)`. The capacity is a hint. */
+/* `StringBuilder()` and `StringBuilder(capacity)`. A capacity is a hint; a negative one throws
+   `IllegalArgumentException` with no message, as Kotlin/Native's builder does. */
 KRef kt_string_builder_new(void);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
-/* `StringBuilder(text)`: a builder holding a COPY of it. */
+/* `StringBuilder(text)`: a builder holding a COPY of it. When `text` is the program's own
+   `CharSequence` and its `length` or `get` throws, no builder is made: NULL, exception pending. */
 KRef kt_string_builder_with_text(KRef text);
 
 /* `sb.append(value)`, answering the RECEIVER so a chain of them reads as one expression. The value
@@ -766,7 +799,8 @@ KRef kt_string_builder_with_text(KRef text);
 KRef kt_string_builder_append(KRef self, KRef value);
 
 /* `sb.appendLine(value)` and `sb.appendLine()`. The line separator is `\n` on every target, which
-   is what Kotlin specifies rather than the platform's. */
+   is what Kotlin specifies rather than the platform's. When the value's `toString` throws, neither
+   the value nor the newline is added. */
 KRef kt_string_builder_append_line(KRef self, KRef value);
 KRef kt_string_builder_append_new_line(KRef self);
 
@@ -881,7 +915,11 @@ kt_boolean kt_result_is_failure(KRef value);
 kt_boolean kt_result_is_success(KRef value);
 KRef kt_result_get_or_null(KRef value);
 KRef kt_result_exception_or_null(KRef value);
+/* `getOrThrow()`: a success's value, or, for a failure, its exception thrown and NULL answered at
+   once — never the failure marker, which is no value of the program's type. */
 KRef kt_result_get_or_throw(KRef value);
+/* `Success(value)` or `Failure(exception)`; NULL, with the exception pending, when rendering the
+   value or the exception through its `toString` throws. */
 KRef kt_result_to_string(KRef value);
 
 /* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class
@@ -952,7 +990,10 @@ KRef kt_class_of(KRef value);
 /* Named for the FORM rather than for what it takes: `kt_class_for` is the collector's own
    size-class helper, and a freestanding program links one namespace. */
 KRef kt_class_literal(const KType *type);
-/* `simpleName` and `qualifiedName`, read off the descriptor's own Kotlin name. */
+/* `simpleName` and `qualifiedName`, as the descriptor publishes them (`KType.class_names`): `null`
+   where Kotlin answers `null` — the qualified name of a local class, both names of an anonymous
+   object. A descriptor that publishes no names, or publishes a kind without the names it needs,
+   fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
 

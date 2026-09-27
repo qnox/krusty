@@ -943,8 +943,10 @@ impl BodyLowering<'_> {
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
-        if let Some(line) = body.close_line() {
-            self.ir.fn_close_lines.insert(function, line);
+        // A block-bodied local function falls off its closing brace, where kotlinc marks the
+        // implicit `return` as it does for a declared one.
+        if !body.has_implicit_return() && body.close_line() != 0 {
+            self.ir.fn_close_lines.insert(function, body.close_line());
         }
         if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
@@ -1150,41 +1152,20 @@ impl BodyLowering<'_> {
                 body_origin(body),
             )?
         } else {
-            let callable = finish_callable_body(
+            finish_callable_body(
                 nested.ir,
                 roots,
                 result,
                 body.has_implicit_return(),
                 unit_as_value,
+                body.close_line(),
                 body_origin(body),
-            )?;
-            if let (true, Some(line)) = (body.has_implicit_return(), body.close_line()) {
-                mark_implicit_unit_return(nested.ir, callable, line);
-            }
-            callable
+            )?
         };
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;
         Ok(NestedCallableBodies { callable, inline })
-    }
-}
-
-/// kotlinc maps a `Unit` lambda's implicit return to its closing `}`: the `Unit` it returns, or the
-/// bare return, starts that line.
-fn mark_implicit_unit_return(ir: &mut crate::ir::IrFile, body: ExprId, line: u32) {
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return;
-    };
-    let Some(&returned) = stmts.last() else {
-        return;
-    };
-    match *ir.expr(returned) {
-        IrExpr::Return(Some(unit)) if matches!(ir.expr(unit), IrExpr::UnitInstance) => {
-            ir.expr_source_lines.insert(unit, line);
-        }
-        IrExpr::Return(None) => ir.mark_implicit_return_end_line(returned, line),
-        _ => {}
     }
 }
 
@@ -1363,14 +1344,25 @@ fn local_function_parameter_identities(
         body.parameters()
             .iter()
             .skip(context_value_count)
-            .map(|parameter| {
-                body.debug_value_name(parameter.value)
+            .map(|parameter| match parameter.name {
+                crate::fir::FirValueParameterName::Bound => body
+                    .debug_value_name(parameter.value)
                     .map(crate::ir::IrParameterIdentity::source)
                     .unwrap_or(crate::ir::IrParameterIdentity {
                         source_name: None,
                         role: crate::ir::IrParameterRole::Value,
                         provenance: crate::ir::IrParameterProvenance::SourceDeclared,
-                    })
+                    }),
+                crate::fir::FirValueParameterName::Unused => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::UnusedValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
+                crate::fir::FirValueParameterName::Destructured => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::DestructuredValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
             }),
     );
     Ok(identities)

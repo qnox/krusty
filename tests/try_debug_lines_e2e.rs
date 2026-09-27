@@ -739,3 +739,76 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
         "krusty's complete table for two: one frame per expansion, not a constant suffix"
     );
 }
+
+/// Each handler's entry carries its clause's own line, the `catch` keyword's: the store of the
+/// caught exception belongs to the clause, whether its body starts on a later line, on the same
+/// line, or is empty.
+#[test]
+fn a_catch_handler_opens_on_its_catch_line() {
+    let src = "class Handlers {\n\
+               \x20   fun step() {}\n\
+               \x20   fun value(): Int = 1\n\
+               \x20   fun separate() {\n\
+               \x20       try {\n\
+               \x20           step()\n\
+               \x20       } catch (e: Exception) {\n\
+               \x20           step()\n\
+               \x20       }\n\
+               \x20   }\n\
+               \x20   fun empty() {\n\
+               \x20       try {\n\
+               \x20           step()\n\
+               \x20       } catch (e: Exception) {\n\
+               \x20       }\n\
+               \x20   }\n\
+               \x20   fun sameLine() {\n\
+               \x20       try {\n\
+               \x20           step()\n\
+               \x20       } catch (e: Exception) { step() }\n\
+               \x20   }\n\
+               \x20   fun several(): Int = try { value() } catch (e: IllegalStateException) { 2 }\n\
+               \x20       catch (e: Exception) {\n\
+               \x20           3\n\
+               \x20       }\n\
+               \x20   fun assigned(): Int {\n\
+               \x20       val x = try {\n\
+               \x20           value()\n\
+               \x20       }\n\
+               \x20       catch (e: Exception) { 4 }\n\
+               \x20       return x\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("CatchLines", src, "Handlers");
+    assert_eq!(
+        method_lines(&reference, "void separate()"),
+        vec![
+            "line 5: 0".to_string(),
+            "line 6: 1".to_string(),
+            "line 7: 8".to_string(),
+            "line 8: 9".to_string(),
+            "line 10: 13".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    for method in [
+        "void separate()",
+        "void empty()",
+        "void sameLine()",
+        "int several()",
+    ] {
+        assert_eq!(
+            method_lines(&krusty, method),
+            method_lines(&reference, method),
+            "{method} lines"
+        );
+    }
+    // The handler of an assigned `try` opens on its own line too; the merge's line after it is a
+    // separate, still-open difference, so only the rows up to the handler's are compared.
+    let assigned = |text: &str| -> Vec<String> {
+        method_lines(text, "int assigned()")
+            .into_iter()
+            .take(3)
+            .collect()
+    };
+    assert_eq!(assigned(&krusty), assigned(&reference), "assigned lines");
+}

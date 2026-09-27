@@ -6,6 +6,7 @@
 //! not know is not read, since an index inside it would go unseen.
 
 use crate::jvm::bytecode::instruction_len;
+use std::ops::Range;
 
 /// A pool entry: where its bytes are, and the entries it names, in the order ASM interns them.
 pub(super) struct Entry {
@@ -29,8 +30,10 @@ pub(super) enum Part {
 /// What holds an index slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Holder {
-    /// The class, a field, a method's header or attributes, or an attribute's name.
+    /// The class, a field, a method's header, or an attribute's contents outside `Code`.
     Class,
+    /// An attribute's name, which the writer interns when it writes the attribute.
+    AttributeName,
     /// The `Code` of the method at this position in the class's method table.
     Code(usize, Part),
 }
@@ -52,6 +55,23 @@ pub(super) struct ClassSlots {
     /// Offset of the byte after the pool.
     pub(super) pool_end: usize,
     pub(super) slots: Vec<Slot>,
+    /// The positions in `slots` of the fields' slots.
+    fields: Range<usize>,
+    /// The position in `slots` past the methods' slots.
+    methods_end: usize,
+}
+
+impl ClassSlots {
+    /// The slots in the order kotlinc's writer visits what holds them: the class header, the
+    /// methods, the fields, then the class attributes.
+    pub(super) fn visit_order(&self) -> impl Iterator<Item = &Slot> {
+        let slots = &self.slots;
+        slots[..self.fields.start]
+            .iter()
+            .chain(&slots[self.fields.end..self.methods_end])
+            .chain(&slots[self.fields.clone()])
+            .chain(&slots[self.methods_end..])
+    }
 }
 
 /// Why a class was not read.
@@ -82,6 +102,8 @@ struct Reader<'a> {
     at: usize,
     entries: Vec<Option<Entry>>,
     slots: Vec<Slot>,
+    fields: Range<usize>,
+    methods_end: usize,
 }
 
 pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
@@ -90,6 +112,8 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         at: 8,
         entries: Vec::new(),
         slots: Vec::new(),
+        fields: 0..0,
+        methods_end: 0,
     };
     reader.pool()?;
     let pool_end = reader.at;
@@ -101,6 +125,8 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         entries: reader.entries,
         pool_end,
         slots: reader.slots,
+        fields: reader.fields,
+        methods_end: reader.methods_end,
     })
 }
 
@@ -214,12 +240,15 @@ impl Reader<'_> {
         self.index(Holder::Class)?;
         self.index(Holder::Class)?;
         self.indices(Holder::Class)?;
+        let fields_start = self.slots.len();
         for _ in 0..self.u2()? {
             self.member(Scope::Member)?;
         }
+        self.fields = fields_start..self.slots.len();
         for method in 0..usize::from(self.u2()?) {
             self.member(Scope::Method(method))?;
         }
+        self.methods_end = self.slots.len();
         self.attributes(Scope::Class)
     }
 
@@ -232,7 +261,7 @@ impl Reader<'_> {
 
     fn attributes(&mut self, scope: Scope) -> Result<(), Unread> {
         for _ in 0..self.u2()? {
-            let name_index = self.index(Holder::Class)?;
+            let name_index = self.index(Holder::AttributeName)?;
             let len = self.u4()? as usize;
             let end = self.at.checked_add(len).ok_or(Unread::Truncated)?;
             let name = self.utf8(name_index).unwrap_or_default().to_string();

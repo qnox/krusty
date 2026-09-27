@@ -14,10 +14,13 @@ mod binding_stability_tests;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+#[cfg(test)]
+mod builtin_operation_tests;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
 mod companion_blocks;
+mod constant_evaluation;
 mod constant_folding;
 mod constructors;
 mod data_classes;
@@ -44,6 +47,7 @@ mod sam_conversions;
 mod sink;
 mod source_calls;
 mod statement;
+mod string_concatenation;
 mod suspend_conversions;
 mod tailrec;
 mod type_operations;
@@ -275,6 +279,9 @@ pub(crate) fn lower_body_with_context(
 
 struct BodyLowering<'a> {
     body: &'a FirBody,
+    /// Constant values of this body's operations, folded as kotlinc's `ConstEvaluationLowering`
+    /// folds them.
+    constants: constant_evaluation::ConstantEvaluation,
     index: &'a ResolvedModuleIndex,
     ir: &'a mut IrFile,
     expression_states: Vec<LoweringState>,
@@ -448,6 +455,7 @@ impl<'a> BodyLowering<'a> {
             .and_then(|count| count.checked_add(u32::from(has_extension_receiver)))
             .expect("too many FIR value slots");
         Self {
+            constants: constant_evaluation::ConstantEvaluation::default(),
             expression_states: vec![LoweringState::Uncomputed; body.expression_count()],
             statement_states: vec![LoweringState::Uncomputed; body.statement_count()],
             body,
@@ -740,6 +748,7 @@ fn finish_callable_body(
     result: crate::types::Ty,
     implicit_return: bool,
     unit_as_value: bool,
+    close_line: u32,
     origin: crate::fir::OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let first_generated = ir.exprs.len();
@@ -759,6 +768,11 @@ fn finish_callable_body(
         } else {
             ir.add_expr(crate::ir::IrExpr::Return(None))
         };
+        // A lambda falls off its closing brace into this return, which kotlinc marks there
+        // before the `Unit` it returns.
+        if close_line != 0 {
+            ir.mark_fallthrough_return_line(return_unit, close_line);
+        }
         roots.push(return_unit);
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,

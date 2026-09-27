@@ -134,10 +134,10 @@ impl Emitter<'_> {
                 return false;
             }
         }
-        if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
+        if let IrExpr::PrimitiveBinOp { op, .. } = *self.ir.expr(cond) {
             use IrBinOp::*;
             if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {
-                self.emit_compare_branch(op, lhs, rhs, target, jump_when_true, code);
+                self.emit_comparison_branch(cond, target, jump_when_true, code);
                 return false;
             }
         }

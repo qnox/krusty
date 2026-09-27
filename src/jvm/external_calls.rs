@@ -407,13 +407,37 @@ pub(super) fn realize(
         } else {
             callable.descriptor.clone()
         };
+        // A `String.plus` that reaches this boundary is a callable-reference adapter body (source
+        // calls lower as concatenations): it is the same two-part concatenation.
+        if callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::StringPlus)
+            || member_realization
+                == crate::libraries::MemberRealization::Intrinsic(
+                    crate::libraries::CompilerIntrinsic::StringPlus,
+                )
+        {
+            let IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                args,
+                ..
+            } = &ir.exprs[index]
+            else {
+                return Err(target.into());
+            };
+            let [argument] = args[..] else {
+                return Err(target.into());
+            };
+            let parts = vec![*receiver, argument];
+            ir.ext_call_source_receiver.remove(&expression);
+            ir.exprs[index] = IrExpr::StringConcat(parts);
+            continue;
+        }
         // A builtin scalar member (`Int.times`, `Boolean.not()`) is a selected Kotlin declaration
         // with no JVM method. Checked FIR publishes the operation for an ordinary call; a callable-
         // reference adapter body keeps the provider identity in an ordinary external-call node, so
         // realize that exact declaration with the common primitive operation at this target
-        // boundary. `String.plus` keeps its own intrinsic call below.
+        // boundary. `String.get` keeps its own intrinsic call below.
         if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
-            if intrinsic != crate::libraries::CompilerIntrinsic::StringPlus {
+            if intrinsic != crate::libraries::CompilerIntrinsic::StringGet {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
                         dispatch_receiver: Some(receiver),
@@ -726,7 +750,10 @@ pub(super) fn realize(
         let mut physical_result = callable.physical_ret;
         let selected_intrinsic = match callable.compiler_intrinsic {
             Some(crate::libraries::CompilerIntrinsic::StringPlus) => {
-                Some(crate::ir::IrIntrinsic::StringPlus)
+                unreachable!("a String.plus call is realized as a concatenation above")
+            }
+            Some(crate::libraries::CompilerIntrinsic::StringGet) => {
+                Some(crate::ir::IrIntrinsic::StringGet)
             }
             Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) => {
                 Some(crate::ir::IrIntrinsic::NullableAnyToString)
@@ -890,11 +917,11 @@ pub(super) fn realize(
                     };
                 }
                 crate::libraries::MemberRealization::Intrinsic(
-                    crate::libraries::CompilerIntrinsic::StringPlus,
+                    crate::libraries::CompilerIntrinsic::StringGet,
                 ) => {
                     physical_result = semantic_ret;
                     *callee = Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
+                        operation: crate::ir::IrIntrinsic::StringGet,
                         ret: semantic_ret,
                     };
                 }

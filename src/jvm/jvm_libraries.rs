@@ -913,7 +913,7 @@ impl JvmLibraries {
                 is_final: true,
                 return_value_status: None,
             };
-            function.annotations = Vec::new();
+            function.annotations = builtin.annotations;
             function.callable.compiler_intrinsic =
                 crate::libraries::builtin_top_level_realization::normalized_function_realization(
                     pkg, name, &function,
@@ -1666,15 +1666,10 @@ impl JvmLibraries {
                     .collect()
             };
             for (m, declaration, constructor_declaration) in declared_methods {
-                if declaration.is_none()
-                    && constructor_declaration.is_none()
-                    && m.is_bridge()
-                    && ci.methods.iter().any(|target| {
-                        !target.is_bridge()
-                            && target.name == m.name
-                            && target.has_same_parameter_descriptor(m)
-                    })
-                {
+                // A Java class's bridges and synthetic accessors are javac ABI, not members: kotlinc's
+                // binary Java class reader drops them, so `Integer.compareTo(Object)` never makes
+                // `Int < Char` applicable ahead of a user `Int.compareTo(Char)` extension.
+                if uses_java_type_semantics && m.is_compiler_generated() {
                     continue;
                 }
                 // Keep every Java declaration that can be accessed outside its declaring class.
@@ -1841,10 +1836,9 @@ impl JvmLibraries {
                     }
                 }
                 member.physical_ret = physical_ret;
-                // Kotlin metadata owns declaration modality. In legacy JVM-default mode the
-                // interface method is physically abstract even though the Kotlin declaration has
-                // a body on `$DefaultImpls`; treating the classfile access bit as semantic made the
-                // declaration disappear from `super` selection and inherited-implementation plans.
+                // Kotlin metadata owns declaration modality. In legacy JVM-default mode a method
+                // can be physically abstract while its body lives on `$DefaultImpls`; classfile
+                // modality would hide it from `super` selection and inherited-implementation plans.
                 member.set_is_abstract(
                     declaration
                         .map_or_else(|| m.is_abstract(), |declaration| declaration.is_abstract()),
@@ -1867,6 +1861,7 @@ impl JvmLibraries {
                         is_property: false,
                         is_operator: declaration.is_operator(),
                         is_infix: declaration.is_infix(),
+                        annotations: &member.annotations,
                     };
                     let range =
                         crate::libraries::builtin_member_realization::unsigned_range_construction(

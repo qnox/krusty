@@ -84,6 +84,24 @@ fn expression_dag_clone_preserves_short_circuit_operator() {
 }
 
 #[test]
+fn expression_dag_clone_preserves_source_when_origin() {
+    let mut file = IrFile::default();
+    let condition = file.add_expr(IrExpr::GetValue(0));
+    let one = file.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let two = file.add_expr(IrExpr::Const(IrConst::Int(2)));
+    let when = file.add_expr(IrExpr::When {
+        branches: vec![(Some(condition), one), (None, two)],
+    });
+    file.whens.source_lines.insert(when, 7);
+
+    let (copy, _) = clone_expression_dag(&mut file, when);
+
+    assert_ne!(copy, when);
+    assert_eq!(file.whens.source_lines.get(&when), Some(&7));
+    assert_eq!(file.whens.source_lines.get(&copy), Some(&7));
+}
+
+#[test]
 fn expr_diverges_by_handles_branches_and_custom_leaves() {
     let mut f = IrFile::default();
     let condition = f.add_expr(IrExpr::Const(IrConst::Boolean(true)));

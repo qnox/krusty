@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use crate::ir::{ClassId, IrExpr, IrFile};
 use crate::types::Ty;
 
+const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
+
 /// The JVM holder class and its `element` field descriptor for one captured element type.
 pub(super) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
     if elem.is_nullable() {
@@ -50,8 +52,14 @@ pub(super) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
     }
 }
 
+/// The holder's type. kotlinc types an object cell as `Ref.ObjectRef<T>` over the element, so its
+/// generic `Signature` names the element (`Ref$ObjectRef<Ljava/lang/String;>`); a primitive cell
+/// is not generic.
 pub(super) fn holder_ty(elem: &Ty) -> Ty {
-    Ty::obj(holder_class(elem).0)
+    match holder_class(elem) {
+        (holder, _) if holder == OBJECT_REF => Ty::obj_args(holder, &[*elem]),
+        (holder, _) => Ty::obj(holder),
+    }
 }
 
 /// Replace only backend declaration slots. The marker map remains logical so metadata, diagnostics,
@@ -156,12 +164,12 @@ mod tests {
 
         assert_eq!(
             ir.classes[class as usize].fields[0].ty,
-            Ty::obj("kotlin/jvm/internal/Ref$ObjectRef")
+            Ty::obj_args(OBJECT_REF, &[Ty::String])
         );
         assert_eq!(ir.classes[class as usize].fields[1].ty, Ty::String);
         assert_eq!(
             ir.classes[class as usize].ctor_args[0].ty,
-            Ty::obj("kotlin/jvm/internal/Ref$ObjectRef")
+            Ty::obj_args(OBJECT_REF, &[Ty::String])
         );
         assert_eq!(ir.classes[class as usize].ctor_args[1].ty, Ty::String);
         assert_eq!(
@@ -191,7 +199,7 @@ mod tests {
 
         assert_eq!(
             ir.classes[class as usize].super_ctor_params,
-            [Ty::obj("kotlin/jvm/internal/Ref$ObjectRef"), Ty::String]
+            [Ty::obj_args(OBJECT_REF, &[Ty::String]), Ty::String]
         );
     }
 }

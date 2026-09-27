@@ -1,6 +1,7 @@
 //! Checked FIR construction for body-local anonymous callables.
 
 use super::*;
+use crate::fir::FirValueParameterName;
 
 impl BodyFirChecker<'_> {
     pub(super) fn lambda(
@@ -82,6 +83,13 @@ impl BodyFirChecker<'_> {
             self.lambda_binding_name.clone(),
             label,
         ));
+        body.set_close_line(
+            self.file
+                .expr_end_lines
+                .get(expression.0 as usize)
+                .copied()
+                .unwrap_or(0),
+        );
         if let Some(site) = self.file.lambda_lifting_sites.get(&expression.0) {
             // A suspend lambda becomes a class of its own rather than a lifted method.
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(
@@ -283,22 +291,32 @@ impl BodyFirChecker<'_> {
         {
             let ty = nested.resolved_type(span, ty)?;
             let value = nested.bind_local(name, ty);
-            nested.body.add_parameter(FirValueParameter {
-                origin: target_origin,
-                value,
-                ty,
-            });
+            nested
+                .body
+                .add_parameter(FirValueParameter::bound(target_origin, value, ty));
         }
-        for (name, ty) in parameter_names
+        let roles = self.file.lambda_parameter_roles.get(&expression.0);
+        for (ordinal, (name, ty)) in parameter_names
             .into_iter()
             .zip(value_parameters.iter().copied())
+            .enumerate()
         {
             let ty = nested.resolved_type(span, ty)?;
             let value = nested.bind_local(name, ty);
+            let role = roles.map(|roles| roles[named_context_count + ordinal]);
             nested.body.add_parameter(FirValueParameter {
                 origin: target_origin,
                 value,
                 ty,
+                name: match role {
+                    None | Some(crate::ast::LambdaParameterRole::Named) => {
+                        FirValueParameterName::Bound
+                    }
+                    Some(crate::ast::LambdaParameterRole::Unused) => FirValueParameterName::Unused,
+                    Some(crate::ast::LambdaParameterRole::Destructured) => {
+                        FirValueParameterName::Destructured
+                    }
+                },
             });
         }
         // The lambda's callable result is a real value boundary. Keep the source expression's

@@ -3480,11 +3480,11 @@ pub struct BuiltinMember {
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
     pub vararg: Option<usize>,
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
-/// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
-/// it has no JVM facade method: it is a semantic compiler builtin whose physical realization is a
-/// backend capability. Resolution still needs its complete source signature.
+/// A top-level `.kotlin_builtins` function. It has no JVM facade method; resolution consumes its
+/// complete semantic signature and the backend supplies its physical realization.
 pub struct BuiltinFunction {
     pub name: String,
     pub receiver: Option<BuiltinTy>,
@@ -3500,9 +3500,9 @@ pub struct BuiltinFunction {
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
-    /// Old unnamed context receivers followed by named context parameters. Both are leading
-    /// implicit parameters in the semantic signature; only the latter have source names.
+    /// Leading unnamed context receivers followed by named context parameters.
     pub context_count: usize,
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 #[derive(Default)]

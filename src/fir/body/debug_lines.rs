@@ -78,14 +78,14 @@ pub struct FirStatementDebugLines {
 }
 
 /// A body's line-only source metadata: one entry per expression and statement, the file's line
-/// count, and a source lambda's closing line.
+/// count, and a local callable's closing line.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct FirBodyDebugLines {
     /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
     expressions: Vec<FirExpressionDebugLines>,
     statements: Vec<FirStatementDebugLines>,
-    /// 1-based line of a source lambda's closing `}` (0 = unknown).
+    /// 1-based line of a local callable's closing `}` (0 = unknown).
     close_line: u32,
 }
 
@@ -135,9 +135,14 @@ impl FirBody {
         self.debug_lines.source_line_count
     }
 
-    /// The line of a source lambda's closing `}`, where kotlinc maps its implicit `Unit` return.
-    pub fn close_line(&self) -> Option<u32> {
-        (self.debug_lines.close_line != 0).then_some(self.debug_lines.close_line)
+    /// The closing `}` line of this local callable's block body or lambda, where kotlinc marks
+    /// the return a body falling off its end gets; 0 when there is none.
+    pub const fn close_line(&self) -> u32 {
+        self.debug_lines.close_line
+    }
+
+    pub(crate) fn set_close_line(&mut self, line: u32) {
+        self.debug_lines.close_line = line;
     }
 
     pub(crate) fn attach_debug_lines(
@@ -188,12 +193,7 @@ impl FirBody {
             }
         }
         for expression in &mut self.expressions {
-            let lambda_span = source_span(expression.origin);
             if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
-                // The literal's last line is its closing `}`.
-                if let Some(lines) = lambda_span.and_then(|span| expression_lines.get(&span)) {
-                    body.debug_lines.close_line = lines.end;
-                }
                 body.attach_debug_lines(
                     source,
                     source_line_count,

@@ -33,6 +33,7 @@ mod captured_storage;
 mod checked_facts;
 mod class_pool_seed;
 mod companion_blocks;
+mod comparison_branches;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
@@ -47,6 +48,7 @@ mod enum_metadata;
 mod field_write;
 mod frame_map;
 mod function_debug;
+mod function_invocation;
 mod function_reference_class;
 mod function_reference_invoke;
 mod implicit_reference_coercion;
@@ -93,6 +95,7 @@ mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_fields;
+mod string_members;
 mod type_operation_emission;
 mod vararg;
 mod when;
@@ -104,7 +107,7 @@ pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
 pub(crate) use declaration_types::jvm_tys;
 pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
-use declaration_types::{field_jvm_tys, jvm_declared_ty};
+use declaration_types::{field_jvm_tys, jvm_declared_ty, signature_function_params};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
@@ -1211,9 +1214,9 @@ fn build_class_metadata(
                         field.is_final() && index >= c.ctor_param_count
                     }) && property
                         .initializer
-                        .is_some_and(|init| static_fields::const_value_idx_peek(ir, init))
+                        .is_some_and(|init| static_fields::literal_initializer(ir, init))
                         || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
-                            !s.is_var && static_fields::const_value_idx_peek(ir, s.init)
+                            !s.is_var && static_fields::literal_initializer(ir, s.init)
                         }),
                     is_const: false,
                     modifiers: property.modifiers,
@@ -3596,105 +3599,6 @@ struct LambdaSelection<'a> {
     rescued: &'a std::collections::HashSet<u32>,
 }
 
-/// Find private instance calls whose caller and declaration are different JVM classes.
-///
-/// FIR/common IR retain Kotlin ownership and the selected member identity only. The Java-8 access
-/// bridge is a physical realization, so this whole-file reachability walk belongs at the backend
-/// boundary and runs once per emission pass, never once per method candidate.
-fn cross_owner_private_member_calls(
-    ir: &IrFile,
-    facade: &str,
-    class_member_fids: &std::collections::HashSet<u32>,
-    private_interface_bodies_are_members: bool,
-) -> std::collections::HashSet<u32> {
-    let mut result = std::collections::HashSet::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(expression) = stack.pop() {
-            if !seen.insert(expression) {
-                continue;
-            }
-            if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
-                let target_class = &ir.classes[*class as usize];
-                let target = target_class.methods[*index as usize];
-                if target_class.fq_name() != owner
-                    && (private_interface_bodies_are_members || !target_class.is_interface)
-                    && ir.private_methods.contains(&target)
-                {
-                    result.insert(target);
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
-        }
-    };
-
-    let facade_roots = ir
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(fid, function)| {
-            !class_member_fids.contains(&(*fid as u32)) && function.dispatch_receiver.is_none()
-        })
-        .filter_map(|(_, function)| function.body)
-        .chain(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner.is_none())
-                .map(|property| property.init),
-        )
-        .collect();
-    scan(facade, facade_roots);
-
-    for class in &ir.classes {
-        let owner = class.fq_name();
-        let mut roots = class
-            .methods
-            .iter()
-            .filter_map(|fid| {
-                ir.functions
-                    .get(*fid as usize)
-                    .and_then(|function| function.body)
-            })
-            .collect::<Vec<_>>();
-        for fid in &class.methods {
-            if let Some(defaults) = ir
-                .fn_params
-                .get(fid)
-                .and_then(|parameters| parameters.defaults.as_ref())
-            {
-                roots.extend(defaults.iter().flatten().copied());
-            }
-        }
-        roots.extend(class.init_body);
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        roots.extend(
-            class
-                .properties
-                .iter()
-                .filter_map(|property| property.initializer),
-        );
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body);
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-        }
-        for entry in &class.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
-        roots.extend(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner_matches(&owner))
-                .map(|property| property.init),
-        );
-        scan(&owner, roots);
-    }
-    result
-}
-
 fn emit_pass(
     ir: &IrFile,
     facade: &str,
@@ -3748,7 +3652,7 @@ fn emit_pass(
     env.run
         .private_member_access_bridges
         .borrow_mut()
-        .clone_from(&cross_owner_private_member_calls(
+        .clone_from(&access_bridges::cross_owner_private_member_calls(
             ir,
             facade,
             &class_member_fids,
@@ -4940,16 +4844,15 @@ fn emit_scheduled_member(
         // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
         // `this` slot; an ordinary member is an instance method.
         emit_method(ir, fid, fq_name, facade, cw, !f.is_static, env);
-        if env
-            .run
-            .private_member_access_bridges
-            .borrow()
-            .contains(&fid)
-        {
-            access_bridges::emit_private_member_access_bridge(ir, fid, fq_name, cw, false);
-        }
         if ir.function_reference_access_bridges.contains(&fid) {
-            access_bridges::emit_function_reference_access_bridge(ir, fid, fq_name, cw, false);
+            access_bridges::emit_function_reference_access_bridge(
+                ir,
+                fid,
+                fq_name,
+                cw,
+                false,
+                c.decl_line,
+            );
         }
         bridge_emission::emit_value_class_interface_entries(
             ir,
@@ -5930,6 +5833,7 @@ fn emit_class(
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     if !static_storage(ir, c) {
@@ -6392,11 +6296,23 @@ fn emit_interface_class(
                 .borrow()
                 .contains(&fid)
             {
-                access_bridges::emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_private_member_access_bridge(
+                    ir,
+                    fid,
+                    &fq_name,
+                    &mut cw,
+                    true,
+                    c.decl_line,
+                );
             }
             if ir.function_reference_access_bridges.contains(&fid) {
                 access_bridges::emit_function_reference_access_bridge(
-                    ir, fid, &fq_name, &mut cw, true,
+                    ir,
+                    fid,
+                    &fq_name,
+                    &mut cw,
+                    true,
+                    c.decl_line,
                 );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
@@ -7019,7 +6935,14 @@ fn emit_enum_class(
                 // static call (`IncompatibleClassChangeError`).
                 emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
                 if ir.function_reference_access_bridges.contains(&fid) {
-                    access_bridges::emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
+                    access_bridges::emit_function_reference_access_bridge(
+                        ir,
+                        fid,
+                        &fq,
+                        cw,
+                        false,
+                        c.decl_line,
+                    );
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
                 // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
@@ -8246,14 +8169,13 @@ fn emit_method_inner_with_holder(
         .get(&fid)
         .cloned()
         .unwrap_or_default();
-    // kotlinc annotates nullability only on declarations a source caller can reach. A
-    // HIDDEN-deprecated one is emitted ACC_SYNTHETIC for binary compatibility alone and carries
-    // neither `@NotNull` nor `@Nullable`; a PRIVATE method (declared, or a data class's `copy`
-    // under `DataClassCopyRespectsConstructorVisibility`) likewise gets none — the annotations
-    // exist for Java interop, which cannot see it.
-    // kotlinc annotates DECLARED methods. A compiler-invented accessor (`access$…$cp`) gets no
-    // nullability annotation, the same way it gets no generic `Signature`.
+    // kotlinc annotates nullability only on DECLARED methods a source caller can reach. A synthetic
+    // one (HIDDEN-deprecated, or reifiable: only an inlining call site runs it), a PRIVATE one
+    // (including a data class's `copy` under `DataClassCopyRespectsConstructorVisibility`) and a
+    // compiler-invented accessor (`access$…$cp`, which gets no `Signature` either) carry neither
+    // `@NotNull` nor `@Nullable`: the annotations exist for Java interop, which cannot see them.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
+        && !method_access::is_reifiable(ir, fid)
         && !ir.private_methods.contains(&fid)
         && !ir.synthetic_methods.contains(&fid)
         && !ir.jvm_nullability_unannotated_methods.contains(&fid);
@@ -8813,7 +8735,7 @@ fn method_signature_shape(
             .unwrap_or(declared_ret);
         return suspend_method_sig(formatter, params, ret);
     }
-    method_parameterized_sig(formatter, &f.params, &f.ret)
+    method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
 }
 
 fn suspend_generic_method_sig(
@@ -9627,6 +9549,8 @@ struct Emitter<'a> {
     /// The declarations that read a suspend lambda's parameters from their fields, in the
     /// `invokeSuspend` being emitted. Each is marked for the transformer.
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
+    /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
+    erased_invocations: HashSet<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -9664,6 +9588,8 @@ struct Emitter<'a> {
     /// carries its own line leaves that line in effect; the instruction that CONSUMES the operand
     /// belongs to the statement, and kotlinc marks it back to this line.
     statement_line: Option<u32>,
+    /// The source line of the comparison being emitted, which its jump carries.
+    comparison_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
@@ -9724,6 +9650,7 @@ impl<'a> Emitter<'a> {
             machine_suspensions: HashSet::new(),
             transformed_suspensions: HashMap::new(),
             suspend_lambda_parameter_reads: HashSet::new(),
+            erased_invocations: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -9734,6 +9661,7 @@ impl<'a> Emitter<'a> {
             open_locals: Vec::new(),
             block_depth: 0,
             statement_line: None,
+            comparison_line: None,
             record_locals: false,
             inside_condition: false,
             this_uninitialized: false,
@@ -9938,21 +9866,12 @@ impl<'a> Emitter<'a> {
                     let mut param_slots: Vec<(u16, Ty)> = cap_slots.clone();
                     param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                     for j in (0..arity).rev() {
-                        let jt = lam_tys[j];
-                        if jt.is_jvm_scalar() {
-                            // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
-                            // from the lambda's semantic parameter before using the physical carrier for
-                            // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
-                            unbox_prim_from(
-                                self.cw,
-                                &mut scratch,
-                                Ty::obj("java/lang/Object"),
-                                semantic_scalar_adapter(lam_semantic_tys[j], jt),
-                            );
-                        } else if let Some(internal) = checkcast_internal(jt) {
-                            let ci = self.cw.class_ref(&internal);
-                            scratch.checkcast(ci);
-                        }
+                        // A value class the implementation takes boxed, the inline body takes unboxed.
+                        let jt = self.coerce_invoke_argument(
+                            lam_semantic_tys[j],
+                            lam_tys[j],
+                            &mut scratch,
+                        );
                         let slot = lambda_slot;
                         lambda_slot += slot_words(jt);
                         self.frame.reserve_through(lambda_slot);
@@ -10003,17 +9922,10 @@ impl<'a> Emitter<'a> {
                     }
                     let body_ret =
                         self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
-                    if body_ret.is_jvm_scalar() {
-                        // The erased `invoke` result is `Object`, so reverse the same semantic adapter
-                        // choice after the inline body leaves its physical carrier on the stack. Use
-                        // the BODY's value type, not the contextual lambda declaration return: a block
-                        // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
-                        box_prim_free(
-                            self.cw,
-                            &mut scratch,
-                            semantic_scalar_adapter(body_value_ty, body_ret),
-                        );
-                    }
+                    // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not
+                    // the contextual lambda declaration return: a block accepted as `() -> Any?` can
+                    // still produce a primitive `Boolean`/`Int` here.
+                    self.coerce_invoke_result(body_value_ty, body_ret, &mut scratch);
                     scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
                     let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
                         &scratch.bytes,
@@ -10613,7 +10525,7 @@ impl<'a> Emitter<'a> {
             match self.inlined_literal_positions(
                 call_expression,
                 leading_non_argument_operands,
-                &args,
+                args,
             ) {
                 Ok(positions) if positions.is_empty() => {
                     return self.try_inline_classpath_body(&inline_call, code).is_some();
@@ -10753,8 +10665,7 @@ impl<'a> Emitter<'a> {
                     (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
                 let slot = if let Some(i) = init {
-                    self.emit_value(i, code);
-                    let source = self.value_ty(i);
+                    let source = self.emit_consumed_operand(i, code);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
                     self.adapt_physical_operand(source, semantic, Some(ty), jt, code);
                     // kotlinc's `visitVariable` marks the initializer's line, then the
@@ -10824,8 +10735,8 @@ impl<'a> Emitter<'a> {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }
             IrExpr::While { .. } => self.emit_while(e, code),
-            IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
-            IrExpr::Continue { label } => self.emit_loop_transfer(&label, false, code),
+            IrExpr::Break { label } => self.emit_loop_transfer(e, &label, true, code),
+            IrExpr::Continue { label } => self.emit_loop_transfer(e, &label, false, code),
             other => {
                 self.emit_discarding_node(e, &other, code);
             }
@@ -11495,6 +11406,12 @@ impl<'a> Emitter<'a> {
         let direct_field = self.direct_field_access(class, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
+            // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
+            if self.reaches_through_bridge(owner, getter) {
+                return Some(access_bridges::private_member_read_access(
+                    self.ir, getter, owner,
+                ));
+            }
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: if class.is_annotation {
@@ -11677,10 +11594,10 @@ impl<'a> Emitter<'a> {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
-                self.emit_loop_transfer(label, true, code);
+                self.emit_loop_transfer(e, label, true, code);
             }
             IrExpr::Continue { label } => {
-                self.emit_loop_transfer(label, false, code);
+                self.emit_loop_transfer(e, label, false, code);
             }
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
@@ -11704,7 +11621,7 @@ impl<'a> Emitter<'a> {
                 IrConst::Long(v) => code.push_long(*v, self.cw),
                 IrConst::Double(v) => code.push_double(*v, self.cw),
                 IrConst::Float(v) => code.push_float(*v, self.cw),
-                IrConst::String(s) => code.push_string_kt(s, self.cw),
+                IrConst::String(s) => super::string_constant::push_string(s, code, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
             IrExpr::ClassConst { internal } => {
@@ -12416,24 +12333,9 @@ impl<'a> Emitter<'a> {
                         self.emit_value(dispatch_receiver.unwrap(), code);
                         code.arraylength();
                     }
-                    crate::ir::IrIntrinsic::StringGet => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        self.emit_value(args[0], code);
-                        let method = self.cw.methodref("java/lang/String", "charAt", "(I)C");
-                        code.invokevirtual(method, 1, 1);
-                    }
-                    crate::ir::IrIntrinsic::StringLength => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        let method = self.cw.methodref("java/lang/String", "length", "()I");
-                        code.invokevirtual(method, 0, 1);
-                    }
-                    crate::ir::IrIntrinsic::StringPlus => {
-                        // kotlinc flattens a `plus` chain (and any template inside it) into ONE
-                        // concatenation before codegen; every part below is a leaf operand.
-                        let mut parts = Vec::new();
-                        self.flatten_concat_parts(dispatch_receiver.unwrap(), &mut parts);
-                        self.flatten_concat_parts(args[0], &mut parts);
-                        self.emit_string_plus_parts(&parts, code)
+                    op @ (crate::ir::IrIntrinsic::StringGet
+                    | crate::ir::IrIntrinsic::StringLength) => {
+                        self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::NullableAnyToString => {
                         let receiver = dispatch_receiver.unwrap();
@@ -12772,6 +12674,12 @@ impl<'a> Emitter<'a> {
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
                     // (stdlib facades, the common case) stay `Methodref`.
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
+                    // A private value-class `-impl` another class calls goes through its bridge.
+                    let bridged = self.ir.jvm_member_targets.get(&e);
+                    let name = match bridged.filter(|&&f| self.reaches_through_bridge(&owner, f)) {
+                        Some(_) => format!("access${name}"),
+                        None => name,
+                    };
                     let m = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &name, &descriptor)
                     } else {
@@ -13741,98 +13649,9 @@ impl<'a> Emitter<'a> {
                 params,
                 ret,
             } => {
-                let n = args.len();
-                let high_arity = is_high_arity_function(n as u8);
-                if args.iter().any(|&a| self.emits_control_flow(a)) {
-                    // A branchy argument can't run with the function value on the stack — its merge
-                    // frame would omit it. Evaluate the function + args into temps first (in order),
-                    // then load and box.
-                    let mut all = vec![*func];
-                    all.extend(args.iter().copied());
-                    let temps = self.spill_to_temps(&all, code);
-                    load(temps[0].1, temps[0].0, code);
-                    if high_arity {
-                        code.push_int(n as i32, self.cw);
-                        let object = self.cw.class_ref("java/lang/Object");
-                        code.anewarray(object);
-                    }
-                    for (i, &(slot, t, _)) in temps[1..].iter().enumerate() {
-                        if high_arity {
-                            code.dup();
-                            code.push_int(i as i32, self.cw);
-                        }
-                        load(t, slot, code);
-                        let semantic = params.get(i).copied().unwrap_or(t);
-                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, t));
-                        if high_arity {
-                            code.array_store(0x53, 1); // aastore
-                        }
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    self.emit_value(*func, code);
-                    if high_arity {
-                        code.push_int(n as i32, self.cw);
-                        let object = self.cw.class_ref("java/lang/Object");
-                        code.anewarray(object);
-                    }
-                    for (i, &arg) in args.iter().enumerate() {
-                        if high_arity {
-                            code.dup();
-                            code.push_int(i as i32, self.cw);
-                        }
-                        self.emit_value(arg, code);
-                        let at = self.value_ty(arg);
-                        let semantic = params.get(i).copied().unwrap_or(at);
-                        // `FunctionN` parameters are erased `Object`, but wrapper selection is a
-                        // semantic operation. Retaining `params` on the IR node prevents an unsigned
-                        // argument from being boxed as the signed wrapper of its shared carrier.
-                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, at));
-                        if high_arity {
-                            code.array_store(0x53, 1); // aastore
-                        }
-                    }
-                }
-                let iface = jvm_function_interface(n as u8);
-                let m = self.cw.interface_methodref(
-                    &iface,
-                    "invoke",
-                    &jvm_function_invoke_descriptor(n as u8),
-                );
-                // A function VALUE's invocation is a dispatch like any other: after the operands
-                // have each marked their own line, the call's own line returns at the `invoke`.
-                self.mark_dispatch_line(e, code);
-                code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
-                // The interface returns `Object`; cast/unbox to the function's declared return type.
-                // Select a scalar adapter from that semantic return before `ir_ty_to_jvm` reduces an
-                // unsigned type to its signed carrier. This is the common consumer for real lambdas,
-                // callable references, and property references, independent of which producer object
-                // supplied the `FunctionN` implementation.
-                let rt = ir_ty_to_jvm(ret);
-                if rt.is_jvm_scalar() {
-                    unbox_prim_from(
-                        self.cw,
-                        code,
-                        Ty::obj("java/lang/Object"),
-                        semantic_scalar_adapter(*ret, rt),
-                    );
-                } else {
-                    match rt {
-                        Ty::Unit | Ty::Nothing => code.pop(),
-                        Ty::String => {
-                            let ci = self.cw.class_ref("java/lang/String");
-                            code.checkcast(ci);
-                        }
-                        _ if rt.is_array() => {
-                            let ci = self.cw.class_ref(&type_descriptor(rt));
-                            code.checkcast(ci);
-                        }
-                        Ty::Obj(internal, _) => {
-                            let ci = self.cw.class_ref(&internal.render());
-                            code.checkcast(ci);
-                        }
-                        _ => {}
-                    }
+                self.emit_function_invocation(e, *func, args, params, code);
+                if !self.erased_invocations.remove(&e) {
+                    self.narrow_invocation_result(*ret, code);
                 }
             }
             _ => {}
@@ -13882,76 +13701,7 @@ impl<'a> Emitter<'a> {
         code.array_store(operation, words);
     }
 
-    /// The operand a concatenation part really contributes. A part boxed only to satisfy
-    /// `String.plus(Any?)` (`"…" + port` wraps the `Int` through a reference coercion) is
-    /// concatenated as the PRIMITIVE — kotlinc's `append(I)` / indy `I` argument, never `valueOf`
-    /// + `append(Object)`. The box is concat-invisible, so see through it.
-    fn concat_operand(&self, e: u32) -> u32 {
-        match self.ir.expr(e) {
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => {
-                let inner = *arg;
-                let inner_ty = self.value_ty(inner);
-                // An UNSIGNED value's box is NOT concat-invisible: its carrier prints in signed
-                // decimal, the box's own `toString` in unsigned — keep the box.
-                let unsigned_inner = self
-                    .ir
-                    .logical_types
-                    .get(&inner)
-                    .is_some_and(|t| t.is_unsigned())
-                    || inner_ty.is_unsigned();
-                let outer_reference = ir_ty_to_jvm(&self.value_ty(e)).is_reference();
-                let inner_reference = ir_ty_to_jvm(&inner_ty).is_reference();
-                // A reference operand widened to `Any?` for the `plus` parameter is the same value
-                // under its own static type: kotlinc concatenates `b: String` as `String`
-                // (`append(String)`, indy `Ljava/lang/String;`) and folds a widened literal into
-                // the recipe. The upcast is concat-invisible too.
-                if outer_reference && (inner_reference || !unsigned_inner) {
-                    inner
-                } else {
-                    e
-                }
-            }
-            _ => e,
-        }
-    }
-
-    /// Flatten a `String.plus` chain into its leaf operands, left to right: a nested `plus` on
-    /// either side and a string template (`IrExpr::StringConcat`) contribute their own parts,
-    /// exactly as kotlinc's `FlattenStringConcatenationLowering` folds them into one
-    /// concatenation. A boxed primitive operand contributes the primitive
-    /// ([`Self::concat_operand`]).
-    fn flatten_concat_parts(&self, e: u32, out: &mut Vec<u32>) {
-        let e = self.concat_operand(e);
-        match self.ir.expr(e) {
-            IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::StringPlus,
-                        ..
-                    },
-                dispatch_receiver: Some(receiver),
-                args,
-                ..
-            } if args.len() == 1 => {
-                let (receiver, arg) = (*receiver, args[0]);
-                self.flatten_concat_parts(receiver, out);
-                self.flatten_concat_parts(arg, out);
-            }
-            IrExpr::StringConcat(parts) => {
-                for part in parts.clone() {
-                    self.flatten_concat_parts(part, out);
-                }
-            }
-            _ => out.push(e),
-        }
-    }
-
     fn append(&mut self, e: u32, code: &mut CodeBuilder) {
-        let e = self.concat_operand(e);
         let ty = self.value_ty(e);
         let semantic = self.ir.logical_types.get(&e).copied().unwrap_or(ty);
         self.emit_value(e, code);
@@ -13988,47 +13738,6 @@ impl<'a> Emitter<'a> {
             }
         }
         self.append_top(ty, code);
-    }
-
-    /// One concatenation over flattened `plus` parts: `invokedynamic makeConcatWithConstants` on
-    /// JVM 9+ (kotlinc's default there), else a single `StringBuilder` with one `append` per part.
-    fn emit_string_plus_parts(&mut self, parts: &[u32], code: &mut CodeBuilder) {
-        if self.try_emit_indy_concat(parts, code) {
-            return;
-        }
-        let sb = self.cw.class_ref("java/lang/StringBuilder");
-        // A branchy operand (`when`/`try`) can't be emitted with the `StringBuilder` on the stack — its
-        // merge frames would omit it. Spill such operands to temps first.
-        if parts.iter().any(|&part| self.emits_control_flow(part)) {
-            let temps = self.spill_to_temps(parts, code);
-            code.new_obj(sb);
-            code.dup();
-            let init = self
-                .cw
-                .methodref("java/lang/StringBuilder", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            for &(slot, t, _) in &temps {
-                load(t, slot, code);
-                self.append_top(t, code);
-            }
-            self.release_operand_spills(&temps);
-        } else {
-            code.new_obj(sb);
-            code.dup();
-            let init = self
-                .cw
-                .methodref("java/lang/StringBuilder", "<init>", "()V");
-            code.invokespecial(init, 0, 0);
-            for &part in parts {
-                self.append_part(part, code);
-            }
-        }
-        let ts = self.cw.methodref(
-            "java/lang/StringBuilder",
-            "toString",
-            "()Ljava/lang/String;",
-        );
-        code.invokevirtual(ts, 0, 1);
     }
 
     /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
@@ -14317,75 +14026,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Push `ops` onto the stack in order. If any later op introduces control flow, evaluate all ops
-    /// into temps first, then load them, keeping the operand baseline empty across nested branches.
-    fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, ops, code, |_, _, _| {});
-    }
-
-    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
-    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
-    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
-    /// after a right operand has landed above it, and a branchy right operand still requires both
-    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
-    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
-    fn emit_operands_adapted<F>(
-        &mut self,
-        default_plan: Option<(
-            u32,
-            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
-        )>,
-        ops: &[u32],
-        code: &mut CodeBuilder,
-        mut adapt: F,
-    ) where
-        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
-    {
-        let mut inside_run = false;
-        if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
-            let temps = self.spill_to_temps(ops, code);
-            for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                load(t, slot, code);
-                adapt(self, t, code);
-            }
-            self.release_operand_spills(&temps);
-        } else {
-            for (operand_index, &o) in ops.iter().enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                self.emit_value(o, code);
-                adapt(self, self.value_ty(o), code);
-            }
-        }
-    }
-
-    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
-    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
-    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
-        box_prim_free(self.cw, code, ty);
-    }
-
-    /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
-    /// side is a primitive right where it lands — kotlinc's shape for a mixed pair (`aload_0; iload_1;
-    /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
-    /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
-    /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
-    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
-    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
-    fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
-    }
-
     fn emit_primitive_inc_dec_virtual(
         &mut self,
         owner: &str,
@@ -14587,50 +14227,8 @@ impl<'a> Emitter<'a> {
                     },
                 }
             }
-            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_compare(op, lhs, rhs, code),
+            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_comparison(expression, code),
         }
-    }
-
-    fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        let f = code.new_label();
-        // Every comparison that needs a conditional branch goes through the same classifier and
-        // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
-        // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
-        // null/reference/numeric case tables here previously let zero-left ordering acquire a different
-        // node-shape rule depending on whether the comparison happened to be an `if` condition.
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, f, false, code) {
-            self.materialize_cmp_bool(f, code);
-            return;
-        }
-
-        // The shared emitter returns false only for structural equality between two non-null
-        // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
-        // position, so branching merely to reconstruct it would be longer and less faithful.
-        self.emit_structural_equality(lhs, rhs, code);
-        if op == IrBinOp::Ne {
-            code.push_int(1, self.cw);
-            code.ixor();
-        }
-    }
-
-    /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
-    /// exactly when the comparison is FALSE. Fall through to `iconst_1`, jump over the `iconst_0` the
-    /// `f` arm pushes — kotlinc's polarity (`if_icmpne; iconst_1; goto; iconst_0`), which keeps the
-    /// null, referential and numeric arms byte-identical to it at no extra instruction cost.
-    fn materialize_cmp_bool(&mut self, f: Label, code: &mut CodeBuilder) {
-        // The branch popped its operands — this is the height on BOTH merge paths (the `f` branch and
-        // the fall-through). The 0/1 booleans below each leave exactly one value, so the tracker must be
-        // reset to this height at `bind(f)`; otherwise the linear counter carries the fall-through's
-        // `push 1` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but it makes
-        // `stack_height()` over-report, which the branchy-inline baseline check relies on).
-        let merged = code.stack_height().max(0) as u16;
-        let end = code.new_label();
-        code.push_int(1, self.cw);
-        code.goto(end);
-        self.bind(f, code);
-        code.set_stack(merged);
-        code.push_int(0, self.cw);
-        self.bind(end, code);
     }
 
     /// Realize the already-selected Kotlin assertion operation. The runtime guard is emitted before
@@ -14695,112 +14293,6 @@ impl<'a> Emitter<'a> {
         code.set_stack(entry_stack);
     }
 
-    /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when
-    /// the comparison's result equals `jt` — no 0/1 boolean is materialized. Mirrors `emit_compare`'s
-    /// operand/3-way/null/ref handling but ends in one fused branch with the right polarity.
-    fn emit_compare_branch(
-        &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        target: Label,
-        jt: bool,
-        code: &mut CodeBuilder,
-    ) {
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, target, jt, code) {
-            return;
-        }
-
-        // The shared classifier leaves only non-null structural `==`/`!=` here. Unlike value position,
-        // a condition must consume `Intrinsics.areEqual` with one final branch; the comparison's
-        // requested polarity determines whether equality means taking or skipping the target.
-        debug_assert!(matches!(op, IrBinOp::Eq | IrBinOp::Ne));
-        self.emit_structural_equality(lhs, rhs, code);
-        if (op == IrBinOp::Eq) == jt {
-            code.ifne(target);
-        } else {
-            code.ifeq(target);
-        }
-    }
-
-    /// Emit every comparison except non-null structural reference equality as a branch.
-    ///
-    /// Returning `false` is a deliberately narrow contract: both operands are non-null references and
-    /// `op` is `==`/`!=`, so the caller must emit `Intrinsics.areEqual` in the form appropriate to its
-    /// consumer. All null, identity and numeric classification lives here so comparison semantics cannot
-    /// drift based on whether an identical IR node is consumed as a Boolean value or as control flow.
-    fn emit_non_structural_compare_branch(
-        &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        target: Label,
-        jt: bool,
-        code: &mut CodeBuilder,
-    ) -> bool {
-        use IrBinOp::*;
-        let lt = self.value_ty(lhs);
-        // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`
-        // (kotlinc's form), NOT `aconst_null; if_acmp*`. Computed up front so the referential-identity
-        // path below doesn't claim a null comparison (a `null` literal's type is a reference).
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        // Referential identity (`===`/`!==`) on two non-null references — or on a mixed reference/
-        // primitive pair, whose primitive side boxes first — → `if_acmpeq`/`if_acmpne`.
-        if matches!(op, RefEq | RefNe)
-            && identity_compares_refs(lt, self.value_ty(rhs))
-            && !lhs_null
-            && !rhs_null
-        {
-            self.emit_identity_operands(lhs, rhs, code);
-            if (op == RefEq) == jt {
-                code.if_acmpeq(target);
-            } else {
-                code.if_acmpne(target);
-            }
-            return true;
-        }
-        let op = match op {
-            RefEq => Eq,
-            RefNe => Ne,
-            o => o,
-        };
-        if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
-            let operand = if lhs_null { rhs } else { lhs };
-            // A physical primitive arises here only for identity (`x === null`/`x !== null`): kotlinc
-            // accepts that with an always-false/true warning, whereas structural `x == null` is
-            // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
-            // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
-            self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
-            if (op == Eq) == jt {
-                code.ifnull(target);
-            } else {
-                code.ifnonnull(target);
-            }
-            return true;
-        }
-        // Structural equality's value result has different optimal consumers: value position can use it
-        // directly, while control flow branches on it. Tell the caller to select that final operation;
-        // the semantic classification itself still occurs once, here.
-        if matches!(op, Eq | Ne) && !(lt.is_jvm_scalar() && self.value_ty(rhs).is_jvm_scalar()) {
-            return false;
-        }
-        self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
-        true
-    }
-
-    /// Put the null-safe structural equality result for two references on the operand stack.
-    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
-        let m = self.cw.methodref(
-            "kotlin/jvm/internal/Intrinsics",
-            "areEqual",
-            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-        );
-        code.invokestatic(m, 2, 1);
-    }
-
     /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
     ///
     /// `None` unless one side is the primitive three-way comparison and the other is the integer
@@ -14853,35 +14345,6 @@ impl<'a> Emitter<'a> {
             return None;
         };
         Some((*receiver, *argument, direct))
-    }
-
-    /// The loop label a branch body jumps to when it does nothing else.
-    ///
-    /// `None` unless the body IS a `break` or `continue` — one that also computed something would
-    /// have to emit that first, and the jump could then not be fused into the condition. Leaving a
-    /// `try` counts as computing something: the transfer runs every `finally` it leaves, so a fused
-    /// jump would skip them.
-    fn loop_jump_target(&self, body: u32) -> Option<Label> {
-        let mut node = self.ir.expr(body);
-        if let IrExpr::Block { stmts, value } = node {
-            let [only] = stmts.as_slice() else {
-                return None;
-            };
-            if value.is_some() {
-                return None;
-            }
-            node = self.ir.expr(*only);
-        }
-        let (label, brk) = match node {
-            IrExpr::Break { label } => (label, true),
-            IrExpr::Continue { label } => (label, false),
-            _ => return None,
-        };
-        let (cont, end, depth) = self.loop_transfer_target(label)?;
-        if self.return_finalizers.len() > depth {
-            return None;
-        }
-        Some(if brk { end } else { cont })
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
