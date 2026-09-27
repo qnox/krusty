@@ -43,8 +43,6 @@ controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
 controlflow/for_loops_array_nested.kt
-coroutines/controlFlow/breakFinally.kt
-coroutines/controlFlow_finally2.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
 coroutines/featureIntersection/funInterface/kt50950.kt

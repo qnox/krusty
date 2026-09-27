@@ -70,10 +70,28 @@ Steps, one PR each:
 
 Each step reports box passes, byte-identical files and divergent classes before and after.
 
+### Step 4 as landed
+
+* A suspension point inside a `try`, `catch` or `finally` no longer declines the transformer. The
+  transformer's port of `splitTryCatchBlocksContainingSuspensionPoint`
+  (`state_machine::split_try_catch_blocks`) puts `L1: nop L2` after the point and cuts each range
+  around it at `L1`/`L2`, so the restored locals sit outside every range while the rest of the
+  region stays protected: a throw after the resume is still caught, and a `finally` runs once on
+  each path. Tested in `tests/suspend_under_try_e2e.rs`: method code and continuation classes
+  against kotlinc for a point in a `try` body, in a `catch` body, in a `finally` body, two points in
+  one range and points in nested ranges, and runs that resume in each, through normal and
+  exceptional exits.
+* Two emitter facts those comparisons needed. A suspension point's erased `Object` result goes
+  straight to a consumer that takes an `Object` (`return step()` returns it as is), without the
+  unbox and rebox; kotlinc coerces it only for a consumer that needs a narrower type. And a catch
+  clause marks its `catch` line where the handler stores the exception (for every function, not
+  only suspend ones), which is the line `@DebugMetadata` records after a point that ends its
+  protected range (`tests/catch_clause_line_e2e.rs`).
+
 ### Step 2 as landed
 
 * `jvm::suspend::bytecode_machine` routes a top-level (static, non-private) suspend function to
-  the transformer when every suspension point is a plain call outside any `try`, the emitter
+  the transformer when every suspension point is a plain call, the emitter
   splices no classpath inline body into it (a same-file inline function the common IR already
   expanded is part of the body), it does not read its own continuation, and stdlib has
   `SpillingKt` (the transformer always nulls out dead spills). Everything else keeps the IR
@@ -87,9 +105,7 @@ Each step reports box passes, byte-identical files and divergent classes before 
   callee's declared result after `afterInlineCall`, as kotlinc does.
 * FixStack needs nothing for a protected range: its analysis follows the exception edges, and the
   try/catch part kotlinc drives from codegen's save-stack pseudo-instructions has nothing to act
-  on, because krusty's emitter never enters a `try` with values on the stack. Suspension points
-  inside a `try` are still step 4 (the transformer's range splitting is not yet checked against
-  kotlinc end to end).
+  on, because krusty's emitter never enters a `try` with values on the stack.
 * `ClassWriter::finish_with_coroutines` runs the transformer over the finished method before the
   other rewrites and hands back the spill fields and `@DebugMetadata`; the continuation class is
   written afterwards from them. A function whose suspension points are all tail calls gets no

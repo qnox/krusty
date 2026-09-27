@@ -92,7 +92,11 @@ impl Emitter<'_> {
         self.machine_after(suspension, code);
         if self.transformed_result(expression).is_some() {
             // kotlinc discards the erased result itself, without coercing it first.
-            self.close_transformed_suspension(expression, true, code);
+            self.close_transformed_suspension(
+                expression,
+                super::transformed_suspensions::SuspensionResult::Discarded,
+                code,
+            );
             return;
         }
         // A successfully spliced bottom-typed expression has already transferred control (for
