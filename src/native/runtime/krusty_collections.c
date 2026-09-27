@@ -540,16 +540,74 @@ typedef struct KWalk {
 
 static const uint32_t kt_walk_offsets[] = {offsetof(KWalk, over)};
 
-const KType kt_type_array_iterator = {
-    KT_ANONYMOUS("kotlin.collections.Iterator"),
-    .instance_size = sizeof(KWalk),
-    .reference_count = 1,
-    .reference_offsets = kt_walk_offsets,
-    .super = &kt_type_any,
-    .vtable = kt_any_vtable,
-    .vtable_length = 3,
-    .interfaces = kt_iterator_interfaces,
-    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
+/* The abstract iterators of the primitive element kinds a range does not have, which an array's
+   iterator subclasses as it subclasses `IntIterator`; like those, each implements `Iterator`. */
+#define KT_ABSTRACT_ITERATOR(identifier, simple)                                                   \
+    const KType identifier = {KT_NAMED("kotlin.collections.", simple),                             \
+                              .instance_size = sizeof(KObjectHeader),                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = kt_iterator_interfaces,                                \
+                              .interface_count = 1};
+KT_ABSTRACT_ITERATOR(kt_type_boolean_iterator, "BooleanIterator")
+KT_ABSTRACT_ITERATOR(kt_type_byte_iterator, "ByteIterator")
+KT_ABSTRACT_ITERATOR(kt_type_short_iterator, "ShortIterator")
+KT_ABSTRACT_ITERATOR(kt_type_float_iterator, "FloatIterator")
+KT_ABSTRACT_ITERATOR(kt_type_double_iterator, "DoubleIterator")
+#undef KT_ABSTRACT_ITERATOR
+
+/* An array's iterator, one class per array kind as Kotlin/Native has: `kotlin.ArrayIterator` for an
+   `Array<T>`, `kotlin.IntArrayIterator` (a subclass of `IntIterator`) and kin for the primitive
+   arrays, and `kotlin.UIntArray.Iterator` and kin for the unsigned ones, which subclass `Any` and
+   implement `Iterator`. The JVM names the signed ones `kotlin.jvm.internal.ArrayIntIterator` and
+   so on, from the same superclasses; this runtime is the native one. They share `KWalk` and are
+   told apart from every other iterator by being entries of this one table, in `kt_array_kinds`'s
+   order. */
+#define KT_ARRAY_ITERATOR(package, simple, parent, marker, markers)                                \
+    {KT_NAMED(package, simple),                                                                    \
+     .instance_size = sizeof(KWalk),                                                               \
+     .reference_count = 1,                                                                         \
+     .reference_offsets = kt_walk_offsets,                                                         \
+     .super = parent,                                                                              \
+     .vtable = kt_any_vtable,                                                                      \
+     .vtable_length = 3,                                                                           \
+     .interfaces = marker,                                                                         \
+     .interface_count = markers}
+static const KType kt_array_iterators[] = {
+    KT_ARRAY_ITERATOR("kotlin.", "ArrayIterator", &kt_type_any, kt_iterator_interfaces, 1),
+    KT_ARRAY_ITERATOR("kotlin.", "BooleanArrayIterator", &kt_type_boolean_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "ByteArrayIterator", &kt_type_byte_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "CharArrayIterator", &kt_type_char_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "ShortArrayIterator", &kt_type_short_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "IntArrayIterator", &kt_type_int_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "LongArrayIterator", &kt_type_long_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "FloatArrayIterator", &kt_type_float_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.", "DoubleArrayIterator", &kt_type_double_iterator, NULL, 0),
+    KT_ARRAY_ITERATOR("kotlin.UByteArray.", "Iterator", &kt_type_any, kt_iterator_interfaces, 1),
+    KT_ARRAY_ITERATOR("kotlin.UShortArray.", "Iterator", &kt_type_any, kt_iterator_interfaces, 1),
+    KT_ARRAY_ITERATOR("kotlin.UIntArray.", "Iterator", &kt_type_any, kt_iterator_interfaces, 1),
+    KT_ARRAY_ITERATOR("kotlin.ULongArray.", "Iterator", &kt_type_any, kt_iterator_interfaces, 1),
+};
+#undef KT_ARRAY_ITERATOR
+
+/* The array kinds, in `kt_array_iterators`'s order. */
+static const KType *const kt_array_kinds[] = {
+    &kt_type_array,       &kt_type_boolean_array, &kt_type_byte_array,  &kt_type_char_array,
+    &kt_type_short_array, &kt_type_int_array,     &kt_type_long_array,  &kt_type_float_array,
+    &kt_type_double_array, &kt_type_ubyte_array,  &kt_type_ushort_array, &kt_type_uint_array,
+    &kt_type_ulong_array};
+
+/* The iterator class of an array of kind `array`, which `kt_is_array` has accepted. */
+static const KType *kt_array_iterator_type(const KType *array) {
+    for (unsigned at = 0; at < sizeof(kt_array_kinds) / sizeof(kt_array_kinds[0]); at++) {
+        if (kt_array_kinds[at] == array) {
+            return &kt_array_iterators[at];
+        }
+    }
+    KT_FAIL("krusty: an iterator of an array of no known kind\n");
+    return NULL;
+}
 
 const KType kt_type_chars_iterator = {
     KT_ANONYMOUS("kotlin.collections.CharIterator"),
@@ -563,9 +621,13 @@ const KType kt_type_chars_iterator = {
     .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
 
 kt_boolean kt_walk_is(KRef iterator) {
-    return iterator != NULL
-           && (iterator->header.type == &kt_type_array_iterator
-               || iterator->header.type == &kt_type_chars_iterator);
+    if (iterator == NULL) {
+        return false;
+    }
+    /* Whether the descriptor is an entry of `kt_array_iterators`, asked of the addresses as
+       integers: C orders pointers only within one object. */
+    uintptr_t offset = (uintptr_t)iterator->header.type - (uintptr_t)kt_array_iterators;
+    return offset < sizeof(kt_array_iterators) || iterator->header.type == &kt_type_chars_iterator;
 }
 
 /* Whether a descriptor is one of the thirteen array shapes. */
@@ -1103,7 +1165,7 @@ KRef kt_iterable_iterator(KRef iterable) {
         return kt_list_iterator(iterable);
     }
     if (iterable != NULL && kt_is_array(iterable->header.type)) {
-        return kt_walk_of(&kt_type_array_iterator, iterable);
+        return kt_walk_of(kt_array_iterator_type(iterable->header.type), iterable);
     }
     /* Either text shape: the chars iterator reads its element through `kt_string_get` and its
        bound through `kt_string_length`, and both answer for a string and for a builder. */

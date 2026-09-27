@@ -9142,6 +9142,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `next()` and throws, and one whose first element removes the first ends cleanly. Compared with
   kotlinc's answers for `map_mutated_source.kt` on every run.
   Tests: `tests/native_runtime_e2e.rs` (`map_mutated_source`).
+- **Every native iterator is an `Iterator`, and an array's is its kind's.** A progression's iterator
+  (`IntProgressionIterator` and kin, through the abstract `IntIterator` family, and the two
+  unsigned ones directly) implements `kotlin.collections.Iterator`, so `is Iterator<*>` holds. An
+  array's iterator is one class per array kind: a `BooleanArray`'s through a `DoubleArray`'s subclass
+  the abstract `BooleanIterator` through `DoubleIterator` (so `IntArray(1).iterator() is
+  IntIterator`), and an `Array<T>`'s and the unsigned arrays' subclass `Any` and implement
+  `Iterator`. The superclasses and `is` answers are compared with kotlinc's for
+  `iterator_identity.kt` on every run, as are the progression iterators' and the unsigned arrays'
+  class names (`kotlin.UIntArray.Iterator`). The other arrays' class names are platform-defined —
+  the JVM's `kotlin.jvm.internal.ArrayIntIterator` is Kotlin/Native's `kotlin.IntArrayIterator`
+  (and `kotlin.ArrayIterator` for an `Array<T>`) — and the runtime publishes Kotlin/Native's, which
+  the driver pins.
+  Tests: `tests/native_runtime_e2e.rs` (`iterator_identity`).
 - **The native list, walk and array entry points answer as Kotlin does on the ordinary path.**
   `listOf`/`mutableListOf` and their members (`get`, `first`, `last`, `indexOf`, `lastIndexOf`,
   `contains`, `add`, `add(i, e)`, `set`, `removeAt`, `remove`, `addAll`, `+=`, `sortWith`,

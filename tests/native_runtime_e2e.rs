@@ -852,6 +852,11 @@ fn a_map_or_for_each_over_a_list_its_lambda_changes_stops_where_kotlins_iterator
     run_driver_against_kotlin("map_mutated_source");
 }
 
+#[test]
+fn an_iterator_is_an_iterator_and_an_arrays_is_its_kinds_iterator() {
+    run_driver_against_kotlin("iterator_identity");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

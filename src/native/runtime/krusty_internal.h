@@ -82,8 +82,11 @@ extern const KType kt_type_long_progression_iterator;
 extern const KType kt_type_char_progression_iterator;
 extern const KType kt_type_uint_progression_iterator;
 extern const KType kt_type_ulong_progression_iterator;
-/* `kotlin.collections.CharIterator`, the abstract class a text's iterator subclasses. */
+/* `kotlin.collections.CharIterator`, the abstract class a text's iterator subclasses, and its
+   `Int` and `Long` twins, which an array's iterator subclasses too. */
 extern const KType kt_type_char_iterator;
+extern const KType kt_type_int_iterator;
+extern const KType kt_type_long_iterator;
 
 /* The walks over arrays and strings, which a range iterator's entry points also answer for:
    whether an iterator is one, and its `hasNext` and `next` as a 64-bit value. Defined in

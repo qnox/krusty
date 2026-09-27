@@ -2457,23 +2457,32 @@ typedef struct KRangeIterator {
 
 /* The iterators are Kotlin's concrete classes: `IntProgressionIterator` and its Long and Char
    twins subclass the abstract `kotlin.collections.IntIterator` family, which has no instances of
-   its own, and the two unsigned ones subclass nothing but `kotlin.Any`. */
-KT_RANGE_TYPE(kt_type_int_iterator, "kotlin.collections.", "IntIterator", KObjectHeader,
-              kt_any_vtable)
-KT_RANGE_TYPE(kt_type_long_iterator, "kotlin.collections.", "LongIterator", KObjectHeader,
-              kt_any_vtable)
-KT_RANGE_TYPE(kt_type_char_iterator, "kotlin.collections.", "CharIterator", KObjectHeader,
-              kt_any_vtable)
+   its own, and the two unsigned ones subclass nothing but `kotlin.Any`. Every one implements
+   `kotlin.collections.Iterator`, which the classes subclassing `Any` list themselves and the others
+   find on their abstract superclass. */
+static const KType *const kt_range_iterator_interfaces[] = {&kt_type_iterator_interface};
+#define KT_ITERATOR_TYPE(identifier, package, simple, shape)                                       \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
+                              .instance_size = sizeof(shape),                                      \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = kt_range_iterator_interfaces,                          \
+                              .interface_count = 1};
+KT_ITERATOR_TYPE(kt_type_int_iterator, "kotlin.collections.", "IntIterator", KObjectHeader)
+KT_ITERATOR_TYPE(kt_type_long_iterator, "kotlin.collections.", "LongIterator", KObjectHeader)
+KT_ITERATOR_TYPE(kt_type_char_iterator, "kotlin.collections.", "CharIterator", KObjectHeader)
 KT_RANGE_SUBTYPE(kt_type_int_progression_iterator, "kotlin.ranges.", "IntProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_int_iterator)
 KT_RANGE_SUBTYPE(kt_type_long_progression_iterator, "kotlin.ranges.", "LongProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_long_iterator)
 KT_RANGE_SUBTYPE(kt_type_char_progression_iterator, "kotlin.ranges.", "CharProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_char_iterator)
-KT_RANGE_TYPE(kt_type_uint_progression_iterator, "kotlin.ranges.", "UIntProgressionIterator",
-              KRangeIterator, kt_any_vtable)
-KT_RANGE_TYPE(kt_type_ulong_progression_iterator, "kotlin.ranges.", "ULongProgressionIterator",
-              KRangeIterator, kt_any_vtable)
+KT_ITERATOR_TYPE(kt_type_uint_progression_iterator, "kotlin.ranges.", "UIntProgressionIterator",
+                 KRangeIterator)
+KT_ITERATOR_TYPE(kt_type_ulong_progression_iterator, "kotlin.ranges.", "ULongProgressionIterator",
+                 KRangeIterator)
+#undef KT_ITERATOR_TYPE
 
 static const KType *const kt_range_iterator_types[KT_RANGE_KINDS] = {
     &kt_type_int_progression_iterator, &kt_type_long_progression_iterator,
