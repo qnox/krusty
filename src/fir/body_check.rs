@@ -34,6 +34,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod failure;
 mod inline_body_plan;
 #[cfg(test)]
 mod invoke_tests;
@@ -76,6 +77,7 @@ pub use driver::{
     check_and_dispatch_scheduled_function_body,
     check_and_dispatch_scheduled_function_body_in_session,
 };
+pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailure};
 
 use std::collections::HashMap;
 
@@ -110,7 +112,6 @@ use super::{
     FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
     LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
     ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
-    UnpublishableType,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -166,29 +167,6 @@ fn body_local_callable_declaration(
     None
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BodyCheckFailureKind {
-    MissingSourceSpan,
-    UnpublishableType(UnpublishableType),
-    UnresolvedTypeSyntax,
-    UnknownLocal,
-    InvalidAnnotationArgument,
-    MissingStableCallTarget,
-    MissingStablePropertyTarget,
-    LocalVariableCallableReference,
-    UnsupportedCallShape,
-    /// The resolver selected a function-value conversion the naming walk did not name.
-    UnnamedFunctionValueConversion,
-    UnsupportedExpression(ExpressionForm),
-    UnsupportedStatement(StatementForm),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BodyCheckFailure {
-    pub span: Option<Span>,
-    pub kind: BodyCheckFailureKind,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckedBodyParameter<'a> {
     pub name: &'a str,
@@ -214,17 +192,6 @@ impl CheckedBodyReceiverShape<'_> {
 struct CheckedBodyDefault {
     parameter: u32,
     expression: ExprId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CheckedBodyDriverFailure {
-    SourceMismatch,
-    MissingCallable,
-    MissingBody,
-    BodyRangeMismatch,
-    ParameterShapeMismatch,
-    UnsupportedBodyKind(BodyKind),
-    Check(BodyCheckFailure),
 }
 
 /// Check and route one scheduled expression body. A declaration/body-range parser supplies the
