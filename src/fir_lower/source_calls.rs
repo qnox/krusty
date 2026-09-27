@@ -48,15 +48,6 @@ pub(super) enum SelectedDefaultMode {
     Materialize,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum SameFileExtensionReceiverMode {
-    Materialized,
-    DirectWhenOrdered,
-    /// Every operand is already an evaluated value read, as a callable-reference adapter's own
-    /// parameters are, so the receiver needs no boundary of its own.
-    Direct,
-}
-
 pub(super) struct SelectedOperandRequest<'a> {
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
@@ -1334,7 +1325,6 @@ impl BodyLowering<'_> {
         target: CallableId,
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
-        extension_receiver_mode: SameFileExtensionReceiverMode,
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
@@ -1359,15 +1349,13 @@ impl BodyLowering<'_> {
             .owner
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
-        // An extension receiver is inserted among context/value parameters below. The checked
-        // iterator-loop contract may keep its already-ordered, argument-free receiver direct;
-        // ordinary calls retain the materialized boundary recorded for general source evaluation.
-        let direct = (extension_receiver.is_none()
-            || extension_receiver_mode == SameFileExtensionReceiverMode::Direct
-            || (extension_receiver_mode == SameFileExtensionReceiverMode::DirectWhenOrdered
-                && arguments.is_empty()))
-            && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-            && arguments_follow_parameter_order(arguments, None);
+        // kotlinc passes a call's operands in physical order: the context arguments, then the
+        // extension receiver, then the value arguments. A context argument is an implicit value
+        // (a context parameter or an implicit receiver), so passing the receiver after it still
+        // evaluates every operand once, in source order.
+        let direct =
+            !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
+                && arguments_follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1402,7 +1390,27 @@ impl BodyLowering<'_> {
                 let ty = declared_extension_receiver?;
                 let specialized = crate::types::ty_subst_keep_unbound(ty.get(), &bindings);
                 let receiver = if direct {
-                    self.direct_call_operand(receiver, specialized)
+                    // Passed in place, a scalar receiver the declaration takes as a reference
+                    // (`Int?.inc()` on an `Int` value) is boxed here, where a materialized one
+                    // was boxed by its reference-typed temporary.
+                    let operand = self
+                        .ir
+                        .physical_types
+                        .get(&receiver)
+                        .or_else(|| self.ir.logical_types.get(&receiver))
+                        .copied();
+                    let receiver = self.direct_call_operand(receiver, specialized);
+                    if operand.is_some_and(|operand| !operand.is_reference())
+                        && specialized.is_reference()
+                    {
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: receiver,
+                            type_operand: specialized,
+                        })
+                    } else {
+                        receiver
+                    }
                 } else {
                     self.spill_call_operand(receiver, specialized, &mut statements)
                 };
