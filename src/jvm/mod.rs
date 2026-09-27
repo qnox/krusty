@@ -10,6 +10,7 @@ mod builtin_member_operations;
 mod bytecode;
 pub(crate) mod bytecode_passes;
 mod call_result_boundaries;
+mod capture_names;
 pub(crate) mod class_node;
 pub mod classfile;
 pub mod classpath;

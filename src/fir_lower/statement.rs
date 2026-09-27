@@ -340,6 +340,9 @@ impl BodyLowering<'_> {
                 // A captured value is compiler-supplied, never a caller's argument: kotlinc does
                 // not guard it with `checkNotNullParameter`.
                 check: None,
+                capture: Some(crate::ir::IrConstructorCapture {
+                    source_name: capture.name.clone(),
+                }),
             });
             if let Some(identity) = capture.capture_identity {
                 self.ir

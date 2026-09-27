@@ -900,6 +900,7 @@ pub(super) fn accept_constructor_body(
                         })
                         .flatten(),
                     check: None,
+                    capture: None,
                 }
             })
             .collect::<Vec<_>>();

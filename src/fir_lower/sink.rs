@@ -1028,6 +1028,7 @@ impl<'a> CommonIrBodySink<'a> {
                     is_vararg: false,
                     type_param: None,
                     check: None,
+                    capture: None,
                 },
             );
             class.ctor_param_count += 1;

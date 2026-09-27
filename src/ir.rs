@@ -63,7 +63,7 @@ pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
-pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrConstructorAccess, IrConstructorCapture, IrConstructorTarget};
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1217,9 +1217,8 @@ impl IrField {
     }
 }
 
-/// One primary-constructor parameter of an [`IrClass`], in declaration order. Folds what were the
-/// index-parallel `ctor_args` tuple and `ctor_param_checks` vec, so a parameter's type / `is_field`
-/// flag / null-check name can't desync.
+/// One primary-constructor parameter of an [`IrClass`], in declaration order: its type, storage,
+/// null check and capture travel together so they cannot desync.
 #[derive(Clone, Debug)]
 pub struct IrCtorArg {
     /// Source parameter name. Synthetic constructor parameters have no name.
@@ -1230,13 +1229,11 @@ pub struct IrCtorArg {
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
-    /// Declared source-level semantic type before storage/JVM erasure. `None` for synthetic
-    /// parameters. Metadata consumes this shape so nested type-parameter uses such as `KClass<T>`
-    /// do not collapse to `KClass<Any>` merely because the constructor stores an erased value.
+    /// Declared source-level type before storage/JVM erasure (`None` for synthetic parameters), so
+    /// metadata keeps `KClass<T>` rather than the erased `KClass<Any>` the constructor stores.
     pub declared_ty: Option<Ty>,
-    /// `true` ⇒ a `val`/`var` property whose arg is stored to a field (the property fields are
-    /// represented by `field_index`; `false` ⇒ a plain parameter, an argument only, available as a
-    /// local in `<init>` for property initializers / `init` blocks.
+    /// `true` ⇒ stored to a field (`field_index`); `false` ⇒ a plain parameter, only a local in
+    /// `<init>` for property initializers and `init` blocks.
     pub is_field: bool,
     /// Exact backing-field index for a property/capture constructor parameter. This cannot be derived
     /// from parameter or field order: interface-delegation storage may precede a source property, and
@@ -1252,6 +1249,8 @@ pub struct IrCtorArg {
     /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a
     /// primitive, nullable, or class-type-parameter param, and for the synthetic inner `this$0`.
     pub check: Option<String>,
+    /// The captured value a local or anonymous class's synthetic constructor prefix carries.
+    pub capture: Option<IrConstructorCapture>,
 }
 
 /// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one
@@ -1839,6 +1838,7 @@ impl IrClass {
                 is_vararg: false,
                 type_param: None,
                 check: None,
+                capture: None,
             })
             .collect::<Vec<_>>();
         let context_count =

@@ -451,6 +451,7 @@ fn constructor_argument(ty: Ty) -> IrCtorArg {
         is_vararg: false,
         type_param: None,
         check: None,
+        capture: None,
     }
 }
 

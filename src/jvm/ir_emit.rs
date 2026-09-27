@@ -2365,8 +2365,8 @@ fn instance_field_jvm_name(
         .iter()
         .position(|candidate| std::ptr::eq(candidate, field))
         .expect("an instance field name must belong to its class");
-    if let Some(capture) = super::method_parameters::capture_field_name(class, field_index) {
-        return capture;
+    if let Some(capture) = super::capture_names::field_capture(class, field_index) {
+        return super::capture_names::capture_name(capture);
     }
     let owner = class.fq_name();
     let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
@@ -2522,7 +2522,7 @@ fn attach_synth_debug_tables(
     }
     // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
     // reflection/assertion label names the physical constructor local too.
-    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(c);
+    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
             ctor_locals.push((name, desc(argument.ty), slot));

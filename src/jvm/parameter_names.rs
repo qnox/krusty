@@ -8,7 +8,7 @@ use crate::ir::{
     IrCapturedDeclaration, IrCapturingCallable, IrFile, IrGeneratedParameterRole,
     IrParameterIdentity, IrParameterRole,
 };
-use crate::jvm::method_parameters::capture_field_name;
+use crate::jvm::capture_names::capture_name;
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -355,10 +355,10 @@ pub(super) fn constructor_method_parameters(
 }
 
 /// A primary constructor's LocalVariableTable names. kotlinc names a local or anonymous class's
-/// captured-value parameter like the field it stores into (`$a`), so the capture prefix shares
-/// [`capture_field_name`]'s spelling.
-pub(super) fn constructor_local_variables(class: &crate::ir::IrClass) -> Vec<Option<String>> {
-    let arguments = &class.ctor_args;
+/// captured-value parameter like the field it stores into ([`capture_name`]).
+pub(super) fn constructor_local_variables(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<Option<String>> {
     let identities = constructor_identities(arguments);
     let anonymous = if anonymous_context_parameters_are_locals() {
         constructor_anonymous_labels(arguments, &identities)
@@ -371,8 +371,9 @@ pub(super) fn constructor_local_variables(class: &crate::ir::IrClass) -> Vec<Opt
         .zip(arguments)
         .map(|((identity, anonymous), argument)| {
             argument
-                .field_index
-                .and_then(|field| capture_field_name(class, field as usize))
+                .capture
+                .as_ref()
+                .map(capture_name)
                 .or(anonymous)
                 .or_else(|| local_variable(identity, "<init>"))
         })
