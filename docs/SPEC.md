@@ -6099,6 +6099,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/class_member_order_e2e.rs::a_class_appends_private_member_bridges_after_its_members`,
   `tests/value_class_member_order_e2e.rs`, box
   `inlineClasses/contextsAndAccessors/accessPrivateInlineClassMethodFromCompanion*.kt`.
+- **A `super` call inside a value-class member runs on the box.** The member's static `-impl` holds
+  `this` as its carrier, and `invokespecial` needs an instance of the class itself, so kotlinc boxes
+  the carrier with `box-impl` before `super.hashCode()` or `super<IFoo>.foo()`. krusty boxed it as the
+  carrier's own wrapper (`Integer.valueOf`), which the verifier rejects. Every `invokespecial`
+  receiver of an unboxed value class now takes the `box-impl` box. Tests:
+  `tests/value_class_super_call_e2e.rs`, box `inlineClasses/anySuperCall{,Generic}.kt`,
+  `inlineClasses/interfaceMethodCalls/interfaceSuperCall{,Generic}.kt`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is

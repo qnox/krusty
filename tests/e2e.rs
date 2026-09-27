@@ -1054,6 +1054,8 @@ mod literal_escapes_coverage_e2e;
 mod lnt_parity_e2e;
 #[path = "local_capture_coverage_e2e.rs"]
 mod local_capture_coverage_e2e;
+#[path = "local_class_capture_constructors_e2e.rs"]
+mod local_class_capture_constructors_e2e;
 #[path = "local_class_e2e.rs"]
 mod local_class_e2e;
 #[path = "local_class_inherited_members_e2e.rs"]
@@ -1216,6 +1218,8 @@ mod value_class_private_member_access_e2e;
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
 mod value_class_secondary_constructor_return_e2e;
+#[path = "value_class_super_call_e2e.rs"]
+mod value_class_super_call_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
@@ -1689,6 +1693,8 @@ mod serializer_operand_cast_e2e;
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
 mod shadowed_method_tparam_e2e;
+#[path = "shared_cell_declaration_e2e.rs"]
+mod shared_cell_declaration_e2e;
 #[path = "short_circuit_condition_e2e.rs"]
 mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]

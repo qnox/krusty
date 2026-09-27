@@ -64,8 +64,6 @@ impl BodyLowering<'_> {
         element: crate::fir::ResolvedTy,
         initial: Option<ExprId>,
     ) -> ExprId {
-        let initial =
-            initial.unwrap_or_else(|| self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
         self.ir.add_expr(IrExpr::RefNew {
             elem: element.get(),
             init: initial,

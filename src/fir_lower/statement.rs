@@ -34,14 +34,16 @@ impl BodyLowering<'_> {
                 initializer,
                 conversion,
             } => {
-                let mut init = initializer
+                let init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
                     .transpose()?;
-                if *lateinit && init.is_none() {
-                    init = Some(self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
-                }
+                // A shared cell's holder is created uninitialized, as kotlinc's
+                // `SharedVariablesLowering` does for a declaration without an initializer
+                // (`lateinit` included): its `element` keeps the field's default.
                 let init = if self.shared_local_type(*target).is_some() {
                     Some(self.shared_cell_new(*ty, init))
+                } else if *lateinit && init.is_none() {
+                    Some(self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)))
                 } else {
                     init
                 };
@@ -327,7 +329,8 @@ impl BodyLowering<'_> {
             fields
                 .push(IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true));
             arguments.push(IrCtorArg {
-                name: Some(capture.name.to_string()),
+                // A capture is synthetic: no source parameter, so no metadata value parameter.
+                name: None,
                 context_kind: crate::types::ContextParameterKind::None,
                 ty: capture.ty.get(),
                 declared_ty: None,
@@ -336,12 +339,12 @@ impl BodyLowering<'_> {
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
-                check: capture
-                    .ty
-                    .get()
-                    .is_reference()
-                    .then(|| capture.name.to_string())
-                    .filter(|_| !capture.ty.get().is_nullable()),
+                // A captured value is compiler-supplied, never a caller's argument: kotlinc does
+                // not guard it with `checkNotNullParameter`.
+                check: None,
+                capture: Some(crate::ir::IrConstructorCapture {
+                    source_name: capture.name.clone(),
+                }),
             });
             if let Some(identity) = capture.capture_identity {
                 self.ir
@@ -365,6 +368,15 @@ impl BodyLowering<'_> {
         }
         class.fields.splice(0..0, fields);
         class.ctor_args.splice(0..0, arguments);
+        // kotlinc's LocalDeclarationsLowering stores every captured value before the constructor
+        // delegates (`this.$a = a; super(…)`), like the enclosing instance of an inner class.
+        for (parameter, field) in &mut class.pre_super_param_fields {
+            *parameter += shifted;
+            *field += shifted;
+        }
+        class
+            .pre_super_param_fields
+            .splice(0..0, (0..shifted).map(|capture| (capture, capture)));
         class.ctor_param_count += captures.len() as u32;
         class.constructor_prefix_count += captures.len() as u32;
         class.is_local_class = true;

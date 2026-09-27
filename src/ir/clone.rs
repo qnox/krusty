@@ -214,7 +214,6 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
-        | IrExpr::RefNew { init: arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
         | IrExpr::NewArray { size: arg, .. }
         | IrExpr::PrimitiveNeg { operand: arg, .. } => *arg = map(*arg),
@@ -245,7 +244,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             map_option(receiver, &mut map);
             *value = map(*value);
         }
-        IrExpr::Variable { init, .. } => map_option(init, &mut map),
+        IrExpr::Variable { init, .. } | IrExpr::RefNew { init, .. } => map_option(init, &mut map),
         IrExpr::EnclosingInstance { receiver, .. }
         | IrExpr::GetField { receiver, .. }
         | IrExpr::LateinitInitialized { receiver, .. } => *receiver = map(*receiver),
