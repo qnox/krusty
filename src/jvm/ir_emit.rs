@@ -6517,7 +6517,7 @@ fn emit_interface_class(
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
         let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
         di.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
-        extra.push((holder, di.finish()));
+        extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
     // A user annotation on an interface is emitted exactly as on a class — kotlinc writes it BEFORE the
@@ -6548,7 +6548,7 @@ fn emit_interface_class(
             access: 0x0019,
         });
     }
-    cw.finish()
+    env.run.finish_class(cw)
 }
 
 /// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →

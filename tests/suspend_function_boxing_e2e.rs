@@ -8,7 +8,17 @@
 use super::common;
 
 fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
+    expect_method_matches_with_lib(name, &[], src, class, method);
+}
+
+fn expect_method_matches_with_lib(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+    method: &str,
+) {
+    match common::method_code_and_references_diff_against_kotlinc(name, lib, src, class, method) {
         None => panic!("reference kotlinc is provisioned"),
         Some(Ok(())) => {}
         Some(Err(difference)) => panic!("{difference}"),
@@ -35,6 +45,70 @@ fn a_suspend_function_without_a_suspension_point_boxes_through_the_coroutine_hel
         "public static final java.lang.Object nothingToBox(",
     ] {
         expect_method_matches("SuspendBoxing", PRIMITIVES, "SuspendBoxingKt", method);
+    }
+}
+
+const HIDDEN: &str = "private suspend fun hidden(n: Int): Int = n + 1\n\
+suspend fun callsHidden(): Int = hidden(1)\n";
+
+/// A private function has no state machine to build either, so it boxes through the coroutine
+/// helpers too.
+#[test]
+fn a_private_function_without_a_suspension_point_boxes_through_the_coroutine_helpers() {
+    expect_method_matches(
+        "SuspendHiddenBoxing",
+        HIDDEN,
+        "SuspendHiddenBoxingKt",
+        "private static final java.lang.Object hidden(",
+    );
+}
+
+const NESTED: &str = "interface Api {\n\
+    suspend fun count(): Int = 3\n\
+}\n\
+class Impl : Api\n\
+suspend fun outer(): Int {\n\
+    suspend fun local(n: Int): Int = n + 1\n\
+    return local(2)\n\
+}\n";
+
+/// An interface's default body and a local function are neither top-level nor class members, but
+/// with no suspension point there is no continuation class to place, so they box through the
+/// coroutine helpers too.
+#[test]
+fn an_interface_default_or_local_function_without_a_suspension_point_boxes_through_the_helpers() {
+    for (class, method) in [
+        ("Api", "public static java.lang.Object count$suspendImpl("),
+        (
+            "SuspendNestedBoxingKt",
+            "private static final java.lang.Object outer$local(",
+        ),
+    ] {
+        expect_method_matches("SuspendNestedBoxing", NESTED, class, method);
+    }
+}
+
+const INLINE_LIB: &str = "package lib\ninline fun twice(n: Int): Int = n * 2\n";
+
+const INLINE_RESULT: &str = "import lib.twice\n\
+suspend fun doubled(n: Int): Int = twice(n)\n\
+suspend fun doubledFlag(n: Int): Boolean = twice(n) > 3\n";
+
+/// A result an inline call produces is spliced into the method before the transformer boxes it,
+/// with no state machine to build.
+#[test]
+fn an_inline_result_without_a_suspension_point_boxes_through_the_coroutine_helpers() {
+    for method in [
+        "public static final java.lang.Object doubled(",
+        "public static final java.lang.Object doubledFlag(",
+    ] {
+        expect_method_matches_with_lib(
+            "SuspendInlineBoxing",
+            &[("Lib.kt", INLINE_LIB)],
+            INLINE_RESULT,
+            "SuspendInlineBoxingKt",
+            method,
+        );
     }
 }
 

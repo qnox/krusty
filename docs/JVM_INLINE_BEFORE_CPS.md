@@ -116,7 +116,11 @@ Each step reports box passes, byte-identical files and divergent classes before 
   wrapper's `valueOf`. `coroutineContext` becomes `getContext()` on the current continuation (the
   fake one the transformer replaces, or `$completion` when there is no point) and is marked as an
   inlined call, so the line in effect is written again after it, as after kotlinc's inlined
-  getter. Tested in `tests/suspend_function_boxing_e2e.rs`.
+  getter. The gates of the state machine itself (spill clean-up in the runtime, where the
+  continuation class goes, privacy, the declaration line and spliced inline lines its
+  `@DebugMetadata` reads) apply only when there is a point, so a private, local or interface-default
+  function, or one whose result comes from an inline call, is taken as well. Tested in
+  `tests/suspend_function_boxing_e2e.rs`, which compares call targets as well as instructions.
 * The transformed method then goes through the same optimizer passes as every other method
   (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
   removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after

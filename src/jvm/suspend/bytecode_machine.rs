@@ -205,8 +205,23 @@ pub(super) fn eligible_points(
                 .any(|class| class.fq_name_id() == owner && !class.is_interface)
         });
     let suspend_set = route.suspend_set;
-    // Checked in order, each only while every earlier one holds.
-    let declines: [(&dyn Fn() -> bool, &str); 8] = [
+    let points = suspension_points_in_order(ir, body, suspend_set);
+    // Shapes the transformer cannot take at all: a suspension spliced in from an inline body, or
+    // a read of the function's own continuation, which kotlinc realizes through a fake one.
+    let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
+        (
+            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
+            "suspends in a spliced inline body",
+        ),
+        (
+            &|| reads_current_continuation(ir, body),
+            "reads its own continuation",
+        ),
+    ];
+    // Gates of the state machine itself: its spills, its continuation class and that class's
+    // `@DebugMetadata`. A function with no suspension point has none of them, as kotlinc's
+    // transformer returns before building them.
+    let machine_declines: [(&dyn Fn() -> bool, &str); 6] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -230,18 +245,16 @@ pub(super) fn eligible_points(
         // Spliced inline bodies are a later step: the splice does not mark the call's own line
         // yet, which the transformer's `@DebugMetadata` reads off the body.
         (&|| splices_inline_code(ir, body), "splices an inline body"),
-        // A classpath inline body or an inline lambda that suspends is spliced into this frame.
-        (
-            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
-            "suspends in a spliced inline body",
-        ),
-        (
-            &|| reads_current_continuation(ir, body),
-            "reads its own continuation",
-        ),
     ];
-    let declined = declines
+    let machine_declines: &[(&dyn Fn() -> bool, &str)] = if points.is_empty() {
+        &[]
+    } else {
+        &machine_declines
+    };
+    // Checked in order, each only while every earlier one holds.
+    let declined = body_declines
         .iter()
+        .chain(machine_declines)
         .find_map(|(declines, reason)| declines().then_some(*reason));
     if let Some(reason) = declined {
         crate::trace_compiler!(
@@ -251,7 +264,6 @@ pub(super) fn eligible_points(
         );
         return None;
     }
-    let points = suspension_points_in_order(ir, body, route.suspend_set);
     let plain_call = |call: ExprId| {
         matches!(
             ir.exprs[call as usize],
