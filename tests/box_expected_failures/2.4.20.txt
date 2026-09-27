@@ -13,8 +13,6 @@ basics/k42000_1.kt
 basics/k42000_crossmodule.kt
 basics/unchecked_cast10.kt
 binaryOp/eqNullableDoublesWithTP.kt
-binaryOp/kt11163.kt
-binaryOp/kt11163_properIeee754comparisons.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
