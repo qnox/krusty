@@ -51,7 +51,7 @@ pub(super) fn prepare(
 
 /// Shift every local from the first after the real parameters up by the captured values' words,
 /// and declare the captured values as parameters.
-fn add_captured_parameters(node: &mut MethodNode, parameters: &Parameters) {
+pub(super) fn add_captured_parameters(node: &mut MethodNode, parameters: &Parameters) {
     let shift = parameters.captured_size();
     if shift == 0 {
         return;

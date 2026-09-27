@@ -14,6 +14,17 @@ impl crate::jvm::inline::MethodBodies for Classpath {
     fn singleton_storage(&self, classifier: TypeName) -> Option<(TypeName, String)> {
         Classpath::singleton_storage(self, classifier)
     }
+    fn regenerated_class(&self, internal: &str) -> Option<crate::jvm::inline::RegeneratedClass> {
+        use crate::jvm::inline::RegeneratedClass;
+        let class = self.find(internal)?;
+        match class.inner_class_self() {
+            Some(entry) if entry.name.is_none() => Some(RegeneratedClass::AnonymousObject),
+            None if class.access & crate::jvm::classfile::ACC_SYNTHETIC != 0 => {
+                Some(RegeneratedClass::SamWrapper)
+            }
+            _ => None,
+        }
+    }
     fn owner_is_interface(&self, owner: &str) -> bool {
         // Prefer the real class flag; otherwise the mapped builtin's own `.kotlin_builtins`
         // `CLASS_KIND`. A Kotlin builtin and the JVM class it maps to always agree on interface-ness

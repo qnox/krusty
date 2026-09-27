@@ -21,6 +21,7 @@ use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
+use crate::jvm::source_map::SourceMap;
 pub(super) use lambda_route::LambdaCallRoute;
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
@@ -62,6 +63,55 @@ pub(super) fn check_byte_splice_body(
 }
 
 impl Emitter<'_> {
+    /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
+    /// constructor of an anonymous object the body creates (`Continuation(ctx){…}`'s
+    /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. Whether
+    /// the call was handled, as the other inline-call routes report it.
+    pub(super) fn inline_value_used_lambda_call(
+        &mut self,
+        inline_call: &ClasspathInlineCall<'_, '_>,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        // A shape the port does not own yet stays on the byte bridge. A body that constructs no
+        // anonymous object takes the literal as an ordinary value (one passed where the parameter
+        // is not function-typed, as `map[key] = { … }`).
+        match self.lambda_call_route(inline_call, code) {
+            Ok(LambdaCallRoute::MethodInliner(callee))
+                if crate::jvm::inliner::constructs_anonymous_object(&callee, &self.bodies) =>
+            {
+                if let Err(reason) = self.inline_classpath_lambda_call(
+                    inline_call,
+                    &callee,
+                    LambdaPlacement::Objects,
+                    code,
+                ) {
+                    self.run.set_inline_bail(reason);
+                }
+                return true;
+            }
+            Ok(LambdaCallRoute::MethodInliner(_)) => {
+                crate::trace_compiler!("splice", "value-used lambda bridged: no object");
+            }
+            Ok(LambdaCallRoute::Splice(reason)) => {
+                crate::trace_compiler!("splice", "value-used lambda bridged: {reason:?}");
+            }
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return true;
+            }
+        }
+        if let Err(reason) = check_byte_splice_body(
+            inline_call.target.name,
+            inline_call.target.splice_desc,
+            inline_call.body,
+        ) {
+            self.run.set_inline_bail(reason);
+            return true;
+        }
+        self.try_inline_materialized_lambda_body(inline_call, code)
+            .is_some()
+    }
+
     /// Temporary migration bridge for a literal lambda the inline body uses as a value (for
     /// example, the implementation object created by `Continuation(context, block)`). The
     /// MethodNode route will own this once anonymous-object regeneration lands. This operation is
@@ -170,6 +220,13 @@ impl Emitter<'_> {
         Some(())
     }
 
+    /// The lines the caller's own source claims in its source map.
+    fn claimable_lines(&self) -> u16 {
+        u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1)
+    }
+
     /// Where an inlined body's frame starts: kotlinc's frame size at the call (`frame_size`),
     /// above every live temporary. Not the method's `max_locals`: a block that ended before the
     /// call has handed its slots back, and the inlined body reuses them as kotlinc's does.
@@ -208,9 +265,7 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) =
-            inliner::unsupported_shape(&callee, inliner::ObjectRegeneration::Regenerated)
-        {
+        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
@@ -248,7 +303,13 @@ impl Emitter<'_> {
             reified,
             inliner::InliningContext {
                 lines: &mut UnmappedLines,
-                objects: &mut self.call_objects(call_expression, target.name, false),
+                classes: &self.bodies,
+                objects: &mut self.call_objects(
+                    call_expression,
+                    target.name,
+                    false,
+                    SourceMap::default(),
+                ),
             },
         ) {
             crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
@@ -259,7 +320,11 @@ impl Emitter<'_> {
             physical: &physical,
             supplies: &supplies,
         };
-        self.emit_inlined_call(&inlined_call, &callee, &parameters, &[], base, code)
+        let inlined = InlinedLambdas {
+            lambdas: &[],
+            lines: SourceMap::default(),
+        };
+        self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
             .expect("the body was inlined before its arguments were evaluated");
         Some(())
     }
@@ -268,10 +333,15 @@ impl Emitter<'_> {
     /// each literal lambda its body invokes is compiled to a node and placed at those `invoke`s.
     /// An error is a broken invariant of that plan and fails the emission; the call is never
     /// retried as a splice.
+    ///
+    /// When the body only passes its lambdas to the anonymous objects it constructs
+    /// (`LambdaPlacement::Objects`), their code is written into the regenerated objects alone, as
+    /// kotlinc's is: what compiling them left in the caller's pool and source map is forgotten.
     pub(super) fn inline_classpath_lambda_call(
         &mut self,
         call: &ClasspathInlineCall<'_, '_>,
         callee: &MethodNode,
+        placement: LambdaPlacement,
         code: &mut CodeBuilder,
     ) -> Result<(), &'static str> {
         let ClasspathInlineCall {
@@ -299,6 +369,7 @@ impl Emitter<'_> {
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
         let mut lambda_bindings = HashMap::new();
+        let checkpoint = self.cw.checkpoint();
         for (index, &argument) in args.iter().enumerate() {
             if !self.is_inlined_literal(
                 call_expression,
@@ -321,6 +392,17 @@ impl Emitter<'_> {
             lambda_bindings.insert(index, lambdas.len());
             lambdas.push(lambda);
         }
+        // The lambdas' lines are lines of the caller's map as compiling them left it.
+        let lambda_lines = self
+            .cw
+            .source_map_for_inlining(self.claimable_lines())
+            .cloned()
+            .unwrap_or_default();
+        // Route planning keeps every lambda that declares a member of the caller on the bridge;
+        // one that still does is a broken plan, never code left in the caller.
+        if placement == LambdaPlacement::Objects && !self.cw.rollback(checkpoint) {
+            return Err("an object-only lambda declared a member of the calling class");
+        }
         let parameters =
             self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
         let base = self.inline_splice_base(self.frame.size());
@@ -329,7 +411,11 @@ impl Emitter<'_> {
             physical: &physical,
             supplies: &supplies,
         };
-        self.emit_inlined_call(&inlined_call, callee, &parameters, &lambdas, base, code)
+        let inlined = InlinedLambdas {
+            lambdas: &lambdas,
+            lines: lambda_lines,
+        };
+        self.emit_inlined_call(&inlined_call, callee, &parameters, inlined, base, code)
             .map_err(|error| {
                 crate::trace_compiler!("splice", "the inliner rejected a planned call: {error:?}");
                 "the inliner rejected a call its route planning gave it"
@@ -370,10 +456,14 @@ impl Emitter<'_> {
         call: &InlinedCall<'_, '_>,
         callee: &MethodNode,
         parameters: &Parameters,
-        lambdas: &[inliner::Lambda],
+        inlined_lambdas: InlinedLambdas<'_>,
         base: u16,
         code: &mut CodeBuilder,
     ) -> Result<(), InlineError> {
+        let InlinedLambdas {
+            lambdas,
+            lines: lambda_lines,
+        } = inlined_lambdas;
         let InlinedCall {
             call:
                 ClasspathInlineCall {
@@ -435,19 +525,20 @@ impl Emitter<'_> {
         debug_lines::mark_expression_start(self.ir, call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
-        let claimable = u16::try_from(self.ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
+        let claimable = self.claimable_lines();
+        let bodies = self.bodies;
         let mut lines = CallLines {
             emitter: self,
             body,
             inline_only: target.inline_only,
             call_line,
             claimable,
+            visited: HashMap::new(),
         };
-        let mut objects = lines
-            .emitter
-            .call_objects(call_expression, target.name, true);
+        let mut objects =
+            lines
+                .emitter
+                .call_objects(call_expression, target.name, true, lambda_lines);
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -457,6 +548,7 @@ impl Emitter<'_> {
             reified,
             inliner::InliningContext {
                 lines: &mut lines,
+                classes: &bodies,
                 objects: &mut objects,
             },
         );
@@ -897,24 +989,32 @@ impl inliner::SourceLines for UnmappedLines {
     }
 }
 
-/// The inlined body's lines, mapped into the caller's source map against the call's line.
+/// The inlined body's lines, mapped into the caller's source map against the call's line. A line
+/// the body revisits keeps the line it was first mapped to (`SourceMapCopier.visitedLines`), even
+/// when a range mapped since would extend to cover it.
 struct CallLines<'e, 'a, 'b> {
     emitter: &'e mut Emitter<'a>,
     body: &'b crate::jvm::classreader::MethodCode,
     inline_only: bool,
     call_line: u16,
     claimable: u16,
+    visited: HashMap<u16, u16>,
 }
 
 impl inliner::SourceLines for CallLines<'_, '_, '_> {
     fn map(&mut self, line: u16) -> Option<u16> {
-        self.emitter.map_inlined_line(
+        if let Some(&mapped) = self.visited.get(&line) {
+            return Some(mapped);
+        }
+        let mapped = self.emitter.map_inlined_line(
             self.body,
             self.inline_only,
             line,
             self.call_line,
             self.claimable,
-        )
+        )?;
+        self.visited.insert(line, mapped);
+        Some(mapped)
     }
     fn synthetic(&mut self) -> Option<u16> {
         self.emitter
@@ -925,6 +1025,21 @@ impl inliner::SourceLines for CallLines<'_, '_, '_> {
     fn call_site(&self) -> Option<u16> {
         Some(self.call_line)
     }
+}
+
+/// Where an inlined body places its lambdas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LambdaPlacement {
+    /// The body invokes some of them, so their code lands in the caller.
+    Invokes,
+    /// The body only passes them to the anonymous objects it constructs, whose copies inline them.
+    Objects,
+}
+
+/// The compiled lambdas of a call, and the source map their lines are lines of.
+struct InlinedLambdas<'a> {
+    lambdas: &'a [inliner::Lambda],
+    lines: SourceMap,
 }
 
 /// What writing the inlined node needs to know about the call's arguments.

@@ -4843,8 +4843,16 @@ regress.
     (`<caller>$<function>$$inlined$<callee>$<n>`). Declined for now, leaving an ordinary call: coroutine
     objects, a `<clinit>`, nested objects, captured-field reads outside `aload 0; getfield`, and
     call sites in constructors, accessors, lambdas, suspend or inline functions.
-  - ☐ 4b. Crossinline lambdas captured by a regenerated object (the `$$inlined$Continuation$1` of
-    `runBlocking`).
+  - ◐ 4b. Crossinline lambdas captured by a regenerated object (the `$$inlined$Continuation$1` of
+    `runBlocking`). ✅ Lambdas of an inline call whose value is used, passed to the constructor of an
+    object the body creates, are inlined into the copy's methods (`anonymous_object::lambda_inlining`):
+    the lambda's field and constructor parameter go, its captured values become `$x$inlined` fields
+    appended after the kept arguments, each `invoke` becomes the lambda's body between inline markers
+    and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
+    the caller's. The call site passes the captured values instead of the lambda; code compiled only
+    for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
+    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
+    keeps the bridge. ☐ Lambdas taking a value class (`Continuation.resumeWith`'s `Result`).
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
 - ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).

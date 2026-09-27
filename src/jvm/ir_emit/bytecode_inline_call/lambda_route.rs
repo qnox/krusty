@@ -35,6 +35,9 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     InPlaceArguments,
     /// A lambda captures a value that is not a caller local of its own type.
     CaptureOutsideFrame,
+    /// A lambda the callee may pass to an object it creates reaches a private declaration, which
+    /// kotlinc reaches from the regenerated object through synthetic accessors.
+    PrivateMemberInObject,
 }
 
 impl Emitter<'_> {
@@ -85,9 +88,7 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) =
-            inliner::unsupported_shape(&callee, inliner::ObjectRegeneration::Declined)
-        {
+        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
             return splice(SpliceReason::CalleeShape(shape));
         }
         if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
@@ -111,6 +112,61 @@ impl Emitter<'_> {
             .all(|&argument| self.lambda_captures_caller_locals(argument))
         {
             return splice(SpliceReason::CaptureOutsideFrame);
+        }
+        // Whether the call's objects regenerate is settled before any code is emitted: the body is
+        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
+        if inliner::constructs_anonymous_object(&callee, &self.bodies) {
+            if lambda_arguments
+                .iter()
+                .any(|&argument| self.lambda_reaches_private_members(argument))
+            {
+                return splice(SpliceReason::PrivateMemberInObject);
+            }
+            let mut lambdas = Vec::new();
+            let mut captured = Vec::new();
+            let mut lambda_bindings = HashMap::new();
+            for (index, &argument) in args.iter().enumerate() {
+                if !lambda_arguments.contains(&argument) {
+                    continue;
+                }
+                let (mut lambda, captures) = self.lambda_shape(argument);
+                let start = captured.len();
+                for (capture, ty) in captures {
+                    captured.push(Parameter {
+                        category: Category::of_descriptor(&type_descriptor(ty)),
+                        binding: self.caller_local_binding(capture, ty),
+                    });
+                }
+                lambda.captured = start..captured.len();
+                lambda_bindings.insert(index, lambdas.len());
+                lambdas.push(lambda);
+            }
+            let parameters =
+                self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
+            let probe = inliner::inline(
+                &callee,
+                &parameters,
+                &lambdas,
+                target.inline_only,
+                self.inline_splice_base(self.frame.size()),
+                call.reified,
+                inliner::InliningContext {
+                    lines: &mut UnmappedLines,
+                    classes: &self.bodies,
+                    objects: &mut self.call_objects(
+                        call_expression,
+                        target.name,
+                        false,
+                        SourceMap::default(),
+                    ),
+                },
+            );
+            if let Err(error) = probe {
+                crate::trace_compiler!("splice", "the call's objects do not regenerate: {error:?}");
+                return splice(SpliceReason::CalleeShape(
+                    inliner::UnsupportedShape::AnonymousObject,
+                ));
+            }
         }
         Ok(LambdaCallRoute::MethodInliner(callee))
     }

@@ -60,11 +60,7 @@ pub(super) fn extract(
     let mut slot = 1u16;
     for argument in &arguments {
         parameters.insert(slot, argument);
-        slot += if matches!(argument.as_bytes()[0], b'J' | b'D') {
-            2
-        } else {
-            1
-        };
+        slot += descriptor_words(argument);
     }
 
     let mut body = original.clone();
@@ -140,6 +136,109 @@ pub(super) fn extract(
 }
 
 impl Constructor {
+    /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at
+    /// `lambda_arguments` of `call_desc`: each lambda's field and parameter go, and the values the
+    /// lambdas capture, `recaptured` as `(field, descriptor)`, are taken after the other arguments
+    /// and kept in fields of their own. The other arguments close up over the lambdas' slots. The
+    /// lambdas' fields, in `lambda_arguments` order.
+    ///
+    /// What is left of the original body may not read a lambda's parameter.
+    pub(super) fn inline_lambdas(
+        &mut self,
+        call_desc: &str,
+        lambda_arguments: &[usize],
+        recaptured: &[(String, String)],
+    ) -> Result<Vec<String>, RegenerationError> {
+        let unsupported = RegenerationError::Unsupported;
+        let arguments = argument_descriptors(call_desc)
+            .ok_or(unsupported("a malformed constructor descriptor"))?;
+        // Each argument's slot in the original constructor and, unless it is a lambda, in the new.
+        let mut slots: Vec<(u16, Option<u16>)> = Vec::with_capacity(arguments.len());
+        let (mut old, mut new) = (1u16, 1u16);
+        for (index, argument) in arguments.iter().enumerate() {
+            let words = descriptor_words(argument);
+            if lambda_arguments.contains(&index) {
+                slots.push((old, None));
+            } else {
+                slots.push((old, Some(new)));
+                new += words;
+            }
+            old += words;
+        }
+        let (old_end, kept_end) = (old, new);
+        let recaptured_words: u16 = recaptured
+            .iter()
+            .map(|(_, desc)| descriptor_words(desc))
+            .sum();
+        let new_end = kept_end + recaptured_words;
+        // `None` for a lambda's slot, which nothing may read any more.
+        let place = |slot: u16| -> Option<u16> {
+            if slot == 0 {
+                return Some(0);
+            }
+            if slot >= old_end {
+                return Some(slot - old_end + new_end);
+            }
+            slots
+                .iter()
+                .find(|(old, _)| *old == slot)
+                .and_then(|&(_, new)| new)
+        };
+        let mut fields = Vec::new();
+        for &argument in lambda_arguments {
+            let slot = slots[argument].0;
+            let at = self
+                .fields
+                .iter()
+                .position(|field| field.slot == slot)
+                .ok_or(unsupported(
+                    "a lambda its constructor does not keep in a field",
+                ))?;
+            fields.push(self.fields.remove(at).name);
+        }
+        for field in &mut self.fields {
+            field.slot = place(field.slot).ok_or(unsupported("a malformed captured store"))?;
+        }
+        for entry in &mut self.body.nodes {
+            if let Node::Insn(Insn::Var { slot, .. } | Insn::Iinc { slot, .. }) = entry {
+                *slot = place(*slot).ok_or(unsupported(
+                    "a constructor that reads a lambda other than to keep it",
+                ))?;
+            }
+        }
+        let mut locals = Vec::with_capacity(self.body.local_variables.len());
+        for mut local in std::mem::take(&mut self.body.local_variables) {
+            if let Some(slot) = place(local.slot) {
+                local.slot = slot;
+                locals.push(local);
+            }
+        }
+        self.body.local_variables = locals;
+        let mut slot = kept_end;
+        for (name, desc) in recaptured {
+            self.fields.push(CapturedField {
+                name: name.clone(),
+                desc: desc.clone(),
+                slot,
+            });
+            slot += descriptor_words(desc);
+        }
+        self.desc = format!(
+            "({}{})V",
+            arguments
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !lambda_arguments.contains(index))
+                .map(|(_, argument)| argument.as_str())
+                .collect::<String>(),
+            recaptured
+                .iter()
+                .map(|(_, desc)| desc.as_str())
+                .collect::<String>()
+        );
+        Ok(fields)
+    }
+
     /// The new constructor: a label, every captured field's store from its parameter, then the
     /// copied `body`, whose locals that started at its first label now start at the new one.
     pub(super) fn assemble(&self, new_class: &str, mut body: MethodNode) -> MethodNode {
@@ -172,6 +271,15 @@ impl Constructor {
         }
         body.desc = self.desc.clone();
         body
+    }
+}
+
+/// The slots a value of type `desc` takes.
+fn descriptor_words(desc: &str) -> u16 {
+    if matches!(desc.as_bytes()[0], b'J' | b'D') {
+        2
+    } else {
+        1
     }
 }
 

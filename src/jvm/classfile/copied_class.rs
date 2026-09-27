@@ -7,8 +7,10 @@ use super::inner_classes::InnerClassTable;
 use super::method_rewrite::MethodIdentity;
 use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
+use crate::jvm::bytecode_passes::descriptors;
+use crate::jvm::bytecode_passes::pipeline::{self, Outcome, PassContext};
 use crate::jvm::class_node::{Annotation, ClassMethod, ElementValue, FieldNode};
-use crate::jvm::method_node::{AssembleError, Constant};
+use crate::jvm::method_node::{AssembleError, Constant, MethodNode};
 use crate::jvm::source_map::SourceMap;
 
 /// Why a declaration could not be copied as it is.
@@ -23,6 +25,8 @@ pub(crate) enum CopyError {
 /// `kotlin.jvm.internal.SourceDebugExtension`, the copy of the source map kotlinc also writes as an
 /// annotation.
 const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExtension;";
+
+const ACC_STATIC: u16 = 0x0008;
 
 impl ClassWriter {
     /// What the pool relayout does with an entry nothing names: a copied class, whose table keeps
@@ -127,6 +131,10 @@ impl ClassWriter {
             self.methods.push(info);
             return Ok(());
         };
+        // kotlinc's optimizing method visitor buffers the body and optimizes it before any of its
+        // constants reach the class's pool, so a constant only the original body used is not
+        // interned at all.
+        let node = &self.optimized_before_writing(method, node);
         let assembled = node.assemble(self).map_err(CopyError::Assemble)?;
         info.lvt = assembled
             .local_variables
@@ -165,6 +173,29 @@ impl ClassWriter {
             self.methods[index].take_rewritten(optimized);
         }
         Ok(())
+    }
+
+    /// `node`, the body of `method`, after kotlinc's optimizations; as it is when they decline it.
+    fn optimized_before_writing(&self, method: &ClassMethod, node: &MethodNode) -> MethodNode {
+        let this = u16::from(method.access & ACC_STATIC == 0);
+        let Some(arguments) = descriptors::argument_types(&method.desc) else {
+            return node.clone();
+        };
+        let parameter_slots = this
+            + arguments
+                .iter()
+                .map(|argument| descriptors::size(argument) as u16)
+                .sum::<u16>();
+        let context = PassContext {
+            owner: &self.internal_name,
+            value_classes: &*self.value_classes,
+            parameter_slots,
+        };
+        let mut optimized = node.clone();
+        match pipeline::optimize(&mut optimized, &context) {
+            Outcome::Changed { .. } => optimized,
+            Outcome::Unchanged | Outcome::Declined => node.clone(),
+        }
     }
 
     /// Give the class `map` as its source map, which the class then writes whatever it holds.

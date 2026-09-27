@@ -165,6 +165,24 @@ impl SourceMap {
         self.map(name, path, source, call_line)
     }
 
+    /// What a line this map handed out stands for (`SMAP.findRange`, then `mapDestToSource`): its
+    /// file's name and path, its line there, and the call that expanded it, if any.
+    pub fn resolve(&self, line: u16) -> Option<(&str, &str, u16, Option<u16>)> {
+        self.files.iter().find_map(|file| {
+            file.ranges
+                .iter()
+                .find(|range| line >= range.dest && line - range.dest < range.range)
+                .map(|range| {
+                    (
+                        file.name.as_str(),
+                        file.path.as_str(),
+                        range.source + (line - range.dest),
+                        range.call_site,
+                    )
+                })
+        })
+    }
+
     fn map(&mut self, name: &str, path: &str, source: u16, call_site: Option<u16>) -> Option<u16> {
         let global_max = self.max_used;
         let file = self

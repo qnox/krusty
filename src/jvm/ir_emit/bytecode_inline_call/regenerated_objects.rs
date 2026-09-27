@@ -9,10 +9,11 @@ use super::*;
 use crate::backend::BackendClassifierSource;
 use crate::jvm::class_node::ClassNode;
 use crate::jvm::inliner::{
-    regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError, Regeneration,
-    RegenerationError,
+    regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError, ObjectLambda,
+    Regeneration, RegenerationError,
 };
 use crate::jvm::ir_emit::JvmSignatureFormatter;
+use crate::jvm::source_map::SourceMap;
 
 /// The method whose inline calls regenerate objects: its JVM identity, the name of the Kotlin
 /// function it realizes, which names the copies, and the classifiers its type arguments' signatures
@@ -79,14 +80,19 @@ pub(super) struct CallObjects<'a> {
     major: u16,
     callee: String,
     commit: bool,
+    /// The caller's source map as the call's lambdas left it: their lines are lines of it.
+    caller_lines: SourceMap,
 }
 
 impl<'a> Emitter<'a> {
+    /// The objects of the call `call_expression` to `callee`, whose lambdas' lines are lines of
+    /// `caller_lines`.
     pub(super) fn call_objects(
         &self,
         call_expression: u32,
         callee: &str,
         commit: bool,
+        caller_lines: SourceMap,
     ) -> CallObjects<'a> {
         CallObjects {
             ir: self.ir,
@@ -98,6 +104,7 @@ impl<'a> Emitter<'a> {
             major: self.cw.major(),
             callee: callee.to_string(),
             commit,
+            caller_lines,
         }
     }
 }
@@ -125,6 +132,7 @@ impl AnonymousObjects for CallObjects<'_> {
         &mut self,
         class: &str,
         constructor_desc: &str,
+        lambdas: &[ObjectLambda<'_>],
     ) -> Result<(String, String), InlineError> {
         let unsupported =
             |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
@@ -168,6 +176,9 @@ impl AnonymousObjects for CallObjects<'_> {
             type_arguments: &type_arguments,
             major: self.major,
             metadata_version: &METADATA_VERSION,
+            lambdas,
+            caller_lines: &self.caller_lines,
+            classes: &self.bodies,
         })
         .map_err(InlineError::Regeneration)?;
         if self.commit {
