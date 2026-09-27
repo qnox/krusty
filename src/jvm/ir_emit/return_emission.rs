@@ -26,12 +26,22 @@ impl Emitter<'_> {
             .return_finalizers
             .pop()
             .expect("the stack is longer than the floor");
-        // This copy of `finalizer` lies in the middle of its own try's protected region. Close the
-        // open segment ahead of it; the caller reopens once the whole transfer is emitted.
-        self.close_finally_segment(finalizer, code);
+        // This copy of `finalizer` lies in the middle of its own try's protected region, and of
+        // every region nested in it that the transfer has left. Close their open segments ahead of
+        // it; the caller reopens once the whole transfer is emitted.
+        self.close_left_regions(finalizer, code);
         self.emit(finalizer, code);
-        let survives =
-            !self.discarding_diverges(finalizer) && self.emit_transfer_finalizers(floor, code);
+        let survives = if self.discarding_diverges(finalizer) {
+            // kotlinc still inlines the outer finalizers behind a diverging one, as dead code its
+            // optimizer then deletes. The regions those copies split stay split, at the offset the
+            // deleted code collapses to: right behind this copy.
+            if let Some(&outermost) = self.return_finalizers.get(floor) {
+                self.close_left_regions(outermost, code);
+            }
+            false
+        } else {
+            self.emit_transfer_finalizers(floor, code)
+        };
         self.return_finalizers.push(finalizer);
         survives
     }
