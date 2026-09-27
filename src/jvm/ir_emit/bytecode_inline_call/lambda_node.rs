@@ -180,8 +180,8 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) -> Ty {
-        let (carrier, coercion) = self.inline_parameter(semantic, physical);
-        if let InvokeCoercion::ValueClass(class) = coercion {
+        let (carrier, _) = self.inline_parameter(semantic, physical);
+        if let Some(class) = self.unboxed_value_class(semantic, carrier) {
             let box_class = self.cw.class_ref(&class);
             code.checkcast(box_class);
             let unbox = self.cw.methodref(
@@ -189,7 +189,11 @@ impl Emitter<'_> {
                 "unbox-impl",
                 &format!("(){}", type_descriptor(carrier)),
             );
-            code.invokevirtual(unbox, 0, i32::from(slot_words(carrier)));
+            // `unbox-impl` is an instance call: a nullable value class carried unboxed (a reference
+            // underlying) lets null past it, as `StackValue.coerce` does.
+            null_preserving(code, semantic.is_nullable(), |code| {
+                code.invokevirtual(unbox, 0, i32::from(slot_words(carrier)));
+            });
         } else if carrier.is_jvm_scalar() {
             // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter from the
             // lambda's semantic parameter before using the physical carrier for the local slot;
@@ -207,6 +211,47 @@ impl Emitter<'_> {
         carrier
     }
 
+    /// `StackValue.coerce` of the lambda body's result of Kotlin type `semantic`, which the body
+    /// leaves as `carrier`, to the `Object` the replaced `invoke` returns, as the byte splice places
+    /// it after the inline body.
+    pub(in crate::jvm::ir_emit) fn coerce_invoke_result(
+        &mut self,
+        semantic: Ty,
+        carrier: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        if let Some(class) = self.unboxed_value_class(semantic, carrier) {
+            let boxed = self.cw.methodref(
+                &class,
+                "box-impl",
+                &format!(
+                    "({}){}",
+                    type_descriptor(carrier),
+                    type_descriptor(Ty::obj(&class))
+                ),
+            );
+            null_preserving(code, semantic.is_nullable(), |code| {
+                code.invokestatic(boxed, i32::from(slot_words(carrier)), 1);
+            });
+        } else if carrier.is_jvm_scalar() {
+            // Reverse the semantic adapter the argument took: `UInt` is not a boxed `Int`.
+            box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, carrier));
+        }
+    }
+
+    /// The value class of Kotlin type `semantic` when `carrier` is its unboxed representation.
+    fn unboxed_value_class(&self, semantic: Ty, carrier: Ty) -> Option<String> {
+        let class = semantic.non_null().obj_internal()?;
+        if !self.is_value_class_ty(&semantic) {
+            return None;
+        }
+        let underlying = crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)?;
+        let carried = type_descriptor(carrier);
+        (carried != type_descriptor(Ty::obj_name(class))
+            && carried == type_descriptor(ir_ty_to_jvm(&underlying)))
+        .then(|| class.render())
+    }
+
     /// How a lambda's value of Kotlin type `semantic`, which the lambda's node carries as
     /// `carrier`, crosses the `Object` of `invoke`: kotlinc's `StackValue.coerce` over the Kotlin
     /// types.
@@ -218,19 +263,16 @@ impl Emitter<'_> {
                 InvokeCoercion::Unported
             };
         }
-        let Some(class) = semantic.non_null().obj_internal() else {
-            return InvokeCoercion::Unported;
-        };
-        let carried = type_descriptor(carrier);
-        if carried == type_descriptor(Ty::obj_name(class)) {
-            return InvokeCoercion::Plain;
-        }
-        let unboxed = crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
-            .map(|underlying| type_descriptor(ir_ty_to_jvm(&underlying)));
-        if !semantic.is_nullable() && unboxed.as_deref() == Some(carried.as_str()) {
-            InvokeCoercion::ValueClass(class.render())
-        } else {
-            InvokeCoercion::Unported
+        match self.unboxed_value_class(semantic, carrier) {
+            Some(class) if !semantic.is_nullable() => InvokeCoercion::ValueClass(class),
+            Some(_) => InvokeCoercion::Unported,
+            None if semantic.non_null().obj_internal().is_some_and(|class| {
+                type_descriptor(carrier) == type_descriptor(Ty::obj_name(class))
+            }) =>
+            {
+                InvokeCoercion::Plain
+            }
+            None => InvokeCoercion::Unported,
         }
     }
 
@@ -611,4 +653,23 @@ fn return_unit_as_void(node: &mut MethodNode, return_type: String) -> String {
         &node.desc[..=node.desc.find(')').expect("a method descriptor")]
     );
     "V".to_string()
+}
+
+/// Emits `convert` over the reference on the stack, or, when it may be null, branches around it so
+/// null stays null: an instance call or a factory would throw on it or wrap it.
+fn null_preserving(code: &mut CodeBuilder, nullable: bool, convert: impl FnOnce(&mut CodeBuilder)) {
+    if !nullable {
+        convert(code);
+        return;
+    }
+    let null_case = code.new_label();
+    let done = code.new_label();
+    code.dup();
+    code.ifnull(null_case);
+    convert(code);
+    code.goto(done);
+    code.bind(null_case);
+    code.pop();
+    code.aconst_null();
+    code.bind(done);
 }
