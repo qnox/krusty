@@ -1,0 +1,94 @@
+//! A suspend function with no suspension point still goes through kotlinc's coroutine
+//! transformer, which returns early but first boxes primitives through
+//! `kotlin.coroutines.jvm.internal.Boxing` instead of the wrappers' `valueOf`.
+//!
+//! `coroutineContext` reads the context of the continuation the transformer puts in place of the
+//! fake one, and ends like the inlined getter it is.
+
+use super::common;
+
+fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
+    match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
+        None => panic!("reference kotlinc is provisioned"),
+        Some(Ok(())) => {}
+        Some(Err(difference)) => panic!("{difference}"),
+    }
+}
+
+const PRIMITIVES: &str = "suspend fun count(): Int = 1\n\
+suspend fun wide(n: Long): Long = n * 3L\n\
+suspend fun flag(n: Int): Boolean = n > 2\n\
+suspend fun letter(): Char = 'k'\n\
+suspend fun ratio(n: Int): Double = n / 2.0\n\
+suspend fun nothingToBox(n: Int) {\n\
+    if (n > 0) return\n\
+}\n";
+
+#[test]
+fn a_suspend_function_without_a_suspension_point_boxes_through_the_coroutine_helpers() {
+    for method in [
+        "public static final java.lang.Object count(",
+        "public static final java.lang.Object wide(",
+        "public static final java.lang.Object flag(",
+        "public static final java.lang.Object letter(",
+        "public static final java.lang.Object ratio(",
+        "public static final java.lang.Object nothingToBox(",
+    ] {
+        expect_method_matches("SuspendBoxing", PRIMITIVES, "SuspendBoxingKt", method);
+    }
+}
+
+const CONTEXT: &str = "import kotlin.coroutines.*\n\
+suspend fun context(): CoroutineContext = coroutineContext\n\
+suspend fun step(): Int = 1\n\
+suspend fun around(): Int {\n\
+    val before = coroutineContext\n\
+    val v = step()\n\
+    return if (before == coroutineContext) v else 0\n\
+}\n";
+
+#[test]
+fn a_context_read_without_a_suspension_point_matches_kotlinc() {
+    expect_method_matches(
+        "SuspendContext",
+        CONTEXT,
+        "SuspendContextKt",
+        "public static final java.lang.Object context(",
+    );
+}
+
+#[test]
+fn a_context_read_around_a_suspension_point_matches_kotlinc() {
+    expect_method_matches(
+        "SuspendContext",
+        CONTEXT,
+        "SuspendContextKt",
+        "public static final java.lang.Object around(",
+    );
+}
+
+#[test]
+fn a_context_read_around_a_suspension_point_runs() {
+    let src = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+var parked: Continuation<Int>? = null\n\
+suspend fun step(): Int = suspendCoroutine { parked = it }\n\
+suspend fun around(): Int {\n\
+    val before = coroutineContext\n\
+    val v = step()\n\
+    return if (before == coroutineContext) v else 0\n\
+}\n\
+suspend fun count(): Int = 4\n\
+fun box(): String {\n\
+    var a = 0\n\
+    var b = 0\n\
+    suspend { a = around() }.startCoroutine(Done())\n\
+    parked!!.resume(7)\n\
+    suspend { b = count() }.startCoroutine(Done())\n\
+    return if (a == 7 && b == 4) \"OK\" else \"F:$a:$b\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "SuspendContextRuns");
+}

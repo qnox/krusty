@@ -351,7 +351,7 @@ pub(super) fn emit_func_ref_class(
             emit_singleton_instance_clinit(&mut cw, &fq);
             add_singleton_instance_field(&mut cw, &fq);
         }
-        return finish_local_synthetic_class(cw);
+        return finish_local_synthetic_class(cw, env);
     }
 
     // Numbered JVM function interfaces stop at arity 22. Larger Kotlin function types use the
@@ -559,7 +559,7 @@ pub(super) fn emit_func_ref_class(
         emit_singleton_instance_clinit(&mut cw, &fq);
         add_singleton_instance_field(&mut cw, &fq);
     }
-    finish_local_synthetic_class(cw)
+    finish_local_synthetic_class(cw, env)
 }
 
 /// Push the `Class` a carrier reflects its declaration's owner as, the way kotlinc's

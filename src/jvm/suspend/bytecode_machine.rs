@@ -23,8 +23,8 @@ use super::emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
-    ensure_tail_return, recorded_suspension_result, shift_locals, suspend_call_fid,
-    value_class_suspension_result, EmitTimeMachines, MachineContext,
+    ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
+    suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::jvm::local_class_names::name_continuation;
@@ -73,6 +73,9 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
 
     let completion = adopt_cps_signature(ir, fid);
     shift_locals(ir, body, completion);
+    // `coroutineContext` is the context of the continuation kotlinc's transformer puts in place
+    // of the fake one: the machine's own, or `$completion` when there is no suspension point.
+    realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
     for suspension in &suspensions {
         let continuation = ir.add_expr(IrExpr::CurrentContinuation);
         if !append_continuation(
@@ -258,16 +261,6 @@ pub(super) fn eligible_points(
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };
-    // kotlinc's transformer builds a lambda's `invokeSuspend` state machine even with no
-    // suspension point in it; a named function without one stays a plain method.
-    if points.is_empty() && subject == Subject::NamedFunction {
-        crate::trace_compiler!(
-            "suspend",
-            "transformer declines {}: it has no suspension point",
-            function.name
-        );
-        return None;
-    }
     if !points.iter().all(|&call| plain_call(call)) {
         crate::trace_compiler!(
             "suspend",

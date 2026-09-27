@@ -110,6 +110,13 @@ Each step reports box passes, byte-identical files and divergent classes before 
   other rewrites and hands back the spill fields and `@DebugMetadata`; the continuation class is
   written afterwards from them. A function whose suspension points are all tail calls gets no
   continuation class; a failed transformation fails the file.
+* A function with no suspension point at all is taken too, as kotlinc wraps every suspend
+  function in its transformer: the tail-call return comes after `ChangeBoxingMethodTransformer`,
+  so a primitive result is boxed through `kotlin.coroutines.jvm.internal.Boxing` rather than the
+  wrapper's `valueOf`. `coroutineContext` becomes `getContext()` on the current continuation (the
+  fake one the transformer replaces, or `$completion` when there is no point) and is marked as an
+  inlined call, so the line in effect is written again after it, as after kotlinc's inlined
+  getter. Tested in `tests/suspend_function_boxing_e2e.rs`.
 * The transformed method then goes through the same optimizer passes as every other method
   (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
   removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after

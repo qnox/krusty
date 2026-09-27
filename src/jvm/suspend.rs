@@ -30,7 +30,9 @@ mod block_splicing;
 mod bottom_completion;
 mod bytecode_machine;
 mod continuation_class;
+mod coroutine_context;
 use continuation_class::build_continuation_class;
+use coroutine_context::realize_coroutine_context;
 mod call_operand_realization;
 mod cps_returns;
 use cps_returns::{box_returns, ensure_tail_return};
@@ -4838,56 +4840,10 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
 /// read; the checked `coroutineContext` intrinsic becomes the ordinary interface call on that same
 /// value. Neither realization repeats property lookup or invokes the stdlib's private throwing getter.
 fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
-    let mut reads_context = false;
-    visit_subtree(&ir.exprs, e, &mut |node| {
-        reads_context |= matches!(
-            node,
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::CoroutineContext,
-                    ..
-                },
-                ..
-            }
-        );
-    });
-    let context_receiver = reads_context.then(|| ir.add_expr(IrExpr::GetValue(slot)));
+    realize_coroutine_context(ir, e, IrExpr::GetValue(slot));
     rewrite_subtree(ir, e, &mut |node| {
         if matches!(node, IrExpr::CurrentContinuation) {
             *node = IrExpr::GetValue(slot);
-            return;
-        }
-        if matches!(
-            node,
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::CoroutineContext,
-                    ..
-                },
-                ..
-            }
-        ) {
-            let IrExpr::Call {
-                dispatch_receiver,
-                args,
-                ..
-            } = node
-            else {
-                unreachable!("matched coroutine-context call")
-            };
-            debug_assert!(dispatch_receiver.is_none());
-            debug_assert!(args.is_empty());
-            *node = IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: type_name("kotlin/coroutines/Continuation"),
-                    name: "getContext".to_string(),
-                    descriptor: "()Lkotlin/coroutines/CoroutineContext;".to_string(),
-                    params: None,
-                    interface: true,
-                },
-                dispatch_receiver: context_receiver,
-                args: Vec::new(),
-            };
         }
     });
 }
