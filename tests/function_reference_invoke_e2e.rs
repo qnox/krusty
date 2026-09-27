@@ -199,12 +199,15 @@ struct Fixture<'a> {
     source: &'a str,
     stem: &'a str,
     carriers: &'a [&'a str],
+    /// A dependency both compilers read as kotlinc compiled it.
+    dependency: Option<&'a str>,
 }
 
 const FIXTURE: Fixture<'static> = Fixture {
     source: SOURCE,
     stem: "ReferenceInvoke",
     carriers: CARRIERS,
+    dependency: None,
 };
 
 /// `javap -p -c -s` of `class` from both compilers, with constant-pool indices and column
@@ -220,18 +223,25 @@ fn disassembly_both(
     std::fs::create_dir_all(&ours_dir).ok()?;
     let source_path = dir.join(format!("{}.kt", fixture.stem));
     std::fs::write(&source_path, fixture.source).ok()?;
-    let (code, stderr) = common::kotlinc_compile(&[
+    let dependency = match fixture.dependency {
+        Some(source) => Some(common::kotlinc_library(source)?),
+        None => None,
+    };
+    let mut arguments = vec![
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
-        source_path.to_string_lossy().into_owned(),
-    ])?;
+    ];
+    if let Some(dependency) = &dependency {
+        arguments.push("-cp".to_string());
+        arguments.push(dependency.to_string_lossy().into_owned());
+    }
+    arguments.push(source_path.to_string_lossy().into_owned());
+    let (code, stderr) = common::kotlinc_compile(&arguments)?;
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let emitted = common::compile_in_process_metadata_cp(
-        fixture.source,
-        fixture.stem,
-        &[common::stdlib_jar()],
-    )
-    .expect("krusty compiles the carriers");
+    let mut classpath = vec![common::stdlib_jar()];
+    classpath.extend(dependency.clone());
+    let emitted = common::compile_in_process_metadata_cp(fixture.source, fixture.stem, &classpath)
+        .expect("krusty compiles the carriers");
     for (name, bytes) in &emitted {
         let path = ours_dir.join(format!("{name}.class"));
         std::fs::create_dir_all(path.parent().expect("class parent")).ok()?;
@@ -251,7 +261,11 @@ fn disassembly_both(
             .join("\n")
     };
     let dump = |root: &std::path::Path, class: &str| {
-        common::javap(&["-p", "-c", "-s", "-cp", &root.to_string_lossy(), class]).map(normalize)
+        let mut roots = vec![root.to_path_buf()];
+        roots.extend(dependency.clone());
+        let classpath = std::env::join_paths(roots).expect("class roots join");
+        common::javap(&["-p", "-c", "-s", "-cp", &classpath.to_string_lossy(), class])
+            .map(normalize)
     };
     let mut out = Vec::new();
     for class in classes {
@@ -326,19 +340,16 @@ fn retained_dispatching_reference_shapes_run() {
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
-        "@JvmInline value class Token(val raw: String)\n\
-         fun wide({high_parameters}): Int = p0 + p22\n\
-         fun unwrap(token: Token): String = token.raw\n\
+        "fun wide({high_parameters}): Int = p0 + p22\n\
          fun shapes(): String {{\n\
          \x20   val prefix = \"K\"\n\
          \x20   fun local(value: String): String = prefix + value\n\
          \x20   val captured: (String) -> String = ::local\n\
          \x20   val high: ({high_function_parameters}) -> Int = ::wide\n\
-         \x20   val valueClass: (Token) -> String = ::unwrap\n\
-         \x20   arrayOf<Any>(captured, high, valueClass)\n\
-         \x20   return captured(\"!\") + high({}) + valueClass(Token(\"v\"))\n\
+         \x20   arrayOf<Any>(captured, high)\n\
+         \x20   return captured(\"!\") + high({})\n\
          }}\n\
-         fun box(): String = if (shapes() == \"K!22v\") \"OK\" else \"fail: \" + shapes()\n",
+         fun box(): String = if (shapes() == \"K!22\") \"OK\" else \"fail: \" + shapes()\n",
         (0..23)
             .map(|ordinal| ordinal.to_string())
             .collect::<Vec<_>>()
@@ -397,19 +408,6 @@ fn retained_dispatching_reference_shapes_run() {
                 ("<clinit>", 0x0008, "()V"),
             ],
         ),
-        (
-            "ReferenceInvokeRetainedRunKt$shapes$valueClass$1",
-            vec![(
-                "INSTANCE",
-                0x0019,
-                "LReferenceInvokeRetainedRunKt$shapes$valueClass$1;",
-            )],
-            vec![
-                ("<init>", 0, "()V"),
-                ("invoke", 0x0001, "(Ljava/lang/Object;)Ljava/lang/Object;"),
-                ("<clinit>", 0x0008, "()V"),
-            ],
-        ),
     ];
     let expected = expected
         .into_iter()
@@ -445,7 +443,109 @@ fn assert_carriers_match_and_run(fixture: &Fixture<'_>) {
     for (class, reference, ours) in dumps {
         assert_eq!(ours, reference, "{class}: carrier differs from kotlinc");
     }
-    common::expect_box_same_as_kotlinc(fixture.source, &format!("{}Run", fixture.stem));
+    let Some(dependency) = fixture.dependency else {
+        common::expect_box_same_as_kotlinc(fixture.source, &format!("{}Run", fixture.stem));
+        return;
+    };
+    let library = common::kotlinc_library(dependency).expect("reference kotlinc is provisioned");
+    let reference = common::kotlinc_box_result_with_classpath(fixture.source, &[library]);
+    assert_eq!(
+        reference, "OK",
+        "{}: kotlinc fixture must succeed",
+        fixture.stem
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(dependency, fixture.source)
+            .expect("reference kotlinc is provisioned"),
+        reference,
+        "{}: krusty and kotlinc box results differ",
+        fixture.stem,
+    );
+}
+
+const VALUE_CLASS_CONSTRUCTOR_SOURCE: &str = r##"@JvmInline
+value class Tag(val raw: Int)
+
+@JvmInline
+value class Name(val raw: String)
+
+class Held(vararg val all: Any)
+
+class Wrap(val tag: Tag)
+
+class Pair2(val tag: Tag, val name: Name?)
+
+fun carriers(): Held = Held(::Wrap, ::Pair2)
+
+fun box(): String {
+    val all = carriers().all
+    if ((all[0] as (Tag) -> Wrap)(Tag(4)).tag.raw != 4) return "wrap"
+    if ((all[1] as (Tag, Name?) -> Pair2)(Tag(1), Name("n")).name?.raw != "n") return "pair"
+    return "OK"
+}
+"##;
+
+/// A constructor that declares a value-class parameter is private, so its reference reflects and
+/// calls kotlinc's `DefaultConstructorMarker` accessor, still under the name `<init>`.
+#[test]
+fn value_class_constructor_references_reflect_the_marker_accessor() {
+    assert_carriers_match_and_run(&Fixture {
+        source: VALUE_CLASS_CONSTRUCTOR_SOURCE,
+        stem: "ValueClassConstructorReference",
+        dependency: None,
+        carriers: &[
+            "ValueClassConstructorReferenceKt$carriers$1",
+            "ValueClassConstructorReferenceKt$carriers$2",
+        ],
+    });
+}
+
+const VALUE_CLASS_DEPENDENCY: &str = r##"package lib
+
+@JvmInline
+value class Id(val raw: Int)
+
+fun decode(id: Id): Int = id.raw + 1
+
+@JvmName("encoded")
+fun encode(value: Int): Id = Id(value * 2)
+
+fun Id.next(): Id = Id(raw + 1)
+"##;
+
+const VALUE_CLASS_DEPENDENCY_SOURCE: &str = r##"import lib.Id
+import lib.decode
+import lib.encode
+import lib.next
+
+class Held(vararg val all: Any)
+
+fun carriers(): Held = Held(::decode, ::encode, Id::next)
+
+fun box(): String {
+    val all = carriers().all
+    if ((all[0] as (Id) -> Int)(Id(41)) != 42) return "decode"
+    if ((all[1] as (Int) -> Id)(21).raw != 42) return "encode"
+    if ((all[2] as (Id) -> Id)(Id(1)).raw != 2) return "next"
+    return "OK"
+}
+"##;
+
+/// A dependency publishes its declaration's Kotlin name beside the JVM method a value-class hash
+/// or `@JvmName` realizes it as. Its reference reflects the Kotlin name and calls, and signs, the
+/// published method verbatim.
+#[test]
+fn dependency_value_class_references_keep_the_published_method() {
+    assert_carriers_match_and_run(&Fixture {
+        source: VALUE_CLASS_DEPENDENCY_SOURCE,
+        stem: "ValueClassDependencyReference",
+        dependency: Some(VALUE_CLASS_DEPENDENCY),
+        carriers: &[
+            "ValueClassDependencyReferenceKt$carriers$1",
+            "ValueClassDependencyReferenceKt$carriers$2",
+            "ValueClassDependencyReferenceKt$carriers$3",
+        ],
+    });
 }
 
 const SUSPEND_SOURCE: &str = r##"import kotlin.coroutines.Continuation
@@ -501,12 +601,97 @@ fn suspend_reference_carriers_declare_kotlincs_typed_invoke() {
     assert_carriers_match_and_run(&Fixture {
         source: SUSPEND_SOURCE,
         stem: "SuspendReferenceInvoke",
+        dependency: None,
         carriers: &[
             "SuspendReferenceInvokeKt$carriers$converted$1",
             "SuspendReferenceInvokeKt$carriers$declared$1",
             "SuspendReferenceInvokeKt$carriers$bound$1",
             "SuspendReferenceInvokeKt$carriers$unbound$1",
             "SuspendReferenceInvokeKt$carriers$boundExtension$1",
+        ],
+    });
+}
+
+const VALUE_CLASS_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+@JvmInline
+value class Tag(val text: String) {
+    fun mark(): String = text + "#"
+}
+
+@JvmInline
+value class Num(val raw: Int)
+
+@JvmInline
+value class Crate(val item: Any)
+
+fun Tag.shout(): String = text + "!"
+fun makeTag(text: String): Tag = Tag(text)
+fun bump(num: Num): Num = Num(num.raw + 1)
+fun widen(value: UInt): Long = 7L
+fun maybe(tag: Tag?): String = if (tag == null) "none" else tag.text
+fun pack(item: Any): Crate = Crate(item)
+fun unsign(value: Int): UInt = 9u
+
+fun carriers(tag: Tag): Held {
+    val extension = Tag::shout
+    val made = ::makeTag
+    val bumped = ::bump
+    val widened = ::widen
+    val member = Tag::mark
+    val boundMember = tag::mark
+    val boundExtension = tag::shout
+    val nullable = ::maybe
+    val packed = ::pack
+    val unsigned = ::unsign
+    return Held(
+        extension, made, bumped, widened, member, boundMember, boundExtension, nullable, packed,
+        unsigned,
+    )
+}
+
+@Suppress("UNCHECKED_CAST")
+fun box(): String {
+    val tag = Tag("t")
+    val all = carriers(tag).all
+    if ((all[0] as (Tag) -> String)(tag) != "t!") return "extension"
+    if ((all[1] as (String) -> Tag)("m") != Tag("m")) return "made"
+    if ((all[2] as (Num) -> Num)(Num(1)) != Num(2)) return "bumped"
+    if ((all[3] as (UInt) -> Long)(3u) != 7L) return "widened"
+    if ((all[4] as (Tag) -> String)(tag) != "t#") return "member"
+    if ((all[5] as () -> String)() != "t#") return "bound member"
+    if ((all[6] as () -> String)() != "t!") return "bound extension"
+    val nullable = all[7] as (Tag?) -> String
+    if (nullable(null) != "none") return "nullable null"
+    if (nullable(tag) != "t") return "nullable value"
+    if ((all[8] as (Any) -> Crate)("c") != Crate("c")) return "packed"
+    if ((all[9] as (Int) -> UInt)(1) != 9u) return "unsigned"
+    return "OK"
+}
+"##;
+
+/// A reference whose signature mentions a value class gets kotlinc's typed `invoke`, mangled over
+/// the carriers it takes and returns, and a bridge that unboxes each value-class argument (keeping
+/// a null one null) and boxes a value-class or unsigned result, even where the mangled invoke
+/// erases to the bridge's own descriptor. A value-class member is reflected as its static
+/// implementation over the carrier.
+#[test]
+fn value_class_reference_carriers_declare_kotlincs_mangled_invoke() {
+    assert_carriers_match_and_run(&Fixture {
+        source: VALUE_CLASS_SOURCE,
+        stem: "ValueClassReferenceInvoke",
+        dependency: None,
+        carriers: &[
+            "ValueClassReferenceInvokeKt$carriers$extension$1",
+            "ValueClassReferenceInvokeKt$carriers$made$1",
+            "ValueClassReferenceInvokeKt$carriers$bumped$1",
+            "ValueClassReferenceInvokeKt$carriers$widened$1",
+            "ValueClassReferenceInvokeKt$carriers$member$1",
+            "ValueClassReferenceInvokeKt$carriers$boundMember$1",
+            "ValueClassReferenceInvokeKt$carriers$boundExtension$1",
+            "ValueClassReferenceInvokeKt$carriers$nullable$1",
+            "ValueClassReferenceInvokeKt$carriers$packed$1",
+            "ValueClassReferenceInvokeKt$carriers$unsigned$1",
         ],
     });
 }
@@ -544,6 +729,7 @@ fn extension_reference_carriers_reflect_the_receiver_parameter() {
     assert_carriers_match_and_run(&Fixture {
         source: EXTENSION_SOURCE,
         stem: "ExtensionReferenceInvoke",
+        dependency: None,
         carriers: &[
             "ExtensionReferenceInvokeKt$carriers$unbound$1",
             "ExtensionReferenceInvokeKt$carriers$text$1",
