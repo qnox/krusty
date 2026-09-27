@@ -17,10 +17,10 @@ impl JvmSignatureFormatter<'_> {
         argument: Ty,
         wildcards: Wildcards,
     ) -> Option<String> {
-        // Below an invariant argument a projection that only restates the parameter's declared
+        // In a return-like position a projection that only restates the parameter's declared
         // variance is declaration-site variance too, and is not written.
         let restated = |projection: TypeVariance| {
-            wildcards == Wildcards::BelowInvariant && declaration == projection
+            wildcards == Wildcards::Suppressed && declaration == projection
         };
         match argument {
             Ty::StarProjection(_) => Some("*".to_string()),

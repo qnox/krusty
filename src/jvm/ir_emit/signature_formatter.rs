@@ -7,43 +7,48 @@ mod type_arguments;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
-/// kotlinc writes those wildcards in PARAMETER positions only: a return type and a field type get the
-/// invariant spelling, at EVERY nesting depth (`fun <U> deep(a: Map<String, List<U>>): Map<String,
+/// kotlinc writes those wildcards in PARAMETER positions: a return type and a field type get the
+/// invariant spelling, down to any contravariant argument (`fun <U> deep(a: Map<String, List<U>>): Map<String,
 /// List<U>>` signs its parameter `Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;` and its
 /// return `Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;`). An explicit `in`/`out`
 /// projection the user wrote is not declaration-site variance and renders in either mode.
 ///
-/// Inside a parameter, kotlinc's `TypeMappingMode` changes with each argument's effective variance.
-/// Below an INVARIANT argument (or an array element) declaration-site variance is no longer
-/// written: `Box<List<Any>>` signs `LBox<Ljava/util/List<Ljava/lang/Object;>;>;`, since `Box<T>`
-/// would not accept a `Box<List<? extends Object>>` anyway. A contravariant argument below that
-/// writes them again, now for its whole subtree: `Box<Comparable<List<Any>>>` signs
-/// `LBox<Ljava/lang/Comparable<Ljava/util/List<+Ljava/lang/Object;>;>;>;`.
+/// Each nested argument's mode follows kotlinc's `TypeMappingMode.toGenericArgumentMode` over its
+/// effective variance. Below an INVARIANT argument of a parameter (or an array element) the position
+/// is return-like: `Box<List<Any>>` signs `LBox<Ljava/util/List<Ljava/lang/Object;>;>;`, since `Box<T>`
+/// would not accept a `Box<List<? extends Object>>` anyway. A CONTRAVARIANT argument of a return-like
+/// position writes them again, for its whole subtree: a return `Inv<Sink<Source<Open>>>` signs
+/// `LInv<LSink<LSource<+LOpen;>;>;>;`. A supertype writes none on its own arguments and all of them
+/// below, even below an invariant one: `Marker<Inv<Source<Open>>>` signs
+/// `LMarker<LInv<LSource<+LOpen;>;>;>;`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wildcards {
     /// A parameter position: realize declaration-site variance as `+`/`-`.
     Declared,
-    /// Below an invariant argument of a parameter: declaration-site variance is not written.
-    BelowInvariant,
-    /// Below a contravariant argument inside an invariant one: declaration-site variance is written
-    /// again, and stays written however the arguments below nest.
-    BelowInvariantContravariant,
-    /// A return or field position: spell every argument invariantly.
+    /// A return or field position, or below an invariant argument of a parameter: declaration-site
+    /// variance is not written.
     Suppressed,
+    /// Below a contravariant argument of a return-like position, or below a supertype's own
+    /// arguments: declaration-site variance is written, however the arguments below nest.
+    Reopened,
+    /// A class header's supertype: its own arguments are spelled invariantly, everything below them
+    /// with declaration-site wildcards.
+    Supertype,
 }
 
 impl Wildcards {
     /// Whether declaration-site variance is written as a wildcard at this position.
     pub(super) fn writes_declaration_site(self) -> bool {
-        matches!(self, Self::Declared | Self::BelowInvariantContravariant)
+        matches!(self, Self::Declared | Self::Reopened)
     }
 
     /// The mode for an argument whose effective variance is `variance` (an array element is
     /// invariant): kotlinc's `TypeMappingMode.toGenericArgumentMode`.
     pub(super) fn for_argument(self, variance: TypeVariance) -> Self {
         match (self, variance) {
-            (Self::Declared, TypeVariance::Invariant) => Self::BelowInvariant,
-            (Self::BelowInvariant, TypeVariance::In) => Self::BelowInvariantContravariant,
+            (Self::Declared, TypeVariance::Invariant) => Self::Suppressed,
+            (Self::Suppressed, TypeVariance::In) => Self::Reopened,
+            (Self::Supertype, _) => Self::Reopened,
             (mode, _) => mode,
         }
     }
@@ -332,8 +337,11 @@ impl<'a> JvmSignatureFormatter<'a> {
             if wildcards.writes_declaration_site() {
                 rendered.push('-');
             }
+            let continuation = wildcards.for_argument(TypeVariance::In);
             rendered.push_str("Lkotlin/coroutines/Continuation<-");
-            rendered.push_str(&self.ty_at(&signature.ret, wildcards)?);
+            rendered.push_str(
+                &self.ty_at(&signature.ret, continuation.for_argument(TypeVariance::In))?,
+            );
             rendered.push_str(">;");
             if wildcards.writes_declaration_site() {
                 rendered.push('+');

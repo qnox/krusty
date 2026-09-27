@@ -50,10 +50,10 @@ pub(super) fn emit_func_ref_class(
         c.superclass()
     };
     // The carrier's generic header: its runtime base class, then the Kotlin function type it
-    // implements (and the suspend marker interface), written as a supertype, without wildcards.
+    // implements (and the suspend marker interface), written as a supertype.
     let suspend = fr.is_suspend || matches!(fr.dispatch, FrDispatch::SuspendConvert);
     let signature = JvmSignatureFormatter::new(ir, env)
-        .ty_at(&fr.function_type, Wildcards::Suppressed)
+        .ty_at(&fr.function_type, Wildcards::Supertype)
         .map(|function| {
             let marker = if suspend {
                 "Lkotlin/coroutines/jvm/internal/SuspendFunction;"

@@ -49,3 +49,46 @@ fn constructor_parameters_follow_the_invariant_rule() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|error| panic!("Holder is byte-identical to kotlinc: {error}"));
 }
+
+/// The same state machine over neutral repository classes, so no mapped or intrinsic type can stand
+/// in for the variance: a return or field reopens declaration-site variance below a contravariant
+/// argument and drops a projection that restates it; a suspend function type's continuation result
+/// sits below the continuation's own `in` projection; a supertype spells only its own arguments
+/// invariantly.
+const NEUTRAL: &str = r##"open class Open
+class Source<out T>
+class Sink<in T>
+open class Inv<T>
+interface Marker<T>
+
+class Fields {
+    val nested: Inv<Sink<Source<Open>>> = Inv()
+    val sink: Sink<Source<Open>> = Sink()
+    val restated: Sink<in Open> = Sink()
+}
+
+class Extends : Inv<Sink<Source<Open>>>(), Marker<Inv<Source<Open>>>
+
+fun nestedReturn(): Inv<Sink<Source<Open>>> = Inv()
+fun sinkReturn(): Sink<Source<Open>> = Sink()
+fun restatedReturn(): Sink<in Open> = Sink()
+fun nestedParameter(a: Inv<Sink<Source<Open>>>) {}
+fun suspendBelowInvariant(a: Inv<suspend () -> Source<Open>>) {}
+fun suspendParameter(a: suspend () -> Source<Open>) {}
+interface Returns {
+    fun suspendReturn(): suspend () -> Source<Open>
+    fun suspendInvariantReturn(): Inv<suspend () -> Source<Open>>
+}
+fun suspendBelowSink(a: Inv<Sink<suspend () -> Source<Open>>>) {}
+fun suspendArgument(a: Inv<suspend (Source<Open>) -> Open>) {}
+"##;
+
+#[test]
+fn return_field_suspend_and_supertype_modes_match_kotlinc() {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    for class in ["NeutralWildcardsKt", "Fields", "Extends", "Returns"] {
+        common::byte_diff_against_kotlinc_cp("NeutralWildcards", NEUTRAL, class, &classpath)
+            .expect("reference kotlinc is provisioned")
+            .unwrap_or_else(|error| panic!("{class} is byte-identical to kotlinc: {error}"));
+    }
+}
