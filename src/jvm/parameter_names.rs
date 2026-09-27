@@ -8,6 +8,7 @@ use crate::ir::{
     IrCapturedDeclaration, IrCapturingCallable, IrFile, IrGeneratedParameterRole,
     IrParameterIdentity, IrParameterRole,
 };
+use crate::jvm::anonymous_context_labels;
 use crate::jvm::capture_names::capture_parameter_local;
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
@@ -108,16 +109,6 @@ pub(super) fn function_locals(
 /// label only to reflection and null assertions.
 fn anonymous_context_parameters_are_locals() -> bool {
     crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
-}
-
-/// What separates a repeated anonymous context label from its ordinal: `$context-String$1` since
-/// Kotlin 2.4.20, `$context-String#1` before it.
-fn anonymous_context_ordinal_separator() -> char {
-    if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
-        '$'
-    } else {
-        '#'
-    }
 }
 
 /// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
@@ -222,55 +213,24 @@ pub(super) fn method_parameter(
     local_variable(identity, function_name)
 }
 
-fn anonymous_context_label(ty: crate::types::Ty) -> String {
-    let stem = match ty.non_null() {
-        crate::types::Ty::Obj(name, _) => name.nested_segment_ref(),
-        crate::types::Ty::TyParam(name, _) => name,
-        crate::types::Ty::Unit => "Unit",
-        crate::types::Ty::Fun(_) => "Function",
-        crate::types::Ty::Nothing => "Nothing",
-        unexpected => panic!("anonymous context parameter has no JVM type label: {unexpected:?}"),
-    };
-    format!("$context-{stem}")
-}
-
 fn disambiguated_anonymous_context_labels(
     identities: &[IrParameterIdentity],
     types: &[crate::types::Ty],
 ) -> Vec<Option<String>> {
     assert_eq!(identities.len(), types.len());
-    let bases = identities
-        .iter()
-        .zip(types)
-        .map(|(identity, ty)| {
-            matches!(
-                identity.role,
-                IrParameterRole::AnonymousContextParameter { .. }
-            )
-            .then(|| anonymous_context_label(*ty))
-        })
-        .collect::<Vec<_>>();
-    let mut totals = std::collections::HashMap::<&str, usize>::new();
-    for base in bases.iter().flatten() {
-        *totals.entry(base).or_default() += 1;
-    }
-    let mut seen = std::collections::HashMap::<&str, usize>::new();
-    bases
-        .iter()
-        .map(|base| {
-            let base = base.as_deref()?;
-            if totals[base] == 1 {
-                Some(base.to_owned())
-            } else {
-                let ordinal = seen.entry(base).or_default();
-                *ordinal += 1;
-                Some(format!(
-                    "{base}{}{ordinal}",
-                    anonymous_context_ordinal_separator()
-                ))
-            }
-        })
-        .collect()
+    anonymous_context_labels::disambiguated(
+        identities
+            .iter()
+            .zip(types)
+            .map(|(identity, ty)| {
+                matches!(
+                    identity.role,
+                    IrParameterRole::AnonymousContextParameter { .. }
+                )
+                .then_some(*ty)
+            })
+            .collect(),
+    )
 }
 
 fn function_semantic_parameter_types(

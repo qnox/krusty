@@ -6,10 +6,12 @@
 //! Every class-file surface that names a capture goes through this module.
 
 use crate::ir::{IrCapturedReceiver, IrClass, IrConstructorCapture};
+use crate::jvm::anonymous_context_labels;
 
 /// The field and reflected parameter name of a capture: `$a` for a value, `this$0` for the
-/// enclosing instance, and `$this_<label>` for a callable's or lambda's receiver (`$this` for an
-/// unlabeled lambda's).
+/// enclosing instance, `$this_<label>` for a callable's or lambda's receiver (`$this` for an
+/// unlabeled lambda's), and `$` before the parameter's own label for an anonymous context
+/// parameter (`$$context-Box`).
 pub(super) fn capture_name(capture: &IrConstructorCapture) -> String {
     match &capture.receiver {
         None => format!("${}", capture.source_name),
@@ -18,6 +20,12 @@ pub(super) fn capture_name(capture: &IrConstructorCapture) -> String {
             format!("$this_{label}")
         }
         Some(IrCapturedReceiver::Lambda(None)) => "$this".to_string(),
+        Some(IrCapturedReceiver::Context { anonymous, index }) => {
+            format!(
+                "${}",
+                anonymous_context_labels::label_at(anonymous, *index as usize)
+            )
+        }
     }
 }
 

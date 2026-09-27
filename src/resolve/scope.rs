@@ -928,6 +928,36 @@ impl<'p, B> Scope<'p, B> {
         })
     }
 
+    /// The anonymous context parameter (`context(_: Box)`) that is the implicit receiver `identity`:
+    /// the types of its callable's anonymous context parameters in declaration order, and its
+    /// position among them.
+    pub(crate) fn implicit_receiver_anonymous_context(
+        &self,
+        identity: (usize, usize),
+    ) -> Option<(Vec<Ty>, usize)> {
+        let ordinal = identity.1.checked_sub(1)?;
+        let scope = self
+            .ancestors()
+            .find(|scope| *scope as *const Self as usize == identity.0)?;
+        let receivers = scope.context_receivers.borrow();
+        let implicit = receivers
+            .iter()
+            .filter(|receiver| receiver.implicit_receiver)
+            .collect::<Vec<_>>();
+        let receiver = *implicit.get(implicit.len().checked_sub(ordinal + 1)?)?;
+        let anonymous = receivers
+            .iter()
+            .filter(|candidate| candidate.name == "_")
+            .collect::<Vec<_>>();
+        let index = anonymous
+            .iter()
+            .position(|candidate| std::ptr::eq(*candidate, receiver))?;
+        Some((
+            anonymous.iter().map(|candidate| candidate.ty).collect(),
+            index,
+        ))
+    }
+
     /// The label of the receiver lambda whose rung introduced the receiver `identity`.
     pub(crate) fn implicit_receiver_lambda_label(
         &self,

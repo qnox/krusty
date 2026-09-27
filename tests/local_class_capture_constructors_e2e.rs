@@ -198,3 +198,62 @@ fn captured_receivers_are_named_like_kotlinc() {
         ],
     );
 }
+
+/// Local and anonymous classes capturing anonymous context parameters (`context(_: Box)`), which
+/// kotlinc stores in a field named after the parameter's own label (`$$context-Box`). The implicit
+/// context argument read from that field has no source position, so each `run` marks its line only
+/// at the call.
+const CONTEXT_RECEIVERS: &str = r##"
+interface Action {
+    fun run(): Any
+}
+
+class Box(val v: Any)
+
+class Holder(val t: Any)
+
+class Two(val first: Any, val second: Any)
+
+context(b: Box)
+fun readBox(): Any = b.v
+
+context(h: Holder)
+fun readHolder(): Any = h.t
+
+context(_: Box)
+fun single(): Action = object : Action {
+    override fun run() = readBox()
+}
+
+context(_: Box, _: Holder)
+fun both(): Action = object : Action {
+    override fun run() = Two(readHolder(), readBox())
+}
+
+context(_: Box, _: Holder)
+fun second(): Action = object : Action {
+    override fun run() = readHolder()
+}
+
+context(_: Box)
+fun localClass(): Any {
+    class L {
+        fun r() = readBox()
+    }
+    return L()
+}
+"##;
+
+#[test]
+fn captured_context_receivers_are_named_like_kotlinc() {
+    assert_identical(
+        "ContextReceivers",
+        CONTEXT_RECEIVERS,
+        &[
+            "ContextReceiversKt$single$1",
+            "ContextReceiversKt$both$1",
+            "ContextReceiversKt$second$1",
+            "ContextReceiversKt$localClass$L",
+        ],
+    );
+}

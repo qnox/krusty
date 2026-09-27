@@ -334,6 +334,10 @@ impl BodyLowering<'_> {
                 FirCapturedReceiver::Enclosing => IrCapturedReceiver::Enclosing,
                 FirCapturedReceiver::Callable(label) => IrCapturedReceiver::Callable(label.clone()),
                 FirCapturedReceiver::Lambda(label) => IrCapturedReceiver::Lambda(label.clone()),
+                FirCapturedReceiver::Context { anonymous, index } => IrCapturedReceiver::Context {
+                    anonymous: anonymous.iter().map(|ty| ty.get()).collect(),
+                    index: *index,
+                },
             });
             arguments.push(IrCtorArg {
                 // A capture is synthetic: no source parameter, so no metadata value parameter.

@@ -81,6 +81,12 @@ pub enum FirCapturedReceiver {
     Callable(Box<str>),
     /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
     Lambda(Option<Box<str>>),
+    /// An anonymous context parameter (`context(_: Box)`): the declared types of its callable's
+    /// anonymous context parameters, in order, and its own position among them.
+    Context {
+        anonymous: Box<[ResolvedTy]>,
+        index: u32,
+    },
 }
 
 impl FirCapturedReceiver {
@@ -88,6 +94,7 @@ impl FirCapturedReceiver {
         match self {
             Self::Enclosing | Self::Lambda(None) => 0,
             Self::Callable(label) | Self::Lambda(Some(label)) => label.len(),
+            Self::Context { anonymous, .. } => anonymous.len() * std::mem::size_of::<ResolvedTy>(),
         }
     }
 }

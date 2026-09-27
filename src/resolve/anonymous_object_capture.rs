@@ -77,6 +77,18 @@ impl Checker<'_> {
         if class_receiver {
             return FirCapturedReceiver::Enclosing;
         }
+        if let Some((anonymous, index)) = scope.implicit_receiver_anonymous_context(identity) {
+            return FirCapturedReceiver::Context {
+                anonymous: anonymous
+                    .into_iter()
+                    .map(|ty| {
+                        crate::fir::ResolvedTy::new(ty)
+                            .expect("a context parameter's declared type is published")
+                    })
+                    .collect(),
+                index: u32::try_from(index).expect("too many context parameters"),
+            };
+        }
         let Some(declaration) = extension else {
             let label = scope.implicit_receiver_lambda_label(identity);
             return FirCapturedReceiver::Lambda(label.map(String::into_boxed_str));
