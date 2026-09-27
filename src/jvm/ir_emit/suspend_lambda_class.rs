@@ -67,10 +67,21 @@ impl Shape {
             .parameters
             .iter()
             .enumerate()
-            .map(|(index, &(ty, stored))| Parameter {
-                semantic: signature.params.get(index).copied().unwrap_or(ty),
-                physical: jvm_declared_ty(&ty),
-                field: stored.map(field),
+            .map(|(index, &(ty, stored))| {
+                // A parameter never has a `void` type: a `Unit` one is the `Unit` object.
+                let [physical] = jvm_tys(&[ty])[..] else {
+                    unreachable!("one type maps to one JVM type")
+                };
+                let semantic = signature.params.get(index).copied().unwrap_or(ty);
+                Parameter {
+                    semantic: if semantic == Ty::Unit {
+                        physical
+                    } else {
+                        semantic
+                    },
+                    physical,
+                    field: stored.map(field),
+                }
             })
             .collect::<Vec<_>>();
         Shape {
@@ -181,6 +192,7 @@ pub(super) fn emit_suspend_lambda_class(
     emit_method(
         ir,
         lambda.invoke_suspend,
+        StaticOwner::Class(c.fq_name),
         &shape.class,
         facade,
         &mut cw,
