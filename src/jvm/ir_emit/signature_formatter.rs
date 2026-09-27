@@ -7,17 +7,51 @@ mod type_arguments;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
-/// kotlinc writes those wildcards in PARAMETER positions only: a return type and a field type get the
-/// invariant spelling, at EVERY nesting depth (`fun <U> deep(a: Map<String, List<U>>): Map<String,
+/// kotlinc writes those wildcards in PARAMETER positions: a return type and a field type get the
+/// invariant spelling, down to any contravariant argument (`fun <U> deep(a: Map<String, List<U>>): Map<String,
 /// List<U>>` signs its parameter `Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;` and its
 /// return `Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;`). An explicit `in`/`out`
 /// projection the user wrote is not declaration-site variance and renders in either mode.
+///
+/// Each nested argument's mode follows kotlinc's `TypeMappingMode.toGenericArgumentMode` over its
+/// effective variance. Below an INVARIANT argument of a parameter (or an array element) the position
+/// is return-like: `Box<List<Any>>` signs `LBox<Ljava/util/List<Ljava/lang/Object;>;>;`, since `Box<T>`
+/// would not accept a `Box<List<? extends Object>>` anyway. A CONTRAVARIANT argument of a return-like
+/// position writes them again, for its whole subtree: a return `Inv<Sink<Source<Open>>>` signs
+/// `LInv<LSink<LSource<+LOpen;>;>;>;`. A supertype writes none on its own arguments and all of them
+/// below, even below an invariant one: `Marker<Inv<Source<Open>>>` signs
+/// `LMarker<LInv<LSource<+LOpen;>;>;>;`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wildcards {
     /// A parameter position: realize declaration-site variance as `+`/`-`.
     Declared,
-    /// A return or field position: spell every argument invariantly.
+    /// A return or field position, or below an invariant argument of a parameter: declaration-site
+    /// variance is not written.
     Suppressed,
+    /// Below a contravariant argument of a return-like position, or below a supertype's own
+    /// arguments: declaration-site variance is written, however the arguments below nest.
+    Reopened,
+    /// A class header's supertype: its own arguments are spelled invariantly, everything below them
+    /// with declaration-site wildcards.
+    Supertype,
+}
+
+impl Wildcards {
+    /// Whether declaration-site variance is written as a wildcard at this position.
+    pub(super) fn writes_declaration_site(self) -> bool {
+        matches!(self, Self::Declared | Self::Reopened)
+    }
+
+    /// The mode for an argument whose effective variance is `variance` (an array element is
+    /// invariant): kotlinc's `TypeMappingMode.toGenericArgumentMode`.
+    pub(super) fn for_argument(self, variance: TypeVariance) -> Self {
+        match (self, variance) {
+            (Self::Declared, TypeVariance::Invariant) => Self::Suppressed,
+            (Self::Suppressed, TypeVariance::In) => Self::Reopened,
+            (Self::Supertype, _) => Self::Reopened,
+            (mode, _) => mode,
+        }
+    }
 }
 
 /// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
@@ -300,13 +334,16 @@ impl<'a> JvmSignatureFormatter<'a> {
         if signature.suspend {
             // The continuation's own `in` projection is part of the type; the wildcards on the
             // `FunctionN` arguments follow the position, like every other argument's.
-            if wildcards == Wildcards::Declared {
+            if wildcards.writes_declaration_site() {
                 rendered.push('-');
             }
+            let continuation = wildcards.for_argument(TypeVariance::In);
             rendered.push_str("Lkotlin/coroutines/Continuation<-");
-            rendered.push_str(&self.ty_at(&signature.ret, wildcards)?);
+            rendered.push_str(
+                &self.ty_at(&signature.ret, continuation.for_argument(TypeVariance::In))?,
+            );
             rendered.push_str(">;");
-            if wildcards == Wildcards::Declared {
+            if wildcards.writes_declaration_site() {
                 rendered.push('+');
             }
             rendered.push_str("Ljava/lang/Object;");
@@ -380,13 +417,21 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::Obj(owner, arguments) if owner.matches("kotlin/Array") && arguments.len() == 1 => {
                 // The element's own variance is not written: a JVM array type has no argument list to
                 // put it on. `Array<out String>` erases to `[Ljava/lang/String;`, as kotlinc emits.
-                let element = match &arguments[0] {
-                    Ty::InProjection(inner)
-                    | Ty::OutProjection(inner)
-                    | Ty::StarProjection(inner) => inner,
-                    argument => argument,
+                // Its projection still decides the element's mode: `Array<List<Any>>` is an
+                // invariant argument, `Array<out List<Any>>` a covariant one.
+                let (variance, element) = match arguments[0] {
+                    // A consumer's elements are read as `Any?`: `Array<in List<Any>>` is
+                    // `[Ljava/lang/Object;`, whose signature adds nothing.
+                    Ty::InProjection(_) => (TypeVariance::In, Ty::obj("kotlin/Any")),
+                    Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                        (TypeVariance::Out, *inner)
+                    }
+                    argument => (TypeVariance::Invariant, argument),
                 };
-                Some(format!("[{}", self.ty_at(element, wildcards)?))
+                Some(format!(
+                    "[{}",
+                    self.ty_at(&element, wildcards.for_argument(variance))?
+                ))
             }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
                 "L{};",

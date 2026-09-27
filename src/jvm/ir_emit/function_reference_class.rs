@@ -53,7 +53,7 @@ pub(super) fn emit_func_ref_class(
     // implements (and the suspend marker interface), written as a supertype, without wildcards.
     let suspend = fr.is_suspend;
     let signature = JvmSignatureFormatter::new(ir, env)
-        .ty_at(&fr.function_type, Wildcards::Suppressed)
+        .ty_at(&fr.function_type, Wildcards::Supertype)
         .map(|function| {
             let marker = if suspend {
                 "Lkotlin/coroutines/jvm/internal/SuspendFunction;"
