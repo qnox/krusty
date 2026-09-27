@@ -42,6 +42,7 @@ mod default_arguments;
 mod expression_provenance;
 mod field_flags;
 mod function_scope;
+mod inline_copies;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
@@ -50,6 +51,7 @@ mod overrides;
 mod progression;
 pub(crate) mod referenced_classifiers;
 mod references;
+mod sam_target;
 mod type_check_role;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
@@ -78,6 +80,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
 };
+pub use sam_target::IrSamTarget;
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -1074,27 +1077,6 @@ pub enum IrExpr {
         finally: Option<ExprId>,
         result: Ty,
     },
-}
-
-/// Checked functional-interface target attached to a lambda after SAM conversion.
-///
-/// Both the call-site-specialized shape and the declaration shape are retained: the former types
-/// the implementation while the latter determines the platform method that the closure implements.
-/// This is frontend semantic data; platform owner spellings and descriptors do not belong here.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrSamTarget {
-    pub classifier: TypeName,
-    pub method: String,
-    pub parameters: Vec<Ty>,
-    pub result: Ty,
-    pub declared_parameters: Vec<Ty>,
-    pub declared_result: Ty,
-    pub context_count: u32,
-    pub has_receiver: bool,
-    pub suspend: bool,
-    /// A fun-interface conversion of a callable reference delegates equality/hashCode through
-    /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
-    pub function_adapter: bool,
 }
 
 /// A function/method declaration (`IrFunction`).
@@ -2319,6 +2301,8 @@ pub struct IrFile {
     /// Sparse inline origin for debug-visible local declarations. Source spelling remains in
     /// `value_names`; target-specific decoration is deliberately deferred to the backend.
     debug_local_provenance: std::collections::HashMap<ExprId, IrDebugLocalProvenance>,
+    /// Expressions copied from an inline function's own body into a call site; see `inline_copies`.
+    inline_copies: std::collections::HashSet<ExprId>,
     /// Lifted lambda implementation id → stable source origin and lexical binding context.
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by

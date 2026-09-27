@@ -1546,7 +1546,10 @@ mod tests {
             ),
             (
                 "mark_must_inline_lambdas(",
-                &["src/jvm/ir_emit.rs", "src/jvm/backend.rs"],
+                &[
+                    "src/jvm/ir_emit/must_inline_lambdas.rs",
+                    "src/jvm/backend.rs",
+                ],
             ),
             (
                 "reparent_lambda_impls(",

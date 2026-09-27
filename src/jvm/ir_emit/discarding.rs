@@ -8,7 +8,9 @@ use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr};
 impl Emitter<'_> {
     pub(super) fn emit_discarding(&mut self, expression: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(expression).clone();
-        self.emit_discarding_node(expression, &node, code);
+        self.emitting(expression, |emitter| {
+            emitter.emit_discarding_node(expression, &node, code);
+        });
     }
 
     pub(super) fn emit_discarding_node(

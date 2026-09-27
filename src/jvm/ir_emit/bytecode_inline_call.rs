@@ -905,7 +905,9 @@ impl Emitter<'_> {
                 code.lookupswitch(labels[default.index()], &pairs);
             }
             _ => {
-                let bytes = encode_instruction(insn, self.cw)
+                let bytes = self
+                    .cw
+                    .copying(|cw| encode_instruction(insn, cw))
                     .ok()
                     .flatten()
                     .expect("every non-branch instruction has a fixed encoding");
