@@ -26,6 +26,7 @@ pub(super) fn emit_enum_entry_subclass(
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let mut cw = new_writer(&fq_name, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
+    env.inner_classes.register(&mut cw);
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
     for field in c.fields.iter() {

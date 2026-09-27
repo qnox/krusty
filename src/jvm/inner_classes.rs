@@ -216,7 +216,9 @@ pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
 
+    // An enum entry's body class is package-private whatever its enum's visibility.
     let visibility = match ir.class_visibilities.get(&class.fq_name_id()) {
+        _ if class.enum_entry_of.is_some() => 0,
         Some(crate::types::Visibility::Protected) => 0x0004,
         Some(crate::types::Visibility::Private) => 0x0002,
         _ => PUBLIC,
