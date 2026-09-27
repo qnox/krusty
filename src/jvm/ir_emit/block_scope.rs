@@ -66,8 +66,6 @@ impl Emitter<'_> {
         while i < self.open_locals.len() {
             if self.open_locals[i].0 >= depth {
                 let (_, slot, start, name, desc) = self.open_locals.remove(i);
-                self.cw.seed_utf8(&name);
-                self.cw.seed_utf8(&desc);
                 code.add_local_entry(start, Some(end.saturating_sub(start)), slot, &name, &desc);
             } else {
                 i += 1;
