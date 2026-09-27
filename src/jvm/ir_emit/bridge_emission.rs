@@ -20,11 +20,13 @@ fn finish_bridge(
     desc: &str,
     code: &mut CodeBuilder,
     locals: u16,
-    kind: crate::ir::BridgeKind,
+    bridge: &crate::ir::Bridge,
     signature: Option<&str>,
 ) {
-    if kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
+    if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
         finish_code_sig::<0x0001>(cw, name, desc, code, locals, signature);
+    } else if bridge.special {
+        finish_code::<{ 0x0001 | 0x0010 | 0x0040 }>(cw, name, desc, code, locals);
     } else {
         finish_code::<{ 0x0001 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     }
@@ -347,7 +349,7 @@ fn emit_bridge(
             &erased_desc,
             &mut code,
             1 + pw,
-            b.kind,
+            b,
             entry.and_then(|header| header.signature.as_deref()),
         );
         attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
@@ -369,7 +371,7 @@ fn emit_bridge(
             &erased_desc,
             &mut code,
             1 + pw,
-            b.kind,
+            b,
             entry.and_then(|header| header.signature.as_deref()),
         );
         attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
@@ -483,7 +485,7 @@ fn emit_bridge(
         &erased_desc,
         &mut code,
         1 + pw,
-        b.kind,
+        b,
         entry.and_then(|header| header.signature.as_deref()),
     );
     attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);

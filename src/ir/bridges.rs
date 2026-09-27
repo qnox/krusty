@@ -38,6 +38,10 @@ pub struct Bridge {
     pub target_ret: Option<Ty>,
     /// Whether incompatible erased arguments return the collection operation's neutral result.
     pub type_safe_barrier: bool,
+    /// kotlinc's `BRIDGE_SPECIAL`: the bridge a builtin member gets under the JVM name it maps to
+    /// (`size()` for `Collection.size`). It is final and not synthetic, so a subclass inherits it
+    /// rather than declaring it again.
+    pub special: bool,
     /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
     /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
     /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
