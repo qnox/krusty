@@ -22,6 +22,8 @@
 //! - A sealed class's nested subclasses intern with its `InnerClasses` table, after `@Metadata`,
 //!   not ahead of its constructor.
 //!
+//! - A local declared in a nested block interns with the method's local-variable table, after
+//!   every constant of the body, not where its block closes.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
 //!
@@ -262,5 +264,22 @@ fn a_hoisted_companion_setter_interns_its_locals_with_its_body() {
          \x20   }\n\
          }\n",
         &["Holder$Companion", "Holder"],
+    );
+}
+
+/// ASM visits a method's local variables after all of its instructions, so a nested block's local
+/// follows a string the method loads after that block has closed.
+#[test]
+fn a_nested_block_local_interns_after_the_whole_body() {
+    assert_identical(
+        "NestedBlockLocal",
+        "fun pick(n: Long): String {\n\
+         \x20   if (n > 0L) {\n\
+         \x20       val wide = n + 1L\n\
+         \x20       if (wide > 5L) return \"big\"\n\
+         \x20   }\n\
+         \x20   return \"small\"\n\
+         }\n",
+        &["NestedBlockLocalKt"],
     );
 }

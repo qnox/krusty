@@ -8602,21 +8602,15 @@ fn emit_method_inner_with_holder(
         }
     }
     // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —
-    // kotlinc writes it even when no other local is recorded. LVT strings intern EAGERLY, right
-    // after this method's body (kotlinc's per-method visit order) — deferring them to the write
-    // phase batches every method's table entries at the end, a pool-order divergence on any
-    // multi-method facade.
+    // kotlinc writes it even when no other local is recorded. The table's strings intern when the
+    // method is added, right after this body (kotlinc's per-method visit order).
     if let Some((slot, start)) = inline_marker {
         let marker_name = format!("$i$f${}", f.name);
-        e.cw.seed_utf8(&marker_name);
-        e.cw.seed_utf8("I");
         code.add_local_entry(start, None, slot, &marker_name, "I");
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
         for (_, slot, start, name, desc) in std::mem::take(&mut e.open_locals) {
-            e.cw.seed_utf8(&name);
-            e.cw.seed_utf8(&desc);
             code.add_local_entry(start, None, slot, &name, &desc);
         }
     }
@@ -8639,8 +8633,6 @@ fn emit_method_inner_with_holder(
             } else {
                 "this"
             };
-            e.cw.seed_utf8(receiver_name);
-            e.cw.seed_utf8(&this_desc);
             code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
@@ -8653,8 +8645,6 @@ fn emit_method_inner_with_holder(
                 .and_then(Clone::clone);
             if let Some(pname) = pname {
                 let pdesc = local_variable_desc(*t);
-                e.cw.seed_utf8(&pname);
-                e.cw.seed_utf8(&pdesc);
                 code.add_local_entry(0, None, slot, &pname, &pdesc);
             }
             slot += slot_words(*t);
