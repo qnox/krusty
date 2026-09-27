@@ -91,3 +91,130 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
         }
     }
 }
+
+impl Checker<'_> {
+    /// The outer expectation that fixes each branch's own generic result, so a sibling branch
+    /// does not rebind it.
+    ///
+    /// kotlinc gives a declared expectation to every branch of an `if`, `when` or elvis:
+    /// `val i: I = if (c) materialize() else B()` fixes `materialize`'s `T` to `I`, not to the
+    /// sibling's `B`. A declared expectation is a declaration's, an assignment target's, a return's
+    /// or a lambda body's type (see [`Checker::expr_declared`]), given to the conditional itself or
+    /// through a block's result. A conditional nested in another's branch is part of the outer
+    /// one's inference, as a call argument is, so kotlinc lets its sibling decide, as it does under
+    /// a call argument's expectation (`sink(if (c) materialize() else B())` binds `T` to `B`) or
+    /// none. An expectation of `Any` or `Any?` constrains nothing and leaves the sibling to decide
+    /// too.
+    pub(super) fn expectation_fixes_branches(
+        &self,
+        scope: &CheckerScope<'_>,
+        conditional: ExprId,
+        expected: Option<Ty>,
+    ) -> Option<Ty> {
+        let declared = self
+            .expectation_frames
+            .last()
+            .is_some_and(|frame| frame.expression == conditional && frame.declared);
+        usable_expected(scope, expected).filter(|ty| {
+            declared
+                && !matches!(ty.non_null(), Ty::Obj(name, _)
+                    if crate::types::same(name, crate::types::wk::any()))
+        })
+    }
+
+    /// Check `e` against a declared expectation: a declaration's type, an assignment target's, or
+    /// a return's.
+    pub(super) fn expr_declared(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        expected: Ty,
+    ) -> Ty {
+        self.expected_declared = true;
+        let checked = self.expr_expected(scope, e, expected);
+        // A lambda converted to a SAM type is checked without consuming the mark.
+        self.expected_declared = false;
+        checked
+    }
+
+    /// Whether a block being checked against a declared expectation forwards it to its result
+    /// expression: a lambda body's `run { decode() ?: fallback }` elvis keeps the declared type.
+    /// A conditional's branch is not declared itself, so a block there forwards nothing.
+    pub(super) fn block_forwards_declared_expectation(&self) -> bool {
+        self.expectation_frames.last().is_some_and(|frame| {
+            frame.declared && matches!(self.file.expr(frame.expression), Expr::Block { .. })
+        })
+    }
+
+    /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
+    /// result as its expectation. An outer expectation that fixes the branch (see
+    /// [`expectation_fixes_branches`]) keeps it while the sibling conforms to that expectation; a
+    /// sibling that does not (`val s: String = if (c) from(t) else 0`) still decides, so kotlinc's
+    /// mismatch names the sibling's `Int`.
+    pub(super) fn rebind_conditional_branch(
+        &mut self,
+        branch: ExprId,
+        sibling: Ty,
+        current: Ty,
+        fixing_expectation: Option<Ty>,
+        recheck: impl FnOnce(&mut Self, Ty) -> Ty,
+    ) -> Ty {
+        if fixing_expectation.is_some_and(|expected| self.receiver_is_assignable(sibling, expected))
+            || current == Ty::Error
+            || matches!(sibling, Ty::Error | Ty::Nothing)
+            || sibling.mentions_pending()
+        {
+            return current;
+        }
+        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
+            return current;
+        };
+        let infer = |expected| {
+            crate::symbol_resolver::infer_generic_return_bindings(
+                &signature,
+                expected,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            )
+        };
+        // The sibling may be MORE specific than the generic result classifier: a
+        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
+        // supertype. Project the sibling to the selected call's result classifier before giving up;
+        // this is ordinary subtype information, not collection-specific approximation.
+        let expectation = if infer(sibling).is_some() {
+            sibling
+        } else {
+            let source = self.fed_source();
+            let Some(applied) = crate::assignable::applied_supertype(
+                &crate::symbol_resolver::SourceOracle(&source),
+                sibling,
+                signature.ret,
+            ) else {
+                return current;
+            };
+            if infer(applied).is_none() {
+                return current;
+            }
+            applied
+        };
+        crate::trace_compiler!(
+            "expected_call",
+            "conditional branch {branch:?} rebinds against sibling {sibling:?} as {expectation:?}"
+        );
+        recheck(self, expectation)
+    }
+}
+
+/// One expression being checked, and whether its expectation is declared.
+pub(super) struct ExpectationFrame {
+    expression: ExprId,
+    declared: bool,
+}
+
+impl ExpectationFrame {
+    pub(super) fn new(expression: ExprId, declared: bool) -> Self {
+        Self {
+            expression,
+            declared,
+        }
+    }
+}

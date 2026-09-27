@@ -2039,6 +2039,8 @@ mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]
 mod reified_value_class_splice_e2e;
 
+#[path = "conditional_branch_expectation_e2e.rs"]
+mod conditional_branch_expectation_e2e;
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
 #[path = "finally_gap_ranges_e2e.rs"]
