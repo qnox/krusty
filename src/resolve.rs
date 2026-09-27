@@ -3747,6 +3747,11 @@ pub struct SymbolTable {
     /// Signature finalization projects declaration-owned facts to stable declaration ids, then
     /// production releases this coordinate map before Pass 2.
     resolved_annotations: HashMap<(u32, u32, u32), TypeName>,
+    /// Annotation identities removed by the source-role gate because a platform source names a
+    /// target-less optional expectation. Stable occurrence publication keeps this rejection
+    /// distinct from an unresolved name so the focused checker can apply suppression policy
+    /// without rebinding the source spelling.
+    rejected_optional_annotations: HashMap<(u32, u32, u32), TypeName>,
     /// Visibility diagnostics explicitly suppressed on a stable declaration. This is compact
     /// resolved annotation state, not retained annotation syntax or a parser-id side table.
     declaration_visibility_suppressions: HashMap<crate::fir::DeclarationId, VisibilitySuppressions>,
@@ -3814,6 +3819,10 @@ impl PassTwoSymbols {
 }
 
 impl SymbolTable {
+    fn release_rejected_optional_annotations(&mut self) {
+        self.rejected_optional_annotations.clear();
+    }
+
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
@@ -3864,6 +3873,7 @@ impl Default for SymbolTable {
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
             resolved_annotations: HashMap::new(),
+            rejected_optional_annotations: HashMap::new(),
             declaration_visibility_suppressions: HashMap::new(),
             annotation_retentions: HashMap::new(),
             annotation_targets: HashMap::new(),
@@ -3988,6 +3998,11 @@ impl SymbolTable {
             .into_iter()
             .map(|((file, lo, hi), internal)| ((file + offset, lo, hi), internal))
             .collect();
+        self.rejected_optional_annotations =
+            std::mem::take(&mut self.rejected_optional_annotations)
+                .into_iter()
+                .map(|((file, lo, hi), internal)| ((file + offset, lo, hi), internal))
+                .collect();
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
                 .into_iter()
@@ -10222,6 +10237,7 @@ pub struct TypeInfo {
     /// Fully checked annotation applications keyed by their classifier-reference occurrence.
     /// Lowering consumes these values directly and never reopens source scope or providers.
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    target_excluded_annotation_occurrences: std::collections::HashSet<(u32, u32)>,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
     /// The enclosing bindings a statement-position local class reads, keyed by its hoisted
@@ -11161,14 +11177,6 @@ impl TypeInfo {
 
     pub fn class_literal_target(&self, expression: ExprId) -> Option<TypeName> {
         self.class_literal_targets.get(&expression).copied()
-    }
-
-    pub fn applied_annotation(
-        &self,
-        annotation: &AnnotationRef,
-    ) -> Option<&crate::types::AppliedAnnotation> {
-        self.applied_annotations
-            .get(&(annotation.span.lo, annotation.span.hi))
     }
 
     /// Whether a checked call selected a class/object member rather than a top-level, extension, or
@@ -37437,6 +37445,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_declaration_type_parameters: HashMap::new(),
         class_literal_targets: HashMap::new(),
         applied_annotations: HashMap::new(),
+        target_excluded_annotation_occurrences: std::collections::HashSet::new(),
+        bound_annotation_identities: HashMap::new(),
         ret_ty: Ty::Unit,
         diagnostic_function: None,
         expected: None,
@@ -39174,6 +39184,8 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         resolved_declaration_type_parameters,
         class_literal_targets,
         applied_annotations,
+        target_excluded_annotation_occurrences,
+        bound_annotation_identities: _,
         expr_lowers,
         resolved_sam_conversions,
         inferred_fun_rets,
@@ -39515,6 +39527,7 @@ fn check_file_at_impl_mode<S: CheckerSymbolEnvironment>(
         resolved_declaration_type_parameters,
         class_literal_targets,
         applied_annotations,
+        target_excluded_annotation_occurrences,
         anonymous_object_captures_by_class,
         anonymous_object_captures_by_construction,
         local_class_captures_by_class: discovered_local_class_captures,
@@ -40198,6 +40211,8 @@ struct Checker<'a> {
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     class_literal_targets: HashMap<ExprId, TypeName>,
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    target_excluded_annotation_occurrences: std::collections::HashSet<(u32, u32)>,
+    bound_annotation_identities: HashMap<(u32, u32), Option<TypeName>>,
     ret_ty: Ty,
     /// Current declaration solely for kotlinc-compatible type-parameter wording in diagnostics.
     diagnostic_function: Option<(String, Vec<String>)>,
@@ -57534,6 +57549,7 @@ impl<'a> Checker<'a> {
                 lexical
             });
         let scope = inner_owner_scope.as_ref().unwrap_or(scope);
+        let annotations_published = self.install_published_classifier_annotations(d, cl);
         // A declaration suppression covers the complete declaration, including member headers and
         // bodies. Keep the class's suppression rung active until this entire recursive class walk
         // completes; member-specific suppressions nest inside it.
@@ -57640,9 +57656,7 @@ impl<'a> Checker<'a> {
                     .insert(declaration, classifier);
             }
         }
-        for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
+        self.check_unpublished_classifier_annotations(scope, cl, annotations_published);
         for entry in &cl.enum_entries {
             self.check_annotation_applications_in_declaration_scope(
                 scope,
@@ -76575,22 +76589,6 @@ impl<'a> Checker<'a> {
     fn visibility_access_suppressed(&self) -> bool {
         self.suppresses_diagnostic("INVISIBLE_REFERENCE")
             || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-    }
-
-    /// Resolve one annotation classifier in the active lexical type scope without performing its
-    /// accessibility check. This staged identity lookup is required to establish declaration
-    /// suppressions before the ordinary annotation application check validates internal annotation
-    /// access. It is semantic classifier selection (including import aliases and nested scopes), not
-    /// a source-spelling shortcut, and the checked application remains the sole validation path.
-    fn annotation_identity_in_scope(
-        &self,
-        scope: &CheckerScope<'_>,
-        annotation: &AnnotationRef,
-    ) -> Option<TypeName> {
-        self.applied_annotations
-            .get(&(annotation.span.lo, annotation.span.hi))
-            .map(|applied| applied.internal)
-            .or_else(|| self.select_classifier(scope, &annotation.name).found())
     }
 
     fn push_declaration_suppressions(

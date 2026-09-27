@@ -13,6 +13,7 @@ impl ResolvedModuleIndex {
             && self.declaration_annotations.is_empty()
             && self.declaration_annotation_occurrences.is_empty()
             && self.declaration_applied_annotations.is_empty()
+            && self.checked_declaration_annotation_occurrences.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()

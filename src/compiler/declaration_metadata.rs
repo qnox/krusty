@@ -73,13 +73,16 @@ pub(super) fn declaration_annotations(
     crate::ir::DeclarationAnnotations::new(
         annotations
             .iter()
-            .map(|annotation| {
-                info.applied_annotation(annotation).unwrap_or_else(|| {
+            .filter_map(|annotation| {
+                if info.target_excluded_annotation(annotation) {
+                    return None;
+                }
+                Some(info.applied_annotation(annotation).unwrap_or_else(|| {
                     panic!(
                         "frontend did not record checked annotation application at {}..{}",
                         annotation.span.lo, annotation.span.hi
                     )
-                })
+                }))
             })
             .filter_map(retained_annotation)
             .collect(),

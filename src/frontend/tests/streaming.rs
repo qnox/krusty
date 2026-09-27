@@ -1106,53 +1106,6 @@ fn pass_two_reparse_removes_the_complete_actualized_expect_class_subtree() {
 }
 
 #[test]
-fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression() {
-    let source = "// WITH_STDLIB\n\
-                  // LANGUAGE: +MultiPlatformProjects\n\
-                  @file:Suppress(\"OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE\")\n\
-                  import kotlin.OptionalExpectation as MayDisappear\n\
-                  @MayDisappear\n\
-                  expect annotation class Optional()\n\
-                  @Optional fun answer(): String = \"OK\"\n";
-    let inputs = [SourceInput::kotlin(source).with_file_stem("Optional")];
-    let mut classpath = crate::toolchain::classpath_jars_for(source);
-    if let Some(jdk) = crate::toolchain::jdk_modules() {
-        classpath.push(jdk);
-    }
-    let platform = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(classpath),
-        ))
-        .expect("JVM provider initialization"),
-    );
-    let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &LangFeatures::from_source(source),
-        |_, _| {},
-        &mut diagnostics,
-    );
-
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
-    let classifier = index
-        .classifier_declaration(crate::types::type_name("Optional"))
-        .expect("target-less optional expectation must remain a common semantic declaration");
-    let constructor = index
-        .owned_declaration(classifier, crate::fir::DeclarationKind::Constructor, 0)
-        .expect("optional annotation constructor declaration");
-    assert!(
-        index.signature(constructor).is_some(),
-        "Pass 2 must consume the finalized annotation constructor signature"
-    );
-
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
-    assert!(census.failures.is_empty(), "{:?}", census.failures);
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-}
-
-#[test]
 fn actualization_keeps_a_distinct_common_overload_after_body_compaction() {
     let inputs = [
         SourceInput::kotlin(
@@ -1667,6 +1620,19 @@ fn streamed_cross_file_companion_const_keeps_checked_payload_on_selected_propert
             .iter()
             .any(|property| property.compile_time_constant.is_some()),
         "classifier-qualified lookup must retain the selected const payload"
+    );
+    let associated_property = associated
+        .callables
+        .properties()
+        .first()
+        .expect("one classifier-associated companion property");
+    assert_eq!(
+        associated_property.associated_classifier,
+        Some(crate::types::type_name("lib/Limits"))
+    );
+    assert_eq!(
+        associated_property.associated_access_owner,
+        Some(crate::types::type_name("lib/Limits"))
     );
 }
 

@@ -110,6 +110,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     );
                 }
             }
+            resolve_legacy_file_annotation_references(
+                file,
+                file_index as u32,
+                names,
+                &mut table.resolved_annotations,
+            );
         }
         if compact_headers.is_none() {
             let file = &files[file_index];
@@ -135,33 +141,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             }
         }
     }
-    // A target-less optional expectation belongs to the common source set only. Its provider record
-    // participates in ordinary qualified-name binding, then this source-role gate removes it from a
-    // platform file before annotation checking. A real target `actual` shadows the common record and
-    // therefore is not classified as optional here.
-    table
-        .resolved_annotations
-        .retain(|(file, _, _), annotation| {
-            let common = compact_headers.map_or_else(
-                || {
-                    files
-                        .get(*file as usize)
-                        .is_some_and(|source| source.is_common)
-                },
-                |headers| {
-                    headers
-                        .scopes
-                        .file(crate::fir::SourceFileId::from_raw(*file))
-                        .is_some_and(|source| source.is_common)
-                },
-            );
-            let optional = libraries.is_optional_expectation(*annotation);
-            crate::trace_compiler!(
-            "diagnostic",
-            "annotation source={file} identity={annotation:?} common={common} optional={optional}",
-        );
-            common || !optional
-        });
+    partition_target_excluded_optional_annotations(&mut table, files, compact_headers, &*libraries);
     // Normalize source annotation retention once identities are bound. The explicit retention
     // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
     // later phases receive the enum fact and never inspect its source spelling.

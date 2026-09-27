@@ -1237,6 +1237,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 function.kind = FnKind::TopLevel;
                 function.receiver = None;
             }
+            function.associated_classifier = Some(owner);
+            function.associated_access_owner = Some(owner);
             function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
         }
         let mut properties = self.member_properties(companion_declaration, companion, false, name);
@@ -1249,6 +1251,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 PropKind::MemberExtension => property.kind = PropKind::Extension,
                 PropKind::Extension | PropKind::TopLevel => {}
             }
+            property.associated_classifier = Some(owner);
+            property.associated_access_owner = Some(owner);
             property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
             if let Some(setter) = &mut property.setter {
                 setter.singleton_dispatch = Some(Box::new(singleton.clone()));

@@ -1,7 +1,6 @@
 //! Temporary projection from compact pass-1 headers into the legacy semantic table.
 //!
-//! This module disappears when signature expressions are evaluated directly by the ordinary
-//! resolver. It must not grow body checking or lowering responsibilities.
+//! This bridge disappears with direct signature evaluation; it must not grow body checking or lowering.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -5388,6 +5387,7 @@ pub(crate) fn finalized_streamed_signature_index(
             skip_classifier!(stub.id);
         }
     }
+    table.release_rejected_optional_annotations();
     for stub in &headers.stubs {
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;

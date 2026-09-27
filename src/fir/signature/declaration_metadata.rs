@@ -2,6 +2,36 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeclarationAnnotationOccurrence {
+    Resolved(TypeName),
+    TargetExcludedOptional(TypeName),
+    Unresolved,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CheckedDeclarationAnnotationOccurrence {
+    pub(crate) identity: Option<TypeName>,
+    pub(crate) application: Option<crate::types::AppliedAnnotation>,
+    pub(crate) target_excluded: bool,
+}
+
+impl DeclarationAnnotationOccurrence {
+    pub(crate) fn published_identity(self) -> Option<TypeName> {
+        match self {
+            Self::Resolved(identity) => Some(identity),
+            Self::TargetExcludedOptional(_) | Self::Unresolved => None,
+        }
+    }
+
+    pub(crate) fn identity_for_check(self) -> Option<TypeName> {
+        match self {
+            Self::Resolved(identity) | Self::TargetExcludedOptional(identity) => Some(identity),
+            Self::Unresolved => None,
+        }
+    }
+}
+
 impl ResolvedModuleIndex {
     pub fn declaration_annotations(&self, declaration: DeclarationId) -> &[TypeName] {
         self.declaration_annotations
@@ -10,10 +40,32 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub(crate) fn declaration_annotation_occurrence_declarations(
+        &self,
+        source: SourceFileId,
+    ) -> Vec<DeclarationId> {
+        let mut declarations = self
+            .declaration_annotation_occurrences
+            .keys()
+            .copied()
+            .filter(|declaration| {
+                self.declaration_anchor(*declaration)
+                    .is_some_and(|anchor| anchor.source == source)
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by_key(|declaration| {
+            (
+                self.source_order(*declaration).unwrap_or(u32::MAX),
+                *declaration,
+            )
+        });
+        declarations
+    }
+
     pub(crate) fn take_declaration_annotation_occurrences(
         &mut self,
         declaration: DeclarationId,
-    ) -> Box<[Option<TypeName>]> {
+    ) -> Box<[DeclarationAnnotationOccurrence]> {
         self.declaration_annotation_occurrences
             .remove(&declaration)
             .unwrap_or_default()
@@ -31,6 +83,15 @@ impl ResolvedModuleIndex {
             .get(&declaration)
             .map(Box::as_ref)
             .unwrap_or_default()
+    }
+
+    pub(crate) fn checked_declaration_annotation_occurrences(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&[CheckedDeclarationAnnotationOccurrence]> {
+        self.checked_declaration_annotation_occurrences
+            .get(&declaration)
+            .map(Box::as_ref)
     }
 
     pub fn declaration_annotation_string_arguments(
@@ -97,7 +158,7 @@ impl ResolvedModuleIndex {
     pub(crate) fn publish_declaration_annotation_occurrences(
         &mut self,
         declaration: DeclarationId,
-        annotations: impl IntoIterator<Item = Option<TypeName>>,
+        annotations: impl IntoIterator<Item = DeclarationAnnotationOccurrence>,
     ) {
         let annotations = annotations
             .into_iter()
@@ -131,6 +192,27 @@ impl ResolvedModuleIndex {
                 .insert(declaration, annotations)
                 .is_none(),
             "a stable declaration may publish checked annotation applications only once"
+        );
+    }
+
+    pub(crate) fn publish_checked_declaration_annotation_occurrences(
+        &mut self,
+        declaration: DeclarationId,
+        annotations: impl IntoIterator<Item = CheckedDeclarationAnnotationOccurrence>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        assert!(
+            !annotations.is_empty(),
+            "only an annotation-bearing declaration has checked occurrences"
+        );
+        assert!(
+            self.checked_declaration_annotation_occurrences
+                .insert(declaration, annotations)
+                .is_none(),
+            "a stable declaration may publish its checked annotation occurrences only once"
         );
     }
 

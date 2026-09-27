@@ -241,6 +241,59 @@ impl ActiveSourceDeclarations {
         Ok(active)
     }
 
+    /// Bind only stable declaration metadata that still needs its retained Pass-1 syntax.
+    ///
+    /// Metadata publication runs after the complete stable inventory has been finalized, but it
+    /// must not validate or activate unrelated executable declarations merely because their parser
+    /// arenas are still live. The requested declarations and their lexical owners form the exact
+    /// structural slice needed to recover the retained declaration nodes; bodies and descendants
+    /// remain outside the binding.
+    pub(crate) fn bind_declaration_metadata(
+        file: &File,
+        source: SourceFileId,
+        index: &ResolvedModuleIndex,
+        declarations: &[DeclarationId],
+    ) -> Result<Self, ActiveSourceBindingError> {
+        let stable = index
+            .source_inventory(source)
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|anchor| anchor.kind != DeclarationKind::TypeAlias)
+            })
+            .collect::<Vec<_>>();
+        let mut selected = declarations
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        loop {
+            let before = selected.len();
+            for declaration in selected.iter().copied().collect::<Vec<_>>() {
+                if let Some(owner) = index
+                    .declaration_header(declaration)
+                    .and_then(|header| header.owner)
+                {
+                    selected.insert(owner);
+                }
+            }
+            if selected.len() == before {
+                break;
+            }
+        }
+        Self::bind_selected(
+            file,
+            source,
+            index,
+            &stable,
+            None,
+            None,
+            Some(&selected),
+            Some(&std::collections::HashMap::new()),
+        )
+    }
+
     /// Bind the stable declarations participating in retained Pass-1 executable fragments to the
     /// parser arena that is live right now. The binding is transient: checked FIR and stable
     /// signatures consume it before the arena is released, and no parser identity crosses into

@@ -26,6 +26,65 @@ pub(in crate::resolve) fn resolved_header_annotation_identities(
         .collect()
 }
 
+/// Bind file annotations for the legacy inventory, whose AST has no compact detached-type arena.
+/// Unresolved applications remain for the authoritative checker to diagnose.
+pub(in crate::resolve) fn resolve_legacy_file_annotation_references(
+    file: &File,
+    file_index: u32,
+    class_names: &ClassNames,
+    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+) {
+    for (annotation, _) in &file.file_annotations {
+        if let Some(identity) = class_names.get_class(&annotation.name) {
+            resolved.insert(
+                (file_index, annotation.span.lo, annotation.span.hi),
+                identity,
+            );
+        }
+    }
+}
+
+/// Separate an identity rejected only by the target source role from an actual binding failure.
+/// The focused metadata checker consumes this distinction to apply suppression policy without
+/// repeating lookup, while a target `actual` continues to shadow its common expectation normally.
+pub(in crate::resolve) fn partition_target_excluded_optional_annotations(
+    table: &mut SymbolTable,
+    files: &[File],
+    headers: Option<&crate::fir::StreamedHeaderModule>,
+    libraries: &dyn SemanticPlatform,
+) {
+    let rejected = table
+        .resolved_annotations
+        .iter()
+        .filter_map(|(key @ (file, _, _), annotation)| {
+            let common = headers.map_or_else(
+                || {
+                    files
+                        .get(*file as usize)
+                        .is_some_and(|source| source.is_common)
+                },
+                |headers| {
+                    headers
+                        .scopes
+                        .file(crate::fir::SourceFileId::from_raw(*file))
+                        .is_some_and(|source| source.is_common)
+                },
+            );
+            let optional = libraries.is_optional_expectation(*annotation);
+            crate::trace_compiler!(
+                "diagnostic",
+                "annotation source={file} identity={annotation:?} common={common} optional={optional}",
+            );
+            (!common && optional).then_some((*key, *annotation))
+        })
+        .collect::<Vec<_>>();
+    for (key, annotation) in rejected {
+        let removed = table.resolved_annotations.remove(&key);
+        debug_assert_eq!(removed, Some(annotation));
+        table.rejected_optional_annotations.insert(key, annotation);
+    }
+}
+
 /// One compact declaration's annotation identities, consumed from the bindings annotation
 /// resolution already selected. Signature projection never re-enters classifier lookup for a
 /// declaration that has a stable identity.

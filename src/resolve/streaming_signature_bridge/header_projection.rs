@@ -831,21 +831,26 @@ pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     declaration: crate::fir::DeclarationId,
     bindings: &std::collections::HashMap<(u32, u32, u32), TypeName>,
 ) -> Vec<TypeName> {
-    streamed_resolved_declaration_annotation_occurrences(headers, declaration, bindings)
-        .into_iter()
-        .flatten()
-        .collect()
+    streamed_resolved_declaration_annotation_occurrences(
+        headers,
+        declaration,
+        bindings,
+        &std::collections::HashMap::new(),
+    )
+    .into_iter()
+    .filter_map(crate::fir::DeclarationAnnotationOccurrence::published_identity)
+    .collect()
 }
 
-/// Exact annotation occurrences parallel to compact declaration syntax. An occurrence with no
-/// binding remains as `None`: annotation resolution already diagnosed an unresolvable reference, or
-/// the source-role gate withdrew a target-less optional expectation from a platform source. Keeping
-/// that hole is what lets the focused metadata pass address later occurrences by source ordinal.
+/// Exact annotation occurrences parallel to compact declaration syntax. Binding failure and the
+/// source-role rejection of a target-less optional expectation remain distinct: the focused
+/// metadata checker owns both diagnostics and suppression policy without repeating lookup.
 pub(in crate::resolve) fn streamed_resolved_declaration_annotation_occurrences(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
     bindings: &std::collections::HashMap<(u32, u32, u32), TypeName>,
-) -> Vec<Option<TypeName>> {
+    rejected_optional: &std::collections::HashMap<(u32, u32, u32), TypeName>,
+) -> Vec<crate::fir::DeclarationAnnotationOccurrence> {
     let source = headers
         .stub(declaration)
         .expect("a compact declaration retains its stub")
@@ -865,7 +870,18 @@ pub(in crate::resolve) fn streamed_resolved_declaration_annotation_occurrences(
                 .ty(*annotation)
                 .expect("a declaration annotation retains its type syntax")
                 .span;
-            bindings.get(&(source, span.lo, span.hi)).copied()
+            let key = (source, span.lo, span.hi);
+            bindings
+                .get(&key)
+                .copied()
+                .map(crate::fir::DeclarationAnnotationOccurrence::Resolved)
+                .or_else(|| {
+                    rejected_optional
+                        .get(&key)
+                        .copied()
+                        .map(crate::fir::DeclarationAnnotationOccurrence::TargetExcludedOptional)
+                })
+                .unwrap_or(crate::fir::DeclarationAnnotationOccurrence::Unresolved)
         })
         .collect()
 }
@@ -888,10 +904,15 @@ pub(in crate::resolve) fn publish_streamed_declaration_annotations(
                 headers,
                 stub.id,
                 &table.resolved_annotations,
+                &table.rejected_optional_annotations,
             )
         });
     debug_assert_eq!(
-        occurrences.iter().flatten().copied().collect::<Vec<_>>(),
+        occurrences
+            .iter()
+            .copied()
+            .filter_map(crate::fir::DeclarationAnnotationOccurrence::published_identity)
+            .collect::<Vec<_>>(),
         annotations,
         "stable annotation identities must preserve the compact occurrence order"
     );
@@ -900,7 +921,7 @@ pub(in crate::resolve) fn publish_streamed_declaration_annotations(
     {
         index.publish_declaration_annotation_occurrences(stub.id, occurrences.iter().copied());
     }
-    index.publish_declaration_annotations(stub.id, occurrences.iter().flatten().copied());
+    index.publish_declaration_annotations(stub.id, annotations.iter().copied());
 
     // Class arguments were resolved beside the annotation identities. Group by source ordinal so
     // the stable index never has to recover the occurrence from a spelling or parser coordinate.
@@ -915,7 +936,9 @@ pub(in crate::resolve) fn publish_streamed_declaration_annotations(
         for (semantic_ordinal, source_ordinal) in occurrences
             .iter()
             .enumerate()
-            .filter_map(|(source, identity)| identity.map(|_| source as u32))
+            .filter_map(|(source, occurrence)| {
+                occurrence.published_identity().map(|_| source as u32)
+            })
             .enumerate()
         {
             index.publish_declaration_annotation_class_arguments(
@@ -937,7 +960,7 @@ pub(in crate::resolve) fn publish_streamed_declaration_annotations(
     for (semantic_ordinal, source_ordinal) in occurrences
         .iter()
         .enumerate()
-        .filter_map(|(source, identity)| identity.map(|_| source))
+        .filter_map(|(source, occurrence)| occurrence.published_identity().map(|_| source))
         .enumerate()
     {
         index.publish_declaration_annotation_string_arguments(

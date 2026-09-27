@@ -15,6 +15,7 @@ use crate::source::{SourceInput, SourceKind};
 use crate::types::Visibility;
 
 mod annotation_strings;
+mod detached_types;
 mod flags;
 mod nested_classifiers;
 
@@ -3638,10 +3639,7 @@ impl HeaderInventoryBuilder {
         let first_source_type = self.syntax.type_count();
         self.scopes
             .add_file(source, file, is_common, &mut self.lookup_names);
-        for ty in &file.detached_type_refs {
-            let ty = self.syntax.add_type(ty, &mut self.lookup_names);
-            self.detached_types.push((source, ty));
-        }
+        self.add_file_detached_types(file, source);
         let extracted = extract_file_stub_inventory(
             file,
             source,

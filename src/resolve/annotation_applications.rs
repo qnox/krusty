@@ -9,7 +9,40 @@
 
 use super::*;
 
+impl TypeInfo {
+    pub fn applied_annotation(
+        &self,
+        annotation: &AnnotationRef,
+    ) -> Option<&crate::types::AppliedAnnotation> {
+        self.applied_annotations
+            .get(&(annotation.span.lo, annotation.span.hi))
+    }
+
+    pub fn target_excluded_annotation(&self, annotation: &AnnotationRef) -> bool {
+        self.target_excluded_annotation_occurrences
+            .contains(&(annotation.span.lo, annotation.span.hi))
+    }
+}
+
 impl Checker<'_> {
+    /// Identity selected for an annotation occurrence in its declaration scope. Stable Pass 1
+    /// publication seeds `bound_annotation_identities`; an as-yet unpublished application uses the
+    /// ordinary lexical classifier selector exactly once.
+    pub(super) fn annotation_identity_in_scope(
+        &self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+    ) -> Option<TypeName> {
+        let key = (annotation.span.lo, annotation.span.hi);
+        if let Some(bound) = self.bound_annotation_identities.get(&key) {
+            return *bound;
+        }
+        self.applied_annotations
+            .get(&key)
+            .map(|applied| applied.internal)
+            .or_else(|| self.select_classifier(scope, &annotation.name).found())
+    }
+
     pub(super) fn check_annotation_application(
         &mut self,
         scope: &CheckerScope<'_>,

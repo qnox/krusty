@@ -21,7 +21,11 @@ pub use selections::*;
 mod classifier_headers;
 mod declaration_metadata;
 mod index_state;
+mod property_parameters;
 mod source_packages;
+pub(crate) use declaration_metadata::{
+    CheckedDeclarationAnnotationOccurrence, DeclarationAnnotationOccurrence,
+};
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1584,16 +1588,22 @@ pub struct ResolvedModuleIndex {
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
     /// Temporary stable source annotation occurrences parallel to a declaration's annotation
-    /// syntax. A missing identity records an occurrence rejected during binding (including a
-    /// target-excluded optional expectation), so metadata checking never shifts a following
-    /// annotation into its slot. The focused Pass-1 metadata pass consumes this map before sealing
-    /// the module index.
-    declaration_annotation_occurrences: HashMap<DeclarationId, Box<[Option<TypeName>]>>,
+    /// syntax. Each occurrence distinguishes a resolved identity, a target-excluded optional
+    /// expectation, and a binding failure, so metadata checking can apply the right diagnostic
+    /// policy without shifting a following annotation into its slot or repeating lookup. The
+    /// focused Pass-1 metadata pass consumes this map before sealing the module index.
+    declaration_annotation_occurrences:
+        HashMap<DeclarationId, Box<[DeclarationAnnotationOccurrence]>>,
     /// Fully checked declaration annotation applications. Values are folded against the selected
     /// annotation constructor and keyed by stable declaration identity; consumers never join them
     /// back to the identity-only header list by ordinal.
     declaration_applied_annotations:
         HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
+    /// Checked states parallel to the original classifier annotation occurrences. Each slot keeps
+    /// the authoritative identity/application or an explicit unresolved/target-excluded state, so
+    /// a later body pass never resolves spelling again or shifts a following application.
+    checked_declaration_annotation_occurrences:
+        HashMap<DeclarationId, Box<[CheckedDeclarationAnnotationOccurrence]>>,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -3118,117 +3128,6 @@ impl ResolvedModuleIndex {
         );
     }
 
-    /// Publish the complete source identity contract for both accessors while the property syntax
-    /// is still live. An implicit setter has a typed generated role; it is never recovered later
-    /// from a missing name or a bodyless accessor declaration.
-    pub fn publish_property_parameter_identities<'a>(
-        &mut self,
-        id: PropertyId,
-        parameters: impl IntoIterator<Item = (&'a str, crate::types::ContextParameterKind)>,
-        setter_parameter_name: Option<&'a str>,
-    ) {
-        let parameters = parameters
-            .into_iter()
-            .map(|(source_name, kind)| ResolvedPropertyContextParameter {
-                source_name: source_name.into(),
-                kind,
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let expected = self
-            .property(id)
-            .expect("context parameters require a published property")
-            .context_parameter_count as usize;
-        assert_eq!(
-            parameters.len(),
-            expected,
-            "property context parameters must match its resolved signature"
-        );
-        assert!(
-            self.property_parameter_identities_published.insert(id),
-            "property parameter identities may be published only once"
-        );
-        if !parameters.is_empty() {
-            assert!(
-                self.property_context_parameters
-                    .insert(id, parameters)
-                    .is_none(),
-                "property context parameters may be published only once"
-            );
-        }
-        let mutable = self
-            .property(id)
-            .expect("parameter identities require a published property")
-            .mutable;
-        assert!(
-            mutable || setter_parameter_name.is_none(),
-            "an immutable property cannot publish a setter parameter"
-        );
-        if mutable {
-            let identity = setter_parameter_name
-                .map_or(ResolvedParameterIdentity::PropertySetterValue, |name| {
-                    ResolvedParameterIdentity::Source(name.into())
-                });
-            assert!(
-                self.property_setter_parameter_identities
-                    .insert(id, identity)
-                    .is_none(),
-                "a property setter parameter identity may be published only once"
-            );
-        }
-    }
-
-    pub fn property_context_parameter(
-        &self,
-        property: PropertyId,
-        ordinal: u32,
-    ) -> Option<&ResolvedPropertyContextParameter> {
-        self.property_context_parameters
-            .get(&property)?
-            .get(ordinal as usize)
-    }
-
-    pub fn property_context_parameter_identities(
-        &self,
-        property: PropertyId,
-    ) -> Option<Box<[ResolvedParameterIdentity]>> {
-        if !self
-            .property_parameter_identities_published
-            .contains(&property)
-        {
-            return None;
-        }
-        let count = self.property(property)?.context_parameter_count;
-        (0..count)
-            .map(|ordinal| {
-                let parameter = self.property_context_parameter(property, ordinal)?;
-                Some(match parameter.kind {
-                    crate::types::ContextParameterKind::Named => {
-                        ResolvedParameterIdentity::ContextValue {
-                            ordinal,
-                            source_name: parameter.source_name.clone(),
-                        }
-                    }
-                    crate::types::ContextParameterKind::Anonymous => {
-                        ResolvedParameterIdentity::AnonymousContextParameter { ordinal }
-                    }
-                    crate::types::ContextParameterKind::LegacyReceiver => {
-                        ResolvedParameterIdentity::LegacyContextReceiver { ordinal }
-                    }
-                    crate::types::ContextParameterKind::None => return None,
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-            .map(Vec::into_boxed_slice)
-    }
-
-    pub fn property_setter_parameter_identity(
-        &self,
-        property: PropertyId,
-    ) -> Option<&ResolvedParameterIdentity> {
-        self.property_setter_parameter_identities.get(&property)
-    }
-
     /// Persistent signature payload only. Temporary graph nodes and source bodies cannot contribute
     /// because neither type is a field of this index.
     pub fn storage_payload_bytes(&self) -> usize {
@@ -3260,11 +3159,13 @@ impl ResolvedModuleIndex {
                 .sum::<usize>()
             + self.declaration_annotation_occurrences.len()
                 * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<Box<[Option<TypeName>]>>())
+                    + std::mem::size_of::<Box<[DeclarationAnnotationOccurrence]>>())
             + self
                 .declaration_annotation_occurrences
                 .values()
-                .map(|annotations| annotations.len() * std::mem::size_of::<Option<TypeName>>())
+                .map(|annotations| {
+                    annotations.len() * std::mem::size_of::<DeclarationAnnotationOccurrence>()
+                })
                 .sum::<usize>()
             + self.declaration_applied_annotations.len()
                 * (std::mem::size_of::<DeclarationId>()
@@ -3274,6 +3175,17 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|annotations| {
                     annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+                })
+                .sum::<usize>()
+            + self.checked_declaration_annotation_occurrences.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[CheckedDeclarationAnnotationOccurrence]>>())
+            + self
+                .checked_declaration_annotation_occurrences
+                .values()
+                .map(|annotations| {
+                    annotations.len()
+                        * std::mem::size_of::<CheckedDeclarationAnnotationOccurrence>()
                 })
                 .sum::<usize>()
             + self.declaration_annotation_string_arguments.len()
