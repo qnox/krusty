@@ -76,8 +76,8 @@ pub(super) fn declared_method_access(
         }
     };
     // A value class's `box-impl`/`unbox-impl` are compiler-manufactured box adapters — kotlinc marks
-    // them `ACC_SYNTHETIC`.
-    let synthetic = if ir.synthetic_methods.contains(&fid) {
+    // them `ACC_SYNTHETIC`, and so it does a reifiable function, which Java cannot call.
+    let synthetic = if ir.synthetic_methods.contains(&fid) || is_reifiable(ir, fid) {
         ACC_SYNTHETIC
     } else {
         0
@@ -88,6 +88,18 @@ pub(super) fn declared_method_access(
         0
     };
     access | synthetic | bridge | varargs_access(ir, fid)
+}
+
+/// kotlinc's `isReifiable`: the function declares a `reified` type parameter. Its erased body only
+/// works once a call site substitutes the type, so kotlinc emits the method `ACC_SYNTHETIC` and
+/// annotates none of its nullability.
+pub(super) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
+    ir.signatures.get(&fid).is_some_and(|signature| {
+        signature
+            .type_params
+            .iter()
+            .any(|parameter| parameter.reified)
+    })
 }
 
 /// kotlinc sets `ACC_VARARGS` exactly when the method's LAST physical parameter is the declared
