@@ -2503,11 +2503,11 @@ pub struct IrFile {
     /// final, in an open class as much as in a final one. The JVM backend omits `ACC_FINAL` for a
     /// `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
-    /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
-    /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
+    /// Methods kotlinc emits `private`; the JVM backend gives a `FunId` in this set `ACC_PRIVATE`.
     pub private_methods: std::collections::HashSet<u32>,
-    /// Private instance methods referenced from synthesized callable-reference classes. The JVM
-    /// backend emits one declaration-owned static access bridge for each exact method identity.
+    /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
+    pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,

@@ -44,6 +44,15 @@ fn a_value_class_orders_its_members_like_kotlinc() {
              }\n",
             "S",
         ),
+        (
+            "ValueClassOrderPrivateBridge",
+            "@JvmInline value class W(private val grams: Int) {\n\
+             \x20   private fun heavy(): Boolean = grams > 10\n\
+             \x20   fun label(): String = \"weight\"\n\
+             \x20   companion object { fun check(w: W): Boolean = w.heavy() }\n\
+             }\n",
+            "W",
+        ),
     ] {
         let Some(built) =
             compare_with_kotlinc_plugin(tag, source, class, &[common::stdlib_jar()], "25", &[])

@@ -273,3 +273,17 @@ fn an_enum_s_bridges_precede_its_static_initializer() {
          }\n",
     );
 }
+
+#[test]
+fn a_class_appends_private_member_bridges_after_its_members() {
+    assert_same_member_order(
+        "MemberBridgeOrder",
+        "class Holder(private val weight: Int) {\n\
+         \x20   private fun heavy(): Boolean = weight > 10\n\
+         \x20   fun label(): String = \"holder\"\n\
+         \x20   companion object {\n\
+         \x20       fun check(holder: Holder): Boolean = holder.heavy()\n\
+         \x20   }\n\
+         }\n",
+    );
+}

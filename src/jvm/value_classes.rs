@@ -2252,7 +2252,8 @@ pub(crate) fn lower_value_classes(
                 result: Ty,
                 args: Vec<Option<ExprId>>,
                 extension_receiver: bool,
-                default_boxed_parameters: Vec<(usize, Ty)>,
+                /// The selected `-impl` in this file; a sibling file's has none here.
+                function: Option<u32>,
             },
             /// Same-value-class non-null `==`/`!=` → `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's ABI).
             VcEq {
@@ -2523,11 +2524,7 @@ pub(crate) fn lower_value_classes(
                                 result: function.ret,
                                 args: args.iter().copied().map(Some).collect(),
                                 extension_receiver: ir.extension_receiver_fns.contains(&fid),
-                                default_boxed_parameters: ir
-                                    .default_stub_boxed_params
-                                    .get(&fid)
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                function: Some(fid),
                             })
                     })
                 }
@@ -2548,7 +2545,7 @@ pub(crate) fn lower_value_classes(
                         result,
                         args: args.iter().copied().map(Some).collect(),
                         extension_receiver: false,
-                        default_boxed_parameters: Vec::new(),
+                        function: None,
                     }
                 }),
             },
@@ -2674,11 +2671,7 @@ pub(crate) fn lower_value_classes(
                     result: function.ret,
                     args: args.clone(),
                     extension_receiver: ir.extension_receiver_fns.contains(&fid),
-                    default_boxed_parameters: ir
-                        .default_stub_boxed_params
-                        .get(&fid)
-                        .cloned()
-                        .unwrap_or_default(),
+                    function: Some(fid),
                 })
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -2764,8 +2757,12 @@ pub(crate) fn lower_value_classes(
                 result,
                 args,
                 extension_receiver,
-                default_boxed_parameters,
+                function,
             }) => {
+                let default_boxed_parameters = function
+                    .and_then(|function| ir.default_stub_boxed_params.get(&function))
+                    .cloned()
+                    .unwrap_or_default();
                 // This rewrite replaces an instance-shaped semantic call with the exact static
                 // carrier implementation. Any earlier property/call stamp described the pre-rewrite
                 // box; publish the implementation result now so a following sole-property read does
@@ -2839,6 +2836,9 @@ pub(crate) fn lower_value_classes(
                             }
                         }
                     }
+                }
+                if let Some(function) = function.filter(|_| !uses_default_stub) {
+                    ir.jvm_member_targets.insert(id, function);
                 }
                 let descriptor = if uses_default_stub {
                     name.push_str("$default");
