@@ -1021,12 +1021,13 @@ pub enum IrExpr {
         field: String,
     },
     /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a
-    /// new `Ref$IntRef`/`Ref$ObjectRef`/… whose `element` field is initialized to `init`. `elem` is
+    /// new `Ref$IntRef`/`Ref$ObjectRef`/… whose `element` field is initialized to `init`, or keeps
+    /// the field's default for a declaration without an initializer. `elem` is
     /// the boxed value's type (selects the `Ref` subclass + the `element` field descriptor). Evaluates
     /// to the holder, so it's the initializer of the local that holds the box.
     RefNew {
         elem: Ty,
-        init: ExprId,
+        init: Option<ExprId>,
     },
     /// Read a boxed mutable local: `holder.element` (`getfield Ref$XxxRef.element`).
     RefGet {

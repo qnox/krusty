@@ -241,6 +241,29 @@ impl ClassSets {
         code_listing(class, bytes)
     }
 
+    /// The `javap -c -p -l` block of the method `class` declares as `declaration` (javap's spelling,
+    /// such as `public static final int f();`), from kotlinc and from krusty, with constant-pool
+    /// indices erased as in [`Self::code_differences`].
+    pub fn method_listing(&self, class: &str, declaration: &str) -> (String, String) {
+        let block = |bytes: Option<&Vec<u8>>| {
+            let bytes = bytes.unwrap_or_else(|| panic!("{class} was not written"));
+            let listing = code_listing(class, bytes);
+            let mut lines = listing.lines().skip_while(|line| *line != declaration);
+            assert!(
+                lines.next().is_some(),
+                "{class} declares no `{declaration}`"
+            );
+            lines
+                .take_while(|line| !line.is_empty() && *line != "}")
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        (
+            block(self.reference.get(class)),
+            block(self.krusty.get(class)),
+        )
+    }
+
     /// Each class whose methods differ in their code, line numbers or local variables, with
     /// constant-pool indices erased: the two classes may lay out their pools differently.
     pub fn code_differences(&self) -> Vec<String> {
