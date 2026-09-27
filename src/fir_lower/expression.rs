@@ -1705,6 +1705,7 @@ impl BodyLowering<'_> {
                     let target = crate::ir::IrSamTarget {
                         classifier: conversion.classifier,
                         method: conversion.method.into(),
+                        method_target: conversion.method_target,
                         parameters: conversion.parameters.iter().map(|ty| ty.get()).collect(),
                         result: conversion.result.get(),
                         declared_parameters: conversion
@@ -1718,6 +1719,7 @@ impl BodyLowering<'_> {
                         suspend: conversion.suspend,
                         overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                         function_adapter: false,
+                        wraps_function_value: false,
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

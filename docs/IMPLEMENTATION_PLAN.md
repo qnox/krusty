@@ -4894,3 +4894,17 @@ JVM backend does not need to read, and that a program-producing backend (the nat
   `main(args)` gets a second `main([Ljava/lang/String;)V` and panics in frame computation. Moving it
   to `entry_point` fixes both but changes JVM output, so it is a separate change checked against
   kotlinc.
+
+## The SAM method on a conversion  ✅
+
+The checker names the abstract method a SAM conversion implements by its declaration identity
+(`FirSamConversion::method_target`, carried to `IrSamTarget::method_target`): a current-module or
+dependency declaration, or `FirSamMethod::FunctionTypeInvoke` for the `invoke` a functional
+interface inherits from a function-type supertype, whichever provider published that type. The
+resolver's SAM selection (`symbol_resolver/sam.rs`) records the identity of the member it selects;
+a provider member published without one is rejected at checking rather than named by its spelling.
+`IrSamTarget::wraps_function_value` says whether the lambda wraps an existing function value (the
+adapter lowering generates) or implements the method with its own body. The JVM backend keeps
+implementing the method by `IrSamTarget::method`. Tests: `fir/body_check/lambda_tests.rs` (the
+checker's choice among same-named members, a function-type supertype, a nullable Java function-value
+conversion) and `fir_lower/sam_target_tests.rs` (lowering carries both facts).

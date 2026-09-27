@@ -50,6 +50,8 @@ mod properties;
 mod property_references;
 mod ranges;
 mod sam_conversions;
+#[cfg(test)]
+mod sam_target_tests;
 mod sink;
 mod source_calls;
 mod statement;

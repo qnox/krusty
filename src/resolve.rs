@@ -59828,10 +59828,8 @@ impl<'a> Checker<'a> {
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
                 && expected.non_null().array_elem().is_some())
-        {
-            self.expr_expected(scope, argument, expected)
-        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
-            && matches!(expected.non_null(), Ty::Fun(_))
+            || (matches!(self.file.expr(argument), Expr::CallableRef { .. })
+                && matches!(expected.non_null(), Ty::Fun(_)))
         {
             self.expr_expected(scope, argument, expected)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {

@@ -78,6 +78,8 @@ pub enum FirConversionKind {
 pub struct FirSamConversion {
     pub classifier: TypeName,
     pub method: Box<str>,
+    /// The abstract method the conversion implements, as the checker selected it.
+    pub method_target: FirSamMethod,
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
     pub declared_parameters: Box<[ResolvedTy]>,
@@ -90,6 +92,16 @@ pub struct FirSamConversion {
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
+}
+
+/// The abstract method a SAM conversion implements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirSamMethod {
+    /// A method a module or a dependency declares.
+    Declared(super::ResolvedFunctionOverrideTarget),
+    /// The `invoke` the interface inherits from its function-type supertype
+    /// (`fun interface F : () -> Unit`); a function type declares no method of its own.
+    FunctionTypeInvoke,
 }
 
 /// Checked payload for one platform-type narrowing. This is language-level Java interop behavior,
@@ -2354,7 +2366,7 @@ impl FirBody {
                     .checked_sub(1)
                     .map(|enclosing_depth| FirCapture {
                         enclosing_depth,
-                        ..capture.clone()
+                        ..*capture
                     })
             }));
             callable_receivers.extend(requirements.implicit_receivers.iter().filter_map(

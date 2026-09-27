@@ -73,7 +73,7 @@ use overload_selection::{
     unique_most_specific_with_conflicts, unique_most_specific_with_conflicts_and_ties,
 };
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
-pub(crate) use sam::{semantic_sam_signature, SamSignature};
+pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
 
 #[derive(Clone, Debug)]
