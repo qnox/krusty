@@ -8,8 +8,10 @@
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance">
 </p>
 
-<!-- Conformance badge = share of the Kotlin `codegen/box` suite whose `box()` returns "OK" on
-     krusty-emitted bytecode. The master build recomputes it and writes the badge JSON to a Gist
+<!-- Conformance badge = share of the applicable Kotlin `codegen/box` cases whose `box()` returns
+     "OK" on krusty-emitted bytecode. Applicable means kotlinc's own JVM box runner expects the case
+     to pass: TARGET_BACKEND / DONT_TARGET_EXACT_BACKEND / IGNORE_BACKEND* exclusions are left out.
+     The master build recomputes it and writes the badge JSON to a Gist
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 

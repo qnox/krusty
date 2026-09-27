@@ -30,7 +30,7 @@ libtest_require_positive_shard_count \
 report_dir="$(mktemp -d)"
 trap 'rm -rf "$report_dir"' EXIT
 passed=0
-scanned=0
+applicable=0
 # A shard that fails its expected-failure check still writes its report: keep running the remaining
 # shards so one run lists every mismatch, then exit with the first failing status.
 failed=0
@@ -55,8 +55,8 @@ for ((shard = 0; shard < shards; shard++)); do
     echo "conformance test did not write its report: shard $((shard + 1))/$shards" >&2
     exit $((failed ? failed : 1))
   }
-  read -r _pct shard_passed shard_scanned extra <"$report"
-  case "$shard_passed:$shard_scanned" in
+  read -r _pct shard_passed shard_applicable extra <"$report"
+  case "$shard_passed:$shard_applicable" in
     *[!0-9:]* | *::* | :* | *:)
       echo "conformance test wrote an invalid report: shard $((shard + 1))/$shards" >&2
       exit 1
@@ -67,11 +67,11 @@ for ((shard = 0; shard < shards; shard++)); do
     exit 1
   fi
   passed=$((passed + shard_passed))
-  scanned=$((scanned + shard_scanned))
+  applicable=$((applicable + shard_applicable))
 done
 
-awk -v passed="$passed" -v scanned="$scanned" 'BEGIN {
-  pct = scanned == 0 ? 0 : 100 * passed / scanned
-  printf "%.1f %d %d\n", pct, passed, scanned
+awk -v passed="$passed" -v applicable="$applicable" 'BEGIN {
+  pct = applicable == 0 ? 0 : 100 * passed / applicable
+  printf "%.1f %d %d\n", pct, passed, applicable
 }'
 exit "$failed"
