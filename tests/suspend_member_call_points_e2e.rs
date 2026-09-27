@@ -219,12 +219,8 @@ fun box(): String {\n\
 
 // A member extension called inside its class: `this` is the dispatch receiver and the written
 // receiver the extension receiver. Each receiver and argument is evaluated once, left to right,
-// though the call suspends between them. Its instructions are not yet kotlinc's: common lowering
-// still copies a same-file extension call's receiver and arguments to locals before the call,
-// suspending or not.
-#[test]
-fn a_member_extension_call_evaluates_its_receivers_once_across_suspension() {
-    let src = "import kotlin.coroutines.*\n\
+// though the call suspends between them.
+const MEMBER_EXTENSION: &str = "import kotlin.coroutines.*\n\
 class Done : Continuation<Unit> {\n\
   override val context: CoroutineContext = EmptyCoroutineContext\n\
   override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
@@ -257,5 +253,30 @@ fun box(): String {\n\
     val ok = first == \"ev\" && second == \"evw\" && r.log == \"evw\" && s == \"sa1sa2\"\n\
     return if (ok) \"OK\" else \"F:$first:$second:${r.log}:$s\"\n\
 }\n";
-    common::expect_box_ok_with_stdlib(src, "MemberExtensionResume");
+
+#[test]
+fn a_member_extension_call_evaluates_its_receivers_once_across_suspension() {
+    common::expect_box_ok_with_stdlib(MEMBER_EXTENSION, "MemberExtensionResume");
+}
+
+#[test]
+fn a_member_extension_call_across_suspension_matches_kotlinc() {
+    let src = "class Recorder {\n\
+    fun <T> note(value: T): T = value\n\
+}\n\
+class Api(val tag: String)\n\
+class Scope(val name: String) {\n\
+    suspend fun pause() {}\n\
+    suspend fun Api.fetch(n: Int): String {\n\
+        pause()\n\
+        return name\n\
+    }\n\
+    suspend fun go(r: Recorder, api: Api): String = r.note(api).fetch(r.note(1))\n\
+}\n";
+    expect_method_matches(
+        "MemberExtension",
+        src,
+        "Scope",
+        "public final java.lang.Object go(",
+    );
 }
