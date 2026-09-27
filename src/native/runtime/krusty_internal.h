@@ -12,6 +12,20 @@
 
 #define KT_FAIL(literal) KT_SYS_FAIL(literal)
 
+/* The names of a class of the runtime's own: `simple` in `package` (which ends in its dot), both
+   published as a member class's (`KType.class_names`), and the rendered name their join. Written
+   as two literals so the simple name is its own text rather than the tail of a split. */
+#define KT_NAMED(package, simple)                                                                  \
+    .name = package simple, .name_length = sizeof(package simple) - 1,                             \
+    .qualified_name = package simple, .qualified_name_length = sizeof(package simple) - 1,         \
+    .simple_name = simple, .simple_name_length = sizeof(simple) - 1,                               \
+    .class_names = KT_CLASS_NAMES_MEMBER
+
+/* A class Kotlin declares as an anonymous object, such as what `Array.asList` answers: `rendered`
+   is what its `toString` and class literal print, and it publishes neither reflection name. */
+#define KT_ANONYMOUS(rendered)                                                                     \
+    .name = rendered, .name_length = sizeof(rendered) - 1, .class_names = KT_CLASS_NAMES_ANONYMOUS
+
 /* Every built-in value is one of these; the header's type says which. */
 struct KObject {
     KObjectHeader header;
@@ -68,6 +82,8 @@ extern const KType kt_type_long_progression_iterator;
 extern const KType kt_type_char_progression_iterator;
 extern const KType kt_type_uint_progression_iterator;
 extern const KType kt_type_ulong_progression_iterator;
+/* `kotlin.collections.CharIterator`, the abstract class a text's iterator subclasses. */
+extern const KType kt_type_char_iterator;
 
 /* The walks over arrays and strings, which a range iterator's entry points also answer for:
    whether an iterator is one, and its `hasNext` and `next` as a 64-bit value. Defined in

@@ -43,15 +43,6 @@ static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_bu
 const kt_fn kt_any_vtable[3] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                       (kt_fn)kt_any_to_string};
 
-/* The names of a class of the runtime's own: `simple` in `package` (which ends in its dot), both
-   published as a member class's (`KType.class_names`), and the rendered name their join. Written
-   as two literals so the simple name is its own text rather than the tail of a split. */
-#define KT_NAMED(package, simple)                                                                  \
-    .name = package simple, .name_length = sizeof(package simple) - 1,                             \
-    .qualified_name = package simple, .qualified_name_length = sizeof(package simple) - 1,         \
-    .simple_name = simple, .simple_name_length = sizeof(simple) - 1,                               \
-    .class_names = KT_CLASS_NAMES_MEMBER
-
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
 const KType kt_type_any = {KT_NAMED("kotlin.", "Any"),

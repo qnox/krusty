@@ -22,17 +22,60 @@ typedef struct KList {
 
 static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
 
-/* What `x is List<*>` compares against. Both list types below name it, because a check writes the
-   INTERFACE and neither concrete type is that. No instances of its own, exactly like `Number` and
-   the function markers. */
-const KType kt_type_list_interface = {"kotlin.collections.List", 23,
-                                      sizeof(KObjectHeader),    0,
-                                      0,                        NULL,
-                                      &kt_type_any,             kt_any_vtable,
-                                      3,                        0};
+/* The collection interfaces, as an `is` names them. None has instances of its own, exactly like
+   `Number` and the function markers; each lists its own bases, flattened. */
+#define KT_INTERFACE(identifier, simple, bases)                                                    \
+    const KType identifier = {KT_NAMED("kotlin.collections.", simple),                             \
+                              .instance_size = sizeof(KObjectHeader),                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = bases,                                                 \
+                              .interface_count = sizeof(bases) / sizeof((bases)[0])};
 
-/* Flattened, as `KType.interfaces` requires. */
-static const KType *const kt_list_interfaces[] = {&kt_type_list_interface};
+#define KT_ROOT_INTERFACE(identifier, simple)                                                      \
+    const KType identifier = {KT_NAMED("kotlin.collections.", simple),                             \
+                              .instance_size = sizeof(KObjectHeader),                              \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3};
+
+static const KType *const kt_iterable_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_mutable_iterable_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_collection_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_mutable_collection_bases[] = {
+    &kt_type_collection_interface, &kt_type_mutable_iterable_interface,
+    &kt_type_iterable_interface};
+static const KType *const kt_list_bases[] = {&kt_type_collection_interface,
+                                             &kt_type_iterable_interface};
+static const KType *const kt_mutable_list_bases[] = {
+    &kt_type_list_interface, &kt_type_mutable_collection_interface, &kt_type_collection_interface,
+    &kt_type_mutable_iterable_interface, &kt_type_iterable_interface};
+
+KT_ROOT_INTERFACE(kt_type_iterator_interface, "Iterator")
+KT_ROOT_INTERFACE(kt_type_iterable_interface, "Iterable")
+KT_INTERFACE(kt_type_mutable_iterable_interface, "MutableIterable", kt_mutable_iterable_bases)
+KT_INTERFACE(kt_type_collection_interface, "Collection", kt_collection_bases)
+KT_INTERFACE(kt_type_mutable_collection_interface, "MutableCollection",
+             kt_mutable_collection_bases)
+KT_INTERFACE(kt_type_list_interface, "List", kt_list_bases)
+KT_INTERFACE(kt_type_mutable_list_interface, "MutableList", kt_mutable_list_bases)
+KT_ROOT_INTERFACE(kt_type_random_access_interface, "RandomAccess")
+
+#undef KT_INTERFACE
+#undef KT_ROOT_INTERFACE
+
+/* What each list class implements, transitively. The read-only list is not a `MutableList`, as
+   Kotlin/Native's `listOf` answer is not; the growable one is every interface here. */
+static const KType *const kt_list_interfaces[] = {
+    &kt_type_list_interface, &kt_type_collection_interface, &kt_type_iterable_interface,
+    &kt_type_random_access_interface};
+static const KType *const kt_mutable_list_interfaces[] = {
+    &kt_type_mutable_list_interface,     &kt_type_list_interface,
+    &kt_type_mutable_collection_interface, &kt_type_collection_interface,
+    &kt_type_mutable_iterable_interface, &kt_type_iterable_interface,
+    &kt_type_random_access_interface};
+static const KType *const kt_iterator_interfaces[] = {&kt_type_iterator_interface};
 
 static kt_boolean kt_list_equals(KRef self, KRef other);
 static kt_int kt_list_hash_code(KRef self);
@@ -41,18 +84,15 @@ static KRef kt_list_to_string(KRef self);
 static const kt_fn kt_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
                                        (kt_fn)kt_list_to_string};
 
-const KType kt_type_list = {"kotlin.collections.List",
-                            sizeof("kotlin.collections.List") - 1,
-                            sizeof(KList),
-                            1,
-                            0,
-                            kt_list_offsets,
-                            &kt_type_any,
-                            kt_list_vtable,
-                            3,
-                            0,
-                            kt_list_interfaces,
-                            1};
+const KType kt_type_list = {KT_ANONYMOUS("kotlin.collections.List"),
+                            .instance_size = sizeof(KList),
+                            .reference_count = 1,
+                            .reference_offsets = kt_list_offsets,
+                            .super = &kt_type_any,
+                            .vtable = kt_list_vtable,
+                            .vtable_length = 3,
+                            .interfaces = kt_list_interfaces,
+                            .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *)};
 
 /* ---- a growable list ------------------------------------------------------------------------
 
@@ -86,18 +126,16 @@ static KRef kt_list_to_string(KRef self);
 static const kt_fn kt_mutable_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
                                                (kt_fn)kt_list_to_string};
 
-const KType kt_type_mutable_list = {"kotlin.collections.ArrayList",
-                                    sizeof("kotlin.collections.ArrayList") - 1,
-                                    sizeof(KMutableList),
-                                    1,
-                                    0,
-                                    kt_mutable_list_offsets,
-                                    &kt_type_any,
-                                    kt_mutable_list_vtable,
-                                    3,
-                                    0,
-                                    kt_list_interfaces,
-                                    1};
+const KType kt_type_mutable_list = {
+    KT_NAMED("kotlin.collections.", "ArrayList"),
+    .instance_size = sizeof(KMutableList),
+    .reference_count = 1,
+    .reference_offsets = kt_mutable_list_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_mutable_list_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_mutable_list_interfaces,
+    .interface_count = sizeof(kt_mutable_list_interfaces) / sizeof(KType *)};
 
 kt_boolean kt_is_mutable_list(KRef value) {
     return value != NULL && value->header.type == &kt_type_mutable_list;
@@ -117,16 +155,16 @@ typedef struct KListIterator {
 static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
 
 /* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. */
-const KType kt_type_list_iterator = {"kotlin.collections.Iterator",
-                                     sizeof("kotlin.collections.Iterator") - 1,
-                                     sizeof(KListIterator),
-                                     1,
-                                     0,
-                                     kt_list_iterator_offsets,
-                                     &kt_type_any,
-                                     kt_any_vtable,
-                                     3,
-                                     0};
+const KType kt_type_list_iterator = {
+    KT_ANONYMOUS("kotlin.collections.Iterator"),
+    .instance_size = sizeof(KListIterator),
+    .reference_count = 1,
+    .reference_offsets = kt_list_iterator_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_iterator_interfaces,
+    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
 
 static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
 
@@ -473,27 +511,27 @@ typedef struct KWalk {
 
 static const uint32_t kt_walk_offsets[] = {offsetof(KWalk, over)};
 
-const KType kt_type_array_iterator = {"kotlin.collections.Iterator",
-                                      sizeof("kotlin.collections.Iterator") - 1,
-                                      sizeof(KWalk),
-                                      1,
-                                      0,
-                                      kt_walk_offsets,
-                                      &kt_type_any,
-                                      kt_any_vtable,
-                                      3,
-                                      0};
+const KType kt_type_array_iterator = {
+    KT_ANONYMOUS("kotlin.collections.Iterator"),
+    .instance_size = sizeof(KWalk),
+    .reference_count = 1,
+    .reference_offsets = kt_walk_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_iterator_interfaces,
+    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
 
-const KType kt_type_chars_iterator = {"kotlin.collections.CharIterator",
-                                      sizeof("kotlin.collections.CharIterator") - 1,
-                                      sizeof(KWalk),
-                                      1,
-                                      0,
-                                      kt_walk_offsets,
-                                      &kt_type_any,
-                                      kt_any_vtable,
-                                      3,
-                                      0};
+const KType kt_type_chars_iterator = {
+    KT_ANONYMOUS("kotlin.collections.CharIterator"),
+    .instance_size = sizeof(KWalk),
+    .reference_count = 1,
+    .reference_offsets = kt_walk_offsets,
+    .super = &kt_type_char_iterator,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_iterator_interfaces,
+    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
 
 kt_boolean kt_walk_is(KRef iterator) {
     return iterator != NULL
@@ -843,16 +881,14 @@ static const kt_fn kt_indexed_value_vtable[] = {(kt_fn)kt_indexed_value_equals,
                                                 (kt_fn)kt_indexed_value_hash_code,
                                                 (kt_fn)kt_indexed_value_to_string};
 
-const KType kt_type_indexed_value = {"kotlin.collections.IndexedValue",
-                                     sizeof("kotlin.collections.IndexedValue") - 1,
-                                     sizeof(KIndexedValue),
-                                     1,
-                                     0,
-                                     kt_indexed_value_offsets,
-                                     &kt_type_any,
-                                     kt_indexed_value_vtable,
-                                     3,
-                                     0};
+const KType kt_type_indexed_value = {
+    KT_NAMED("kotlin.collections.", "IndexedValue"),
+    .instance_size = sizeof(KIndexedValue),
+    .reference_count = 1,
+    .reference_offsets = kt_indexed_value_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_indexed_value_vtable,
+    .vtable_length = 3};
 
 KRef kt_indexed_value(kt_int index, KRef value) {
     /* `value` stays in the parameter across the allocation: it is its root. */
@@ -918,16 +954,16 @@ typedef struct KWithIndex {
 
 static const uint32_t kt_with_index_offsets[] = {offsetof(KWithIndex, source)};
 
-const KType kt_type_with_index = {"kotlin.collections.IndexingIterable",
-                                  sizeof("kotlin.collections.IndexingIterable") - 1,
-                                  sizeof(KWithIndex),
-                                  1,
-                                  0,
-                                  kt_with_index_offsets,
-                                  &kt_type_any,
-                                  kt_any_vtable,
-                                  3,
-                                  0};
+const KType kt_type_with_index = {
+    KT_NAMED("kotlin.collections.", "IndexingIterable"),
+    .instance_size = sizeof(KWithIndex),
+    .reference_count = 1,
+    .reference_offsets = kt_with_index_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_iterable_bases,
+    .interface_count = sizeof(kt_iterable_bases) / sizeof(KType *)};
 
 /* What `asSequence()` answers: the source iterable, kept until somebody asks it for an iterator.
 
@@ -948,16 +984,14 @@ typedef struct KSequence {
 
 static const uint32_t kt_sequence_offsets[] = {offsetof(KSequence, source)};
 
-const KType kt_type_sequence = {"kotlin.sequences.Sequence",
-                                sizeof("kotlin.sequences.Sequence") - 1,
-                                sizeof(KSequence),
-                                1,
-                                0,
-                                kt_sequence_offsets,
-                                &kt_type_any,
-                                kt_any_vtable,
-                                3,
-                                0};
+const KType kt_type_sequence = {
+    KT_ANONYMOUS("kotlin.sequences.Sequence"),
+    .instance_size = sizeof(KSequence),
+    .reference_count = 1,
+    .reference_offsets = kt_sequence_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3};
 
 KRef kt_sequence_of(KRef source) {
     KSequence *wrapper = (KSequence *)kt_gc_allocate(&kt_type_sequence, sizeof(KSequence));
@@ -978,16 +1012,16 @@ typedef struct KIndexingIterator {
 
 static const uint32_t kt_indexing_iterator_offsets[] = {offsetof(KIndexingIterator, source)};
 
-const KType kt_type_indexing_iterator = {"kotlin.collections.IndexingIterator",
-                                         sizeof("kotlin.collections.IndexingIterator") - 1,
-                                         sizeof(KIndexingIterator),
-                                         1,
-                                         0,
-                                         kt_indexing_iterator_offsets,
-                                         &kt_type_any,
-                                         kt_any_vtable,
-                                         3,
-                                         0};
+const KType kt_type_indexing_iterator = {
+    KT_NAMED("kotlin.collections.", "IndexingIterator"),
+    .instance_size = sizeof(KIndexingIterator),
+    .reference_count = 1,
+    .reference_offsets = kt_indexing_iterator_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_iterator_interfaces,
+    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
 
 KRef kt_iterable_with_index(KRef iterable) {
     KWithIndex *wrapper = (KWithIndex *)kt_gc_allocate(&kt_type_with_index, sizeof(KWithIndex));
@@ -1103,14 +1137,14 @@ static kt_int kt_iterable_size(KRef iterable) {
         return -1;
     }
     /* How many elements the WALK yields, which is not `last - first + 1` unless the step is 1 and
-       the walk ascends. A progression shares a range's struct -- so a descending `3 downTo 1` reached the ascending test with `first` above `last` and was
-       counted as empty, and `1..9 step 3` would have been counted 7 where the walk yields 3.
+       the walk ascends: a descending `3 downTo 1` has `first` above `last`, and `1..9 step 3`
+       yields 3 elements, not 7.
 
        `kt_range_empty` already answers emptiness for either direction and at the bounds' own
        signedness, so the count below never divides for a walk that yields nothing.
 
        The span is taken on the RING, as two's-complement subtraction, for the reason
-       `kt_progression_last` states about forming a distance: `Long.MIN_VALUE..Long.MAX_VALUE`
+       `kt_range_last_element` states about forming a distance: `Long.MIN_VALUE..Long.MAX_VALUE`
        spans more than a `kt_long` holds, and the signed subtraction wraps. At 64 bits unsigned it
        is exact -- and exact for an unsigned range's bounds above 2^63 by the same token. A span
        that large cannot be collected anyway, which the cap below still says. `last` is already the
@@ -1736,36 +1770,58 @@ KRef kt_iterator_next(KRef iterator) {
     return kt_box_int((kt_int)value);
 }
 
-/* Kotlin's `List.equals`: same size and elementwise equal, and only against another list. A list
-   never equals a set with the same members, which the type comparison is. */
+/* Kotlin's `List.equals`: elementwise equal, in order, and only against another `List` — which is
+   an `is` against the interface, so a list class of the program's own is compared too. A list
+   never equals a set with the same members, and a `List` equals a `MutableList` holding the same
+   things. Each element answers through its own `equals`, and one that throws ends the comparison
+   whatever it returned.
+
+   Two of the runtime's lists compare by index. A program's list is walked through its own
+   iterator, the one member of it this side can reach, the way the JVM's `AbstractList.equals`
+   walks the other list: `hasNext`, then `next`, then this element's `equals` with it, element by
+   element, and at the end the other list must have nothing left. Every call into the program is
+   followed by a look for the exception it may have thrown. */
 static kt_boolean kt_list_equals(KRef self, KRef other) {
     if (self == other) {
         return true;
     }
-    /* Either shape counts as a list: Kotlin compares two lists by their elements in order, so a
-       `List` and a `MutableList` holding the same things are equal. */
-    if (other == NULL
-        || (other->header.type != &kt_type_list && !kt_is_mutable_list(other))) {
+    if (!kt_is_instance(other, &kt_type_list_interface)) {
         return false;
     }
     kt_int size = kt_list_size(self);
-    if (size != kt_list_size(other)) {
-        return false;
-    }
     KRef left = ((const KList *)self)->elements;
-    KRef right = ((const KList *)other)->elements;
-    for (kt_int i = 0; i < size; i++) {
-        kt_boolean equal = kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i]);
-        /* Asked whatever `equal` says: an element's `equals` that threw may still have returned
-           true, and going on would compare the elements after it. */
+    if (other->header.type == &kt_type_list || kt_is_mutable_list(other)) {
+        if (size != kt_list_size(other)) {
+            return false;
+        }
+        KRef right = ((const KList *)other)->elements;
+        for (kt_int i = 0; i < size; i++) {
+            kt_boolean equal = kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i]);
+            if (kt_raised() || !equal) {
+                return false;
+            }
+        }
+        return true;
+    }
+    KRef walk = kt_iterable_iterator(other);
+    for (kt_int i = 0; i <= size; i++) {
+        kt_boolean more = !kt_raised() && kt_iterator_has_next(walk);
+        if (kt_raised() || i == size) {
+            return !kt_raised() && !more;
+        }
+        if (!more) {
+            return false;
+        }
+        KRef theirs = kt_iterator_next(walk);
         if (kt_raised()) {
             return false;
         }
-        if (!equal) {
+        kt_boolean equal = kt_equals(kt_elements_of(left)[i], theirs);
+        if (kt_raised() || !equal) {
             return false;
         }
     }
-    return true;
+    return false;
 }
 
 /* Kotlin's own: 1 folded with `31 * h + e.hashCode()`, a null element contributing 0. */

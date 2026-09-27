@@ -807,6 +807,11 @@ fn an_element_member_that_throws_ends_the_walk_that_called_it() {
     run_driver("list_stops_on_throwing_element");
 }
 
+#[test]
+fn a_list_is_the_collection_interfaces_and_equals_a_program_list() {
+    run_driver("list_identity");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

@@ -9068,6 +9068,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   out of memory, as the JVM's does, before any element is copied. `IndexedValue.hashCode` wraps
   like Kotlin's `Int`. A string iterator is linear in the string's length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
+  `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
+  `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
+  `is` names. The read-only list `listOf` answers is `List`, `Collection`, `Iterable` and
+  `RandomAccess` and not mutable, and publishes no class name: that is Kotlin/Native's answer, an
+  anonymous read-only `AbstractList` from `Array.asList`, where the JVM's `java.util.Arrays$ArrayList`
+  is a `MutableList` to an `is` (kotlinc 2.4.10 prints `true` there). A list equals any `List` with
+  equal elements in order, a program's own list class included, which it walks as the JVM's
+  `AbstractList.equals` does — `hasNext`, `next`, the element's `equals`, and a final `hasNext` — and
+  a merely `Iterable` object never. A call into the program that throws ends the comparison.
+  Tests: `tests/native_runtime_e2e.rs` (`list_identity`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type

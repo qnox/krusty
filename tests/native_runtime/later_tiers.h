@@ -153,6 +153,25 @@ __attribute__((weak)) kt_int kt_render_ulong(uint64_t value, char *buffer) {
     return count;
 }
 
+/* `x is T`, which a later tier defines: the super chain, and at each step the interfaces the type
+   lists, already flattened. */
+__attribute__((weak)) kt_boolean kt_is_instance(KRef object, const KType *type) {
+    if (object == NULL) {
+        return 0;
+    }
+    for (const KType *at = type_of(object); at != NULL; at = at->super) {
+        if (at == type) {
+            return 1;
+        }
+        for (uint32_t i = 0; i < at->interface_count; i++) {
+            if (at->interfaces[i] == type) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Whether `text` -- a string or a builder -- holds exactly these BYTES. Read through the text
    accessor of `standins.h`, which mirrors both layouts, rather than through a runtime comparison:
    `compareTo` and `startsWith` decode to UTF-16 units, which would call two different encodings of
