@@ -9049,6 +9049,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   program, and where it stops when one throws, are those the reference kotlinc makes on the JVM for
   `comparable_range_members.kt`, which the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
+- **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
+  records the exception and comes back, so each runtime raise returns at once and each walk checks
+  for a pending exception after every `next` and every lambda it calls. That covers the lambda's own
+  exception and a `ConcurrentModificationException` from the list it walks. An out-of-bounds
+  `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
+  was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
+  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
+  `xs.addAll(list)` appends the argument's elements as they were when the call began, so
+  `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
+  more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
+  of memory. `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the
+  string's length.
+  Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
   parameters or context parameters, returns `Unit`, and takes nothing or one array whose elements
