@@ -17,10 +17,9 @@ impl Emitter<'_> {
     ) {
         let n = args.len();
         let high_arity = is_high_arity_function(n as u8);
-        if args.iter().any(|&a| self.emits_control_flow(a)) {
-            // A branchy argument can't run with the function value on the stack — its merge
-            // frame would omit it. Evaluate the function + args into temps first (in order),
-            // then load and box.
+        if args.iter().any(|&a| self.spills_operand_prefix(a)) {
+            // An argument that cannot carry the operand stack can't run with the function value
+            // on it. Evaluate the function + args into temps first (in order), then load and box.
             let mut all = vec![func];
             all.extend(args.iter().copied());
             let temps = self.spill_to_temps(&all, code);

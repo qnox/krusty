@@ -35,10 +35,10 @@ impl Emitter<'_> {
             return;
         }
         if self.diverges(value) {
-            // Kotlin still evaluates the receiver before the RHS. A branchy divergent RHS must
-            // start from a clean operand stack, so preserve an effectful receiver through a
-            // temporary before emitting the non-returning value.
-            if self.emits_control_flow(value) {
+            // Kotlin still evaluates the receiver before the RHS. A divergent RHS that cannot
+            // carry the operand stack must start from a clean one, so preserve an effectful
+            // receiver through a temporary before emitting the non-returning value.
+            if self.spills_operand_prefix(value) {
                 let temps = self.spill_to_temps(&[receiver], code);
                 self.emit_value(value, code);
                 self.release_temporary(temps[0].2);
@@ -48,9 +48,9 @@ impl Emitter<'_> {
             }
             return;
         }
-        // A branchy value emits a merge frame; spill it before loading the receiver so those frames
-        // begin with a clean operand stack. Plain values retain direct receiver/value order.
-        if self.emits_control_flow(value) {
+        // A value that cannot carry the operand stack is spilled before the receiver is loaded.
+        // Every other value, branchy or not, keeps direct receiver/value order, as kotlinc does.
+        if self.spills_operand_prefix(value) {
             let temps = self.spill_to_temps(&[value], code);
             self.emit_value(receiver, code);
             let (slot, ty, lease) = temps[0];

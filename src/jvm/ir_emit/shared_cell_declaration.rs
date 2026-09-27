@@ -17,8 +17,8 @@ pub(super) type SharedCell = (Ty, Option<ExprId>);
 
 impl Emitter<'_> {
     /// The holder a declaration's `RefNew` initializer creates, when the declaration stores it
-    /// before setting its element. A branchy initial value is set on the holder before the store
-    /// instead, since the frames at its joins don't carry a holder left on the operand stack.
+    /// before setting its element. An initial value that cannot carry the loaded holder on the
+    /// operand stack (see `spills_operand_prefix`) is set on the holder before the store instead.
     pub(super) fn stored_shared_cell(
         &self,
         declaration: ExprId,
@@ -26,7 +26,7 @@ impl Emitter<'_> {
     ) -> Option<SharedCell> {
         match *self.ir.expr(initializer) {
             IrExpr::RefNew { elem, init }
-                if !init.is_some_and(|value| self.emits_control_flow(value))
+                if !init.is_some_and(|value| self.spills_operand_prefix(value))
                     && !self.inlined_only_cells.contains(&declaration) =>
             {
                 Some((elem, init))
@@ -100,7 +100,7 @@ impl Emitter<'_> {
             self.emit_new_holder(class, code);
             return;
         };
-        if self.emits_control_flow(init) {
+        if self.spills_operand_prefix(init) {
             let temps = self.spill_to_temps(&[init], code);
             self.emit_new_holder(class, code);
             code.dup();

@@ -28,7 +28,7 @@ impl Emitter<'_> {
         let physical = jvm_tys(declared);
         let spilled = arguments
             .iter()
-            .any(|&argument| self.emits_control_flow(argument))
+            .any(|&argument| self.spills_operand_prefix(argument))
             .then(|| self.spill_to_temps(arguments, code));
         code.aload(0);
         let mut slot = 1;
