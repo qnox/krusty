@@ -1403,13 +1403,15 @@ pub enum AnonymousEnclosingFunction {
 /// `lexical_owner` is the exact source classifier whose class body owns the declaration, or
 /// `None` for the file. `segments` are source declaration identities below that owner (function,
 /// property, or local binding names). `ordinal` is the shared local-artifact sequence position for
-/// an unnamed declaration. No target separator, facade spelling, or synthetic class name crosses
-/// this boundary.
+/// an unnamed declaration. `parents` are the declarations it is nested in below that owner, outermost
+/// first; local variables are not among them. No target separator, facade spelling, or synthetic
+/// class name crosses this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalClassNameProvenance {
     pub lexical_owner: Option<DeclId>,
     pub segments: Vec<String>,
     pub ordinal: Option<u32>,
+    pub parents: Vec<crate::enclosing_declarations::EnclosingDeclaration>,
 }
 
 /// Where a body-local callable sits among the callables kotlinc lifts out of one declaration.

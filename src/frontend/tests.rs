@@ -71,6 +71,11 @@ fun calculate() {
             lexical_owner: None,
             segments: vec!["calculate".to_string(), "Token".to_string()],
             ordinal: None,
+            parents: vec![
+                crate::enclosing_declarations::EnclosingDeclaration::Function(
+                    "calculate".to_string()
+                )
+            ],
         }
     );
 }

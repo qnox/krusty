@@ -896,6 +896,8 @@ mod inline_value_class_lambda_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
+#[path = "inner_class_declaration_order_e2e.rs"]
+mod inner_class_declaration_order_e2e;
 #[path = "inner_class_name_pool_order_e2e.rs"]
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]

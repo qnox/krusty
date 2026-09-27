@@ -29,6 +29,9 @@ use crate::ast::{
     AnonymousEnclosingFunction, ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId,
     File, FunBody, FunDecl, LocalClassNameProvenance, PropDecl, Stmt, StmtId,
 };
+use crate::enclosing_declarations::EnclosingDeclaration::{
+    self, EnumEntry, Function, Getter, InstanceInitializer, Lambda, Setter, StaticInitializer,
+};
 
 /// The names one walk invents for a file's local nodes.
 #[derive(Default)]
@@ -53,9 +56,23 @@ struct Chain {
     counter_owner: String,
     segments: Vec<String>,
     enclosing_function: Option<AnonymousEnclosingFunction>,
+    /// The declarations this chain's contents are nested in below `owner` (see
+    /// [`LocalClassNameProvenance::parents`]).
+    parents: Vec<EnclosingDeclaration>,
 }
 
 impl Chain {
+    /// The chain of a classifier's own body.
+    fn classifier(owner: Option<DeclId>, counter_owner: String) -> Self {
+        Self {
+            owner,
+            counter_owner,
+            segments: Vec::new(),
+            enclosing_function: None,
+            parents: Vec::new(),
+        }
+    }
+
     fn named(&self, name: &str) -> Self {
         let mut segments = self.segments.clone();
         segments.push(name.to_string());
@@ -64,7 +81,14 @@ impl Chain {
             counter_owner: self.counter_owner.clone(),
             segments,
             enclosing_function: self.enclosing_function,
+            parents: self.parents.clone(),
         }
+    }
+
+    /// This chain inside `declaration`.
+    fn inside(mut self, declaration: EnclosingDeclaration) -> Self {
+        self.parents.push(declaration);
+        self
     }
 
     fn in_function(mut self, function: AnonymousEnclosingFunction) -> Self {
@@ -88,6 +112,7 @@ impl Chain {
             lexical_owner: self.owner,
             segments: self.segments.clone(),
             ordinal,
+            parents: self.parents.clone(),
         }
     }
 }
@@ -118,12 +143,7 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
         names: InventedLocalNames::default(),
         expression_depth: 0,
     };
-    let file_chain = Chain {
-        owner: None,
-        counter_owner: "file".to_string(),
-        segments: Vec::new(),
-        enclosing_function: None,
-    };
+    let file_chain = Chain::classifier(None, "file".to_string());
     let anonymous = file
         .anonymous_object_classes
         .values()
@@ -139,14 +159,9 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
                 &file_chain,
                 Some(AnonymousEnclosingFunction::TopLevel(declaration)),
             ),
-            Decl::Property(property) => inventor.property(property, &file_chain),
+            Decl::Property(property) => inventor.property(property, &file_chain, StaticInitializer),
             Decl::Class(class) => {
-                let chain = Chain {
-                    owner: Some(declaration),
-                    counter_owner: format!("class:{}", class.name),
-                    segments: Vec::new(),
-                    enclosing_function: None,
-                };
+                let chain = Chain::classifier(Some(declaration), format!("class:{}", class.name));
                 inventor.class_body(declaration, class, &chain, false);
             }
         }
@@ -181,7 +196,9 @@ impl Inventor<'_> {
         outer: &Chain,
         identity: Option<AnonymousEnclosingFunction>,
     ) {
-        let mut chain = outer.named(&function.name);
+        let mut chain = outer
+            .named(&function.name)
+            .inside(Function(function.name.clone()));
         if let Some(identity) = identity {
             chain = chain.in_function(identity);
         }
@@ -213,14 +230,17 @@ impl Inventor<'_> {
         }
     }
 
-    fn property(&mut self, property: &PropDecl, outer: &Chain) {
+    /// Walk a property. Its initializer and delegate run as part of `initializer`: the owner's
+    /// instance or static initialization.
+    fn property(&mut self, property: &PropDecl, outer: &Chain, initializer: EnclosingDeclaration) {
         let chain = outer.named(&property.name);
         let delegated = property.delegate.is_some();
         if delegated {
             self.next(&chain);
         }
+        let initializer_chain = chain.clone().inside(initializer);
         for initializer in property.init.iter().chain(property.delegate.iter()) {
-            self.expr(*initializer, &chain);
+            self.expr(*initializer, &initializer_chain);
         }
         if delegated {
             // The accessors pass a reference to the property itself to `getValue`/`setValue`.
@@ -230,14 +250,14 @@ impl Inventor<'_> {
             }
         }
         if let Some(getter) = &property.getter {
-            self.body(getter, &chain);
+            self.body(getter, &chain.clone().inside(Getter(property.name.clone())));
         }
         if let Some(body) = property
             .setter
             .as_ref()
             .and_then(|setter| setter.body.as_ref())
         {
-            self.body(body, &chain);
+            self.body(body, &chain.clone().inside(Setter(property.name.clone())));
         }
     }
 
@@ -252,18 +272,27 @@ impl Inventor<'_> {
     ) {
         // The constructor contributes no name: its parameters' defaults, the superclass arguments
         // and every `init` block are numbered in the class's own chain.
+        let constructor = chain.clone().inside(InstanceInitializer);
         for default in class.props.iter().filter_map(|parameter| parameter.default) {
-            self.expr(default, chain);
+            self.expr(default, &constructor);
         }
         if !anonymous {
             for argument in &class.base_args {
-                self.expr(*argument, chain);
+                self.expr(*argument, &constructor);
             }
         }
-        // The `$$delegate_N` field adds no name of its own, like every field.
+        // The `$$delegate_N` field adds no name of its own, like every field; the constructor
+        // initializes it.
         for delegation in &class.interface_delegations {
-            self.expr(delegation.value, chain);
+            self.expr(delegation.value, &constructor);
         }
+        // An object's properties and `init` blocks are part of its static initialization, and a
+        // companion's of its outer class's.
+        let initializer = if class.singleton && !anonymous {
+            StaticInitializer
+        } else {
+            InstanceInitializer
+        };
         for entry in &class.enum_entries {
             // An entry with a body is an instance of its own class, whose constructor passes the
             // arguments on: they are numbered in that class's chain, not the enum's.
@@ -275,9 +304,12 @@ impl Inventor<'_> {
             } else {
                 chain.clone()
             };
+            // The enum's static initializer constructs every entry.
+            let arguments = entry_chain.clone().inside(StaticInitializer);
             for argument in &entry.args {
-                self.expr(*argument, &entry_chain);
+                self.expr(*argument, &arguments);
             }
+            let entry_chain = entry_chain.inside(EnumEntry(entry.name.clone()));
             if has_body {
                 self.initializers(&entry.init_order, &entry.props, &entry_chain);
                 for method in &entry.methods {
@@ -298,9 +330,11 @@ impl Inventor<'_> {
                     {
                         self.secondary_constructor(constructor, chain);
                     }
-                    self.expr(*block, chain);
+                    self.expr(*block, &chain.clone().inside(initializer.clone()));
                 }
-                ClassInit::PropInit(index) => self.property(&class.body_props[*index], chain),
+                ClassInit::PropInit(index) => {
+                    self.property(&class.body_props[*index], chain, initializer.clone())
+                }
             }
         }
         for constructor in constructors {
@@ -318,13 +352,18 @@ impl Inventor<'_> {
     fn initializers(&mut self, order: &[ClassInit], properties: &[PropDecl], chain: &Chain) {
         for step in order {
             match step {
-                ClassInit::Block(block) => self.expr(*block, chain),
-                ClassInit::PropInit(index) => self.property(&properties[*index], chain),
+                ClassInit::Block(block) => {
+                    self.expr(*block, &chain.clone().inside(InstanceInitializer))
+                }
+                ClassInit::PropInit(index) => {
+                    self.property(&properties[*index], chain, InstanceInitializer)
+                }
             }
         }
     }
 
-    fn secondary_constructor(&mut self, constructor: &crate::ast::SecondaryCtor, chain: &Chain) {
+    fn secondary_constructor(&mut self, constructor: &crate::ast::SecondaryCtor, outer: &Chain) {
+        let chain = &outer.clone().inside(InstanceInitializer);
         for default in constructor
             .params
             .iter()
@@ -373,7 +412,7 @@ impl Inventor<'_> {
                 self.names
                     .references
                     .insert(expression, chain.provenance(Some(Self::ordinal(&own))));
-                self.expr(*body, &own);
+                self.expr(*body, &own.inside(Lambda));
             }
             // A class literal has no generated callable-reference class and therefore consumes no
             // position. Its bound expression, when present, remains in the surrounding chain.
@@ -422,10 +461,8 @@ impl Inventor<'_> {
                     self.expr(*argument, chain);
                 }
                 let own = Chain {
-                    owner: Some(declaration),
-                    counter_owner: format!("anonymous:{}", declaration.0),
-                    segments: Vec::new(),
                     enclosing_function: chain.enclosing_function,
+                    ..Chain::classifier(Some(declaration), format!("anonymous:{}", declaration.0))
                 };
                 self.class_body(declaration, class, &own, true);
             }
@@ -480,10 +517,11 @@ impl Inventor<'_> {
                             .classes
                             .insert(declaration, chain.named(&source.name).provenance(None));
                         let own = Chain {
-                            owner: Some(declaration),
-                            counter_owner: format!("local:{}", declaration.0),
-                            segments: Vec::new(),
                             enclosing_function: chain.enclosing_function,
+                            ..Chain::classifier(
+                                Some(declaration),
+                                format!("local:{}", declaration.0),
+                            )
                         };
                         self.class_body(declaration, hoisted, &own, false);
                     }

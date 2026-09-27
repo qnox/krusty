@@ -1,15 +1,29 @@
 //! The `InnerClasses` table: which nested classes a class names, and in what order.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use super::{ClassWriter, InnerClassResolver, InnerClassSpec};
 
+/// kotlinc's `fqNameWhenAvailable` of each class declared in executable code, by internal name.
+pub(crate) type DeclarationPaths = Rc<HashMap<String, String>>;
+
 /// How a class's `InnerClasses` table is built.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum InnerClassTable {
-    /// kotlinc's `ClassCodegen`: every nested class the class references, sorted by name.
-    #[default]
-    Referenced,
+    /// kotlinc's `ClassCodegen`: every nested class the class references, stably sorted by its
+    /// qualified name. A class declared in executable code is named
+    /// by the declarations enclosing it, from these paths; any other by its outer class's name and
+    /// its own.
+    Referenced(DeclarationPaths),
     /// Every row as it was visited, as ASM writes a class that is copied.
     Visited,
+}
+
+impl Default for InnerClassTable {
+    fn default() -> Self {
+        Self::Referenced(DeclarationPaths::default())
+    }
 }
 
 impl ClassWriter {
@@ -30,6 +44,13 @@ impl ClassWriter {
 
     pub fn set_inner_class_resolver(&mut self, resolver: Option<InnerClassResolver>) {
         self.inner_class_resolver = resolver;
+    }
+
+    /// The qualified names the referenced table sorts the file's local classes by.
+    pub(crate) fn set_declaration_paths(&mut self, paths: DeclarationPaths) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            *own = paths;
+        }
     }
 
     /// Write every registered entry, in registration order: the table of a class copied from a
@@ -168,11 +189,62 @@ impl ClassWriter {
                 });
             }
         }
-        // kotlinc writes the complete table sorted by inner internal name (`C$Companion`,
-        // `C$NestObj`, `C$Nested` — case-sensitive), including classpath-discovered entries.
-        if self.inner_class_table == InnerClassTable::Referenced {
-            self.inner_class_candidates
-                .sort_by(|a, b| a.inner.cmp(&b.inner));
+        // kotlinc writes the complete table stably sorted by qualified name (`C.Companion`,
+        // `C.NestObj`, `C.Nested`, case-sensitive), classpath-discovered entries included, the
+        // classes with an equal name in the order they were met.
+        if let InnerClassTable::Referenced(paths) = &self.inner_class_table {
+            let keys = qualified_names(&self.inner_class_candidates, paths);
+            // Pool order follows the methods, the order kotlinc's codegen meets their classes.
+            let met: HashMap<String, usize> = self
+                .cp
+                .class_names()
+                .into_iter()
+                .enumerate()
+                .map(|(rank, class)| (class, rank))
+                .collect();
+            let mut rows: Vec<_> = keys
+                .into_iter()
+                .zip(std::mem::take(&mut self.inner_class_candidates))
+                .map(|(key, spec)| {
+                    let rank = met.get(spec.inner.as_str()).copied().unwrap_or(usize::MAX);
+                    (key, rank, spec)
+                })
+                .collect();
+            rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
+                key.cmp(other_key).then(rank.cmp(other_rank))
+            });
+            self.inner_class_candidates = rows.into_iter().map(|(_, _, spec)| spec).collect();
         }
     }
+}
+
+/// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
+/// executable code, otherwise its outer class's name and its own simple name, or the dotted
+/// internal name of a top-level class.
+fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> Vec<String> {
+    fn name(
+        inner: &str,
+        rows: &HashMap<&str, &InnerClassSpec>,
+        paths: &HashMap<String, String>,
+        depth: usize,
+    ) -> String {
+        if let Some(path) = paths.get(inner) {
+            return path.clone();
+        }
+        match rows.get(inner) {
+            Some(InnerClassSpec {
+                outer: Some(outer),
+                name: Some(simple),
+                ..
+            }) if depth < rows.len() => {
+                format!("{}.{simple}", name(outer, rows, paths, depth + 1))
+            }
+            _ => inner.replace('/', "."),
+        }
+    }
+    let by_inner: HashMap<&str, &InnerClassSpec> =
+        rows.iter().map(|row| (row.inner.as_str(), row)).collect();
+    rows.iter()
+        .map(|row| name(&row.inner, &by_inner, paths, 0))
+        .collect()
 }
