@@ -48,9 +48,9 @@ pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
             // A `private set` narrows only the SETTER, and the accessor synthesis emits an
             // unconditionally public `setX` — accepting one would let a write through that kotlinc
             // rejects, so those keep the rejection path until the narrowed visibility is modeled.
-            p.setter
-                .as_ref()
-                .is_some_and(|setter| setter.body.is_some() && !setter.is_private)
+            p.setter.as_ref().is_some_and(|setter| {
+                setter.body.is_some() && setter.visibility != Some(Visibility::Private)
+            })
         } else {
             p.setter.is_none()
         }
@@ -1254,7 +1254,7 @@ pub struct PropDecl {
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
-    /// lives on [`PropAccessor::is_private`]; this is the property's (getter's) visibility.
+    /// lives on [`PropAccessor::visibility`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
     /// Generic type parameters declared on an EXTENSION property (`val <T> Array<T>.length: Int`),
     /// scoped over the receiver, declared type, and accessor bodies. Erased to `Any` like a function's.
@@ -1355,7 +1355,7 @@ impl PropDecl {
 }
 
 /// A property setter (or, in future, a non-default getter): its parameter name, optional body
-/// (`None` = default accessor, e.g. `private set`), and whether it is `private`.
+/// (`None` = default accessor, e.g. `private set`), and its own visibility.
 #[derive(Clone, Debug)]
 pub struct PropAccessor {
     /// Setter parameter name (`set(value) { … }` → `"value"`); `None` for a default-bodied setter.
@@ -1365,7 +1365,9 @@ pub struct PropAccessor {
     pub span: Span,
     /// `None` = default accessor body (just a visibility change); `Some` = explicit body.
     pub body: Option<FunBody>,
-    pub is_private: bool,
+    /// The visibility modifier written on the accessor (`private set`, `protected set`); `None`
+    /// when it has none and takes its property's.
+    pub visibility: Option<Visibility>,
     /// The setter carries the semantic `inline` modifier and must retain checked FIR for call sites.
     pub is_inline: bool,
 }

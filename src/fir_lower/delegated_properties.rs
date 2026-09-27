@@ -26,7 +26,7 @@ use crate::types::{Ty, TypeName};
 
 use super::generics::declaration_type_parameters;
 use super::properties::{
-    add_accessor_function, set_accessor_parameter_identities, setter_is_private,
+    add_accessor_function, set_accessor_parameter_identities, setter_visibility,
     stamp_generated_property_nodes, AccessorResult,
 };
 use super::FirFileLoweringFailure;
@@ -388,7 +388,7 @@ pub(super) fn materialize_member_delegate(
         modifiers: super::properties::member_property_modifiers(property.flags, false),
         delegate_field: Some(delegate_field),
         is_private: property.visibility.is_private(),
-        setter_is_private: setter_is_private(index, property.declaration),
+        setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
         setter,
         getter_jvm_name: None,

@@ -616,7 +616,8 @@ fn module_property(
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
     let access_bridge = enclosing.is_some()
-        && (property.visibility.is_private() || reference_mutable && property.setter_is_private);
+        && (property.visibility.is_private()
+            || reference_mutable && property.setter_visibility.is_private());
     let owner = property
         .extension_receiver
         .and_then(Ty::kotlin_class_internal)

@@ -845,7 +845,7 @@ fn materialize_member_property(
 ) -> Result<(), FirFileLoweringFailure> {
     let owner = ir.classes[class_id as usize].fq_name;
     let needs_property_reference_bridge = (property.visibility.is_private()
-        || setter_is_private(index, property.declaration))
+        || setter_visibility(index, property.declaration, property.visibility).is_private())
         && ir.exprs.iter().any(|expression| {
             matches!(
                 expression,
@@ -1170,7 +1170,8 @@ fn materialize_member_property(
             .extend(getter.iter().chain(setter.iter()).copied());
     }
     if let Some(setter) = setter.filter(|_| {
-        property.visibility.is_private() || setter_is_private(index, property.declaration)
+        property.visibility.is_private()
+            || setter_visibility(index, property.declaration, property.visibility).is_private()
     }) {
         ir.private_methods.insert(setter);
     }
@@ -1198,7 +1199,7 @@ fn materialize_member_property(
         ),
         delegate_field: None,
         is_private: property.visibility.is_private(),
-        setter_is_private: setter_is_private(index, property.declaration),
+        setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter,
         setter,
         getter_jvm_name: None,
@@ -1374,17 +1375,23 @@ pub(super) fn member_property_modifiers(
     }
 }
 
-pub(super) fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
-    (0..index.declaration_count()).any(|raw| {
-        let accessor = DeclarationId::from_raw(raw as u32);
-        index.declaration_anchor(accessor).is_some_and(|anchor| {
-            anchor.kind == DeclarationKind::Accessor
-                && anchor.owner == Some(declaration)
-                && anchor.sibling == 1
-        }) && index
-            .declaration_header(accessor)
-            .is_some_and(|header| header.visibility.is_private())
-    })
+/// A property's setter visibility: the setter declaration's own, else the property's.
+pub(super) fn setter_visibility(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    property_visibility: crate::types::Visibility,
+) -> crate::types::Visibility {
+    (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|accessor| {
+            index.declaration_anchor(*accessor).is_some_and(|anchor| {
+                anchor.kind == DeclarationKind::Accessor
+                    && anchor.owner == Some(declaration)
+                    && anchor.sibling == 1
+            })
+        })
+        .and_then(|setter| index.declaration_header(setter))
+        .map_or(property_visibility, |header| header.visibility)
 }
 
 fn merge_class_initialization(

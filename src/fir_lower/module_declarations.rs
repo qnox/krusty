@@ -128,13 +128,6 @@ fn publish_callable(
     Ok(())
 }
 
-fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
-    index
-        .owned_declaration(declaration, crate::fir::DeclarationKind::Accessor, 1)
-        .and_then(|setter| index.declaration_header(setter))
-        .is_some_and(|header| header.visibility.is_private())
-}
-
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
     if flags.has(DeclarationFlags::ANNOTATION_CLASS) {
         IrClassifierKind::Annotation
@@ -216,7 +209,11 @@ fn publish_property(
             companion_associated: header.flags.has(DeclarationFlags::COMPANION),
             companion_owner,
             visibility: header.visibility,
-            setter_is_private: setter_is_private(index, property.declaration),
+            setter_visibility: super::properties::setter_visibility(
+                index,
+                property.declaration,
+                header.visibility,
+            ),
             annotations: index
                 .declaration_annotations(property.declaration)
                 .to_vec()

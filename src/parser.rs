@@ -2136,7 +2136,7 @@ impl<'a> Parser<'a> {
         'accessors: loop {
             let save = self.i;
             self.skip_newlines();
-            let mut is_private = false;
+            let mut visibility = None;
             let mut is_inline = false;
             let mut is_external = false;
             loop {
@@ -2159,7 +2159,16 @@ impl<'a> Parser<'a> {
                         "external",
                     ])
                 {
-                    is_private |= self.keyword_text("private");
+                    for (keyword, declared) in [
+                        ("private", Visibility::Private),
+                        ("protected", Visibility::Protected),
+                        ("internal", Visibility::Internal),
+                        ("public", Visibility::Public),
+                    ] {
+                        if self.keyword_text(keyword) {
+                            visibility = Some(declared);
+                        }
+                    }
                     is_inline |= self.keyword_text("inline");
                     is_external |= self.keyword_text("external");
                     self.bump();
@@ -2168,7 +2177,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if self.explicit_backing_fields
-                && !is_private
+                && visibility != Some(Visibility::Private)
                 && explicit_backing_field.is_none()
                 && self.at(TokenKind::Ident)
                 && self.keyword_text("field")
@@ -2239,7 +2248,7 @@ impl<'a> Parser<'a> {
                         "expected '=' or '{' for a property getter".to_string(),
                     );
                 }
-                let _ = is_private; // getter visibility not modeled (rare); ignored
+                let _ = visibility; // getter visibility not modeled (rare); ignored
             } else {
                 // setter: optional `(param)` then optional body; `private set` has neither.
                 let param = self.parse_setter_param();
@@ -2259,7 +2268,7 @@ impl<'a> Parser<'a> {
                     param,
                     span: accessor_span,
                     body,
-                    is_private,
+                    visibility,
                     is_inline,
                 });
             }

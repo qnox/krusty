@@ -1353,9 +1353,10 @@ pub struct IrProperty {
     /// backing field — so a use from outside the declaring class has nothing to call, and whichever
     /// path is lowering it does not own the access.
     pub is_private: bool,
-    /// `true` for a `var` whose setter alone is declared `private`. This is declaration visibility, not
-    /// a JVM flag: every backend must preserve it when realizing a default setter.
-    pub setter_is_private: bool,
+    /// The resolved visibility of a `var`'s setter: its own modifier (`private set`, `protected set`),
+    /// else the property's. This is declaration visibility, not a JVM flag: every backend must
+    /// preserve it when realizing a default setter or the storage it guards.
+    pub setter_visibility: crate::types::Visibility,
     /// The lowered body of a source-written getter/setter (a computed, `field`-using, or delegated
     /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
     pub getter: Option<FunId>,
@@ -3002,7 +3003,7 @@ pub struct IrModuleProperty {
     /// singleton-association edge; it says nothing about target storage.
     pub companion_owner: Option<TypeName>,
     pub visibility: crate::types::Visibility,
-    pub setter_is_private: bool,
+    pub setter_visibility: crate::types::Visibility,
     /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,

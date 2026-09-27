@@ -20,7 +20,7 @@ use crate::jvm::names::{
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
-use field_visibility::{is_jvm_field, jvm_field_visibility};
+use field_visibility::{default_setter_access, is_jvm_field, jvm_field_visibility};
 
 mod access_bridges;
 mod annotation_impl;
@@ -1221,7 +1221,7 @@ fn build_class_metadata(
                         }),
                     is_const: false,
                     modifiers: property.modifiers,
-                    setter_is_private: property.setter_is_private,
+                    setter_visibility: property.setter_visibility,
                     has_backing_field: !c.is_annotation
                         && (backing.is_some()
                             || delegate.is_some()
@@ -1312,7 +1312,7 @@ fn build_class_metadata(
                 has_constant: true,
                 is_const: true,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: prop.visibility,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1369,7 +1369,7 @@ fn build_class_metadata(
             has_constant: false,
             is_const: false,
             modifiers: ext.modifiers,
-            setter_is_private: false,
+            setter_visibility: ext.visibility,
             has_backing_field: ext_delegate.is_some(),
             tparam: None,
             receiver: Some(ext.receiver),
@@ -4635,15 +4635,8 @@ fn emit_declared_property_accessor(
             st.ret_void();
             st.ensure_locals(1 + words);
             st.link();
-            // `private set` narrows only the setter. Accessor synthesis owns the method flags now,
-            // so it must preserve that declaration fact instead of widening the setter to public.
-            let access = if property.setter_is_private {
-                0x0012 // PRIVATE | FINAL
-            } else if overridable {
-                0x0001
-            } else {
-                0x0011 // PUBLIC | FINAL
-            };
+            let access =
+                default_setter_access(property.setter_visibility, property.visibility, overridable);
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
         }
     }

@@ -1544,7 +1544,7 @@ impl IrPlugin for SerializationPlugin {
                 modifiers: Default::default(),
                 delegate_field: None,
                 is_private: false,
-                setter_is_private: false,
+                setter_visibility: crate::types::Visibility::Public,
                 getter: Some(descriptor),
                 setter: None,
                 getter_jvm_name: None,

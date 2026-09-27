@@ -40,8 +40,8 @@ pub struct PropMeta {
     /// Modality, declared accessors, delegation and `lateinit`, recorded in `Property.flags` and
     /// the accessor flag words.
     pub modifiers: crate::ir::IrPropertyModifiers,
-    /// A `var` whose setter alone is `private`.
-    pub setter_is_private: bool,
+    /// The setter's resolved visibility: its own modifier, else the property's.
+    pub setter_visibility: Visibility,
     /// Kotlin return-value status, recorded in `Property.flags` bits 17-18.
     pub return_value_status: crate::types::ReturnValueStatus,
     /// Whether this declaration owns a backing field. A concrete computed property has accessor code
@@ -268,8 +268,9 @@ pub(crate) fn records_annotations(annotations: &[crate::ir::AppliedAnnotation]) 
     annotations.iter().any(records_annotation)
 }
 
-fn property_flags(prop: &PropMeta) -> u64 {
-    let visibility = match prop.visibility {
+/// A declaration visibility's `flags` bits, which a property and its accessors share.
+fn visibility_flags(visibility: Visibility) -> u64 {
+    match visibility {
         Visibility::Internal => 0,
         Visibility::Private => PRIVATE_VISIBILITY,
         Visibility::Protected => 4,
@@ -279,9 +280,12 @@ fn property_flags(prop: &PropMeta) -> u64 {
                 "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
             )
         }
-    };
+    }
+}
+
+fn property_flags(prop: &PropMeta) -> u64 {
     (property_flags::DEFAULT & !property_flags::VISIBILITY_MASK)
-        | visibility
+        | visibility_flags(prop.visibility)
         | if prop.is_var {
             property_flags::IS_VAR | property_flags::HAS_SETTER
         } else {
@@ -329,9 +333,7 @@ const PRIVATE_VISIBILITY: u64 = 2;
 /// delegated, or when it narrows the property's visibility (`private set`). A bodiless `set`, even
 /// an annotated one, stays the default accessor.
 fn setter_is_not_default(p: &PropMeta) -> bool {
-    p.is_var
-        && (p.modifiers.declared_setter
-            || (p.setter_is_private && p.visibility != Visibility::Private))
+    p.is_var && (p.modifiers.declared_setter || p.setter_visibility != p.visibility)
 }
 
 /// `Property.flags` bits 4-5, which the accessor flag words share.
@@ -1034,13 +1036,8 @@ pub fn build_class(
         // The setter word rides on the DECLARATION being a `var`, not on a JVM setter signature
         // being recorded: a `@JvmField var` has no setter method at all and still records the word.
         if p.is_var {
-            let setter_visibility = if p.setter_is_private {
-                PRIVATE_VISIBILITY
-            } else {
-                shared & property_flags::VISIBILITY_MASK
-            };
             let setter_flags = (shared & !property_flags::VISIBILITY_MASK)
-                | setter_visibility
+                | visibility_flags(p.setter_visibility)
                 | not_default(setter_is_not_default(p));
             if setter_flags != default_accessor {
                 prop.field_varint(8, setter_flags); // Property.setter_flags = 8
@@ -1562,7 +1559,7 @@ mod tests {
                 has_constant: true,
                 is_const: true,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: visibility,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1638,7 +1635,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1699,7 +1696,7 @@ mod tests {
                 return_value_status: Default::default(),
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: true,
+                setter_visibility: Visibility::Private,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1891,7 +1888,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1918,7 +1915,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -1994,7 +1991,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -2149,7 +2146,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -2212,7 +2209,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 modifiers: Default::default(),
-                setter_is_private: false,
+                setter_visibility: Visibility::Public,
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
@@ -2283,7 +2280,7 @@ mod tests {
                     is_const: false,
                     visibility: Visibility::Public,
                     modifiers: Default::default(),
-                    setter_is_private: false,
+                    setter_visibility: Visibility::Public,
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,
@@ -2314,7 +2311,7 @@ mod tests {
                         declared_setter: true,
                         ..Default::default()
                     },
-                    setter_is_private: false,
+                    setter_visibility: Visibility::Public,
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,

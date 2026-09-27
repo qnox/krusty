@@ -1,7 +1,8 @@
 //! The JVM access flags of a class's backing fields, where kotlinc publishes a field beyond
-//! `private`.
+//! `private`, and of the default setter whose visibility a `lateinit` field shares.
 
 use crate::ir::IrClass;
+use crate::types::Visibility;
 
 /// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
 /// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
@@ -35,17 +36,35 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
             .properties
             .iter()
             .find(|declaration| declaration.backing_field == Some(field_index as u32))?;
-        if property.setter_is_private {
-            crate::types::Visibility::Private
-        } else {
-            property.visibility
-        }
+        property.setter_visibility
     } else {
         return None;
     };
     Some(match visibility {
-        crate::types::Visibility::Protected => 0x0004,
-        crate::types::Visibility::Private => 0x0002,
+        Visibility::Protected => 0x0004,
+        Visibility::Private => 0x0002,
         _ => 0x0001,
     })
+}
+
+/// A default setter's access: `private set` and `protected set` narrow only the setter, which keeps
+/// that declaration fact rather than widen to its property's visibility. Only an overridable
+/// property's setter drops `final`, and a private one never does. A setter that merely shares a
+/// protected property's visibility stays public like that property's getter: publishing both
+/// accessors `protected` waits on the accessors a subclass in another package reaches them by.
+pub(super) fn default_setter_access(
+    setter_visibility: Visibility,
+    property_visibility: Visibility,
+    overridable: bool,
+) -> u16 {
+    let access = match setter_visibility {
+        Visibility::Private => return 0x0012,
+        Visibility::Protected if property_visibility != Visibility::Protected => 0x0004,
+        _ => 0x0001,
+    };
+    if overridable {
+        access
+    } else {
+        access | 0x0010
+    }
 }

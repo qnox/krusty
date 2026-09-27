@@ -486,7 +486,7 @@ fn materialize_delegation(
                     modifiers: Default::default(),
                     delegate_field: None,
                     is_private: false,
-                    setter_is_private: false,
+                    setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
                     setter,
                     getter_jvm_name: None,
