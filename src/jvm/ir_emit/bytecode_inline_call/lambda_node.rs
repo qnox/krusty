@@ -177,6 +177,63 @@ impl Emitter<'_> {
         (shape, captures)
     }
 
+    /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
+    /// private field (a property's backing field), a private function, an `invokespecial`, or a
+    /// lambda it materializes (whose implementation is a private method). Inlined into a regenerated
+    /// object, kotlinc reaches those through synthetic accessors, which the port does not generate
+    /// yet.
+    pub(super) fn lambda_reaches_private_members(&self, argument: u32) -> bool {
+        let (lambda, _) = self.literal_lambda(argument);
+        let mut pending = vec![lambda.inline_body];
+        let mut seen = HashSet::new();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            let private = match self.ir.expr(expression) {
+                // A property's backing field is private unless it is a constant or `@JvmField`,
+                // whatever the property's own visibility.
+                IrExpr::GetStatic(index) | IrExpr::SetStatic { index, .. } => {
+                    !self.ir.statics[*index as usize].is_const
+                        && !self.ir.is_jvm_field_static(*index)
+                }
+                IrExpr::GetField { class, index, .. }
+                | IrExpr::SetField { class, index, .. }
+                | IrExpr::LateinitInitialized { class, index, .. } => self.ir.classes
+                    [*class as usize]
+                    .fields[*index as usize]
+                    .is_private(),
+                IrExpr::Call { callee, .. } => {
+                    matches!(callee, Callee::Special { .. })
+                        || callee
+                            .source_function()
+                            .is_some_and(|function| self.ir.private_methods.contains(&function))
+                }
+                IrExpr::Lambda {
+                    inline_body: None, ..
+                } => true,
+                _ => false,
+            };
+            if private {
+                return true;
+            }
+            match self.ir.expr(expression) {
+                IrExpr::Lambda {
+                    captures,
+                    inline_body: Some(body),
+                    ..
+                } => {
+                    pending.extend(captures.iter().copied());
+                    pending.push(*body);
+                }
+                _ => crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+                    pending.push(child)
+                }),
+            }
+        }
+        false
+    }
+
     /// Whether every value the lambda `argument` captures is a caller local the inlined body can
     /// read as it is: kotlinc binds a capture to the caller's slot only without a cast.
     pub(super) fn lambda_captures_caller_locals(&self, argument: u32) -> bool {

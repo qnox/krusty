@@ -108,3 +108,26 @@ fn a_literal_for_a_value_parameter_stays_a_value() {
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+const FIELD_MAIN: &str = r#"
+import lib.*
+
+private var greeted = ""
+var named = ""
+
+fun remembered(): String = greeting { greeted = it; named = it + "!"; greeted + named }.greet()
+
+fun box(): String {
+    if (remembered() != "hihi!") return "FAIL remembered: " + remembered()
+    return "OK"
+}
+"#;
+
+/// A lambda that reads or writes a property's backing field keeps working when the callee passes
+/// it to an object: the field is private to the caller's class, which the object is not.
+#[test]
+fn a_lambda_writing_a_backing_field_runs_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_kotlinc(LIB, FIELD_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}

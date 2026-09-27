@@ -35,6 +35,9 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     InPlaceArguments,
     /// A lambda captures a value that is not a caller local of its own type.
     CaptureOutsideFrame,
+    /// A lambda the callee may pass to an object it creates reaches a private declaration, which
+    /// kotlinc reaches from the regenerated object through synthetic accessors.
+    PrivateMemberInObject,
 }
 
 impl Emitter<'_> {
@@ -113,6 +116,12 @@ impl Emitter<'_> {
         // Whether the call's objects regenerate is settled before any code is emitted: the body is
         // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
         if inliner::constructs_anonymous_object(&callee) {
+            if lambda_arguments
+                .iter()
+                .any(|&argument| self.lambda_reaches_private_members(argument))
+            {
+                return splice(SpliceReason::PrivateMemberInObject);
+            }
             let mut lambdas = Vec::new();
             let mut captured = Vec::new();
             let mut lambda_bindings = HashMap::new();
