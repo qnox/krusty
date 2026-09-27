@@ -390,12 +390,14 @@ fn materialize_member_extension_property(
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_member_extension_delegate(
             index,
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             class_id,
             receiver,
-            context_parameters,
             ir,
             realizations,
             initialization,
@@ -542,11 +544,13 @@ fn materialize_top_level_property(
 ) -> Result<(), FirFileLoweringFailure> {
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_top_level_delegate(
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             extension_receiver,
-            context_parameters,
             index,
             ir,
             realizations,
@@ -884,11 +888,13 @@ fn materialize_member_property(
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_member_delegate(
             index,
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             class_id,
-            context_parameters,
             ir,
             realizations,
             initialization,

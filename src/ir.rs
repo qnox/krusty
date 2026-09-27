@@ -1136,8 +1136,8 @@ pub struct IrEnumEntry {
 pub struct IrField {
     pub name: String,
     pub ty: Ty,
-    /// Source line for the compiler-generated PRIMARY-CONSTRUCTOR store into this exact field.
-    /// Zero for non-constructor-property fields or when no source line was retained. This semantic
+    /// Source line for the compiler-generated constructor store into this exact field: a PRIMARY-
+    /// CONSTRUCTOR property's, or a delegated property's delegate. Zero otherwise. This semantic
     /// debug role is recorded on the resolved field coordinate so a backend never has to recover
     /// the property from its emitted field name.
     pub constructor_store_line: u32,

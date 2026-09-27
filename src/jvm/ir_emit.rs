@@ -45,6 +45,7 @@ mod data_class_value_classes;
 mod debug_lines;
 mod declaration_types;
 mod declared_nullability;
+mod delegated_property_array;
 mod discarding;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -2799,6 +2800,7 @@ fn attach_synth_debug_tables(
 /// getter's reference return, and each `var` setter's reference param — the shape kotlinc emits for a
 /// class with reference-typed properties. Call after `attach_synth_debug_tables`.
 fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+    cw.realize_leading_late_fields(); // The fields heading the table annotate first.
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
@@ -5162,11 +5164,13 @@ fn emit_class(
     // table (kotlinc's order), before the instance fields and any hoisted statics — but its pool
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
     if let Some(companion) = c.companion_class {
-        cw.add_field_late_leading(
-            0x0019,
-            companion.nested_segment_ref(),
-            &format!("L{};", companion.render()),
-        );
+        let desc = format!("L{};", companion.render());
+        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
+    }
+    // `$$delegatedProperties` follows it; a singleton's follows its INSTANCE, below.
+    if !static_storage(ir, c) {
+        delegated_property_array::declare(env, &fq_name, &mut cw);
     }
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
@@ -6641,12 +6645,11 @@ fn emit_enum_class(
     // The `Companion` field LEADS the field table, but kotlinc interns its name and descriptor at
     // the field VISIT — late, not here. Emitting it eagerly put those strings at the head of the
     // constant pool and reordered nearly all of it.
+    delegated_property_array::declare(env, &fq, &mut cw);
     if let Some(companion) = c.companion_class {
-        cw.add_field_late_leading(
-            0x0019,
-            companion.nested_segment_ref(),
-            &format!("L{};", companion.render()),
-        );
+        let desc = format!("L{};", companion.render());
+        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
     // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
@@ -7119,6 +7122,7 @@ fn emit_enum_class(
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
         let mut clinit = CodeBuilder::new(0);
+        e.emit_delegated_property_array(env, &fq, &mut clinit);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
         // Consecutive enum entries on one source line share one LNT entry.
         for (i, entry) in c.enum_entries.iter().enumerate() {
@@ -14155,21 +14159,8 @@ impl<'a> Emitter<'a> {
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name()),
             IrExpr::SingletonValue { classifier } => Ty::obj_name(*classifier),
             IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj_name(*ty),
-            IrExpr::ExternalStaticField { descriptor, .. } => {
-                // The static field's JVM type, from its descriptor (an object `L…;` for an `object`'s
-                // INSTANCE; primitives for the rare const-field case).
-                match descriptor.as_str() {
-                    "J" => Ty::Long,
-                    "D" => Ty::Double,
-                    "I" => Ty::Int,
-                    "Z" => Ty::Boolean,
-                    d => d
-                        .strip_prefix('L')
-                        .and_then(|s| s.strip_suffix(';'))
-                        .map(Ty::obj)
-                        .unwrap_or(Ty::obj("java/lang/Object")),
-                }
-            }
+            // The static field's JVM type, from its descriptor.
+            IrExpr::ExternalStaticField { descriptor, .. } => ty_from_field_descriptor(descriptor),
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,

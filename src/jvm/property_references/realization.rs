@@ -155,6 +155,10 @@ pub(crate) struct PropertyFieldAccess {
 pub(crate) struct PropertyReferenceRealizations {
     by_reference: HashMap<TypeName, PropertyReferenceRealization>,
     protected_bridges: Vec<ProtectedReferenceBridgeMethod>,
+    /// Each class's `$$delegatedProperties`, for the delegated-property operands that read it.
+    pub(crate) delegated_arrays: super::DelegatedPropertyArrays,
+    /// The operands found by `realize`, until `place_delegated_arrays` gives them their slots.
+    pub(super) pending_delegated: Vec<super::delegated_arrays::DelegatedOperand>,
 }
 
 impl PropertyReferenceRealizations {

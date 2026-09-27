@@ -16,9 +16,10 @@ pub(super) struct PropertyStore {
 /// A PRIMARY-CONSTRUCTOR property's store goes to the line its declaration starts on, annotations
 /// included: kotlinc puts `@SerialName("x")` over `val x: Int` on the annotation's line, while the
 /// property's own getter stays on the `val` line. A BODY property is not the same shape — its
-/// initializer store stays on its own line, annotation or not — which is why only constructor
-/// properties carry `constructor_store_line`. Body-property stores retain the older declaration-line
-/// map until that broader debug-metadata migration moves onto exact field coordinates too.
+/// initializer store stays on its own line, annotation or not. Constructor properties and the
+/// delegates of delegated properties (whose field is not named after the property) carry
+/// `constructor_store_line`; other body-property stores retain the older declaration-line map until
+/// that broader debug-metadata migration moves onto exact field coordinates too.
 pub(super) fn property_line(ir: &IrFile, class: &IrClass, field: u32) -> Option<u32> {
     let field = class.fields.get(field as usize)?;
     if field.constructor_store_line != 0 {

@@ -963,7 +963,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        let property_reference_realizations = match crate::jvm::property_references::realize(
+        let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
             &self.cp,
@@ -1018,6 +1018,11 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
+        crate::jvm::property_references::place_delegated_arrays(
+            &mut file.ir,
+            &mut property_reference_realizations,
+            &*self.cp,
+        );
         self.emit_streamed_ir(
             file,
             property_realizations,

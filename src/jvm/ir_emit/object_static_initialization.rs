@@ -31,15 +31,16 @@ pub(super) fn emit(
     };
     let self_desc = format!("L{fq_name};");
 
-    // kotlinc reaches `<clinit>` before the INSTANCE field, so reserve and intern in body order.
+    // kotlinc reaches `<clinit>` before the fields, so the body interns first and the leading
+    // INSTANCE and `$$delegatedProperties` intern with the field visit.
     cw.reserve_method_name("<clinit>");
-    let ci = cw.class_ref(fq_name);
-    let init = cw.methodref(fq_name, "<init>", "()V");
-    let fref = cw.fieldref(fq_name, instance_name, &self_desc);
-    cw.add_field(instance_access, instance_name, &self_desc);
-    if !interface_companion {
-        cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
-    }
+    let nullability = (!interface_companion).then_some("Lorg/jetbrains/annotations/NotNull;");
+    cw.add_field_late_leading(
+        (instance_access, instance_name, &self_desc),
+        None,
+        nullability,
+    );
+    delegated_property_array::declare(env, fq_name, cw);
 
     // Backing fields follow INSTANCE in the field table.
     for (field_index, field) in c.fields.iter().enumerate() {
@@ -79,6 +80,10 @@ pub(super) fn emit(
             .chain(init_body),
     );
     let mut clinit = CodeBuilder::new(0);
+    emitter.emit_delegated_property_array(env, fq_name, &mut clinit);
+    let ci = emitter.cw.class_ref(fq_name);
+    let init = emitter.cw.methodref(fq_name, "<init>", "()V");
+    let fref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
     clinit.new_obj(ci);
     clinit.dup();
     clinit.invokespecial(init, 0, 0);

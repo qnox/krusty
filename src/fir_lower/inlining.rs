@@ -221,6 +221,17 @@ impl BodyLowering<'_> {
                 operand.map(|operand| self.specialized_inline_operand(operand, &bindings))
             })
             .collect::<Vec<_>>();
+        // A delegated property's reflected value passed to an inline operator that never reads it
+        // is `null`, as kotlinc passes it: the property then needs no reflected value at all.
+        for (value, operand) in operands.iter().enumerate() {
+            if let Some(operand) = *operand {
+                if self.ir.is_delegated_property_operand(operand)
+                    && !crate::ir::reads_value(self.ir, template, value as u32)
+                {
+                    self.ir.elide_delegated_property_operand(operand);
+                }
+            }
+        }
         let defaults = if operands.iter().any(Option::is_none) {
             if self.ir.param_defaults_stub_only(function) {
                 return None;
