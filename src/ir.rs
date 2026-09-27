@@ -1263,6 +1263,9 @@ pub enum IrEnclosure {
     File,
     /// A classifier's property initializer or `init` block.
     ClassInitializer(ClassId),
+    /// A classifier as a whole rather than any of its code: a class a backend generates for the
+    /// classifier's own use, such as an annotation implementation shared by all its instantiations.
+    Classifier(ClassId),
 }
 
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary

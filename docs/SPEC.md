@@ -4676,6 +4676,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
   package-private class itself. Test:
   `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
+- **An annotation instance's implementation class is anonymous, synthetic and enclosed by its
+  owner.** kotlinc generates `Owner$annotationImpl$Tag$0` for the class or file facade whose code
+  first instantiates `Tag`, as a child of that owner. `InnerClasses` lists it with no outer class
+  and no simple name as `public static final synthetic`, both in the owner and in the class itself,
+  sorted under the owner's qualified name (`Owner.annotationImpl$Tag$0`). Its `EnclosingMethod`
+  names the owner with no method. Like any class, it interns each method's name and descriptor
+  before the method's code, each call's constants in instruction order, and its fields when the
+  field table is written; its `hashCode` names `this` in its `LocalVariableTable`. Tests:
+  `tests/annotation_instance_class_rows_e2e.rs`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order

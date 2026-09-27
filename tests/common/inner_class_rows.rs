@@ -1,4 +1,4 @@
-//! Differential comparison of a class's `InnerClasses` rows with kotlinc's.
+//! Differential comparison of classes, and of their `InnerClasses` rows, with kotlinc's.
 
 use krusty::jvm::classreader::{parse_class, InnerClassRef};
 use std::path::PathBuf;
@@ -11,6 +11,29 @@ pub fn assert_same_inner_classes(
     classpath: &[PathBuf],
     classes: &[&str],
 ) {
+    let rows = |bytes: &[u8]| -> Vec<InnerClassRef> {
+        parse_class(bytes).expect("a parseable class").inner_classes
+    };
+    for (class, (expected, actual)) in classes
+        .iter()
+        .zip(compile_with_kotlinc(stem, source, classpath, classes))
+    {
+        assert_eq!(
+            rows(&actual),
+            rows(&expected),
+            "{stem}: {class}'s InnerClasses rows"
+        );
+    }
+}
+
+/// Compile `source` with kotlinc and krusty against `classpath` and return each of `classes` as
+/// `(kotlinc's bytes, krusty's bytes)`.
+pub fn compile_with_kotlinc(
+    stem: &str,
+    source: &str,
+    classpath: &[PathBuf],
+    classes: &[&str],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
     let dir = super::common_core::scratch_dir().expect("scratch directory");
     let reference = dir.join("ref");
     std::fs::create_dir_all(&reference).expect("reference output directory");
@@ -50,21 +73,18 @@ pub fn assert_same_inner_classes(
             )
         )
     });
-    let rows = |bytes: &[u8]| -> Vec<InnerClassRef> {
-        parse_class(bytes).expect("a parseable class").inner_classes
-    };
-    for class in classes {
-        let expected = std::fs::read(reference.join(format!("{class}.class")))
-            .unwrap_or_else(|_| panic!("{stem}: kotlinc emits {class}"));
-        let (_, actual) = compiled
-            .iter()
-            .find(|(name, _)| name == class)
-            .unwrap_or_else(|| panic!("{stem}: krusty did not emit {class}"));
-        assert_eq!(
-            rows(actual),
-            rows(&expected),
-            "{stem}: {class}'s InnerClasses rows"
-        );
-    }
+    let pairs = classes
+        .iter()
+        .map(|class| {
+            let expected = std::fs::read(reference.join(format!("{class}.class")))
+                .unwrap_or_else(|_| panic!("{stem}: kotlinc emits {class}"));
+            let (_, actual) = compiled
+                .iter()
+                .find(|(name, _)| name == class)
+                .unwrap_or_else(|| panic!("{stem}: krusty did not emit {class}"));
+            (expected, actual.clone())
+        })
+        .collect();
     let _ = std::fs::remove_dir_all(&dir);
+    pairs
 }
