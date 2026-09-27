@@ -48,6 +48,21 @@ pub(super) fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Ve
     parameters
 }
 
+/// The types a common-IR function's generic `Signature` spells: its declared parameters, with each
+/// shared mutable capture typed as its cell. kotlinc types an object cell `Ref.ObjectRef<T>`, so a
+/// lifted function that takes one signs `(Lkotlin/jvm/internal/Ref$ObjectRef<Ljava/lang/String;>;)V`.
+pub(super) fn signature_function_params(ir: &IrFile, function: crate::ir::FunId) -> Vec<Ty> {
+    let declared = &ir.functions[function as usize].params;
+    (0..declared.len())
+        .map(|parameter| {
+            let ordinal = u32::try_from(parameter).expect("too many JVM function parameters");
+            ir.shared_capture_parameters
+                .get(&(function, ordinal))
+                .map_or(declared[parameter], crate::jvm::shared_captures::holder_ty)
+        })
+        .collect()
+}
+
 /// The JVM descriptor a common-IR function is declared with.
 pub(in crate::jvm) fn function_descriptor(ir: &IrFile, function: crate::ir::FunId) -> String {
     method_descriptor(
