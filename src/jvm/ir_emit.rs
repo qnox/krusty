@@ -8316,14 +8316,13 @@ fn emit_method_inner_with_holder(
         .get(&fid)
         .cloned()
         .unwrap_or_default();
-    // kotlinc annotates nullability only on declarations a source caller can reach. A
-    // HIDDEN-deprecated one is emitted ACC_SYNTHETIC for binary compatibility alone and carries
-    // neither `@NotNull` nor `@Nullable`; a PRIVATE method (declared, or a data class's `copy`
-    // under `DataClassCopyRespectsConstructorVisibility`) likewise gets none — the annotations
-    // exist for Java interop, which cannot see it.
-    // kotlinc annotates DECLARED methods. A compiler-invented accessor (`access$…$cp`) gets no
-    // nullability annotation, the same way it gets no generic `Signature`.
+    // kotlinc annotates nullability only on DECLARED methods a source caller can reach. A synthetic
+    // one (HIDDEN-deprecated, or reifiable: only an inlining call site runs it), a PRIVATE one
+    // (including a data class's `copy` under `DataClassCopyRespectsConstructorVisibility`) and a
+    // compiler-invented accessor (`access$…$cp`, which gets no `Signature` either) carry neither
+    // `@NotNull` nor `@Nullable`: the annotations exist for Java interop, which cannot see them.
     let nullability_annotated = !declared_annotations.deprecated_hidden()
+        && !method_access::is_reifiable(ir, fid)
         && !ir.private_methods.contains(&fid)
         && !ir.synthetic_methods.contains(&fid)
         && !ir.jvm_nullability_unannotated_methods.contains(&fid);
