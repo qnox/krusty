@@ -15049,6 +15049,13 @@ impl<'a> Emitter<'a> {
             when::discard_joined_value(keeps_value, result_ty, code);
             return;
         }
+        // kotlinc's `visitWhen` marks a source `when`'s own line and writes a `nop` on it before
+        // the first branch, so a debugger stops on the `when` line. The nop survives only where a
+        // debug point needs it, as every nop does.
+        if let Some(&line) = self.ir.source_whens.get(&expression) {
+            code.mark_line(line);
+            code.nop();
+        }
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {

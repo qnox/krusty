@@ -2430,6 +2430,11 @@ pub struct IrFile {
     /// exhaustive down an `else if` chain). Backends use this to preserve value flow and emit the
     /// mandatory no-match failure path without re-running exhaustiveness analysis.
     pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
+    /// The `when` expressions the source wrote (fir2ir's `IrStatementOrigin.WHEN`), by common-IR
+    /// identity, with the line of their `when` keyword. An `if`, and a `when` lowering builds, is
+    /// not one. kotlinc's JVM codegen marks that line and a `nop` before the branches of such a
+    /// `when` unless it becomes a switch.
+    pub source_whens: std::collections::HashMap<ExprId, u32>,
     /// Source binding reads and the checked binding's reassignment contract. The expression key is
     /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
     pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,

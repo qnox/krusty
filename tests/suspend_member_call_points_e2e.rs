@@ -131,3 +131,29 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "MemberPointsResume");
 }
+
+// Promoted from `backend_rejection_coverage_e2e`: the IR machine declined two safe-call
+// suspensions in one expression, and the transformer takes them. The instructions still differ
+// from kotlinc's around the second `?.`/`?:`: kotlinc stores the first operand after the null
+// check, krusty before it with a `dup`, as for any safe call with a pending operand.
+const SAFE_CALLS: &str = "class Box(val v: Int) { suspend fun d(): Int = v }\n\
+suspend fun f(b: Box?): Int { return (b?.d() ?: 0) + (b?.d() ?: 0) }\n";
+
+#[test]
+fn two_safe_member_calls_in_one_expression_run() {
+    let src = format!(
+        "import kotlin.coroutines.*\n\
+{SAFE_CALLS}\
+class Done : Continuation<Unit> {{\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) {{ result.getOrThrow() }}\n\
+}}\n\
+fun box(): String {{\n\
+    var some = -1\n\
+    var none = -1\n\
+    suspend {{ some = f(Box(3)); none = f(null) }}.startCoroutine(Done())\n\
+    return if (some == 6 && none == 0) \"OK\" else \"F:$some:$none\"\n\
+}}\n"
+    );
+    common::expect_box_ok_with_stdlib(&src, "SafeCallsRun");
+}

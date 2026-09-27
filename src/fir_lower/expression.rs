@@ -1137,7 +1137,14 @@ impl BodyLowering<'_> {
                 branches,
                 deeply_exhaustive,
             } => {
-                self.when_expression(*subject, branches, expression.ty.get(), *deeply_exhaustive)?
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.when_expression(
+                    *subject,
+                    branches,
+                    expression.ty.get(),
+                    *deeply_exhaustive,
+                    line,
+                )?
             }
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();

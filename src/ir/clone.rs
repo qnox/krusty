@@ -339,6 +339,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(value_names);
     copy_map!(logical_types);
     copy_map!(exhaustive_whens);
+    copy_map!(source_whens);
     copy_map!(binding_read_stability);
     copy_map!(short_circuits);
     copy_map!(physical_types);

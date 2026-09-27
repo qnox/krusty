@@ -20,6 +20,7 @@ impl BodyLowering<'_> {
         branches: &[FirWhenBranch],
         result_ty: Ty,
         deeply_exhaustive: bool,
+        line: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
         let mut prefix = Vec::new();
         let subject = subject
@@ -86,6 +87,9 @@ impl BodyLowering<'_> {
         let when = self.ir.add_expr(IrExpr::When {
             branches: lowered_branches,
         });
+        if line != 0 {
+            self.ir.source_whens.insert(when, line);
+        }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
         // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever
         // its result, `Unit` included), is exhaustive; the checker also decided whether fir2ir types
