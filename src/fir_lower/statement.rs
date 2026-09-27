@@ -34,14 +34,16 @@ impl BodyLowering<'_> {
                 initializer,
                 conversion,
             } => {
-                let mut init = initializer
+                let init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
                     .transpose()?;
-                if *lateinit && init.is_none() {
-                    init = Some(self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
-                }
+                // A shared cell's holder is created uninitialized, as kotlinc's
+                // `SharedVariablesLowering` does for a declaration without an initializer
+                // (`lateinit` included): its `element` keeps the field's default.
                 let init = if self.shared_local_type(*target).is_some() {
                     Some(self.shared_cell_new(*ty, init))
+                } else if *lateinit && init.is_none() {
+                    Some(self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)))
                 } else {
                     init
                 };

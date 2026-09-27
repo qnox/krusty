@@ -134,7 +134,6 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
-        | IrExpr::RefNew { init: arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
         | IrExpr::NewArray { size: arg, .. }
         | IrExpr::PrimitiveNeg { operand: arg, .. } => f(*arg),
@@ -161,7 +160,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             receiver.iter().for_each(|&receiver| f(receiver));
             f(*value);
         }
-        IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
+        IrExpr::Variable { init, .. } | IrExpr::RefNew { init, .. } => {
+            init.iter().for_each(|&i| f(i))
+        }
         IrExpr::EnclosingInstance { receiver, .. }
         | IrExpr::GetField { receiver, .. }
         | IrExpr::LateinitInitialized { receiver, .. } => f(*receiver),

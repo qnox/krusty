@@ -878,7 +878,8 @@ fn hoist_expr(
         // hoists to a preceding temp. Assigning the same local from a suspension later needs nothing
         // here — that is a `RefSet`, which already has its own arm.
         IrExpr::RefNew { elem, init } => {
-            let init = hoist_expr(ir, init, suspend_set, orig_rets, value_types, prelude);
+            let init =
+                init.map(|init| hoist_expr(ir, init, suspend_set, orig_rets, value_types, prelude));
             ir.exprs[e as usize] = IrExpr::RefNew { elem, init };
             e
         }
