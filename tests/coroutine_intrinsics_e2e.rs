@@ -387,3 +387,28 @@ fun box(): String {{ val c = C(); builder {{ c.put(\"OK\") }}; return c.v }}\n"
     );
     assert_eq!(run(&src).expect("unit suspend intrinsic runs"), "OK");
 }
+
+#[test]
+fn a_unit_function_ending_in_the_intrinsic_statement_returns_its_suspension() {
+    // `pause`'s block body ends in the intrinsic as a statement. When the block answers
+    // `COROUTINE_SUSPENDED`, so must `pause`: answering `Unit` instead would run the caller on
+    // past the suspension, and the later resume would run it a second time.
+    const SRC: &str = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+class Done : Continuation<Unit> {\n\
+    override val context: CoroutineContext = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+}\n\
+var parked: Continuation<Unit>? = null\n\
+var steps = 0\n\
+suspend fun pause() {\n\
+    suspendCoroutineUninterceptedOrReturn<Unit> { c -> parked = c; COROUTINE_SUSPENDED }\n\
+}\n\
+fun box(): String {\n\
+    suspend { pause(); steps++ }.startCoroutine(Done())\n\
+    if (steps != 0) return \"ran past the suspension: $steps\"\n\
+    parked!!.resume(Unit)\n\
+    return if (steps == 1) \"OK\" else \"F:$steps\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "IntrinsicUnitTail");
+}

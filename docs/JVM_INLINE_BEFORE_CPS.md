@@ -150,8 +150,12 @@ Known gaps, both byte differences in the function's own method (the continuation
   `FunctionN` casts it, one that takes `Any` does not, as in kotlinc.
 * The lambdas taken are the shapes steps 2 and 3 take: plain-call suspension points outside any
   `try`, no spliced inline body, no assigned capture, not an argument an inline call consumes.
-  Invoking a suspend function value is not a plain call yet. The rest keep the lifted function
-  with an IR-machine continuation.
+  A call to a same-file member suspend function is a plain call, whether its receiver is explicit,
+  `this`, or the lambda's own extension receiver. Invoking a suspend function value is not a plain
+  call yet. The rest keep the lifted function with an IR-machine continuation.
+* A receiver lambda passed straight to a call names its receiver local after the call's label,
+  `$this$builder` for `builder { … }`; krusty still writes `<this>`, which is right only for a lambda
+  that is not a call argument.
 
 Known gaps: the class's `@Metadata` has no lambda `d1`/`d2`, the pool interns the transformer's
 constants last (as for named functions), and a local declared in the lambda's body ends its range

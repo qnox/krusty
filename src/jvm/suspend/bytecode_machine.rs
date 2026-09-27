@@ -8,8 +8,9 @@
 //! the spill fields and `@DebugMetadata` come from the transformer.
 //!
 //! The functions taken so far are top-level functions and class members whose suspension points
-//! are all plain calls outside any `try`, and which call no inline function; an overridable
-//! member's machine is built in the `$suspendImpl` its body moves to (`jvm::suspend_impls`).
+//! are all plain calls outside any `try`, and which call no inline function; a call to a member,
+//! on any receiver, is as plain as a call to a top-level function. An overridable member's machine
+//! is built in the `$suspendImpl` its body moves to (`jvm::suspend_impls`).
 //! Suspend lambdas of that shape go through `suspend_lambda`, which shares the eligibility and
 //! suspension collection here. Interface bodies, `try` and spliced inline bodies are the next steps
 //! of the plan; until then they keep the IR machine.
@@ -258,8 +259,10 @@ pub(super) fn eligible_points(
     }
     let points = suspension_points_in_order(ir, body, route.suspend_set);
     let plain_call = |call: ExprId| {
-        matches!(ir.exprs[call as usize], IrExpr::Call { .. })
-            && !ir.intrinsic_suspension_points.contains_key(&call)
+        matches!(
+            ir.exprs[call as usize],
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+        ) && !ir.intrinsic_suspension_points.contains_key(&call)
             && value_class_suspension_result(ir, call, route.suspend_set).is_none()
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())

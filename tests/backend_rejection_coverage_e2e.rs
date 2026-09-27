@@ -157,14 +157,6 @@ fn suspend_sequence_map_not_inlined_rejected() {
 }
 
 #[test]
-fn suspend_safe_call_double_suspension_rejected() {
-    assert!(rejects(
-        "class Box { suspend fun d(): Int = 1 }\n\
-         suspend fun f(b: Box?): Int { return (b?.d() ?: 0) + (b?.d() ?: 0) }\n"
-    ));
-}
-
-#[test]
 fn cross_file_suspend_generic_value_class_specialization_runs() {
     let sources = [
         (

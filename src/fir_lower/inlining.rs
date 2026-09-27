@@ -1082,7 +1082,7 @@ fn specialize_expression_facts(
 ) {
     for ty in [
         ir.logical_types.get_mut(&expression),
-        ir.exhaustive_whens.get_mut(&expression),
+        ir.whens.exhaustive.get_mut(&expression),
         ir.physical_types.get_mut(&expression),
         ir.ext_call_source_receiver.get_mut(&expression),
         ir.call_declared_ret.get_mut(&expression),
