@@ -847,6 +847,11 @@ fn the_list_walk_and_array_entry_points_answer_as_kotlin_does() {
     run_driver_against_kotlin("list_api_answers");
 }
 
+#[test]
+fn a_map_or_for_each_over_a_list_its_lambda_changes_stops_where_kotlins_iterator_does() {
+    run_driver_against_kotlin("map_mutated_source");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

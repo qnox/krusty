@@ -485,9 +485,13 @@ KRef kt_list_iterator(KRef list) {
     return (KRef)iterator;
 }
 
+/* `cursor != size`, as the JVM's `ArrayList` and `AbstractList` iterators answer it, and not
+   `cursor < size`: a walk whose last element removes an element leaves the cursor past the end,
+   where the JVM says there is more and the `next()` that follows raises
+   `ConcurrentModificationException`. The cursor only passes the size through such a change. */
 kt_boolean kt_list_iterator_has_next(KRef iterator) {
     const KListIterator *self = (const KListIterator *)iterator;
-    return self->at < kt_list_size(self->list);
+    return self->at != kt_list_size(self->list);
 }
 
 KRef kt_list_iterator_next(KRef iterator) {
@@ -1187,7 +1191,8 @@ static KRef kt_invoke_one(KRef function, KRef argument) {
    descriptor says which — a range's count is its bounds, a list's is its array's length.
 
    `map` needs this because it answers a LIST, and a list is an array with a header: there is one
-   allocation, sized once, rather than a buffer that grows. */
+   allocation, sized once, rather than a buffer that grows. It asks only for a receiver its
+   transform cannot change; a mutable one is walked by its iterator (see `kt_iterable_map`). */
 static kt_int kt_iterable_size(KRef iterable) {
     if (iterable == NULL) {
         KT_FAIL("krusty: member access on a null receiver\n");
@@ -1254,10 +1259,15 @@ static KRef kt_frozen(KRef growing, kt_boolean reversed);
 
 KRef kt_iterable_map(KRef iterable, KRef transform) {
     kt_int size = kt_iterable_size(iterable);
-    if (size < 0) {
-        /* A receiver whose count is not known without walking it; see `kt_iterable_size`. The
-           result grows rather than being sized once, which costs a copy or two and keeps the walk
-           single — and a walk's side effects are what a program can see. */
+    if (size < 0 || kt_is_mutable_list(iterable) || kt_is_set(iterable) || kt_is_map(iterable)) {
+        /* A receiver whose count is not known without walking it (see `kt_iterable_size`), or one
+           the transform can change while it is walked. Kotlin's `map` is a `for` loop over the
+           receiver's iterator, so it asks `hasNext()` before every element and the iterator
+           notices a change: a transform that appends to a one-element list makes the walk go on to
+           a `next()` that raises `ConcurrentModificationException`, where a walk of the size
+           taken first would stop after one element with nothing raised. The result grows rather
+           than being sized once, which costs a copy or two and keeps the walk single — and a
+           walk's side effects are what a program can see. */
         KRef growing = kt_mutable_list_new();
         KRef walk = kt_iterable_iterator(iterable);
         while (kt_more(walk)) {
