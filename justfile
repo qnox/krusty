@@ -14,7 +14,7 @@
 #   just kotlin-native download+unpack the matching Kotlin/Native distribution; prints root path
 #   just klib-semantics exercise the common KLIB metadata decoder against that distribution
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
-#   just conformance       print box-suite conformance "<pct> <passed> <scanned>"
+#   just conformance       print box-suite conformance "<pct> <passed> <applicable>"
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
 #   just install-hooks    lefthook install
 #   just version          krusty release version, e.g. 2.4.20-build.3
@@ -405,7 +405,7 @@ conformance-bin:
     [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
     printf '%s\n' "$bin"
 
-# Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". The suite's native
+# Run the codegen/box conformance suite and print "<pct> <passed> <applicable>". The suite's native
 # exit status holds every file to the version's exact fail/not-applicable manifests; the report exposes the score.
 conformance VERSION=`just max-version`:
     #!/usr/bin/env bash
@@ -413,7 +413,7 @@ conformance VERSION=`just max-version`:
     just conformance-run "$(just conformance-bin)" "{{VERSION}}"
 
 # Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
-# "<pct> <passed> <scanned>". The test writes the report before its assertions, so callers receive
+# "<pct> <passed> <applicable>". The test writes the report before its assertions, so callers receive
 # the metric even when a file disagrees with the outcome manifests.
 conformance-run BIN VERSION:
     #!/usr/bin/env bash
@@ -425,14 +425,14 @@ conformance-run BIN VERSION:
 conformance-badge:
     #!/usr/bin/env bash
     set -euo pipefail
-    read -r pct passed scanned < <(just conformance)
+    read -r pct passed applicable < <(just conformance)
     color=red
     awk "BEGIN{exit !($pct>=10)}" && color=orange || true
     awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
     awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
     mkdir -p docs/badges
     printf '{"schemaVersion":1,"label":"Kotlin %s conformance","message":"%s%% (%s/%s)","color":"%s"}\n' \
-      "$(just max-version)" "$pct" "$passed" "$scanned" "$color" > docs/badges/conformance.json
+      "$(just max-version)" "$pct" "$passed" "$applicable" "$color" > docs/badges/conformance.json
     printf '{"schemaVersion":1,"label":"Kotlin","message":"%s","color":"blue"}\n' \
       "$(just max-version)" > docs/badges/kotlin.json
     echo "wrote docs/badges/conformance.json + kotlin.json"
