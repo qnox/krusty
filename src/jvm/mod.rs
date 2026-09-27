@@ -51,6 +51,7 @@ mod module_calls;
 pub mod names;
 mod parameter_assertions;
 mod parameter_names;
+mod private_static_access;
 pub mod property_annotations;
 mod property_realizations;
 mod property_references;

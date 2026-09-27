@@ -28,8 +28,9 @@ use crate::types::{type_name, Ty, TypeName};
 struct DeclaredAccessors {
     getter: Option<FunId>,
     setter: Option<FunId>,
-    /// The file's static storage slot, for a property stored on a facade or declaring class.
-    storage: Option<u32>,
+    /// The property's private static storage, when other classes reach it through its owner's
+    /// accessors.
+    bridged_storage: Option<crate::jvm::private_static_access::BridgedStorage>,
     value_class_storage: bool,
 }
 
@@ -46,13 +47,13 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
         } => DeclaredAccessors {
             getter: *getter,
             setter: *setter,
-            storage: Some(*storage),
+            bridged_storage: crate::jvm::private_static_access::bridged_storage(ir, *storage),
             value_class_storage: false,
         },
         IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => DeclaredAccessors {
             getter: Some(*getter),
             setter: *setter,
-            storage: None,
+            bridged_storage: None,
             value_class_storage: false,
         },
         IrLocalPropertyLayout::Member {
@@ -64,7 +65,7 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
         } => DeclaredAccessors {
             getter: *getter,
             setter: *setter,
-            storage: None,
+            bridged_storage: None,
             // A value class has exactly one field, and the property that owns it is its underlying
             // one. The storage slot is the identity; the two share no distinguishing spelling.
             value_class_storage: *backing_field == Some(0)
@@ -76,7 +77,7 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
         IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => DeclaredAccessors {
             getter: Some(*getter),
             setter: *setter,
-            storage: None,
+            bridged_storage: None,
             value_class_storage: false,
         },
     }
@@ -635,19 +636,7 @@ fn module_property(
     // A PRIVATE static property's field has no public accessor, and the reference is a class of
     // its own: kotlinc reads and writes it through its static owner's `access$get<X>$p` /
     // `access$set<X>$p`, whatever the owner is.
-    let bridged_storage = declared.storage.filter(|_| {
-        enclosing.is_none()
-            && property.visibility.is_private()
-            && [
-                crate::fir::DeclarationFlags::CUSTOM_GETTER,
-                crate::fir::DeclarationFlags::CUSTOM_SETTER,
-                crate::fir::DeclarationFlags::DELEGATED,
-                crate::fir::DeclarationFlags::CONST,
-            ]
-            .into_iter()
-            .all(|flag| !property.flags.has(flag))
-            && (property.extension_receiver.is_none() || companion_associated)
-    });
+    let bridged_storage = declared.bridged_storage;
     let bridged_name = |declared: &str| {
         if access_bridge || bridged_storage.is_some() {
             format!("access${declared}$p")

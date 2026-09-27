@@ -457,8 +457,13 @@ pub(super) fn emit_func_ref_class(
     };
     // A reference to a PRIVATE same-file static function can't invokestatic it from this
     // (separate) class — call its static owner's `access$<name>` accessor instead.
+    let static_owner = StaticOwner::of(fr.call_owner);
     let static_call_name = if function_reference_target(ir, fr).is_some_and(|target| {
-        static_accessors::routes_through_accessor(ir, &fq, &call_owner, target)
+        static_accessors::routes_through_accessor(
+            ir,
+            static_owner == StaticOwner::Class(c.fq_name),
+            target,
+        )
     }) {
         format!("access${}", fr.call_name)
     } else {
@@ -466,7 +471,12 @@ pub(super) fn emit_func_ref_class(
     };
     match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound => {
-            let m = cw.methodref(&call_owner, &static_call_name, &call_desc);
+            // A static of an interface is named by an `InterfaceMethodref`.
+            let m = if static_owner.is_interface(ir) {
+                cw.interface_methodref(&call_owner, &static_call_name, &call_desc)
+            } else {
+                cw.methodref(&call_owner, &static_call_name, &call_desc)
+            };
             inv.invokestatic(m, call_arg_words, ret_words);
         }
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM

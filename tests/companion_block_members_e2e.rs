@@ -206,6 +206,63 @@ fn private_block_members_used_from_other_classes_go_through_class_accessors() {
     common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "BlockAccessors");
 }
 
+/// A private block function of an interface is a private static of the interface. Every other
+/// class reaches it through the interface's `access$…` accessor, which as an interface method is
+/// not `final` and is named by `InterfaceMethodref`s: the carriers of references written in a
+/// default member and in the block, and a nested class and its lambda.
+#[test]
+fn private_interface_block_functions_go_through_interface_accessors() {
+    const SRC: &str = "interface Shape {\n\
+        \x20   fun area(): Int {\n\
+        \x20       val g = Shape::scale\n\
+        \x20       return g(3) + twice()\n\
+        \x20   }\n\
+        \x20   class Nested {\n\
+        \x20       fun viaNested(): Int {\n\
+        \x20           val l = { y: Int -> scale(y) }\n\
+        \x20           return l(1) + scale(2)\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       private fun scale(x: Int): Int = x * 2\n\
+        \x20       private fun twice(): Int {\n\
+        \x20           val h = ::scale\n\
+        \x20           return h(4)\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n\
+        class Square : Shape\n\
+        fun box(): String {\n\
+        \x20   val r = Square().area() + Shape.Nested().viaNested()\n\
+        \x20   return if (r == 20) \"OK\" else \"fail\"\n\
+        }\n";
+    const USERS: [&str; 3] = ["Shape$Nested", "Shape$area$g$1", "Shape$twice$h$1"];
+    let mut classes = vec!["Shape"];
+    classes.extend(USERS);
+    let comparisons = assert_members_and_metadata_match_kotlinc_on(
+        "InterfaceBlockAccessors",
+        SRC,
+        &classes,
+        &[common::stdlib_jar()],
+    );
+    let header = "public static int access$scale(int);";
+    let accessor = common::method_block(&comparisons[0].reference, header);
+    assert!(!accessor.is_empty(), "kotlinc declares Shape.{header}");
+    assert_eq!(
+        common::method_block(&comparisons[0].krusty, header),
+        accessor,
+        "Shape.{header}"
+    );
+    for (class, comparison) in USERS.iter().zip(&comparisons[1..]) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "{class}: kotlinc's members"
+        );
+    }
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "InterfaceBlockAccessors");
+}
+
 /// kotlinc treats a block property of an interface as an interface property: without a getter
 /// body it is abstract, initializer or not, and an abstract interface property cannot be private.
 /// So no private interface storage exists to reach through accessors; a private property with a

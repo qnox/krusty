@@ -515,11 +515,14 @@ impl Emitter<'_> {
         let is_const = s.is_const;
         let facade = self.facade.clone();
         // A PRIVATE property's field, read from another class, goes through its owner's accessor.
-        if let Some(owner) = static_accessors::bridged_storage_owner(self.ir, &facade, i)
-            .filter(|owner| *owner != self.owner)
+        if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, i)
+            .filter(|storage| !storage.owner.is_emitted_class(&self.owner, &facade))
         {
-            let m = self.cw.methodref(
-                &owner,
+            let m = static_accessors::static_methodref(
+                self.cw,
+                self.ir,
+                &facade,
+                storage.owner,
                 &format!("access${}$p", property_getter_name(&name)),
                 &format!("(){}", type_descriptor(jt)),
             );
@@ -595,11 +598,14 @@ impl Emitter<'_> {
         }
         // A PRIVATE property's field, written from another class, goes through its owner's
         // accessor.
-        if let Some(owner) = static_accessors::bridged_storage_owner(self.ir, &facade, index)
-            .filter(|owner| *owner != self.owner)
+        if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, index)
+            .filter(|storage| !storage.owner.is_emitted_class(&self.owner, &facade))
         {
-            let m = self.cw.methodref(
-                &owner,
+            let m = static_accessors::static_methodref(
+                self.cw,
+                self.ir,
+                &facade,
+                storage.owner,
                 &format!("access${}$p", property_setter_name(&name)),
                 &format!("({})V", type_descriptor(jt)),
             );
