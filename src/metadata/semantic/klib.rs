@@ -149,11 +149,11 @@ fn validate_annotation_value(
     Ok(())
 }
 
-fn validate_annotation(
+fn annotation_identity(
     body: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> Result<(), PackageFragmentDecodeError> {
+) -> Result<crate::types::TypeName, PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut class_id = None;
     while !cursor.at_end() {
@@ -194,13 +194,43 @@ fn validate_annotation(
             (_, wire) => cursor.skip(wire, "annotation")?,
         }
     }
-    semantic_qname(
+    let identity = semantic_qname(
         strings,
         qnames,
         class_id.ok_or_else(|| semantic_error("annotation has no class identity"))?,
         "annotation",
     )?;
-    Ok(())
+    Ok(crate::types::type_name(&identity))
+}
+
+fn validate_annotation(
+    body: &[u8],
+    strings: &[String],
+    qnames: &[QName],
+) -> Result<(), PackageFragmentDecodeError> {
+    annotation_identity(body, strings, qnames).map(drop)
+}
+
+fn annotation_identities(
+    body: &[u8],
+    annotation_fields: &[u64],
+    strings: &[String],
+    qnames: &[QName],
+    context: &str,
+) -> Result<Vec<crate::types::TypeName>, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut annotations = Vec::new();
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, context)?;
+        if annotation_fields.contains(&number) {
+            require_wire(&cursor, wire, 2, context)?;
+            let annotation = cursor.length_delimited("annotation")?.0;
+            annotations.push(annotation_identity(annotation, strings, qnames)?);
+        } else {
+            cursor.skip(wire, context)?;
+        }
+    }
+    Ok(annotations)
 }
 
 fn validate_annotation_fields(
@@ -210,18 +240,7 @@ fn validate_annotation_fields(
     qnames: &[QName],
     context: &str,
 ) -> Result<(), PackageFragmentDecodeError> {
-    let mut cursor = Cursor::new(body, 0);
-    while !cursor.at_end() {
-        let (number, wire) = field(&mut cursor, context)?;
-        if annotation_fields.contains(&number) {
-            require_wire(&cursor, wire, 2, context)?;
-            let annotation = cursor.length_delimited("annotation")?.0;
-            validate_annotation(annotation, strings, qnames)?;
-        } else {
-            cursor.skip(wire, context)?;
-        }
-    }
-    Ok(())
+    annotation_identities(body, annotation_fields, strings, qnames, context).map(drop)
 }
 
 fn message_bodies<'a>(
@@ -923,9 +942,11 @@ fn semantic_function(
 ) -> Result<(metadata::KotlinMember, Option<metadata::KotlinFunction>), PackageFragmentDecodeError>
 {
     let contract_type_table = type_table_bodies(body, "function declaration")?;
-    validate_annotation_fields(
+    // Metadata's own annotation fields, `.kotlin_builtins`' `BuiltInsProtoBuf.functionAnnotation`
+    // (150), and the KLIB extensions (170, 171).
+    let annotations = annotation_identities(
         body,
-        &[12, 34, 170, 171],
+        &[12, 34, 150, 170, 171],
         tables.strings,
         tables.qnames,
         "function declaration",
@@ -1067,6 +1088,7 @@ fn semantic_function(
         param_names: param_names[param_names.len() - written..].to_vec(),
         param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
         vararg: vararg.and_then(|index| index.checked_sub(leading)),
+        annotations: annotations.clone(),
     };
     let top = top_level.then_some(metadata::KotlinFunction {
         name,
@@ -1089,6 +1111,7 @@ fn semantic_function(
         context_count: function.context_receiver_bodies.len()
             + function.context_receiver_type_ids.len()
             + function.context_params.len(),
+        annotations,
     });
     Ok((member, top))
 }
@@ -1217,6 +1240,7 @@ fn semantic_property(
         param_names: Vec::new(),
         param_defaults: Vec::new(),
         vararg: None,
+        annotations: Vec::new(),
     };
     let property = top_level.then(|| metadata::KotlinProperty {
         name,
@@ -1821,6 +1845,40 @@ mod tests {
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/String"));
         assert!(package.functions[0].ret.nullable());
+    }
+
+    /// `.kotlin_builtins` writes a function's annotations to `BuiltInsProtoBuf` field 150, a KLIB
+    /// to field 170; both decode to the annotation's qualified identity.
+    #[test]
+    fn function_annotations_keep_their_qualified_identity() {
+        let strings = [
+            "f",
+            "p",
+            "kotlin",
+            "Unit",
+            "internal",
+            "IntrinsicConstEvaluation",
+        ];
+        let qnames = [
+            qname(2, None, 1),
+            qname(3, Some(0), 0),
+            qname(4, Some(0), 1),
+            qname(5, Some(2), 0),
+        ];
+        let mut annotation = Vec::new();
+        int_field(&mut annotation, 1, 3);
+        for annotation_field in [150, 170] {
+            let mut function = function_with_return(Some(&class_type(1)), None);
+            bytes_field(&mut function, annotation_field, &annotation);
+            let bytes = fragment(&strings, &qnames, &package_with_function(&function, None));
+
+            let package = parse_package_fragment_checked(&bytes).expect("valid annotated function");
+            assert_eq!(
+                package.functions[0].annotations,
+                vec![crate::types::wk::intrinsic_const_evaluation()],
+                "annotation field {annotation_field}"
+            );
+        }
     }
 
     #[test]

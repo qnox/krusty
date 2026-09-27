@@ -69,6 +69,15 @@ pub(super) fn attach(file: &mut File, src: &str) {
         .iter()
         .map(|&span| span_line_at(span, span.hi))
         .collect();
+    // A catch clause's own line, its `catch` keyword's: kotlinc marks it at the handler's entry,
+    // ahead of the store of the caught exception.
+    for expr in &mut file.expr_arena {
+        if let Expr::Try { catches, .. } = expr {
+            for catch in catches {
+                catch.line = span_line_at(catch.keyword_span, catch.keyword_span.lo);
+            }
+        }
+    }
     file.stmt_lines = file
         .stmt_spans
         .iter()

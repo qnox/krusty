@@ -14,6 +14,8 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+mod callable_body_returns;
+mod catch_clauses;
 mod local_classifier_provenance;
 mod lowering_temporaries;
 
@@ -21,71 +23,6 @@ use super::lower_body;
 
 #[path = "callable_references/tests.rs"]
 mod callable_reference_tests;
-
-#[test]
-fn consuming_lowering_materializes_common_ir_roots() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(7));
-    let local_value = body.allocate_local_value();
-    let one = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(1)),
-    });
-    let two = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(2)),
-    });
-    let sum = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Binary {
-            operation: FirBinaryOperation::Add,
-            lhs: one,
-            rhs: two,
-        },
-    });
-    let local = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Local {
-            target: local_value,
-            ty: resolved(Ty::Int),
-            mutable: false,
-            lateinit: false,
-            initializer: Some(sum),
-            conversion: None,
-        },
-    });
-    body.push_root(local);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-
-    assert_eq!(lowered.owner, BodyOwnerId::from_raw(7));
-    assert_eq!(lowered.roots.as_ref(), &[3]);
-    assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(1))));
-    assert!(matches!(ir.expr(1), IrExpr::Const(IrConst::Int(2))));
-    assert!(matches!(
-        ir.expr(2),
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: 0,
-            rhs: 1
-        }
-    ));
-    assert!(matches!(
-        ir.expr(3),
-        IrExpr::Variable {
-            index: 0,
-            ty: Ty::Int,
-            init: Some(2),
-            named: true
-        }
-    ));
-    assert_eq!(ir.fir_origins.len(), ir.exprs.len());
-    assert_eq!(ir.fir_origins.get(&3), Some(&IrNodeOrigin::Fir(origin)));
-}
 
 #[test]
 fn char_arithmetic_result_type_survives_nested_common_lowering() {
@@ -109,54 +46,6 @@ fn char_arithmetic_result_type_survives_nested_common_lowering() {
         })
         .expect("lowered Char subtraction");
     assert_eq!(ir.logical_types.get(&subtraction), Some(&Ty::Char));
-}
-
-#[test]
-fn catch_parameter_name_survives_checked_fir_lowering() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(7));
-    let parameter = body.allocate_local_value();
-    body.set_debug_value_name(parameter, "failure");
-    let one = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(1)),
-    });
-    let two = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(2)),
-    });
-    let attempt = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Try {
-            body: one,
-            catches: Box::new([FirCatch {
-                origin,
-                parameter,
-                parameter_ty: resolved(Ty::obj("java/lang/Exception")),
-                body: two,
-            }]),
-            finally: None,
-        },
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(attempt),
-    });
-    body.push_root(root);
-    let mut ir = IrFile::default();
-    lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let catch = ir
-        .exprs
-        .iter()
-        .find_map(|expression| match expression {
-            IrExpr::Try { catches, .. } => catches.first(),
-            _ => None,
-        })
-        .expect("checked try expression must retain its catch clause");
-    assert_eq!(catch.binding_name(), Some("failure"));
 }
 
 #[test]
@@ -2852,41 +2741,6 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
 }
 
 #[test]
-fn checked_increment_lowers_without_recovering_an_operator() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(2));
-    let value = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(41)),
-    });
-    let increment = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Unary {
-            operation: FirUnaryOperation::Increment,
-            operand: value,
-        },
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(increment),
-    });
-    body.push_root(root);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    assert!(matches!(
-        ir.expr(lowered.roots[0]),
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            type_operand: Ty::Int,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn block_bodied_local_function_keeps_its_explicit_return() {
     let origin = OriginId::from_raw(0);
     let mut body = FirBody::new(BodyOwnerId::from_raw(8));
@@ -3129,45 +2983,6 @@ fn default_expressions_are_lowered_but_not_inserted_into_body_roots() {
     assert!(lowered.roots.is_empty());
     assert_eq!(lowered.defaults.as_ref(), &[(1, 0)]);
     assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(12))));
-}
-
-#[test]
-fn implicit_non_unit_callable_result_is_a_terminal_return_statement() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(10));
-    body.set_result_type(resolved(Ty::Int));
-    body.set_implicit_return();
-    let value = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Int),
-        kind: FirExprKind::Constant(FirConstant::Int(12)),
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(value),
-    });
-    body.push_root(root);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let callable_body = super::finish_callable_body(
-        &mut ir,
-        lowered.roots.into_vec(),
-        lowered.result_type.unwrap(),
-        lowered.implicit_return,
-        false,
-        origin,
-    )
-    .unwrap();
-
-    let IrExpr::Block { stmts, value } = ir.expr(callable_body) else {
-        panic!("callable body must be a block")
-    };
-    assert!(value.is_none());
-    assert!(matches!(
-        stmts.as_slice(),
-        [returned] if matches!(ir.expr(*returned), IrExpr::Return(Some(_)))
-    ));
 }
 
 #[test]

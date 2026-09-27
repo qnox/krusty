@@ -59,6 +59,57 @@ fn declaration_order(bridges: &mut [Bridge], order: Vec<u32>) {
     }
 }
 
+/// kotlinc's `BridgeLowering` blacklists the special bridge of every overridden declaration in a
+/// Kotlin superclass: a Kotlin class that first takes `size` from a collection already carries the
+/// final `size()` bridge to its `getSize()`, including through an inherited fake override, so a
+/// subclass must not declare it again (`IncompatibleClassChangeError: overrides final method`). The
+/// override edges name only the declarations that spell the member, so walk the superclass chain
+/// for a Kotlin class whose classfile already has that final bridge.
+fn inherits_final_special_bridge(
+    ir: &IrFile,
+    cid: usize,
+    classpath: &crate::jvm::classpath::Classpath,
+    name: &str,
+    descriptor: &str,
+) -> bool {
+    let mut next = ir.classes[cid].superclass;
+    loop {
+        if let Some(module_class) = ir.classes.iter().find(|class| class.fq_name == next) {
+            next = module_class.superclass;
+            continue;
+        }
+        let Some(info) = classpath.find_name(next) else {
+            return false;
+        };
+        if info.meta.class_kind.is_some()
+            && info.methods.iter().any(|method| {
+                method.name == name
+                    && method.descriptor == descriptor
+                    && is_inherited_special_bridge(method)
+            })
+        {
+            return true;
+        }
+        match info.super_class {
+            Some(superclass) => next = superclass,
+            None => return false,
+        }
+    }
+}
+
+/// A superclass method that IS the special bridge a subclass inherits: a final `ACC_BRIDGE` instance
+/// method. kotlinc publishes that bridge `public`, so a `protected` one is inherited too, but a
+/// private or static method with the same signature is not inherited and owns no bridge, and a
+/// package-private one is not treated as reachable across the packages a classpath superclass
+/// can sit in.
+fn is_inherited_special_bridge(method: &crate::jvm::classreader::MethodSig) -> bool {
+    method.is_bridge()
+        && method.is_final()
+        && !method.is_static()
+        && !method.is_private()
+        && (method.is_public() || method.is_protected())
+}
+
 fn external_method_name(
     classpath: &crate::jvm::classpath::Classpath,
     target: crate::fir::ExternalCallableId,
@@ -181,6 +232,17 @@ fn superclass_method_bridges(
         if bridge_name != edge.name && edge.has_kotlin_superclass_override {
             continue;
         }
+        if bridge_name != target_name
+            && inherits_final_special_bridge(
+                ir,
+                cid,
+                classpath,
+                &bridge_name,
+                &method_descriptor(&base_params, base_ret),
+            )
+        {
+            continue;
+        }
         crate::trace_compiler!(
             "bridges",
             "stable override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={} target={} declared={base_params:?}->{base_ret:?} concrete={own_params:?}->{own_ret:?}",
@@ -242,6 +304,7 @@ fn superclass_method_bridges(
                 .and_then(|function| ir.fn_source_order.get(&function).copied())
                 .unwrap_or(u32::MAX),
         );
+        let special = bridge_name != edge.name;
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
@@ -253,6 +316,7 @@ fn superclass_method_bridges(
             concrete_ret,
             target_ret: None,
             type_safe_barrier: false,
+            special,
             target_name,
             box_ret: None,
             unbox_params: Vec::new(),
@@ -330,6 +394,15 @@ fn property_bridges(
         if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
             continue;
         }
+        let bridge_descriptor = method_descriptor(
+            &declared_receiver.into_iter().collect::<Vec<_>>(),
+            bridge_erasure(edge.declared_type),
+        );
+        if bridge_getter != target_getter
+            && inherits_final_special_bridge(ir, cid, classpath, &bridge_getter, &bridge_descriptor)
+        {
+            continue;
+        }
         let position = implementation_property
             .filter(|_| declared_here)
             .map_or(u32::MAX, |property| property.source_order);
@@ -391,6 +464,7 @@ fn push_member_extension_accessor_bridges(
         concrete_ret,
         target_ret: None,
         type_safe_barrier: false,
+        special: false,
         target_name: None,
         box_ret: None,
         unbox_params: Vec::new(),
@@ -440,6 +514,7 @@ fn push_property_bridge(
         .any(|b| b.name == getter_name && b.erased_params.is_empty());
     if !has_getter {
         let target_name = (getter_name != getter_target).then_some(getter_target);
+        let special = getter_name != property_getter_name(pname);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: None,
@@ -451,6 +526,7 @@ fn push_property_bridge(
             concrete_ret: own_ret,
             target_ret: None,
             type_safe_barrier: false,
+            special,
             target_name,
             box_ret: None,
             unbox_params: Vec::new(),
@@ -476,6 +552,7 @@ fn push_property_bridge(
             concrete_ret: Ty::Unit,
             target_ret: None,
             type_safe_barrier: false,
+            special: false,
             target_name: None,
             box_ret: None,
             unbox_params: Vec::new(),

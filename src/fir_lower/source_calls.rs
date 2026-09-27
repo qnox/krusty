@@ -121,7 +121,7 @@ impl BodyLowering<'_> {
     /// Whether a checked common-IR operand contains a suspension that belongs to the current body.
     /// The checker/lowering maps are authoritative; this performs no callable lookup. A lambda body
     /// remains a separate semantic body, while evaluating its captures still belongs to the caller.
-    fn operand_suspends(&self, expression: ExprId) -> bool {
+    pub(super) fn operand_suspends(&self, expression: ExprId) -> bool {
         if self.ir.suspend_calls.contains_key(&expression) {
             return true;
         }

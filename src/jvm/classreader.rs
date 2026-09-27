@@ -15,6 +15,7 @@ pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_BRIDGE: u16 = 0x0040;
+pub const ACC_SYNTHETIC: u16 = 0x1000;
 /// The final array parameter accepts Java vararg elements.
 pub const ACC_VARARGS: u16 = 0x0080;
 pub const ACC_ENUM: u16 = 0x4000;
@@ -68,17 +69,17 @@ impl MethodSig {
     pub fn is_final(&self) -> bool {
         self.access & ACC_FINAL != 0
     }
+    /// A compiler-generated method (`ACC_BRIDGE` or `ACC_SYNTHETIC`): javac's bridges and
+    /// accessors are ABI, never source declarations.
+    pub fn is_compiler_generated(&self) -> bool {
+        self.access & (ACC_BRIDGE | ACC_SYNTHETIC) != 0
+    }
+    /// An `ACC_BRIDGE` method: a special bridge a subclass inherits (see `jvm::bridges`).
     pub fn is_bridge(&self) -> bool {
         self.access & ACC_BRIDGE != 0
     }
     pub fn is_vararg(&self) -> bool {
         self.access & ACC_VARARGS != 0
-    }
-    pub fn has_same_parameter_descriptor(&self, other: &Self) -> bool {
-        self.descriptor
-            .split_once(')')
-            .zip(other.descriptor.split_once(')'))
-            .is_some_and(|((params, _), (other_params, _))| params == other_params)
     }
 }
 
@@ -1781,25 +1782,5 @@ mod tests {
                 ],
             }]
         );
-    }
-
-    #[test]
-    fn compares_method_parameters_independently_of_return_type() {
-        let method = |descriptor: &str| MethodSig {
-            access: super::ACC_PUBLIC,
-            name: "call".to_string(),
-            descriptor: descriptor.to_string(),
-            signature: None,
-            parameter_nullability: Vec::new(),
-            return_nullability: None,
-            deprecated_hidden: false,
-            has_annotation_default: false,
-        };
-        let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
-        let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");
-        let parameter_bridge = method("(Ljava/lang/Object;I)Ljava/lang/Object;");
-
-        assert!(concrete.has_same_parameter_descriptor(&return_bridge));
-        assert!(!concrete.has_same_parameter_descriptor(&parameter_bridge));
     }
 }
