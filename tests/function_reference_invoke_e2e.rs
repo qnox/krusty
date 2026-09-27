@@ -731,6 +731,60 @@ fn local_function_reference_carriers_store_named_captures() {
     });
 }
 
+const SHARED_CAPTURE_SOURCE: &str = r##"class Held(vararg val all: Any)
+
+var total = 0L
+
+fun carriers(): Held {
+    var count = 0
+    var sum = 0L
+    var seen = "K"
+    fun note(value: String): String {
+        seen += value
+        return seen
+    }
+    fun bump(by: Int): Int {
+        count += by
+        return count
+    }
+    fun add(by: Long): Long {
+        sum += by
+        total = sum
+        return sum
+    }
+    val counter = ::bump
+    val adder = ::add
+    val noter = ::note
+    counter(1)
+    return Held(counter, adder, noter)
+}
+
+fun box(): String {
+    val all = carriers().all
+    if ((all[0] as (Int) -> Int)(2) != 3) return "counter"
+    if ((all[1] as (Long) -> Long)(40L) != 40L || total != 40L) return "adder"
+    if ((all[2] as (String) -> String)("!") != "K!") return "noter"
+    return "OK"
+}
+"##;
+
+/// A local function that writes a captured `var` shares the variable's cell with its reference:
+/// the carrier stores that cell in a field named after the variable and passes it to the lifted
+/// function, which names it after the variable too. An object cell's generic field signature is
+/// not yet written, so that carrier is only run.
+#[test]
+fn shared_capture_reference_carriers_store_the_cell() {
+    assert_carriers_match_and_run(&Fixture {
+        source: SHARED_CAPTURE_SOURCE,
+        stem: "SharedCaptureReferenceInvoke",
+        dependency: None,
+        carriers: &[
+            "SharedCaptureReferenceInvokeKt$carriers$counter$1",
+            "SharedCaptureReferenceInvokeKt$carriers$adder$1",
+        ],
+    });
+}
+
 const HIGH_ARITY_SOURCE: &str = r##"class Held(vararg val all: Any)
 
 fun wide(

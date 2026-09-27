@@ -135,6 +135,18 @@ fn function_local_variable(
             .expect("an extension receiver retains its declaration source name");
         return Some(format!("$this${source_name}"));
     }
+    // A shared mutable capture keeps its variable's own name: the parameter holds the variable's
+    // cell rather than a copy of its value.
+    if let (Some(name), IrParameterRole::CapturedValue { ordinal }) =
+        (&identity.source_name, identity.role)
+    {
+        if ir
+            .shared_capture_parameters
+            .contains_key(&(function, ordinal))
+        {
+            return Some(name.clone());
+        }
+    }
     local_variable(identity, "")
 }
 
