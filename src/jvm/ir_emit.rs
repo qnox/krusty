@@ -3609,40 +3609,6 @@ struct LambdaSelection<'a> {
     rescued: &'a std::collections::HashSet<u32>,
 }
 
-/// Find private instance calls whose caller and declaration are different JVM classes.
-///
-/// FIR/common IR retain Kotlin ownership and the selected member identity only. The Java-8 access
-/// bridge is a physical realization, so this whole-file reachability walk belongs at the backend
-/// boundary and runs once per emission pass, never once per method candidate.
-fn cross_owner_private_member_calls(
-    ir: &IrFile,
-    contexts: &[static_accessors::EmissionContext],
-    private_interface_bodies_are_members: bool,
-) -> std::collections::HashSet<u32> {
-    let mut result = std::collections::HashSet::new();
-    for context in contexts {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = context.roots.clone();
-        while let Some(expression) = stack.pop() {
-            if !seen.insert(expression) {
-                continue;
-            }
-            if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
-                let target_class = &ir.classes[*class as usize];
-                let target = target_class.methods[*index as usize];
-                if context.owner != StaticOwner::Class(target_class.fq_name)
-                    && (private_interface_bodies_are_members || !target_class.is_interface)
-                    && ir.private_methods.contains(&target)
-                {
-                    result.insert(target);
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
-        }
-    }
-    result
-}
-
 fn emit_pass(
     ir: &IrFile,
     facade: &str,
@@ -3697,7 +3663,7 @@ fn emit_pass(
     env.run
         .private_member_access_bridges
         .borrow_mut()
-        .clone_from(&cross_owner_private_member_calls(
+        .clone_from(&access_bridges::cross_owner_private_member_calls(
             ir,
             &contexts,
             opts.jvm_default != JvmDefaultMode::Disable,
@@ -10983,7 +10949,9 @@ impl<'a> Emitter<'a> {
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
         let direct_field = self.direct_field_access(class, declared, true);
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
@@ -11135,7 +11103,9 @@ impl<'a> Emitter<'a> {
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
         // accessor and the field itself is unreachable.
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))

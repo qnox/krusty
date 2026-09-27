@@ -211,3 +211,55 @@ pub(super) fn emit_private_member_access_bridge(
         cw,
     );
 }
+
+/// Find private instance calls whose caller and declaration are different JVM classes.
+///
+/// FIR/common IR retain Kotlin ownership and the selected member identity only. The Java-8 access
+/// bridge is a physical realization, so this whole-file reachability walk belongs at the backend
+/// boundary and runs once per emission pass, never once per method candidate.
+pub(super) fn cross_owner_private_member_calls(
+    ir: &IrFile,
+    contexts: &[static_accessors::EmissionContext],
+    private_interface_bodies_are_members: bool,
+) -> std::collections::HashSet<u32> {
+    let mut result = std::collections::HashSet::new();
+    for context in contexts {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = context.roots.clone();
+        while let Some(expression) = stack.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            // Direct member calls carry their class/index. Static value-class members and
+            // property reads carry the exact selected function in `jvm_member_targets`; their
+            // interned owner identifies the source class without rendering or spelling lookup.
+            let target = match ir.expr(expression) {
+                IrExpr::MethodCall { class, index, .. } => {
+                    Some((*class, ir.classes[*class as usize].methods[*index as usize]))
+                }
+                IrExpr::Call {
+                    callee: Callee::Static { owner, .. },
+                    ..
+                }
+                | IrExpr::PropertyRead { owner, .. } => ir
+                    .jvm_member_targets
+                    .get(&expression)
+                    .and_then(|&function| {
+                        ir.class_id_by_name(*owner).map(|class| (class, function))
+                    }),
+                _ => None,
+            };
+            if let Some((class, target)) = target {
+                let target_class = &ir.classes[class as usize];
+                if context.owner != StaticOwner::Class(target_class.fq_name)
+                    && (private_interface_bodies_are_members || !target_class.is_interface)
+                    && ir.private_methods.contains(&target)
+                {
+                    result.insert(target);
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
+        }
+    }
+    result
+}
