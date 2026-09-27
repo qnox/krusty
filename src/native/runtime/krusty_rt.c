@@ -2313,13 +2313,9 @@ static KRef kt_range_allocate(const KType *type, kt_long first, kt_long last, kt
 }
 
 /* A progression: what `step`, `downTo` and `reversed()` answer, of the element kind of `like` (a
-   range or a progression). It is one even when its step is `1`. */
+   range or a progression, which every caller has checked), even when its step is `1`. */
 static KRef kt_range_new_stepped(const KType *like, kt_long first, kt_long last, kt_long step) {
-    int kind = kt_range_kind(like);
-    if (kind < 0) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    return kt_range_allocate(kt_progression_types[kind], first, last, step);
+    return kt_range_allocate(kt_progression_types[kt_range_kind(like)], first, last, step);
 }
 
 /* A range: what `..` and `until` answer. */
@@ -2566,19 +2562,24 @@ KRef kt_range_iterator(KRef range) {
     return (KRef)iterator;
 }
 
+/* The receiver of `step` or `reversed()`, read through only once its descriptor says it is a range:
+   another class may be smaller than a `KRange`, so even reading its bounds would read past it. */
+static const KRange *kt_stepped_receiver(KRef range) {
+    if (!kt_is_range(range)) {
+        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
+    }
+    return (const KRange *)range;
+}
+
 /* `range step n`. The magnitude is what is given; the receiver's direction is kept, which is why
    `10 downTo 1 step 3` descends. A step of zero has no walk to describe and is Kotlin's
    `IllegalArgumentException`. */
 KRef kt_range_step(KRef range, kt_long step) {
-    if (!kt_is_range(range)) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    const KRange *bounds = (const KRange *)range;
+    const KRange *bounds = kt_stepped_receiver(range);
     if (step <= 0) {
-        /* Kotlin's own message, which names the step that was given. The RETURN matters: the
-           exception is recorded, not raised, so falling through would build a progression whose
-           step is zero and whose last element is computed modulo it — a SIGFPE, and a machine
-           trap where Kotlin has an exception a program is entitled to catch. */
+        /* Kotlin's own message. The RETURN matters: the exception is recorded, not raised, and
+           falling through would compute the last element modulo a zero step — a SIGFPE where
+           Kotlin has an exception a program is entitled to catch. */
         KRef message = kt_string_plus(kt_string_utf8("Step must be positive, was: ", 28),
                                       kt_to_string(kt_box_long(step)));
         message = kt_string_plus(message, kt_string_utf8(".", 1));
@@ -2592,10 +2593,7 @@ KRef kt_range_step(KRef range, kt_long step) {
 /* `reversed()`. The walk runs the other way from the LAST ELEMENT, which is already on the step —
    so `(1..9 step 3).reversed()` is `7 downTo 1 step 3`, not `9 downTo 1 step 3`. */
 KRef kt_range_reversed(KRef range) {
-    if (!kt_is_range(range)) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    const KRange *bounds = (const KRange *)range;
+    const KRange *bounds = kt_stepped_receiver(range);
     return kt_range_new_stepped(range->header.type, bounds->last, bounds->first, -bounds->step);
 }
 
