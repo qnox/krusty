@@ -7520,11 +7520,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
   exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
   that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
-  NEGATIVE one throws `java.lang.NegativeArraySizeException` whose message is the capacity in
-  decimal (`StringBuilder(-1)` → message `"-1"`), making no builder. That is the JVM's answer
-  because `AbstractStringBuilder(int)` allocates `new byte[capacity]`, and HotSpot's message for a
-  negative array size is the size itself (checked on JDK 21); Kotlin declares no alias for the type,
-  so its name is Java's. `StringBuilder(text)` over a `CharSequence` the program implements reads
+  NEGATIVE one throws `IllegalArgumentException` with no message, making no builder. This is
+  platform-defined: the common `expect` constructor documents no exception; Kotlin/JVM throws
+  Java's `NegativeArraySizeException` with the capacity as message (`AbstractStringBuilder(int)`
+  allocates `new byte[capacity]`; kotlinc 2.4.10 on JDK 21 prints `-1` for `StringBuilder(-1)`), a
+  type Kotlin itself does not declare; Kotlin/JS ignores the capacity (`StringBuilderJs.kt`:
+  `actual constructor(capacity: Int) : this()`). The native runtime follows Kotlin/Native, the
+  platform it stands in for, and the only answer a Kotlin program on it can catch by a Kotlin name:
+  in the Kotlin/Native 2.4.10 distribution's linux_x64 stdlib cache, `StringBuilder(kotlin.Int)`
+  calls `AllocArrayInstance(kclass:kotlin.CharArray, capacity)` with no check of its own, and
+  `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a negative size, which throws
+  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`).
+  `StringBuilder(text)` over a `CharSequence` the program implements reads
   it through its own `length` and `get`; when either throws, no builder is made and nothing more of
   the sequence is read.
   Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,

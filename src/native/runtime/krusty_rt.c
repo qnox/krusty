@@ -1213,17 +1213,16 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
 }
 
 /* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
-   one is not read as zero: Kotlin/JVM's builder allocates its storage as `new byte[capacity]`, so
-   `StringBuilder(-1)` throws that allocation's `NegativeArraySizeException`, whose message is the
-   capacity in decimal, and makes no builder. The same is raised here before the builder is
-   allocated, and the NULL returned is never read: the call site tests for the exception first. */
+   one is not read as zero. Kotlin's common declaration specifies no exception, and the platforms
+   differ, so this runtime answers as Kotlin/Native does, being a native target: its constructor
+   allocates the builder's storage as `CharArray(capacity)`, and a negative array size there throws
+   `IllegalArgumentException` with no message. (Kotlin/JVM throws Java's
+   `NegativeArraySizeException`, a type Kotlin does not declare; Kotlin/JS ignores the capacity.)
+   The exception is raised before the builder is allocated, and the NULL returned is never read:
+   the call site tests for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
     if (capacity < 0) {
-        /* An `Int` is at most eleven bytes in decimal, the sign included: `-2147483648`. */
-        KByteArray *digits = kt_bytes_new(11);
-        kt_int length = kt_render_long(capacity, kt_bytes_of(digits));
-        KRef message = kt_string_of((KRef)digits, kt_bytes_of(digits), length);
-        kt_throw(kt_throwable_new(&kt_type_negative_array_size_exception, message));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, NULL));
         return NULL;
     }
     KStringBuilder *builder =

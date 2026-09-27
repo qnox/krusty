@@ -1,32 +1,27 @@
-/* `StringBuilder(capacity)` with a NEGATIVE capacity throws what the JVM throws: Java's builder
-   allocates its storage as `new byte[capacity]`, so the exception is that allocation's,
-   `java.lang.NegativeArraySizeException`, and its message is the capacity in decimal. The runtime
-   used to read every negative capacity as zero and hand back an empty builder, so the exception a
-   program catches there never came. */
+/* `StringBuilder(capacity)` with a NEGATIVE capacity throws what Kotlin/Native throws there:
+   `IllegalArgumentException`, with no message, and makes no builder. The runtime used to read
+   every negative capacity as zero and hand back an empty builder, so the exception a program
+   catches there never came.
+
+   Kotlin's common `StringBuilder(capacity: Int)` documents no exception, and the platforms differ:
+   Kotlin/JVM throws Java's `NegativeArraySizeException` with the capacity as its message, and
+   Kotlin/JS ignores the capacity altogether. Kotlin/Native 2.4.10's stdlib (the linux_x64 static
+   cache of the distribution) compiles the constructor to `AllocArrayInstance(CharArray, capacity)`
+   with no check of its own, and `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a
+   negative size, which throws `IllegalArgumentException()`. */
 #include "later_tiers.h"
 
-typedef struct Case {
-    kt_int capacity;
-    const char *message;
-    kt_int message_length;
-} Case;
-
 void kt_program_entry(void) {
-    static const Case cases[] = {
-        {-1, "-1", 2},
-        {-42, "-42", 3},
-        {(kt_int)0x80000000u, "-2147483648", 11},
-    };
-    for (unsigned at = 0; at < sizeof(cases) / sizeof(cases[0]); at++) {
-        (void)kt_string_builder_with_capacity(cases[at].capacity);
+    DRIVER_BEGIN();
+    static const kt_int capacities[] = {-1, -42, (kt_int)0x80000000u};
+    for (unsigned at = 0; at < sizeof(capacities) / sizeof(capacities[0]); at++) {
+        (void)kt_string_builder_with_capacity(capacities[at]);
         KRef thrown = kt_pending_exception();
         CHECK(thrown != NULL, "a negative capacity threw nothing\n");
-        CHECK(type_of(thrown) == &kt_type_negative_array_size_exception,
-              "a negative capacity threw something other than NegativeArraySizeException\n");
-        /* Held in a local, so the text allocated to compare it with cannot collect it. */
-        KRef message = kt_throwable_message(thrown);
-        CHECK(message != NULL && text_is(message, cases[at].message, cases[at].message_length),
-              "a negative capacity's message is not the capacity\n");
+        CHECK(type_of(thrown) == &kt_type_illegal_argument_exception,
+              "a negative capacity threw something other than IllegalArgumentException\n");
+        CHECK(kt_throwable_message(thrown) == NULL,
+              "a negative capacity's exception has a message\n");
         kt_clear_pending();
     }
 

@@ -40,9 +40,9 @@ __attribute__((weak)) const KType kt_type_null_pointer_exception = {
     .super = &kt_type_any,
 };
 
-__attribute__((weak)) const KType kt_type_negative_array_size_exception = {
-    .name = "java.lang.NegativeArraySizeException",
-    .name_length = sizeof("java.lang.NegativeArraySizeException") - 1,
+__attribute__((weak)) const KType kt_type_illegal_argument_exception = {
+    .name = "kotlin.IllegalArgumentException",
+    .name_length = sizeof("kotlin.IllegalArgumentException") - 1,
     .instance_size = sizeof(DriverThrowable),
     .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
     .reference_offsets = driver_throwable_offsets,

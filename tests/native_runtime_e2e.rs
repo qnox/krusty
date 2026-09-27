@@ -319,7 +319,7 @@ fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
 }
 
 #[test]
-fn a_negative_builder_capacity_throws_negative_array_size_exception() {
+fn a_negative_builder_capacity_throws_illegal_argument_exception() {
     run_driver("builder_negative_capacity");
 }
 

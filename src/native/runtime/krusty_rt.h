@@ -786,7 +786,7 @@ KRef kt_to_string(KRef value);
 extern const KType kt_type_string_builder;
 
 /* `StringBuilder()` and `StringBuilder(capacity)`. A capacity is a hint; a negative one throws
-   `NegativeArraySizeException` with the capacity as its message, as the JVM's builder does. */
+   `IllegalArgumentException` with no message, as Kotlin/Native's builder does. */
 KRef kt_string_builder_new(void);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
@@ -886,10 +886,6 @@ extern const KType kt_type_number_format_exception;
 extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
-/* A `RuntimeException` Kotlin declares no alias for, so its name is Java's:
-   `java.lang.NegativeArraySizeException`. It is what a negative `StringBuilder` capacity throws on
-   the JVM, whose builder allocates its storage as an array of that size. */
-extern const KType kt_type_negative_array_size_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
