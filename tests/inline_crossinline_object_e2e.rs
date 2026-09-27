@@ -174,3 +174,57 @@ fn a_captured_field_name_the_object_already_has_is_numbered() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const CONCAT_MAIN: &str = r#"
+import lib.*
+
+fun joined(suffix: String): String = greeting { it + "-" + suffix }.greet()
+
+fun box(): String {
+    if (joined("x") != "hi-x") return "FAIL joined: " + joined("x")
+    return "OK"
+}
+"#;
+
+/// On JVM 9+ the lambda's concatenation is an `invokedynamic`, whose bootstrap method compiling the
+/// lambda registers in the caller. The code moves into the copy, so the caller keeps neither the
+/// bootstrap method nor its constants.
+#[test]
+fn a_bootstrap_method_the_object_only_lambda_needs_stays_out_of_the_caller() {
+    let classes = common::classes_against_kotlinc_lib_target(
+        "Concat",
+        &[("Lib.kt", LIB)],
+        CONCAT_MAIN,
+        Some(11),
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["ConcatKt", "ConcatKt$joined$$inlined$greeting$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const MATERIALIZED_MAIN: &str = r#"
+import lib.*
+
+fun deferred(suffix: String): String = greeting {
+    val tail = { suffix + "!" }
+    it + tail()
+}.greet()
+
+fun box(): String {
+    if (deferred("x") != "hix!") return "FAIL deferred: " + deferred("x")
+    return "OK"
+}
+"#;
+
+/// A lambda that would declare a method of the caller (here the class of a lambda it materializes)
+/// is kept on the bridge by route planning, before any of its code is emitted.
+#[test]
+fn a_lambda_declaring_a_caller_member_stays_on_the_bridge() {
+    let output = common::expect_box_run_against_kotlinc(LIB, MATERIALIZED_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}

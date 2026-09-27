@@ -398,8 +398,10 @@ impl Emitter<'_> {
             .source_map_for_inlining(self.claimable_lines())
             .cloned()
             .unwrap_or_default();
+        // Route planning keeps every lambda that declares a member of the caller on the bridge;
+        // one that still does is a broken plan, never code left in the caller.
         if placement == LambdaPlacement::Objects && !self.cw.rollback(checkpoint) {
-            crate::trace_compiler!("splice", "an object-only lambda declared into the caller");
+            return Err("an object-only lambda declared a member of the calling class");
         }
         let parameters =
             self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);

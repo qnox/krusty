@@ -80,12 +80,13 @@ impl ConstantSink for ClassWriter {
         bootstrap: &Handle,
         arguments: &[Constant],
     ) -> u16 {
-        let member = handle_member(self, bootstrap);
-        let handle = self.method_handle_ref(bootstrap.kind, member);
+        // ASM's `addBootstrapMethod` interns the arguments before the bootstrap handle.
         let arguments = arguments
             .iter()
             .map(|argument| self.constant(argument))
             .collect();
+        let member = handle_member(self, bootstrap);
+        let handle = self.method_handle_ref(bootstrap.kind, member);
         let entry = self.add_bootstrap(handle, arguments);
         self.invoke_dynamic_ref(entry, name, desc)
     }

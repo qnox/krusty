@@ -179,7 +179,7 @@ impl Emitter<'_> {
 
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
     /// private field (a property's backing field), a private function, an `invokespecial`, or a
-    /// lambda it materializes (whose implementation is a private method). Inlined into a regenerated
+    /// nested lambda (which may be materialized as a private method). Inlined into a regenerated
     /// object, kotlinc reaches those through synthetic accessors, which the port does not generate
     /// yet.
     pub(super) fn lambda_reaches_private_members(&self, argument: u32) -> bool {
@@ -208,27 +208,15 @@ impl Emitter<'_> {
                             .source_function()
                             .is_some_and(|function| self.ir.private_methods.contains(&function))
                 }
-                IrExpr::Lambda {
-                    inline_body: None, ..
-                } => true,
+                // A nested lambda may be materialized as a method of the caller, which the object
+                // could not reach and route planning cannot tell from its shape.
+                IrExpr::Lambda { .. } => true,
                 _ => false,
             };
             if private {
                 return true;
             }
-            match self.ir.expr(expression) {
-                IrExpr::Lambda {
-                    captures,
-                    inline_body: Some(body),
-                    ..
-                } => {
-                    pending.extend(captures.iter().copied());
-                    pending.push(*body);
-                }
-                _ => crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
-                    pending.push(child)
-                }),
-            }
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         false
     }

@@ -8,7 +8,9 @@ use crate::jvm::source_map::SourceMap;
 pub struct ClassCheckpoint {
     entries: usize,
     slots: usize,
-    declarations: [usize; 5],
+    members: [usize; 3],
+    bootstrap_methods: usize,
+    inner_class_candidates: usize,
     source_map: SourceMap,
 }
 
@@ -28,31 +30,36 @@ impl ClassWriter {
         ClassCheckpoint {
             entries: self.cp.entries.len(),
             slots: self.cp.slot_entries.len(),
-            declarations: self.declaration_counts(),
+            members: self.member_counts(),
+            bootstrap_methods: self.bootstrap_methods.len(),
+            inner_class_candidates: self.inner_class_candidates.len(),
             source_map: self.source_map.clone(),
         }
     }
 
-    /// Forget the constants and source-map lines compiled since `checkpoint`: code compiled only to
-    /// be read back as a method node and written elsewhere, which kotlinc never writes into this
-    /// class. Nothing is forgotten, and `false` returned, when that code also declared something in
-    /// the class (a method, field, bootstrap method or nested class), which would still name them.
+    /// Forget what code compiled since `checkpoint` left in the class: its constants, source-map
+    /// lines, bootstrap methods and nested-class candidates, all of which only that code referred
+    /// to. It was compiled to be read back as a method node and written elsewhere, which kotlinc
+    /// never writes into this class. Nothing is forgotten, and `false` returned, when that code
+    /// also declared a member (a method or field) of the class, which the class would still carry.
     pub fn rollback(&mut self, checkpoint: ClassCheckpoint) -> bool {
-        if self.declaration_counts() != checkpoint.declarations {
+        if self.member_counts() != checkpoint.members {
             return false;
         }
         self.cp.truncate(checkpoint.entries, checkpoint.slots);
+        self.bootstrap_methods
+            .truncate(checkpoint.bootstrap_methods);
+        self.inner_class_candidates
+            .truncate(checkpoint.inner_class_candidates);
         self.source_map = checkpoint.source_map;
         true
     }
 
-    fn declaration_counts(&self) -> [usize; 5] {
+    fn member_counts(&self) -> [usize; 3] {
         [
             self.fields.len(),
             self.late_fields.len(),
             self.methods.len(),
-            self.bootstrap_methods.len(),
-            self.inner_class_candidates.len(),
         ]
     }
 }
