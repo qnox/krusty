@@ -2733,9 +2733,8 @@ impl<'a> Parser<'a> {
         // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
-        // A `companion object { … }` in the enum body (`enum class E { A; companion object { … } }`).
-        let mut companion = None;
-        let mut companion_block_members = Vec::new();
+        // `companion object { … }` and `companion { … }` in the enum body (`enum class E { A; … }`).
+        let mut companions = companion_declarations::ClassifierCompanions::default();
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
@@ -2978,14 +2977,7 @@ impl<'a> Parser<'a> {
                         secondary_ctors.push(self.parse_secondary_constructor(&emods));
                     }
                     TokenKind::Ident if self.at_companion_declaration() => {
-                        if self.at_companion_object_declaration() {
-                            // `companion object { … }` in the enum body — parse it like a regular
-                            // class's companion and attach its singleton identity to the enum.
-                            companion = Some(self.parse_companion(&name, &emods));
-                        } else {
-                            companion_block_members
-                                .extend(self.parse_companion_block(&name, &emods));
-                        }
+                        self.parse_classifier_companion(&name, &emods, &mut companions);
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         type_aliases.push(self.parse_type_alias_syntax());
@@ -3021,7 +3013,7 @@ impl<'a> Parser<'a> {
             lexical_type_parameter_captures: Vec::new(),
             props,
             methods,
-            companion,
+            companion: companions.object,
             body_props,
             init_order,
             is_data: false,
@@ -3048,7 +3040,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
-            companion_block_members,
+            companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -3684,8 +3676,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
-        let mut companion = None;
-        let mut companion_block_members = Vec::new();
+        let mut companions = companion_declarations::ClassifierCompanions::default();
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
@@ -3734,14 +3725,9 @@ impl<'a> Parser<'a> {
                     {
                         init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
-                    // A companion is a nested singleton declaration linked from this class.
+                    // A companion object, or a block whose members join this class's static scope.
                     TokenKind::Ident if self.at_companion_declaration() => {
-                        if self.at_companion_object_declaration() {
-                            companion = Some(self.parse_companion(&name, &mods));
-                        } else {
-                            companion_block_members
-                                .extend(self.parse_companion_block(&name, &mods));
-                        }
+                        self.parse_classifier_companion(&name, &mods, &mut companions);
                     }
                     TokenKind::Ident
                         if self.keyword_text("annotation")
@@ -3785,7 +3771,7 @@ impl<'a> Parser<'a> {
             lexical_type_parameter_captures: Vec::new(),
             props,
             methods,
-            companion,
+            companion: companions.object,
             body_props,
             init_order,
             is_data: false,
@@ -3814,7 +3800,7 @@ impl<'a> Parser<'a> {
             type_aliases,
             span: Span::new(start.lo, end.hi),
             ctor_close_line: ctor_close_lo,
-            companion_block_members,
+            companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -4087,8 +4073,7 @@ impl<'a> Parser<'a> {
         type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
-        let mut companion = None;
-        let mut companion_block_members = Vec::new();
+        let mut companions = companion_declarations::ClassifierCompanions::default();
         let mut type_aliases = Vec::new();
         if self.eat_optional_declaration_body_open() {
             loop {
@@ -4145,12 +4130,7 @@ impl<'a> Parser<'a> {
                     }
                     // `interface I { companion object { … } }` — same as a class companion.
                     TokenKind::Ident if self.at_companion_declaration() => {
-                        if self.at_companion_object_declaration() {
-                            companion = Some(self.parse_companion(&name, &imods));
-                        } else {
-                            companion_block_members
-                                .extend(self.parse_companion_block(&name, &imods));
-                        }
+                        self.parse_classifier_companion(&name, &imods, &mut companions);
                     }
                     _ => {
                         self.diags
@@ -4178,7 +4158,7 @@ impl<'a> Parser<'a> {
             lexical_type_parameter_captures: Vec::new(),
             props: Vec::new(),
             methods,
-            companion,
+            companion: companions.object,
             body_props,
             init_order: Vec::new(),
             is_data: false,
@@ -4201,7 +4181,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
-            companion_block_members,
+            companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,

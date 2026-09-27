@@ -1093,7 +1093,16 @@ pub struct ClassDecl {
     pub ctor_close_line: u32,
     /// The file-level declarations this classifier's `companion { … }` blocks introduced, in
     /// source order. They are hoisted beside the classifier, which remains their lexical owner.
-    pub companion_block_members: Vec<DeclId>,
+    pub companion_block_members: Vec<CompanionBlockMember>,
+}
+
+/// A declaration a classifier's `companion { … }` block introduced.
+#[derive(Clone, Copy, Debug)]
+pub struct CompanionBlockMember {
+    pub declaration: DeclId,
+    /// The member's own `private` modifier: kotlinc reports there a private member its classifier
+    /// cannot declare.
+    pub private_modifier: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
