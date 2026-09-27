@@ -1201,7 +1201,10 @@ static kt_int kt_iterable_size(KRef iterable) {
     if (kt_is_array(iterable->header.type)) {
         return kt_length_of(iterable);
     }
-    if (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable)) {
+    /* A `String` never changes, so its length is its walk's. A builder's walk asks the CURRENT
+       length before every step, as Kotlin's `CharSequence.iterator()` does, and a transform that
+       writes to the builder it maps changes that; it has no size to give ahead of the walk. */
+    if (iterable->header.type == &kt_type_string) {
         return kt_string_length(iterable);
     }
     if (!kt_is_range(iterable)) {
@@ -1949,7 +1952,9 @@ static kt_int kt_list_hash_code(KRef self) {
 
 /* `[a, b, c]`, each element through its own `toString` — which is what makes this a loop over
    `kt_string_plus` rather than a render into one buffer: an element's rendering may itself
-   allocate, and the joined text has to stay reachable across that. */
+   allocate, and the joined text has to stay reachable across that. A list that holds itself
+   renders that element as `(this Collection)`, Kotlin's `AbstractCollection.toString`, rather
+   than recursing into its own `toString`. */
 static KRef kt_list_to_string(KRef self) {
     KRef elements = ((const KList *)self)->elements;
     kt_int length = kt_list_size(self);
@@ -1958,7 +1963,9 @@ static KRef kt_list_to_string(KRef self) {
         if (i > 0) {
             text = kt_string_plus(text, kt_string_utf8(", ", 2));
         }
-        KRef rendered = kt_to_string(kt_elements_of(elements)[i]);
+        KRef element = kt_elements_of(elements)[i];
+        KRef rendered = element == self ? kt_string_utf8("(this Collection)", 17)
+                                        : kt_to_string(element);
         /* A `toString` that threw leaves the rendering there: its answer is no text, and the
            elements after it are not asked for theirs. */
         if (kt_raised()) {

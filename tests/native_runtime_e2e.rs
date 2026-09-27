@@ -837,6 +837,11 @@ fn an_indexed_value_or_none_stops_at_the_programs_throwing_call() {
     run_driver("member_stops_at_throw");
 }
 
+#[test]
+fn a_builder_map_sees_its_length_change_and_a_self_list_renders() {
+    run_driver("builder_map_and_self_list");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

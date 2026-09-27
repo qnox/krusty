@@ -9112,6 +9112,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   overflow trapping (`-fsanitize=signed-integer-overflow -fsanitize-trap=...`), so a counter left
   signed fails its driver with SIGILL.
   Tests: `tests/native_runtime_e2e.rs` (`walk_count_overflow`, `list_modification_count_wraps`).
+- **A native walk over a builder asks its current length, and a list renders itself as
+  `(this Collection)`.** `map` over a `StringBuilder` steps as Kotlin's `CharSequence.iterator()`
+  does, asking the current length before each step, so a transform that appends to or shortens the
+  builder changes how many elements it yields (`StringBuilder("ab").map { if (sb.length < 4)
+  sb.append('z'); it }` is `[a, b, z, z]`); only an immutable `String` is sized ahead. A list's
+  `toString` renders an element that is the list itself as `(this Collection)`, Kotlin's
+  `AbstractCollection.toString`, rather than recursing. Both as kotlinc 2.4.10 answers on the JVM for
+  the program recorded in the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_map_and_self_list`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
