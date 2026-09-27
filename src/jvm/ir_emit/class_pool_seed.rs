@@ -1,19 +1,17 @@
 //! The constant-pool entries a plain class interns before krusty's emission reaches them, reserved
 //! in kotlinc's visit order: the primary constructor's header and parameter annotations, its
-//! LocalVariableTable and `$default` header, then a data class's synthesized members.
+//! LocalVariableTable and `$default` header.
 
 use super::*;
 
-pub(super) struct PlainClassPoolSeed<'a, 'symbols> {
-    pub(super) formatter: &'a JvmSignatureFormatter<'symbols>,
+pub(super) struct PlainClassPoolSeed<'a> {
     pub(super) ir: &'a IrFile,
-    pub(super) bodies: &'a dyn MethodBodies,
     pub(super) class: &'a crate::ir::IrClass,
     pub(super) fq_name: &'a str,
     pub(super) ctor_signature: Option<&'a str>,
 }
 
-pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
+pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
         ir,
         class: c,
@@ -54,7 +52,7 @@ pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut C
 
 /// Seed what kotlinc interns once the primary constructor's body is done: its local-variable
 /// strings and `$default` overload, then a data class's synthesized members.
-pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
+pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
         ir,
         class: c,
@@ -111,59 +109,4 @@ fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)>
             Some((name?, crate::jvm::names::type_descriptor(argument.ty)))
         })
         .collect()
-}
-
-/// Seed a data class's synthesized members once its constructors are written: the primary, its
-/// `$default` overload and its marker accessor each intern their own bodies first.
-pub(super) fn seed_data_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter) {
-    let PlainClassPoolSeed {
-        formatter,
-        ir,
-        bodies,
-        class: c,
-        fq_name,
-        ctor_signature,
-        ..
-    } = seed;
-    if !synthesizes_data_class_members(c) {
-        return;
-    }
-    // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
-    // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
-    // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
-    // add_method_sig) dedupes to kotlinc's interning positions.
-    // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
-    // concrete type (`List<String>`). Disjoint — a field is one or the other.
-    let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
-        let type_parameter = ir
-            .field_signatures(fq_name)
-            .and_then(|fs| {
-                fs.iter()
-                    .find(|(name, _)| name == &f.name)
-                    .map(|(_, parameter)| parameter.as_str())
-            })
-            .or(f.type_param.as_deref());
-        property_jvm_signatures(formatter, &f.ty, type_parameter).field
-    };
-    let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
-    // A data class's accessor signatures join its accessor window below, while its backing-field
-    // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
-    // at the exact accessor/field visits.
-    // A companion OUTER's `access$…$cp` bridges, `<clinit>`, and hoisted-initializer constants are
-    // NOT seeded here: kotlinc interns them at their natural emission position — after the declared
-    // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
-    // each name at its emission site instead.
-    data_class_pool_seed::seed_data_class_members(
-        data_class_pool_seed::DataClassPoolSeed {
-            ir,
-            class: c,
-            bodies,
-            fq_name,
-            ctor_signature,
-            ctor_desc: &primary_ctor_descriptor(c),
-            field_sigs: &field_sigs,
-            field_sig_of: &field_sig_of,
-        },
-        cw,
-    );
 }

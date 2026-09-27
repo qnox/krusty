@@ -37,7 +37,6 @@ mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod coroutine_machine;
-mod data_class_pool_seed;
 mod data_class_value_classes;
 mod debug_lines;
 mod declaration_types;
@@ -82,8 +81,8 @@ use annotation_impl::emit_annotation_impl_class;
 mod value_class_descriptors;
 mod value_class_signatures;
 use class_pool_seed::{
-    seed_data_class_pool, seed_enum_constructor_locals, seed_plain_class_pool,
-    seed_plain_constructor_tail, PlainClassPoolSeed,
+    seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
+    PlainClassPoolSeed,
 };
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
@@ -781,6 +780,15 @@ fn field_nullability_kind(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> u8 {
         2
     } else {
         1
+    }
+}
+
+/// The annotation descriptor a [`field_nullability_kind`] selects: `@NotNull`, `@Nullable` or none.
+pub(super) fn nullability_annotation(kind: u8) -> Option<&'static str> {
+    match kind {
+        1 => Some("Lorg/jetbrains/annotations/NotNull;"),
+        2 => Some("Lorg/jetbrains/annotations/Nullable;"),
+        _ => None,
     }
 }
 
@@ -2494,7 +2502,6 @@ fn attach_synth_debug_tables(
     // A data class's `copy` parameters are exactly its property-backed constructor parameters.
     // This is not the primary constructor's physical descriptor (plain parameters may also exist
     // there), so keep the two identities deliberately separate.
-    let data_copy_desc = format!("({})V", ctor_field_descs(c));
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
     // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
     // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
@@ -2760,56 +2767,6 @@ fn attach_synth_debug_tables(
             }
         }
     }
-    // A `data class`'s synthesized methods carry a LocalVariableTable (this + params) but NO
-    // LineNumberTable (kotlinc gives them none). componentN/hashCode/toString/equals have only `this`
-    // (equals also `other`); `copy` has the ctor parameters.
-    if c.is_data {
-        let self_ref = format!("L{};", c.fq_name());
-        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
-        for (i, f) in data_fields.iter().enumerate() {
-            cw.set_method_debug(
-                &format!("component{}", i + 1),
-                &format!("(){}", desc(f.ty)),
-                None,
-                &this_only,
-            );
-        }
-        // A `data object` synthesizes no `copy` (see the metadata assembly), so it has no table either.
-        if !data_fields.is_empty() {
-            let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
-            let mut slot = 1u16;
-            for f in data_fields {
-                copy_locals.push((f.name.clone(), desc(f.ty), slot));
-                slot += slot_size(f.ty);
-            }
-            cw.set_method_debug(
-                "copy",
-                &format!(
-                    "{copy_desc_no_v}{self_ref}",
-                    copy_desc_no_v = &data_copy_desc[..data_copy_desc.len() - 1]
-                ),
-                None,
-                &copy_locals,
-            );
-        }
-        cw.set_method_debug(
-            "equals",
-            "(Ljava/lang/Object;)Z",
-            None,
-            &[
-                ("this".to_string(), this_desc.clone(), 0),
-                ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
-            ],
-        );
-        // hashCode: a ≥2-field data class folds into a `result` accumulator local — kotlinc lists it
-        // (partial live-range) before `this`. A single-field hashCode is a bare `return h(f0)` (this only).
-        if c.fields.len() >= 2 {
-            cw.set_hashcode_result_debug(&this_desc);
-        } else {
-            cw.set_method_debug("hashCode", "()I", None, &this_only);
-        }
-        cw.set_method_debug("toString", "()Ljava/lang/String;", None, &this_only);
-    }
 }
 
 /// Attach kotlinc's `@org.jetbrains.annotations.NotNull` / `@Nullable` to a plain property class's
@@ -2821,12 +2778,8 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
-    let ann = |name: &str, t: Ty| -> Option<&'static str> {
-        match field_nullability_kind(ir, &c.fq_name(), name, t) {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        }
+    let ann = |name: &str, t: Ty| {
+        nullability_annotation(field_nullability_kind(ir, &c.fq_name(), name, t))
     };
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
@@ -2867,11 +2820,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     let source_parameters = primary_ctor_source_parameters(ir, c);
     let ctor_params: Vec<Option<&str>> = source_parameters
         .iter()
-        .map(|parameter| match parameter.nullability {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        })
+        .map(|parameter| nullability_annotation(parameter.nullability))
         .collect();
     let ctor_desc = primary_ctor_descriptor(c);
     if ctor_params.iter().any(|p| p.is_some()) {
@@ -4384,7 +4333,7 @@ fn jvm_field_visibility(c: &crate::ir::IrClass, property: &str) -> Option<u16> {
 
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(annotations) = c.field_annotations.iter().find(|a| a.field == field) {
-        cw.set_last_field_annotations_deferred(&annotations.annotations);
+        cw.set_last_late_field_annotations(&annotations.annotations);
     }
 }
 
@@ -5345,9 +5294,7 @@ fn emit_class(
         && opts.emit_class_metadata
         && (c.is_anonymous_object || build_class_metadata(ir, c, opts).is_some());
     let pool_seed = || PlainClassPoolSeed {
-        formatter: &signature_formatter,
         ir,
-        bodies: env.bodies,
         class: c,
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
@@ -5492,12 +5439,9 @@ fn emit_class(
             // that must not become a second answer to the same question.
             // The constructor prefix's fields (the outer instance, lexical captures) are the
             // compiler's own, and kotlinc annotates no synthetic declaration.
-            let field_ann = match field_nullability_kind(ir, &fq_name, name, *ty) {
-                _ if field_index < c.constructor_prefix_count as usize => None,
-                1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-                2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-                _ => None,
-            };
+            let field_ann = (field_index >= c.constructor_prefix_count as usize)
+                .then(|| nullability_annotation(field_nullability_kind(ir, &fq_name, name, *ty)))
+                .flatten();
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
@@ -5864,9 +5808,6 @@ fn emit_class(
                 &mut cw,
                 env,
             );
-        }
-        if byte_parity {
-            seed_data_class_pool(pool_seed(), &mut cw);
         }
     } // end `if c.has_primary_ctor`
 
@@ -6823,8 +6764,33 @@ fn emit_enum_class(
             &format!("L{};", companion.render()),
         );
     }
-    // A `@Serializable enum`'s `$cachedSerializer$delegate` sits directly after `Companion` and
-    // BEFORE the constructor properties and entry constants — the same leading block, not the tail.
+    // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
+    // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
+    // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
+    cw.reserve_method_pool_with_annotations(
+        "<init>",
+        &ctor_desc,
+        Some(&ctor_sig),
+        &[],
+        &crate::ir::DeclarationAnnotations::default(),
+        &ctor_parameters,
+    );
+    // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
+    cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    // The property backing fields are visited after the methods: each name interns where the
+    // constructor body first stores it, after that body's own constants.
+    for (f, t) in c.fields.iter().zip(&field_tys) {
+        let nullability = nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty));
+        cw.add_field_late(
+            enum_field_acc(f),
+            &f.name,
+            &type_descriptor(*t),
+            None,
+            nullability,
+        );
+    }
+    // A `@Serializable enum`'s `$cachedSerializer$delegate` follows the property fields and precedes
+    // the entry constants: `Companion, value, $cachedSerializer$delegate, <entries>`.
     for s in ir.statics.iter().filter(|s| s.owner_matches(&fq)) {
         // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
@@ -6839,121 +6805,43 @@ fn emit_enum_class(
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
-        // The delegate follows the CONSTRUCTOR PROPERTIES and precedes the entry constants —
-        // `Companion, value, $cachedSerializer$delegate, <entries>`. A fixture with no properties
-        // cannot tell that apart from "directly after Companion", which is why this needs the
-        // explicit index rather than the plain leading form.
-        let at = usize::from(c.companion_class.is_some()) + c.fields.len();
-        cw.add_field_late_at_sig(
+        cw.add_field_late_sig(
             acc,
             &s.name,
             &ir_type_desc(&s.ty),
             signatures.field.as_deref(),
+            None,
             ann,
-            at,
         );
     }
-    // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
-    // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
-    // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
-    cw.reserve_method_pool_with_annotations(
-        "<init>",
-        &ctor_desc,
-        Some(&ctor_sig),
-        &[],
-        &crate::ir::DeclarationAnnotations::default(),
-        &ctor_parameters,
-    );
-    // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
-    cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
-    // The property backing fields intern AFTER the constructor's names, descriptors and its
-    // `super(name, ordinal)` reference, and BEFORE the constructor's LocalVariableTable strings —
-    // kotlinc's visit order. Each field also mints its `NameAndType`/`Fieldref` here, where kotlinc
-    // does, rather than later at the constructor's `putfield`.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        let desc = type_descriptor(*t);
-        cw.add_field(enum_field_acc(f), &f.name, &desc);
-        cw.fieldref(&fq, &f.name, &desc);
-    }
-    for (f, t) in c.fields[n_params..].iter().zip(&field_tys[n_params..]) {
-        let desc = type_descriptor(*t);
-        cw.add_field(enum_field_acc(f), &f.name, &desc);
-        cw.fieldref(&fq, &f.name, &desc);
-    }
-    seed_enum_constructor_locals(c, &self_desc, &mut cw);
-    // The DECLARED members come next — kotlinc reaches a property's accessor (`getTag`, its
-    // descriptor, its `@NotNull`) before any of the synthesized machinery below. Emitting them only
-    // at their method visit left those strings after `values`/`$VALUES` and shifted the pool.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
-    }
-    // …then the synthesized members, in kotlinc's visit order, each with the entries its body
-    // references: `values()` reads `$VALUES` and calls `Object.clone()`; `valueOf` delegates to
-    // `Enum.valueOf` and names its parameter `value`; `getEntries` returns the `@NotNull`
-    // `$ENTRIES`. Only after all of them does kotlinc reach the entry constants themselves.
-    cw.reserve_method_name("values");
-    cw.reserve_descriptor(&format!("(){arr_desc}"));
-    cw.reserve_method_name("$VALUES");
-    cw.reserve_descriptor(&arr_desc);
-    cw.fieldref(&fq, "$VALUES", &arr_desc);
-    cw.class_ref("java/lang/Object");
-    cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
-    // `values()` casts the `clone()` result back: `checkcast [LE;`.
-    cw.class_ref(&arr_desc);
-    let value_of_desc = format!("(Ljava/lang/String;){self_desc}");
-    let value_of_parameters = if env.java_parameters {
-        super::method_parameters::enum_value_of().to_vec()
-    } else {
-        Vec::new()
-    };
-    cw.reserve_method_pool_with_annotations(
-        "valueOf",
-        &value_of_desc,
-        None,
-        &[],
-        &crate::ir::DeclarationAnnotations::default(),
-        &value_of_parameters,
-    );
-    cw.methodref(
-        "java/lang/Enum",
-        "valueOf",
-        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
-    );
-    cw.reserve_method_name("value");
-    cw.reserve_method_name("getEntries");
-    cw.reserve_descriptor("()Lkotlin/enums/EnumEntries;");
-    cw.reserve_descriptor(&format!("()Lkotlin/enums/EnumEntries<{self_desc}>;"));
-    cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
-    cw.reserve_method_name("$ENTRIES");
-    cw.reserve_descriptor("Lkotlin/enums/EnumEntries;");
-    cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
-    cw.reserve_method_name("$values");
-    // One static-final constant per entry, plus the private `$VALUES` array.
+    // One static-final constant per entry, plus the private `$VALUES` array. kotlinc visits the
+    // fields after the methods, so each name interns where a body first references it (`$values`
+    // reads every entry), or at the field visit.
     for entry in &c.enum_entries {
-        cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, &entry.name, &self_desc);
-        // `<clinit>`'s `putstatic` for this entry resolves right after the field's own name, before
-        // the next entry — kotlinc interleaves them rather than batching the Fieldrefs at the end.
-        cw.fieldref(&fq, &entry.name, &self_desc);
+        cw.add_field_late(
+            0x0001 | 0x0008 | 0x0010 | ACC_ENUM,
+            &entry.name,
+            &self_desc,
+            None,
+            None,
+        );
         apply_enum_entry_annotations(&mut cw, c, &entry.name);
     }
-    cw.add_field(
+    cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
         "$VALUES",
         &arr_desc,
+        None,
+        None,
     );
     // The `entries` property backing (Kotlin 2.x emits this on EVERY enum): a `private static final`
     // `kotlin/enums/EnumEntries`, initialized in `<clinit>` from `EnumEntriesKt.enumEntries($VALUES)`.
-    cw.add_field(
+    cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
         "$ENTRIES",
         "Lkotlin/enums/EnumEntries;",
+        None,
+        None,
     );
     // The owner-scoped statics the serialization plugin synthesized were emitted with the leading
     // fields above, next to `Companion`, where kotlinc puts them; this binding is the one `<clinit>`
@@ -7032,6 +6920,19 @@ fn emit_enum_class(
     // secondary — both are `(String, int)V` — and the class failed to load with a
     // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
     // constant pool interns in kotlinc's order.
+    seed_enum_constructor_locals(c, &self_desc, &mut cw);
+    // The constructor's LocalVariableTable strings follow its body, and the property accessors
+    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.reserve_method_name(&property_getter_name(&f.name));
+        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        // The nullability comes from the declared type; `t` is its erased JVM form.
+        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
+            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
+            _ => {}
+        }
+    }
     let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
     if emits_primary_ctor {
         cw.add_method_sig(
@@ -7153,6 +7054,47 @@ fn emit_enum_class(
         }
     };
     emit_members(&mut cw, &schedule.declared);
+    // The synthesized members follow the declared ones, in kotlinc's visit order, each with the entries its body
+    // references: `values()` reads `$VALUES` and calls `Object.clone()`; `valueOf` delegates to
+    // `Enum.valueOf` and names its parameter `value`; `getEntries` returns the `@NotNull`
+    // `$ENTRIES`. Only after all of them does kotlinc reach the entry constants themselves.
+    cw.reserve_method_name("values");
+    cw.reserve_descriptor(&format!("(){arr_desc}"));
+    cw.reserve_method_name("$VALUES");
+    cw.reserve_descriptor(&arr_desc);
+    cw.fieldref(&fq, "$VALUES", &arr_desc);
+    cw.class_ref("java/lang/Object");
+    cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
+    // `values()` casts the `clone()` result back: `checkcast [LE;`.
+    cw.class_ref(&arr_desc);
+    let value_of_desc = format!("(Ljava/lang/String;){self_desc}");
+    let value_of_parameters = if env.java_parameters {
+        super::method_parameters::enum_value_of().to_vec()
+    } else {
+        Vec::new()
+    };
+    cw.reserve_method_pool_with_annotations(
+        "valueOf",
+        &value_of_desc,
+        None,
+        &[],
+        &crate::ir::DeclarationAnnotations::default(),
+        &value_of_parameters,
+    );
+    cw.methodref(
+        "java/lang/Enum",
+        "valueOf",
+        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+    );
+    cw.reserve_method_name("value");
+    cw.reserve_method_name("getEntries");
+    cw.reserve_descriptor("()Lkotlin/enums/EnumEntries;");
+    cw.reserve_descriptor(&format!("()Lkotlin/enums/EnumEntries<{self_desc}>;"));
+    cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
+    cw.reserve_method_name("$ENTRIES");
+    cw.reserve_descriptor("Lkotlin/enums/EnumEntries;");
+    cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
