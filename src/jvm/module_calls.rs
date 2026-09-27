@@ -198,7 +198,7 @@ fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizat
 /// Materialize Kotlin/JVM's default bridge operands from one checked semantic call. Common IR
 /// carries only supplied arguments plus omitted parameter ordinals; mask words, zero placeholders,
 /// and the marker are exclusively JVM ABI.
-fn realize_default_arguments(
+pub(super) fn realize_default_arguments(
     ir: &mut IrFile,
     mut parameters: Vec<crate::types::Ty>,
     arguments: Vec<ExprId>,

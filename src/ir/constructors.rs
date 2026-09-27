@@ -12,8 +12,9 @@ use super::{CtorDelegateTarget, DeclarationAnnotations, ExprId, IrGeneratedDecla
 /// backend never recovers them from the target class's IR, which another file may own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrConstructorTarget {
-    /// The selected constructor is its class's primary declaration.
-    pub primary: bool,
+    /// The selected constructor's place in its class: 0 for the primary, `n` for the `n`th
+    /// secondary constructor (`secondary_ctors[n - 1]` of a class lowered in this file).
+    pub ordinal: u32,
     pub access: IrConstructorAccess,
 }
 
@@ -21,9 +22,14 @@ impl IrConstructorTarget {
     /// The primary constructor of an ordinary class, as a compiler-synthesized class reaches its
     /// superclass (`Any`, a lambda or continuation base, an enum base).
     pub const UNRESTRICTED_PRIMARY: Self = Self {
-        primary: true,
+        ordinal: 0,
         access: IrConstructorAccess::Unrestricted,
     };
+
+    /// The selected constructor is its class's primary declaration.
+    pub fn primary(self) -> bool {
+        self.ordinal == 0
+    }
 }
 
 /// Who Kotlin lets call a selected constructor, beyond the call already being well-typed.
@@ -33,9 +39,8 @@ pub enum IrConstructorAccess {
     /// not sealed, or a compiler-generated public one.
     Unrestricted,
     /// A `private` constructor of a class that is not sealed: only its own class, and the classes
-    /// nested in it. `ordinal` is the constructor's place in its class: 0 for the primary, `n` for
-    /// the `n`th secondary constructor.
-    Private { ordinal: u32 },
+    /// nested in it.
+    Private,
     /// A declared constructor of a `sealed` class, which is always `protected` or `private`: only
     /// the class and its subclasses.
     SealedClass,

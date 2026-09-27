@@ -7229,6 +7229,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `S("K")` becomes `S.constructor-impl("K")` and the slot holds the carrier, as in kotlinc; a `new S`
   box there fails verification against the `String` parameter. Tests:
   `tests/value_class_constructor_default_e2e.rs`.
+- **A value class's secondary constructor with defaults gets its own `constructor-impl$default`.**
+  `constructor(x: Long = 42L) : this(x.toInt())` in `value class Z(val x: Int)` is the static
+  `constructor-impl(J)I`, plus `constructor-impl$default(J, int, DefaultConstructorMarker)` that
+  fills the omitted `x` (a default may read the earlier parameters) and calls it. `Z()` passes a
+  zero placeholder, mask and `null` marker to that stub over the secondary's parameters, not the
+  primary's: the construction calls the `constructor-impl` of the constructor the checker selected
+  (by its ordinal), through the same default-call realization as any function. A class another
+  source file declares is called over its constructor's declared parameters with the same
+  materializer; as for a sibling function's `$default`, its parameters all take their carriers,
+  since that file's declared defaults are not known here. Tests:
+  `tests/value_class_secondary_constructor_default_e2e.rs`.
+- **Only a defaulted nullable-carrier value-class parameter stays boxed in a `$default` stub.**
+  For `value class N(val s: String?)`, `fun f(n: N, k: Int = 1)` has kotlinc's
+  `f-<hash>$default(String, int, int, Object)`: `n` has no default, so it takes its carrier as in
+  `f` itself. `fun g(k: Int = 1, n: N = N(null))` keeps `n` boxed (`$default(int, N, int, Object)`),
+  since an omitted `n` arrives as a null placeholder, and the call site boxes a supplied `n`.
+  Constructors follow the same rule. Tests: `tests/nullable_vc_default_stub_e2e.rs`,
+  `tests/value_class_secondary_constructor_default_e2e.rs`.
 - **A generic result specialized to an `Object`-carried value class is unboxed once.** A call to a
   dependency's `fun <T> pass(value: T): T` with `b: Box` returns the box through the erased slot,
   and the caller emits `checkcast Box; unbox-impl` once, as kotlinc does. When the carrier itself

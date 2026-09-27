@@ -29,7 +29,7 @@ pub(super) fn reached_through_accessor(
 ) -> bool {
     match target.access {
         IrConstructorAccess::SealedClass => true,
-        IrConstructorAccess::Private { .. } => caller != Some(owner),
+        IrConstructorAccess::Private => caller != Some(owner),
         IrConstructorAccess::Unrestricted => false,
     }
 }
@@ -99,7 +99,7 @@ fn emit_accessor(class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWrite
 /// `super(…)` before the calls in its body.
 fn private_constructors_called_from_outside(ir: &IrFile, owner: TypeName) -> Vec<u32> {
     let private_ordinal = |target: IrConstructorTarget| match target.access {
-        IrConstructorAccess::Private { ordinal } => Some(ordinal),
+        IrConstructorAccess::Private => Some(target.ordinal),
         _ => None,
     };
     // (calling class's source position, kind of call, the call within its kind, ordinal): a
