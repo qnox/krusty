@@ -1158,6 +1158,8 @@ mod nothing_type_argument_signature_e2e;
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
+#[path = "value_class_constructor_default_e2e.rs"]
+mod value_class_constructor_default_e2e;
 #[path = "value_class_equality_e2e.rs"]
 mod value_class_equality_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]

@@ -7199,6 +7199,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consumer (`Any?`, or a generic parameter) hands that box on unchanged: the checked coercion from
   `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
   call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
+- **A value-class default of a primary constructor is lowered like the constructor's other code.**
+  `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
+  `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the
+  primary constructor's parameters, as the `init` block and the superclass arguments do, so
+  `S("K")` becomes `S.constructor-impl("K")` and the slot holds the carrier, as in kotlinc; a `new S`
+  box there fails verification against the `String` parameter. Tests:
+  `tests/value_class_constructor_default_e2e.rs`.
 - **A generic result specialized to an `Object`-carried value class is unboxed once.** A call to a
   dependency's `fun <T> pass(value: T): T` with `b: Box` returns the box through the erased slot,
   and the caller emits `checkcast Box; unbox-impl` once, as kotlinc does. When the carrier itself
