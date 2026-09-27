@@ -199,10 +199,9 @@ impl Emitter<'_> {
                 }
                 IrExpr::GetField { class, index, .. }
                 | IrExpr::SetField { class, index, .. }
-                | IrExpr::LateinitInitialized { class, index, .. } => self.ir.classes
-                    [*class as usize]
-                    .fields[*index as usize]
-                    .is_private(),
+                | IrExpr::LateinitInitialized { class, index, .. } => {
+                    self.ir.classes[*class as usize].fields[*index as usize].is_private()
+                }
                 IrExpr::Call { callee, .. } => {
                     matches!(callee, Callee::Special { .. })
                         || callee
