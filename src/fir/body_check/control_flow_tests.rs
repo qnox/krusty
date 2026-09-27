@@ -119,7 +119,7 @@ fn try_and_catch_consume_their_own_entry_edge_flow_facts() {
              var result: Any = \"\"\n\
              result = C(\"OK\")\n\
              try {\n\
-                 result = result.getField()\n\
+                 result.getField()\n\
              } catch (error: Throwable) {\n\
                  result.getMethod()\n\
              }\n\

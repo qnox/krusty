@@ -253,7 +253,6 @@ sam/constructors/sameWrapperClass2.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt
-smartCasts/kt44932.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt

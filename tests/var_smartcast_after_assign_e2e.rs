@@ -1,5 +1,6 @@
-//! A nullable `var` (or `val`) is flow-narrowed to its non-null type after a non-null assignment or
-//! initializer, matching kotlinc's smart-cast: `var i: Int?; i = 10; i += 1` reads `i` as `Int`. The
+//! A nullable `var` is flow-narrowed to its non-null type after a non-null assignment, matching
+//! kotlinc's smart-cast: `var i: Int?; i = 10; i += 1` reads `i` as `Int`. Its initializer does not
+//! narrow a declared type, as kotlinc rejects `var i: Int? = 10; i + 1`. The
 //! narrowing is dropped at branch/loop/closure boundaries (sound), and a later nullable reassignment
 //! widens it back to the declared type. Same-file, runs on the JVM.
 use super::common;
@@ -19,20 +20,24 @@ fn assign_then_compound_plus() {
 }
 
 #[test]
-fn nonnull_initializer_narrows() {
-    const SRC: &str = "fun box(): String {\n\
+fn nonnull_initializer_does_not_narrow_a_declared_type() {
+    const SRC: &str = "fun sum(): Int {\n\
         \x20 var i: Int? = 10\n\
-        \x20 val x = i + 1\n\
-        \x20 return if (x == 11) \"OK\" else \"no\"\n\
+        \x20 return i.inc()\n\
         }\n";
-    assert_eq!(run(SRC).expect("init narrows"), "OK");
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", SRC)],
+        &[common::stdlib_jar(), common::jdk_modules()],
+    );
+    common::expect_identical_rejection(&result, "declared initializer");
 }
 
 #[test]
 fn reassign_renarrows_to_new_value() {
     // A second non-null assignment re-narrows the var, so it stays usable as a non-null Int.
     const SRC: &str = "fun box(): String {\n\
-        \x20 var i: Int? = 5\n\
+        \x20 var i: Int? = null\n\
+        \x20 i = 5\n\
         \x20 val a = i + 1\n\
         \x20 i = 20\n\
         \x20 val b = i + 2\n\
