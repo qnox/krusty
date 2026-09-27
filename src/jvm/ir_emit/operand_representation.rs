@@ -28,6 +28,51 @@ impl Emitter<'_> {
         self.coerce_reference_on_stack(self.value_ty(expression), expected, code);
     }
 
+    /// Emit an operand whose consumer materializes it at its own slot type, answering the stack type
+    /// left for that materialization. A generic call's erased reference result stays erased here:
+    /// kotlinc narrows it only when the consumer's type asks for it, not to the substituted type.
+    pub(super) fn emit_consumed_operand(
+        &mut self,
+        expression: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        if let Some((call, slot)) = self.erased_reference_result(expression) {
+            self.emit_value(call, code);
+            return slot;
+        }
+        self.emit_value(expression, code);
+        self.value_ty(expression)
+    }
+
+    /// The operation and physical slot of a value in an erased `Object` slot that checked IR narrows
+    /// to another JVM reference type: a generic declaration's erased result, from a source or provider callee.
+    /// Carriers (value classes, unsigned, primitives) keep their own adaptation.
+    pub(super) fn erased_reference_result(
+        &self,
+        expression: crate::ir::ExprId,
+    ) -> Option<(crate::ir::ExprId, Ty)> {
+        let crate::ir::IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(expression)
+        else {
+            return None;
+        };
+        // Only a slot erased to `Object`: a bounded type parameter's slot (`T : Base`) is already a
+        // class a receiver or argument adapter takes as the value's own type.
+        let slot = *self.ir.physical_types.get(arg)?;
+        let reference = |ty: &Ty| ir_ty_to_jvm(ty).is_reference();
+        (jvm_is_erased_top(ir_ty_to_jvm(&slot))
+            && reference(&slot)
+            && reference(type_operand)
+            && matches!(
+                self.reference_coercion(slot, *type_operand),
+                ReferenceCoercion::Cast(_)
+            ))
+        .then_some((*arg, slot))
+    }
+
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.
     pub(super) fn is_value_class_ty(&self, ty: &Ty) -> bool {
         ty.non_null().obj_internal().is_some_and(|fq_name| {

@@ -480,9 +480,14 @@ impl Emitter<'_> {
     /// produced at straight to the primitive, so an implicit reference coercion directly beneath
     /// the unbox (`ArrayList<Int>.get` producing `Object`, coerced to `Int!` and then to `int`)
     /// writes no `checkcast` of its own: the unbox reads `Object` and goes through `Number`.
+    ///
+    /// A reference target likewise materializes an erased generic result at its own type, so the
+    /// result's narrowing to the substituted type is not written first.
     fn unboxed_reference_source(&self, arg: ExprId, type_operand: Ty) -> ExprId {
         if !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar() {
-            return arg;
+            return self
+                .erased_reference_result(arg)
+                .map_or(arg, |(source, _)| source);
         }
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

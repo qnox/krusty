@@ -10752,8 +10752,7 @@ impl<'a> Emitter<'a> {
                     (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
                 });
                 let slot = if let Some(i) = init {
-                    self.emit_value(i, code);
-                    let source = self.value_ty(i);
+                    let source = self.emit_consumed_operand(i, code);
                     let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
                     self.adapt_physical_operand(source, semantic, Some(ty), jt, code);
                     // kotlinc's `visitVariable` marks the initializer's line, then the
@@ -14227,75 +14226,6 @@ impl<'a> Emitter<'a> {
             }
             _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — straight-line
         }
-    }
-
-    /// Push `ops` onto the stack in order. If any later op introduces control flow, evaluate all ops
-    /// into temps first, then load them, keeping the operand baseline empty across nested branches.
-    fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, ops, code, |_, _, _| {});
-    }
-
-    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
-    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
-    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
-    /// after a right operand has landed above it, and a branchy right operand still requires both
-    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
-    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
-    fn emit_operands_adapted<F>(
-        &mut self,
-        default_plan: Option<(
-            u32,
-            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
-        )>,
-        ops: &[u32],
-        code: &mut CodeBuilder,
-        mut adapt: F,
-    ) where
-        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
-    {
-        let mut inside_run = false;
-        if ops.iter().skip(1).any(|&o| self.emits_control_flow(o)) {
-            let temps = self.spill_to_temps(ops, code);
-            for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                load(t, slot, code);
-                adapt(self, t, code);
-            }
-            self.release_operand_spills(&temps);
-        } else {
-            for (operand_index, &o) in ops.iter().enumerate() {
-                self.mark_synthesized_operand_run(
-                    default_plan,
-                    operand_index,
-                    &mut inside_run,
-                    code,
-                );
-                self.emit_value(o, code);
-                adapt(self, self.value_ty(o), code);
-            }
-        }
-    }
-
-    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
-    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
-    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
-        box_prim_free(self.cw, code, ty);
-    }
-
-    /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
-    /// side is a primitive right where it lands — kotlinc's shape for a mixed pair (`aload_0; iload_1;
-    /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
-    /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
-    /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
-    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
-    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
-    fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_primitive_inc_dec_virtual(
