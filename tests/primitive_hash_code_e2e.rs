@@ -1,5 +1,6 @@
 //! `hashCode()` on a primitive value hashes it through its wrapper's static `hashCode`
-//! (`Integer.hashCode(I)I`) without boxing, as kotlinc's `HashCode` intrinsic does.
+//! (`Integer.hashCode(I)I`) without boxing, as kotlinc's `HashCode` intrinsic does, in a direct
+//! call and in an unbound callable reference's adapter alike.
 use super::common;
 
 const SOURCE: &str = "fun ofBoolean(v: Boolean) = v.hashCode()\n\
@@ -11,7 +12,9 @@ const SOURCE: &str = "fun ofBoolean(v: Boolean) = v.hashCode()\n\
                       fun ofFloat(v: Float) = v.hashCode()\n\
                       fun ofDouble(v: Double) = v.hashCode()\n\
                       fun ofSafeCall(v: Long?) = v?.hashCode()\n\
-                      fun ofSmartCast(v: Boolean?) = if (v != null) v.hashCode() else 0\n";
+                      fun ofSmartCast(v: Boolean?) = if (v != null) v.hashCode() else 0\n\
+                      fun intReference(): (Int) -> Int = Int::hashCode\n\
+                      fun booleanReference(): (Boolean) -> Int = Boolean::hashCode\n";
 
 #[test]
 fn a_primitive_hash_code_calls_the_static_wrapper_method_like_kotlinc() {
@@ -23,6 +26,26 @@ fn a_primitive_hash_code_calls_the_static_wrapper_method_like_kotlinc() {
     )
     .expect("the reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("PrimitiveHashCodeKt differs from kotlinc:\n{diff}"));
+}
+
+/// An unbound reference's adapter class calls the same static wrapper method: `Int::hashCode`
+/// reaches `Any.hashCode` through the mapped wrapper, `Boolean::hashCode` through the builtins'
+/// own declaration.
+#[test]
+fn a_primitive_hash_code_reference_adapter_calls_the_static_wrapper_method_like_kotlinc() {
+    for class in [
+        "PrimitiveHashCodeKt$intReference$1",
+        "PrimitiveHashCodeKt$booleanReference$1",
+    ] {
+        common::byte_diff_against_kotlinc_cp(
+            "PrimitiveHashCode",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc:\n{diff}"));
+    }
 }
 
 #[test]
@@ -38,6 +61,8 @@ fn a_primitive_hash_code_is_the_wrapper_hash() {
          \x20   if (ofDouble(1.0) != 1072693248) return \"double\"\n\
          \x20   if (ofSafeCall(null) != null || ofSafeCall(3L) != 3) return \"safe call\"\n\
          \x20   if (ofSmartCast(true) != 1231) return \"smart cast\"\n\
+         \x20   if (intReference()(42) != 42) return \"int reference\"\n\
+         \x20   if (booleanReference()(true) != 1231) return \"boolean reference\"\n\
          \x20   return \"OK\"\n\
          }}\n"
     );
