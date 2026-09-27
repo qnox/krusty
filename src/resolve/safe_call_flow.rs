@@ -10,12 +10,9 @@ use crate::ast::{Expr, ExprId};
 use crate::diag::Span;
 use crate::types::Ty;
 
+use super::lexical_bindings::BindingIdentity;
 use super::scope::{NarrowPath, Ns};
 use super::{Checker, CheckerScope, Local, ReceiverFnValueOrigin, ScopeBinding};
-
-/// Ephemeral identity of one lexical value during a bounded checker run.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct BindingIdentity(u32);
 
 impl Checker<'_> {
     pub(super) fn attach_safe_call_origin(
@@ -61,30 +58,7 @@ impl Checker<'_> {
                     && matches!(origin.origin, ReceiverFnValueOrigin::Local)
             })
             .and_then(|origin| origin.lexical_capture_identity)
-            .map(BindingIdentity)
-    }
-
-    /// Find the currently visible spelling of one exact lexical binding. A same-named inner value
-    /// makes the older binding inaccessible and therefore stops implication traversal.
-    fn visible_local_binding(
-        &self,
-        scope: &CheckerScope<'_>,
-        identity: BindingIdentity,
-    ) -> Option<(String, Local)> {
-        let mut found = None;
-        scope.visit_bindings(Ns::Value, |name, binding| {
-            if found.is_none() {
-                if let Some(local) = binding
-                    .value()
-                    .filter(|local| local.lexical_capture_identity == Some(identity.0))
-                {
-                    found = Some((name.to_string(), local));
-                }
-            }
-        });
-        let (name, local) = found?;
-        (self.lookup(scope, &name)?.lexical_capture_identity == Some(identity.0))
-            .then_some((name, local))
+            .map(BindingIdentity::new)
     }
 
     /// Binding-identified safe-call origins reachable from one root-only lexical result.
@@ -99,7 +73,7 @@ impl Checker<'_> {
         let Some(start) = self
             .lookup(scope, &path.root)
             .and_then(|local| local.lexical_capture_identity)
-            .map(BindingIdentity)
+            .map(BindingIdentity::new)
         else {
             return Vec::new();
         };
@@ -189,24 +163,31 @@ mod tests {
     #[test]
     fn traversal_has_no_valid_depth_cap() {
         let edges = (1..=32)
-            .map(|identity| (BindingIdentity(identity), BindingIdentity(identity - 1)))
+            .map(|identity| {
+                (
+                    BindingIdentity::new(identity),
+                    BindingIdentity::new(identity - 1),
+                )
+            })
             .collect::<HashMap<_, _>>();
-        let chain = origin_chain(BindingIdentity(32), |identity| {
+        let chain = origin_chain(BindingIdentity::new(32), |identity| {
             edges.get(&identity).copied()
         });
         assert_eq!(chain.len(), 32);
-        assert_eq!(chain.last(), Some(&BindingIdentity(0)));
+        assert_eq!(chain.last(), Some(&BindingIdentity::new(0)));
     }
 
     #[test]
     fn traversal_stops_at_a_cycle() {
         let edges = HashMap::from([
-            (BindingIdentity(1), BindingIdentity(2)),
-            (BindingIdentity(2), BindingIdentity(1)),
+            (BindingIdentity::new(1), BindingIdentity::new(2)),
+            (BindingIdentity::new(2), BindingIdentity::new(1)),
         ]);
         assert_eq!(
-            origin_chain(BindingIdentity(1), |identity| edges.get(&identity).copied()),
-            vec![BindingIdentity(2)]
+            origin_chain(BindingIdentity::new(1), |identity| edges
+                .get(&identity)
+                .copied()),
+            vec![BindingIdentity::new(2)]
         );
     }
 }
