@@ -162,7 +162,8 @@ fn suspend_converted_local_reference_becomes_suspend_wrapper() {
 fn suspend_converted_function_value_becomes_bound_conversion_reference() {
     let ir = lower_single_source(
         r#"
-            fun convert(block: (Int) -> String): suspend (Int) -> String = block
+            fun consume(block: suspend (Int) -> String) {}
+            fun convert(block: (Int) -> String) = consume(block)
         "#,
         "SuspendConvertedFunctionValue",
     );

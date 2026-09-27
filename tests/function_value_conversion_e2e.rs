@@ -335,3 +335,75 @@ fn unit_conversion_of_a_value_requires_the_language_feature() {
         }\n";
     common::assert_errors_match_kotlinc(&[("Main.kt", SOURCE)], &[]);
 }
+
+/// kotlinc converts a function value only where it is passed as a call argument. Assigned to a
+/// variable of a `Unit`-returning or `suspend` function type it is a type mismatch, with or without
+/// the language feature.
+#[test]
+fn a_function_value_is_not_converted_when_assigned() {
+    const SOURCE: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n\
+        fun assign(g: () -> String) {\n\
+        \x20   var unit: () -> Unit = {}\n\
+        \x20   unit = g\n\
+        \x20   var suspending: suspend () -> String = { \"\" }\n\
+        \x20   suspending = g\n\
+        \x20   var both: suspend () -> Unit = {}\n\
+        \x20   both = g\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SOURCE)],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+}
+
+/// A function value returned where the declared result is a `Unit`-returning or `suspend` function
+/// type is a return type mismatch, whether returned explicitly or as an expression body.
+#[test]
+fn a_function_value_is_not_converted_when_returned() {
+    const SOURCE: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n\
+        fun unit(g: () -> String): () -> Unit {\n\
+        \x20   return g\n\
+        }\n\
+        fun suspending(g: () -> String): suspend () -> String {\n\
+        \x20   return g\n\
+        }\n\
+        fun both(g: () -> String): suspend () -> Unit = g\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SOURCE)],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+}
+
+/// Neither a declaration's initializer nor a lambda's result converts a function value either; the
+/// lambda's mismatch is reported at its result expression.
+#[test]
+fn a_function_value_is_not_converted_by_an_initializer_or_lambda_result() {
+    const SOURCE: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n\
+        fun declare(g: () -> String) {\n\
+        \x20   val unit: () -> Unit = g\n\
+        \x20   val suspending: suspend () -> String = g\n\
+        }\n\
+        fun produce(g: () -> String): () -> () -> Unit = { g }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SOURCE)],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+}
+
+/// A named argument and a conditional argument convert like a positional value.
+#[test]
+fn named_and_conditional_arguments_convert_a_function_value() {
+    const SOURCE: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n\
+        var calls = 0\n\
+        fun consume(f: () -> Unit) { f() }\n\
+        fun box(): String {\n\
+        \x20   val g: () -> String = { calls++; \"ignored\" }\n\
+        \x20   val h: () -> String = { \"ignored\" }\n\
+        \x20   consume(f = g)\n\
+        \x20   consume(if (calls > 0) g else h)\n\
+        \x20   return if (calls == 2) \"OK\" else \"calls: $calls\"\n\
+        }\n";
+    if accepted_like_kotlinc(SOURCE) {
+        common::expect_box_same_as_kotlinc(SOURCE, "ArgumentFormsRun");
+    }
+}

@@ -4292,23 +4292,19 @@ fn sam_constructor_accepts_a_nominal_callable_supertype() {
 }
 
 #[test]
-fn regular_function_value_to_suspend_function_is_an_explicit_checked_conversion() {
+fn regular_function_value_argument_to_suspend_parameter_is_an_explicit_checked_conversion() {
     let (body, _) = checked_function_body(
-        "fun convert(block: (Int) -> String): suspend (Int) -> String = block\n",
+        "fun consume(block: suspend (Int) -> String): Unit {}\n\
+         fun convert(block: (Int) -> String): Unit {\n\
+             consume(block)\n\
+         }\n",
         "convert",
     );
 
-    let FirExprKind::ImplicitConversion {
-        conversion:
-            FirConversion {
-                kind: FirConversionKind::FunctionValue { from, to, .. },
-                ..
-            },
+    let Some(FirConversion {
+        kind: FirConversionKind::FunctionValue { from, to, .. },
         ..
-    } = body
-        .expr(root_expression(&body))
-        .expect("converted function value")
-        .kind
+    }) = function_value_argument_conversion(&body)
     else {
         panic!("regular-to-suspend adaptation must be explicit checked FIR")
     };
@@ -4328,17 +4324,9 @@ fn regular_function_value_to_suspend_function_is_an_explicit_checked_conversion(
     ));
 }
 
-#[test]
-fn functional_intersection_selects_the_matching_constituent_for_suspend_conversion() {
-    let (body, _) = checked_function_body(
-        "fun consume(block: suspend (Int) -> String): Unit {}\n\
-         fun <T> test(value: T): Unit where T : () -> String, T : (Int) -> String {\n\
-             consume(value)\n\
-         }\n",
-        "test",
-    );
-
-    let conversion = (0..body.expression_count()).find_map(|raw| {
+/// The function-value conversion checked FIR records on a call argument of `body`, if any.
+fn function_value_argument_conversion(body: &FirBody) -> Option<&FirConversion> {
+    (0..body.expression_count()).find_map(|raw| {
         let FirExprKind::Call(call) = &body
             .expr(FirExprId::from_raw(u32::try_from(raw).ok()?))?
             .kind
@@ -4355,11 +4343,23 @@ fn functional_intersection_selects_the_matching_constituent_for_suspend_conversi
             };
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. }).then_some(conversion)
         })
-    });
+    })
+}
+
+#[test]
+fn functional_intersection_selects_the_matching_constituent_for_suspend_conversion() {
+    let (body, _) = checked_function_body(
+        "fun consume(block: suspend (Int) -> String): Unit {}\n\
+         fun <T> test(value: T): Unit where T : () -> String, T : (Int) -> String {\n\
+             consume(value)\n\
+         }\n",
+        "test",
+    );
+
     let Some(FirConversion {
         kind: FirConversionKind::FunctionValue { from, to, .. },
         ..
-    }) = conversion
+    }) = function_value_argument_conversion(&body)
     else {
         panic!("the matching callable intersection constituent must be converted")
     };

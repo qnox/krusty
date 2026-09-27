@@ -17232,7 +17232,7 @@ impl<'a> Checker<'a> {
                      source: usize| {
             let expected = self.declared_function_semantic_type(expected);
             let semantic_actual =
-                self.expression_type_for_expected(scope, argument, actual, expected);
+                self.argument_type_for_expected(scope, argument, actual, expected);
             let semantic_actual = self
                 .unit_coerced_lambda_type(argument, expected, semantic_actual)
                 .unwrap_or(semantic_actual);
@@ -23091,7 +23091,7 @@ impl<'a> Checker<'a> {
                                 if sig.exact_params.get(pi).copied().unwrap_or(false) {
                                     let nominal = self.expr(scope, a);
                                     return self
-                                        .expression_type_for_expected(scope, a, nominal, expected);
+                                        .argument_type_for_expected(scope, a, nominal, expected);
                                 }
                                 return self.expr_expected(scope, a, expected);
                             }
@@ -52425,7 +52425,7 @@ impl<'a> Checker<'a> {
                 parameter
             };
             let nominal = self.expr_types[argument.0 as usize];
-            let actual = self.expression_type_for_expected(scope, argument, nominal, expected);
+            let actual = self.argument_type_for_expected(scope, argument, nominal, expected);
             // Preserve the non-generic shell of a parameter while leaving only its type-variable
             // components to inference. A direct `T` cannot be judged against its erased non-null `Any`,
             // but `(Int) -> T` still requires a function of the right shape; otherwise that primary
@@ -62357,7 +62357,7 @@ impl<'a> Checker<'a> {
             }
         }
         let nominal = actual;
-        let actual = self.recorded_expression_type_for_expected(scope, argument, nominal, expected);
+        let actual = self.recorded_argument_type_for_expected(scope, argument, nominal, expected);
         let selected_intersection_projection = actual != nominal
             && self
                 .expr_access_path(argument)
@@ -63460,6 +63460,9 @@ impl<'a> Checker<'a> {
         // declared return type from `expected`).
         if let (Ty::Fun(e), Ty::Fun(a)) = (expected, actual) {
             if e.params.len() == a.params.len() {
+                if self.function_value_needs_conversion(ctx, e, a) {
+                    self.report_assignability_error(declared_expected, declared_actual, span, ctx);
+                }
                 return;
             }
         }
@@ -64194,12 +64197,9 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if matches!(expected.non_null(), Ty::Fun(_)) {
-            self.function_value_conversion_source(scope, expression, nominal, expected)
-                .or_else(|| {
-                    self.expression_function_types(scope, expression, nominal)
-                        .into_iter()
-                        .find(|function| self.receiver_is_assignable(*function, expected))
-                })
+            self.expression_function_types(scope, expression, nominal)
+                .into_iter()
+                .find(|function| self.receiver_is_assignable(*function, expected))
                 .unwrap_or(nominal)
         } else if !self.receiver_is_assignable(nominal, expected) {
             if self.conditional_branches_admit_expected(expression, expected) {
@@ -64227,19 +64227,6 @@ impl<'a> Checker<'a> {
         nominal: Ty,
         expected: Ty,
     ) -> Ty {
-        // Candidate probing calls `expression_type_for_expected` directly. Reaching this mutating
-        // seam means an enclosing declaration/call has committed its expected type, so retain the
-        // exact callable constituent chosen for its conversion. Callable-reference FIR already
-        // carries its own checked adaptation and must not acquire a second wrapper here.
-        self.selected_function_value_conversions.remove(&expression);
-        if !matches!(self.file.expr(expression), Expr::CallableRef { .. }) {
-            if let Some(source) =
-                self.function_value_conversion_source(scope, expression, nominal, expected)
-            {
-                self.selected_function_value_conversions
-                    .insert(expression, (source, expected));
-            }
-        }
         let contextual = self.expression_type_for_expected(scope, expression, nominal, expected);
         let selected_intersection_projection = contextual != nominal
             && self
@@ -72454,7 +72441,7 @@ impl<'a> Checker<'a> {
                                 if self.resolved_sam_conversions.contains_key(&argument) {
                                     expected
                                 } else {
-                                    self.expression_type_for_expected(
+                                    self.argument_type_for_expected(
                                         scope, argument, nominal, expected,
                                     )
                                 }
@@ -74401,12 +74388,8 @@ impl<'a> Checker<'a> {
                 };
             let ret = match mode.expected_return {
                 Some(expected) => {
-                    self.expect_assignable(
-                        expected,
-                        inferred_ret,
-                        self.span(body),
-                        "lambda return",
-                    );
+                    let result = conditional_branch::branch_value_expression(self.file, body);
+                    self.expect_assignable(expected, inferred_ret, self.span(result), "return");
                     expected
                 }
                 None => inferred_ret,
@@ -75360,7 +75343,7 @@ impl<'a> Checker<'a> {
                                     }
                                     let expression = args[source_argument];
                                     let nominal = self.expr_types[expression.0 as usize];
-                                    let contextual = self.expression_type_for_expected(
+                                    let contextual = self.argument_type_for_expected(
                                         scope, expression, nominal, parameter,
                                     );
                                     self.receiver_is_assignable(contextual, parameter)

@@ -8732,12 +8732,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in source order: each function, local function, lambda, property initializer, accessor and secondary
   constructor restarts it, while a class's initializers share one. Without the feature, a mismatched
   function value is reported as kotlinc's `argument type mismatch` (a regular value reaching a
-  suspend parameter is shown as the suspend type it converted to). Known gaps: an anonymous object
-  following a conversion in the same sequence keeps its pre-resolution position (local classifier
-  identities are published before bodies are resolved); a suspend carrier boxes a primitive argument
-  with `valueOf` where kotlinc's coroutine pass uses `Boxing.box*` (krusty applies that rewrite only
-  to transformed state machines); the conversion is also recorded at declaration and return
-  boundaries, which kotlinc rejects. (`tests/function_value_conversion_e2e.rs`,
+  suspend parameter is shown as the suspend type it converted to). Both conversions apply only to a
+  call argument (positional, named, or a conditional passed as one): kotlinc 2.4.0 through 2.4.20
+  reject a regular or non-`Unit` value that an initializer, assignment, `return`, expression body or
+  lambda result would have to convert, as that seam's own type mismatch (a lambda's at its result
+  expression). Only the argument seams consult the conversion, and `expect_assignable`'s
+  same-arity shortcut for function types refuses a value that would need one elsewhere. Known gaps:
+  an anonymous object following a conversion in the same sequence keeps its pre-resolution position
+  (local classifier identities are published before bodies are resolved); a suspend carrier boxes a
+  primitive argument with `valueOf` where kotlinc's coroutine pass uses `Boxing.box*` (krusty applies
+  that rewrite only to transformed state machines); that shortcut still ignores result and parameter
+  types that need no conversion (`val f: () -> Int = g` for `g: () -> String` is accepted); and a
+  generic call passed as the argument (`consume(id(g))`) infers its type argument from the
+  expected type, so krusty accepts it before 2.4.20 where kotlinc rejects it.
+  (`tests/function_value_conversion_e2e.rs`,
   `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
   `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
 
