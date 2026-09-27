@@ -1768,6 +1768,8 @@ mod suspend_interface_delegation_e2e;
 mod suspend_interface_impl_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
+#[path = "suspend_lambda_metadata_e2e.rs"]
+mod suspend_lambda_metadata_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]

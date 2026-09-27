@@ -75,6 +75,9 @@ pub(crate) struct SuspendLambdaClass {
     /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
     /// it is kept in when the body reads it.
     pub parameters: Vec<(crate::types::Ty, Option<u32>)>,
+    /// The name Kotlin metadata records for each of the lambda's value parameters (its receiver
+    /// excluded), in order; `None` for one no declaration named.
+    pub metadata_names: Vec<Option<String>>,
 }
 
 /// The suspend functions whose machine is built during emission, with their suspensions: those

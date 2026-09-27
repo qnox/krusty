@@ -179,11 +179,14 @@ pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String
         .flatten()
 }
 
-/// Kotlin metadata accepts only a declaration/producer-published semantic name.
+/// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
+/// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
+/// parameter.
 pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
-    match identity.role {
-        IrParameterRole::AnonymousContextParameter { .. } => Some("<unused var>"),
-        _ => identity.source_name.as_deref(),
+    match (identity.role, identity.source_name.as_deref()) {
+        (IrParameterRole::AnonymousContextParameter { .. }, _)
+        | (IrParameterRole::Value, Some("_")) => Some("<unused var>"),
+        (_, name) => name,
     }
 }
 

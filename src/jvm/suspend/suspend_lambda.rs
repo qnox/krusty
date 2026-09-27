@@ -48,6 +48,10 @@ struct Parameter {
     ty: Ty,
     /// The local-variable name its read-back takes.
     name: Option<String>,
+    /// Whether it is the lambda's extension receiver rather than a value parameter.
+    receiver: bool,
+    /// The name Kotlin metadata records, for a value parameter.
+    metadata_name: Option<String>,
     /// The field it is kept in, when the body reads it.
     field: Option<SpillName>,
 }
@@ -195,6 +199,11 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
                     });
                     (parameter.ty, field)
                 })
+                .collect(),
+            metadata_names: parameters
+                .iter()
+                .filter(|parameter| !parameter.receiver)
+                .map(|parameter| parameter.metadata_name.clone())
                 .collect(),
         },
     );
@@ -358,7 +367,16 @@ fn layout(
         } else {
             None
         };
-        parameters.push(Parameter { ty, name, field });
+        let metadata_name = (!receiver)
+            .then(|| crate::jvm::parameter_names::metadata(identity).map(str::to_owned))
+            .flatten();
+        parameters.push(Parameter {
+            ty,
+            name,
+            receiver,
+            metadata_name,
+            field,
+        });
     }
     Some((captures, parameters))
 }

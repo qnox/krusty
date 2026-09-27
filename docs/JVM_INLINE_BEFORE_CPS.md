@@ -157,7 +157,13 @@ Known gaps, both byte differences in the function's own method (the continuation
   (`$this$builder` for `builder { … }`), and `<this>` when it has none. The parser records that
   label as kotlinc's raw-FIR builder assigns it; `docs/SPEC.md` has the rule.
 
-Known gaps: the class's `@Metadata` has no lambda `d1`/`d2`, the pool interns the transformer's
+The class's `@Metadata` records the lambda's function as kotlinc does: `<anonymous>`, local
+visibility, its receiver, each value parameter under its source name (`_` as `<unused var>`), and
+its result.
+
+Known gaps: that function is not yet written for a lambda over context parameters, over an
+enclosing declaration's type parameter (kotlinc copies those into the lambda's own table), or
+with a destructuring parameter; the pool interns the transformer's
 constants last (as for named functions), and a local declared in the lambda's body ends its range
 before the final `areturn` (the body lowers as `return <block>`; plain lambdas share this).
 
