@@ -1052,6 +1052,8 @@ mod literal_escapes_coverage_e2e;
 mod lnt_parity_e2e;
 #[path = "local_capture_coverage_e2e.rs"]
 mod local_capture_coverage_e2e;
+#[path = "local_class_capture_constructors_e2e.rs"]
+mod local_class_capture_constructors_e2e;
 #[path = "local_class_e2e.rs"]
 mod local_class_e2e;
 #[path = "local_class_inherited_members_e2e.rs"]
