@@ -10,11 +10,6 @@ use super::common;
 
 const UNIT_CONVERSIONS: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n";
 
-/// kotlinc 2.4.0 and 2.4.10 know the feature but convert no arbitrary value.
-fn unit_conversions_available() -> bool {
-    krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
-}
-
 /// Compile `source` with both compilers and require `class` to be kotlinc's: its header, every
 /// member with its code and debug tables, and its `@Metadata`.
 fn assert_class_matches_kotlinc(
@@ -95,13 +90,22 @@ fn assert_conversion_matches_kotlinc(
     common::expect_box_same_as_kotlinc(source, &format!("{stem}Run"));
 }
 
-/// Before 2.4.20, kotlinc rejects the unit conversion of an arbitrary value even with the feature
-/// on; krusty reproducing that release must report the same errors.
-fn assert_unit_conversion_rejected_like_kotlinc(source: &str) {
-    common::assert_errors_match_kotlinc(
-        &[("Main.kt", source)],
-        &common::language_directives::kotlinc_args(source),
+/// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, as recorded per
+/// Kotlin version, and answer whether kotlinc accepted it. kotlinc 2.4.0 and 2.4.10 know
+/// `UnitConversionsOnArbitraryExpressions` but convert no arbitrary value (KT-84393), so the same
+/// program is rejected there and compiled from 2.4.20 on.
+fn accepted_like_kotlinc(source: &str) -> bool {
+    let sources = [("Main.kt", source)];
+    let expected = common::recorded(|| {
+        common::reference_error_ledger(&sources, &common::language_directives::kotlinc_args(source))
+    });
+    assert_eq!(
+        common::krusty_error_ledger(&sources),
+        expected,
+        "krusty's ledger against kotlinc {}",
+        krusty::kotlin_version::target()
     );
+    expected.is_empty()
 }
 
 const UNIT_SOURCE: &str = "fun consume(f: () -> Unit) {\n\
@@ -123,17 +127,15 @@ const UNIT_SOURCE: &str = "fun consume(f: () -> Unit) {\n\
 #[test]
 fn unit_conversion_of_a_value_is_kotlincs_bound_carrier() {
     let source = format!("{UNIT_CONVERSIONS}{UNIT_SOURCE}");
-    if !unit_conversions_available() {
-        assert_unit_conversion_rejected_like_kotlinc(&source);
-        return;
+    if accepted_like_kotlinc(&source) {
+        assert_conversion_matches_kotlinc(
+            "UnitValue",
+            &source,
+            &["UnitValueKt$pass$1"],
+            "UnitValueKt",
+            "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
+        );
     }
-    assert_conversion_matches_kotlinc(
-        "UnitValue",
-        &source,
-        &["UnitValueKt$pass$1"],
-        "UnitValueKt",
-        "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
-    );
 }
 
 const UNIT_AND_SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
@@ -156,17 +158,15 @@ const UNIT_AND_SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
 #[test]
 fn unit_and_suspend_conversion_of_a_value_is_one_carrier() {
     let source = format!("{UNIT_CONVERSIONS}{UNIT_AND_SUSPEND_SOURCE}");
-    if !unit_conversions_available() {
-        assert_unit_conversion_rejected_like_kotlinc(&source);
-        return;
+    if accepted_like_kotlinc(&source) {
+        assert_conversion_matches_kotlinc(
+            "UnitSuspendValue",
+            &source,
+            &["UnitSuspendValueKt$pass$1"],
+            "UnitSuspendValueKt",
+            "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
+        );
     }
-    assert_conversion_matches_kotlinc(
-        "UnitSuspendValue",
-        &source,
-        &["UnitSuspendValueKt$pass$1"],
-        "UnitSuspendValueKt",
-        "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
-    );
 }
 
 const SUBTYPE_SOURCE: &str = "abstract class Source : () -> String {\n\
@@ -180,7 +180,7 @@ const SUBTYPE_SOURCE: &str = "abstract class Source : () -> String {\n\
     }\n\
     var effects = \"\"\n\
     fun box(): String {\n\
-    \x20   val source = object : Source() {}\n\
+    \x20   val source: Source = object : Source() {}\n\
     \x20   consume(source)\n\
     \x20   return effects\n\
     }\n";
@@ -189,18 +189,16 @@ const SUBTYPE_SOURCE: &str = "abstract class Source : () -> String {\n\
 /// carrier reflects and casts to `Function0`, and is named beside the anonymous object's class.
 #[test]
 fn unit_conversion_of_a_function_subtype_converts_its_function_supertype() {
-    // The release gate is pinned by the plain value tests above.
-    if !unit_conversions_available() {
-        return;
-    }
     let source = format!("{UNIT_CONVERSIONS}{SUBTYPE_SOURCE}");
-    assert_conversion_matches_kotlinc(
-        "SubtypeValue",
-        &source,
-        &["SubtypeValueKt$box$1"],
-        "SubtypeValueKt",
-        "public static final java.lang.String box();",
-    );
+    if accepted_like_kotlinc(&source) {
+        assert_conversion_matches_kotlinc(
+            "SubtypeValue",
+            &source,
+            &["SubtypeValueKt$box$1"],
+            "SubtypeValueKt",
+            "public static final java.lang.String box();",
+        );
+    }
 }
 
 const SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
@@ -284,19 +282,23 @@ fn conversion_carriers(classes: &[(String, Vec<u8>)]) -> Vec<(String, String)> {
 /// property initializer, accessor and secondary constructor, while a class's `init` blocks share one.
 #[test]
 fn conversion_carriers_take_kotlincs_names() {
-    // The release gate is pinned by the plain value tests above.
-    if !unit_conversions_available() {
-        return;
-    }
     let source = format!("{UNIT_CONVERSIONS}{NAMING_SOURCE}");
+    if accepted_like_kotlinc(&source) {
+        assert_carrier_names_match_kotlinc(&source);
+    }
+}
+
+/// Compile `source` with both compilers and require krusty's conversion carriers to be kotlinc's,
+/// class name and reflected `suspendConversion<N>` alike.
+fn assert_carrier_names_match_kotlinc(source: &str) {
     let dir = common::scratch_dir().expect("scratch directory");
     let source_path = dir.join("Names.kt");
-    std::fs::write(&source_path, &source).expect("write fixture");
+    std::fs::write(&source_path, source).expect("write fixture");
     let mut arguments = vec![
         "-d".to_string(),
         dir.join("ref").to_string_lossy().into_owned(),
     ];
-    arguments.extend(common::language_directives::kotlinc_args(&source));
+    arguments.extend(common::language_directives::kotlinc_args(source));
     arguments.push(source_path.to_string_lossy().into_owned());
     let (code, stderr) =
         common::kotlinc_compile(&arguments).expect("reference kotlinc is provisioned");
@@ -314,7 +316,7 @@ fn conversion_carriers_take_kotlincs_names() {
         })
         .collect::<Vec<_>>();
     let _ = std::fs::remove_dir_all(dir);
-    let ours = common::compile_in_process_metadata_cp(&source, "Names", &[common::stdlib_jar()])
+    let ours = common::compile_in_process_metadata_cp(source, "Names", &[common::stdlib_jar()])
         .expect("krusty compiles the conversions");
     let expected = conversion_carriers(&reference);
     assert_eq!(expected.len(), 11, "kotlinc's carriers: {expected:?}");

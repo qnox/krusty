@@ -231,7 +231,10 @@ against a generic member and a non-generic extension reports the extension's mis
 unexpected type argument); tied survivors are reported together as NONE_APPLICABLE at the callee
 name (`i?.hashCode(1)` lists `hashCode()` and `Any?.hashCode()`). Earlier releases report the
 member's own error (`too many arguments for 'fun hashCode(): Int'.` at the argument). One call's
-diagnostics are listed in source order. Tests follow the same target:
+diagnostics are listed in source order, and so are one file's body diagnostics: kotlinc lists them
+by position, not in the order the checker visits a class's constructors, property initializers,
+accessors and `init` blocks (`conversion_carriers_take_kotlincs_names` before 2.4.20). Tests
+follow the same target:
 differential tests compare against whichever kotlinc the run provisions, and a test that pins what
 kotlinc says reads it from a values file recorded per version from kotlinc itself
 (`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
