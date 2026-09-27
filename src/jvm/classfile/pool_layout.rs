@@ -15,6 +15,8 @@
 //!   placed where the method's constants began, in the order ASM's `MethodWriter` interns the
 //!   rewritten body: catch types, then each instruction's operands, then the local-variable
 //!   tables, then the frames' classes, every entry after the entries it names;
+//! - an entry a rewritten method interned for code its rewrite removed, and that code emitted
+//!   as it was names later, is placed where that code first names it: ASM interns it there;
 //! - every other entry keeps its relative place.
 //!
 //! Every index in the class is then renumbered. A class whose `ldc` operand would no longer fit in
@@ -101,6 +103,9 @@ struct Layout<'a> {
     /// Per rewritten method: the index its constants are placed before, and the entries its code
     /// names in ASM's order.
     sequences: Vec<(usize, Vec<u16>)>,
+    /// Entries a rewrite left only to code emitted as it was, with the index each is placed
+    /// before (see [`orphan_anchors`]).
+    anchored: Vec<Option<usize>>,
 }
 
 impl<'a> Layout<'a> {
@@ -122,17 +127,25 @@ impl<'a> Layout<'a> {
             }
         }
         let mut parts: Vec<[Vec<u16>; 4]> = relaid.iter().map(|_| Default::default()).collect();
+        let mut rewritten_reach = vec![false; count];
         for slot in &read.slots {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class => None,
+                Holder::Class | Holder::AttributeName => None,
             };
             match rewritten {
-                Some((at, part)) => parts[at][part_order(part)].push(slot.index),
+                Some((at, part)) => {
+                    parts[at][part_order(part)].push(slot.index);
+                    reach(read, slot.index, &mut rewritten_reach);
+                }
                 None => reach(read, slot.index, &mut fixed),
             }
         }
+        let orphaned: Vec<bool> = (0..count)
+            .map(|index| owned[index] && kept[index] && !rewritten_reach[index])
+            .collect();
+        let anchored = orphan_anchors(read, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
             let unowned: Vec<u16> = (1..count)
                 .filter(|&index| read.entries[index].is_some() && !owned[index])
@@ -165,6 +178,7 @@ impl<'a> Layout<'a> {
             kept,
             movable,
             sequences,
+            anchored,
         }
     }
 
@@ -176,19 +190,40 @@ impl<'a> Layout<'a> {
         let mut anchors: Vec<&(usize, Vec<u16>)> = self.sequences.iter().collect();
         anchors.sort_by_key(|(anchor, _)| *anchor);
         let mut anchors = anchors.into_iter().peekable();
-        for index in 1..count {
-            while let Some((_, sequence)) = anchors.next_if(|(anchor, _)| *anchor <= index) {
-                for &entry in sequence {
-                    self.place(entry, &mut placed, &mut order);
+        let mut orphans: Vec<(usize, u16)> = (0..count)
+            .filter_map(|index| Some((self.anchored[index]?, index as u16)))
+            .collect();
+        orphans.sort_unstable();
+        let mut orphans = orphans.into_iter().peekable();
+        // A sequence goes before an orphan with the same anchor; an anchor past the last entry
+        // places its sequence or orphan at the end, still in anchor order.
+        for index in 1..=count {
+            let bound = if index == count { usize::MAX } else { index };
+            loop {
+                let sequence = anchors.peek().map(|(anchor, _)| *anchor);
+                let orphan = orphans.peek().map(|&(anchor, _)| anchor);
+                match (sequence, orphan) {
+                    (Some(sequence), orphan)
+                        if sequence <= bound && orphan.is_none_or(|orphan| sequence <= orphan) =>
+                    {
+                        let (_, sequence) = anchors.next().expect("a peeked sequence");
+                        for &entry in sequence {
+                            self.place(entry, &mut placed, &mut order);
+                        }
+                    }
+                    (_, Some(orphan)) if orphan <= bound => {
+                        let (_, orphan) = orphans.next().expect("a peeked orphan");
+                        self.place(orphan, &mut placed, &mut order);
+                    }
+                    _ => break,
                 }
             }
-            if self.read.entries[index].is_some() && !self.movable[index] {
+            if index < count
+                && self.read.entries[index].is_some()
+                && !self.movable[index]
+                && self.anchored[index].is_none()
+            {
                 self.place(index as u16, &mut placed, &mut order);
-            }
-        }
-        for (_, sequence) in anchors {
-            for &entry in sequence {
-                self.place(entry, &mut placed, &mut order);
             }
         }
         // Every kept entry is placed by now: it is named by a slot or by a placed entry. Placing
@@ -213,6 +248,100 @@ impl<'a> Layout<'a> {
         }
         order.push(index);
     }
+}
+
+/// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
+/// code no longer names, first named (in kotlinc's visit order) by the code of a method emitted
+/// as it was, is placed before the first entry that code names for the first time with or after
+/// it, or right after the last entry that method names when none follows. An entry some other
+/// slot names first stays where it is.
+fn orphan_anchors(
+    read: &ClassSlots,
+    by_method: &HashMap<usize, usize>,
+    orphaned: &[bool],
+) -> Vec<Option<usize>> {
+    let count = read.entries.len();
+    let mut anchored = vec![None; count];
+    if !orphaned.contains(&true) {
+        return anchored;
+    }
+    let mut seen = vec![false; count];
+    let mut method = None;
+    // The last entry the current method names: its header, then its code.
+    let mut named_max = 0;
+    // The last entry the slots since the last code slot name: the next method's header.
+    let mut header_max = 0;
+    let mut pending: Vec<usize> = Vec::new();
+    let settle = |pending: &mut Vec<usize>, anchor: usize, anchored: &mut [Option<usize>]| {
+        for orphan in pending.drain(..) {
+            if anchor > orphan {
+                anchored[orphan] = Some(anchor);
+            }
+        }
+    };
+    for slot in read.visit_order() {
+        let code = match slot.holder {
+            Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
+            _ => None,
+        };
+        let reached = reached_from(read, slot.index);
+        let Some(at) = code else {
+            for &index in &reached {
+                seen[index] = true;
+                if !orphaned[index] && slot.holder == Holder::Class {
+                    header_max = header_max.max(index);
+                }
+            }
+            if matches!(slot.holder, Holder::Code(..)) {
+                header_max = 0;
+            }
+            continue;
+        };
+        if method != Some(at) {
+            settle(&mut pending, named_max + 1, &mut anchored);
+            method = Some(at);
+            named_max = header_max;
+        }
+        header_max = 0;
+        for &index in &reached {
+            if orphaned[index] && !seen[index] {
+                pending.push(index);
+            }
+        }
+        let fresh = reached
+            .iter()
+            .copied()
+            .filter(|&index| !seen[index] && !orphaned[index])
+            .min();
+        if let Some(fresh) = fresh {
+            settle(&mut pending, fresh, &mut anchored);
+        }
+        for index in reached {
+            seen[index] = true;
+            if !orphaned[index] {
+                named_max = named_max.max(index);
+            }
+        }
+    }
+    settle(&mut pending, named_max + 1, &mut anchored);
+    anchored
+}
+
+/// `index` and every entry it names, each once.
+fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
+    let mut reached = Vec::new();
+    let mut pending = vec![index];
+    while let Some(index) = pending.pop() {
+        let at = usize::from(index);
+        if at >= read.entries.len() || reached.contains(&at) {
+            continue;
+        }
+        reached.push(at);
+        if let Some(entry) = &read.entries[at] {
+            pending.extend(entry.components.iter().map(|&(_, component)| component));
+        }
+    }
+    reached
 }
 
 fn part_order(part: Part) -> usize {

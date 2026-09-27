@@ -29,6 +29,10 @@
 //! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
 //!   `toString`/`hashCode`/`equals`, whose bodies and local-variable tables intern where they are
 //!   emitted.
+//! - A constant a rewrite removed from one method's body interns where a later body first names
+//!   it: an always-true type check leaves no class entry ahead of the next method, a discarded
+//!   `Unit` read's field interns after a lambda body's header, and an object's elided `INSTANCE`
+//!   read interns its name at `<clinit>`'s store, since fields are written after methods.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
 //!
@@ -36,8 +40,14 @@
 //! neutral names only.
 use super::common;
 
-/// Compile `src` with kotlinc and with krusty and return both builds of each class in `classes`.
-fn build_both(stem: &str, src: &str, classes: &[&str]) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+/// Compile `src` with kotlinc and with krusty against `classpath` and return both builds of each
+/// class in `classes`.
+fn build_both(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    classpath: &[std::path::PathBuf],
+) -> Vec<(String, Vec<u8>, Vec<u8>)> {
     let dir = common::scratch_dir().expect("scratch directory");
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
@@ -50,8 +60,9 @@ fn build_both(stem: &str, src: &str, classes: &[&str]) -> Vec<(String, Vec<u8>, 
     ])
     .expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let krusty = common::compile_in_process_metadata_cp_module_target(src, stem, &[], "main", None)
-        .expect("krusty compiles the fixture");
+    let krusty =
+        common::compile_in_process_metadata_cp_module_target(src, stem, classpath, "main", None)
+            .expect("krusty compiles the fixture");
     let pairs = classes
         .iter()
         .map(|class| {
@@ -70,7 +81,22 @@ fn build_both(stem: &str, src: &str, classes: &[&str]) -> Vec<(String, Vec<u8>, 
 }
 
 fn assert_identical(stem: &str, src: &str, classes: &[&str]) {
-    for (class, reference, krusty) in build_both(stem, src, classes) {
+    assert_identical_against(stem, src, classes, &[]);
+}
+
+/// [`assert_identical`] with the standard library on krusty's classpath, for a fixture whose
+/// shape depends on what the library's metadata declares.
+fn assert_identical_with_stdlib(stem: &str, src: &str, classes: &[&str]) {
+    assert_identical_against(stem, src, classes, &[common::stdlib_jar()]);
+}
+
+fn assert_identical_against(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    classpath: &[std::path::PathBuf],
+) {
+    for (class, reference, krusty) in build_both(stem, src, classes, classpath) {
         assert!(reference == krusty, "{class} differs from kotlinc's build");
     }
 }
@@ -314,5 +340,56 @@ fn a_data_class_declared_function_interns_before_its_synthesized_members() {
          \x20   fun merge(other: Cell): Cell = other\n\
          }\n",
         &["Cell"],
+    );
+}
+
+#[test]
+fn a_class_an_elided_type_check_named_interns_where_a_later_body_names_it() {
+    assert_identical(
+        "ElidedCheck",
+        r#"class Marker
+
+class Cell<T>(val value: T)
+
+fun isCell(cell: Cell<out Any?>): Boolean = cell is Cell<*>
+
+fun pick(first: Any): Any {
+    val marker = first as Marker
+    return Cell(marker)
+}
+"#,
+        &["ElidedCheckKt"],
+    );
+}
+
+#[test]
+fn a_field_an_elided_read_named_interns_after_the_next_body_s_header() {
+    assert_identical(
+        "ElidedRead",
+        r#"val action: () -> Unit = {}
+
+fun run(): String {
+    action() as Unit
+    return "OK"
+}
+"#,
+        &["ElidedReadKt"],
+    );
+}
+
+#[test]
+fn an_object_s_elided_instance_read_interns_its_name_at_the_static_initializer() {
+    assert_identical_with_stdlib(
+        "ElidedInstance",
+        r#"fun bump(): String {
+    Counter += 1
+    return "OK"
+}
+
+object Counter {
+    operator fun plusAssign(step: Any) = Unit
+}
+"#,
+        &["Counter", "ElidedInstanceKt"],
     );
 }
