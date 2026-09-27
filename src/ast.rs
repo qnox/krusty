@@ -1669,6 +1669,10 @@ pub struct File {
     /// id, from the file's local-class naming walk. A backend that realizes one as a class of its
     /// own (a suspend lambda's `SuspendLambda`) names it from this.
     pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
+    /// The value each generated-class sequence the naming walk touched had before this file (or
+    /// declaration unit) numbered anything in it. Settling the walk after resolution replays the
+    /// same sequences from these positions.
+    pub generated_class_sequence_starts: std::collections::HashMap<Vec<String>, u32>,
     /// Lifting provenance of each lambda literal, by expression id, from the file's local-function
     /// naming walk.
     pub lambda_lifting_sites: std::collections::HashMap<u32, LiftingSite>,
@@ -1798,6 +1802,9 @@ pub struct File {
     /// instead of being unconditionally public. The per-class `kotlin.ConsistentCopyVisibility` /
     /// `kotlin.ExposedCopyVisibility` annotation overrides are unhandled.
     pub data_copy_respects_ctor_visibility: bool,
+    /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
+    /// non-`Unit` may be converted to a function type returning `Unit`.
+    pub unit_conversions_on_arbitrary_expressions: bool,
 }
 
 impl File {
@@ -1860,6 +1867,7 @@ impl File {
         self.anon_fun_lambdas = Default::default();
         self.anon_fun_context_count = Default::default();
         self.callable_reference_provenance = Default::default();
+        self.generated_class_sequence_starts = Default::default();
         self.lambda_lifting_sites = Default::default();
         self.local_function_lifting_sites = Default::default();
         self.local_delegate_lifting_sites = Default::default();

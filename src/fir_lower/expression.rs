@@ -1522,8 +1522,19 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(expression))?
             .ty
             .get();
-        let expression = self.expression(expression)?;
-        self.lowered_with_conversion(expression, source_type, conversion)
+        let value = expression;
+        let expression = self.expression(value)?;
+        let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
+        if conversion.is_some_and(|conversion| {
+            matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
+        }) {
+            // The checker named the class a function-value conversion compiles to on its value.
+            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+                self.ir.expr_source_lines.insert(converted, line);
+            }
+            self.record_generated_class_provenance(value, converted as usize);
+        }
+        Ok(converted)
     }
 
     /// Apply a checked conversion to an operand already lowered from a value of `source_type`.
@@ -1656,8 +1667,8 @@ impl BodyLowering<'_> {
                         })?
                 }
             }
-            FirConversionKind::SuspendFunction { from, to } => self
-                .suspend_function_value_adapter(from, to, expression)
+            FirConversionKind::FunctionValue { from, to, ordinal } => self
+                .function_value_conversion(from, to, ordinal, expression)
                 .ok_or(FirLoweringFailure::UnsupportedConversion {
                     origin: conversion_origin,
                 })?,

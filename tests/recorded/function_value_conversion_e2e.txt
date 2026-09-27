@@ -1,0 +1,15 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[unit_and_suspend_conversion_of_a_value_is_one_carrier]
+2.4.0..2.4.10:
+  Main.kt:12:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.
+
+[unit_conversion_of_a_value_is_kotlincs_bound_carrier]
+2.4.0..2.4.10:
+  Main.kt:11:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+
+[unit_conversion_of_a_value_requires_the_language_feature]
+2.4.0..2.4.20:
+  Main.kt:4:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:5:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.

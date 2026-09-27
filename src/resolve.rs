@@ -65,6 +65,7 @@ mod diagnostic_selection;
 mod finalized_projection;
 mod for_loop_iteration;
 pub(crate) mod function_type_parameters;
+mod function_value_conversions;
 mod generic_call_bindings;
 mod implicit_rungs;
 mod inspection_analysis;
@@ -10299,10 +10300,12 @@ pub struct TypeInfo {
     /// argument target. The expression itself may still be an `Int` operator tree; checked FIR
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
     pub(crate) selected_numeric_conversions: HashMap<ExprId, Ty>,
-    /// Exact regular callable constituent selected for Kotlin's one-way conversion to a suspend
-    /// function type. The nominal expression may implement several callable supertypes, so checked
-    /// FIR must consume this pair instead of selecting a constituent again.
-    pub(crate) selected_suspend_function_conversions: HashMap<ExprId, (Ty, Ty)>,
+    /// Exact regular callable constituent selected for a function-value conversion (suspend and/or
+    /// `Unit` result), with its target. The nominal expression may implement several callable
+    /// supertypes, so checked FIR must consume this pair instead of selecting a constituent again.
+    pub(crate) selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
+    /// Generated-class names settled against the selected function-value conversions.
+    pub(crate) generated_class_names: crate::frontend::SettledGeneratedClassNames,
     /// A bare-member read (`Expr::Name`) or unqualified call that resolved against a FLOW-NARROWED
     /// implicit receiver (`if (this is B) … a …`, where `a`/`m()` is a member of `B` but not of the
     /// declared receiver). Maps the read/call `ExprId` to the narrowed receiver's internal name so the
@@ -17128,10 +17131,10 @@ impl<'a> Checker<'a> {
                 .iter()
                 .zip(&actual.params)
                 .all(|(expected, actual)| component(*expected, *actual))
-            // Unit coercion belongs to lambda/callable-reference syntax. Callers normalize those
-            // expressions before this erased-shape comparison; an already-stored `() -> String`
-            // value is not a `() -> Unit` value.
-            && component(expected.ret, actual.ret)
+            // Lambdas and callable references are normalized before this comparison. A stored
+            // `() -> String` value reaches `() -> Unit` only through the language's unit conversion.
+            && (component(expected.ret, actual.ret)
+                || self.unit_conversion_admits_result(expected.ret))
     }
 
     /// Whether one expression can reach a semantic SAM parameter through Kotlin's function-value
@@ -37492,7 +37495,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_expression_intersections: HashMap::new(),
         selected_value_smartcasts: HashMap::new(),
         selected_numeric_conversions: HashMap::new(),
-        selected_suspend_function_conversions: HashMap::new(),
+        selected_function_value_conversions: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
         unbound_value_lambda_call_formals: HashMap::new(),
@@ -39196,7 +39199,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_call_type_argument_bounds,
         selected_value_smartcasts,
         selected_numeric_conversions,
-        selected_suspend_function_conversions,
+        selected_function_value_conversions,
         narrowed_this_member,
         resolved_calls,
         implicit_receiver_selections,
@@ -39502,6 +39505,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_sam_conversions.keys().collect::<Vec<_>>(),
         resolved_constructors.keys().collect::<Vec<_>>(),
     );
+    let generated_class_names = crate::frontend::settle_generated_class_names(
+        file,
+        &selected_function_value_conversions
+            .keys()
+            .copied()
+            .collect(),
+    );
     let mut info = TypeInfo {
         expr_types,
         callable_reference_types,
@@ -39536,7 +39546,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_call_type_argument_bounds,
         selected_value_smartcasts,
         selected_numeric_conversions,
-        selected_suspend_function_conversions,
+        selected_function_value_conversions,
+        generated_class_names,
         narrowed_this_member,
         resolved_calls,
         implicit_receiver_selections,
@@ -40427,7 +40438,7 @@ struct Checker<'a> {
     inferred_expression_intersections: HashMap<ExprId, Vec<Ty>>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
-    selected_suspend_function_conversions: HashMap<ExprId, (Ty, Ty)>,
+    selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
@@ -49676,10 +49687,11 @@ impl<'a> Checker<'a> {
                         if !candidate
                             .call_sig
                             .parameter_admits(parameter, expected, actual)
+                            || self.function_value_rejected(argument, expected, actual)
                         {
                             self.report_assignability_error(
                                 expected,
-                                actual,
+                                self.suspend_converted_argument(expected, actual),
                                 self.span(argument),
                                 context,
                             );
@@ -64134,36 +64146,6 @@ impl<'a> Checker<'a> {
             .find(|candidate| fits(*candidate))
     }
 
-    /// Select the exact regular callable constituent wrapped by Kotlin's one-way suspend
-    /// conversion. The nominal value can implement several function supertypes; arity alone is not
-    /// enough, so compare each complete function type against the non-suspend form of the expected
-    /// target and retain the selected source shape for FIR.
-    fn suspend_function_conversion_source(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        nominal: Ty,
-        expected: Ty,
-    ) -> Option<Ty> {
-        let Ty::Fun(target) = expected.non_null() else {
-            return None;
-        };
-        if !target.suspend || nominal.is_nullable() {
-            return None;
-        }
-        let regular_target = Ty::fun_with_shape(
-            target.params.clone(),
-            target.ret,
-            target.context_count,
-            target.has_receiver,
-            false,
-        );
-        self.expression_function_types(scope, expression, nominal)
-            .into_iter()
-            .filter(|candidate| matches!(candidate, Ty::Fun(signature) if !signature.suspend))
-            .find(|candidate| self.receiver_is_assignable(*candidate, regular_target))
-    }
-
     /// Exact function type carried by a value. This deliberately excludes a classifier's
     /// `operator fun invoke`: a callable object remains that object, and direct invocation must select
     /// and retain its member declaration rather than pretending the receiver is a `FunctionN` value.
@@ -64212,7 +64194,7 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if matches!(expected.non_null(), Ty::Fun(_)) {
-            self.suspend_function_conversion_source(scope, expression, nominal, expected)
+            self.function_value_conversion_source(scope, expression, nominal, expected)
                 .or_else(|| {
                     self.expression_function_types(scope, expression, nominal)
                         .into_iter()
@@ -64247,15 +64229,14 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         // Candidate probing calls `expression_type_for_expected` directly. Reaching this mutating
         // seam means an enclosing declaration/call has committed its expected type, so retain the
-        // exact callable constituent chosen for suspend conversion. Callable-reference FIR already
+        // exact callable constituent chosen for its conversion. Callable-reference FIR already
         // carries its own checked adaptation and must not acquire a second wrapper here.
-        self.selected_suspend_function_conversions
-            .remove(&expression);
+        self.selected_function_value_conversions.remove(&expression);
         if !matches!(self.file.expr(expression), Expr::CallableRef { .. }) {
             if let Some(source) =
-                self.suspend_function_conversion_source(scope, expression, nominal, expected)
+                self.function_value_conversion_source(scope, expression, nominal, expected)
             {
-                self.selected_suspend_function_conversions
+                self.selected_function_value_conversions
                     .insert(expression, (source, expected));
             }
         }

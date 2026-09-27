@@ -185,7 +185,9 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::Constructor { .. } => {
             crate::ir::ReflectedCallable::Constructor
         }
-        crate::ir::IrCallableReferenceTarget::External { .. } => {
+        // A conversion is a compiler builtin whose reflected name and signature are fixed.
+        crate::ir::IrCallableReferenceTarget::External { .. }
+        | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. } => {
             crate::ir::ReflectedCallable::Physical
         }
     };
@@ -232,6 +234,14 @@ fn realize_adapter_reference(
             declaration,
             receiver,
         } => external_reflection(classpath, declaration, receiver)?,
+        // kotlinc reflects every function-value conversion, suspend or `Unit`, as a synthesized
+        // `suspendConversion<N>` compiler builtin on `Intrinsics.Kotlin`.
+        crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => (
+            Some(crate::types::wk::kotlin_intrinsics_reflection_owner()),
+            format!("suspendConversion{ordinal}"),
+            false,
+            None,
+        ),
     };
     let adapted = reference.adaptation.is_some() || suspend_conversion;
     let bound = reference.bound_receiver.is_some();

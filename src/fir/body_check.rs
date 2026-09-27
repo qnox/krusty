@@ -177,6 +177,8 @@ pub enum BodyCheckFailureKind {
     MissingStablePropertyTarget,
     LocalVariableCallableReference,
     UnsupportedCallShape,
+    /// The resolver selected a function-value conversion the naming walk did not name.
+    UnnamedFunctionValueConversion,
     UnsupportedExpression(ExpressionForm),
     UnsupportedStatement(StatementForm),
 }

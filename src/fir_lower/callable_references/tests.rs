@@ -159,7 +159,7 @@ fn suspend_converted_local_reference_becomes_suspend_wrapper() {
 }
 
 #[test]
-fn suspend_converted_function_value_becomes_checked_forwarding_wrapper() {
+fn suspend_converted_function_value_becomes_bound_conversion_reference() {
     let ir = lower_single_source(
         r#"
             fun convert(block: (Int) -> String): suspend (Int) -> String = block
@@ -167,28 +167,31 @@ fn suspend_converted_function_value_becomes_checked_forwarding_wrapper() {
         "SuspendConvertedFunctionValue",
     );
 
-    let wrapper = ir
+    let adapter = ir
         .functions
         .iter()
-        .position(|function| function.name.starts_with("$fir_suspend_delegate_"))
-        .expect("suspend function-value conversion wrapper") as u32;
+        .position(|function| function.name.starts_with("$fir_function_value_conversion_"))
+        .expect("function-value conversion adapter") as u32;
     assert!(matches!(
-        ir.functions[wrapper as usize].params.as_slice(),
+        ir.functions[adapter as usize].params.as_slice(),
         [Ty::Fun(source), Ty::Int]
             if !source.suspend && source.params == [Ty::Int] && source.ret == Ty::String
     ));
-    assert_eq!(ir.functions[wrapper as usize].ret, Ty::String);
-    assert!(ir.suspend_funs.contains(&wrapper));
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::Lambda {
-            impl_fn,
-            arity: 2,
-            captures,
-            sam: None,
-            ..
-        } if *impl_fn == wrapper && captures.len() == 1
-    )));
+    assert_eq!(ir.functions[adapter as usize].ret, Ty::String);
+    assert!(ir.suspend_funs.contains(&adapter));
+    let references = semantic_references(&ir);
+    let [reference] = references.as_slice() else {
+        panic!("one conversion reference, got {references:?}");
+    };
+    assert!(matches!(
+        reference.target,
+        crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 }
+    ));
+    assert_eq!(reference.adapter, adapter);
+    assert!(reference.captures.is_empty() && reference.bound_receiver.is_some());
+    assert!(reference.declaration_suspend && reference.adaptation.is_none());
+    assert!(matches!(reference.function_type, Ty::Fun(signature)
+        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::String));
 }
 
 #[test]

@@ -4301,7 +4301,7 @@ fn regular_function_value_to_suspend_function_is_an_explicit_checked_conversion(
     let FirExprKind::ImplicitConversion {
         conversion:
             FirConversion {
-                kind: FirConversionKind::SuspendFunction { from, to },
+                kind: FirConversionKind::FunctionValue { from, to, .. },
                 ..
             },
         ..
@@ -4353,12 +4353,11 @@ fn functional_intersection_selects_the_matching_constituent_for_suspend_conversi
             else {
                 return None;
             };
-            matches!(conversion.kind, FirConversionKind::SuspendFunction { .. })
-                .then_some(conversion)
+            matches!(conversion.kind, FirConversionKind::FunctionValue { .. }).then_some(conversion)
         })
     });
     let Some(FirConversion {
-        kind: FirConversionKind::SuspendFunction { from, to },
+        kind: FirConversionKind::FunctionValue { from, to, .. },
         ..
     }) = conversion
     else {

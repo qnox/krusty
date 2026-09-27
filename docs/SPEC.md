@@ -8703,20 +8703,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
   advances from `unresolved` to the separate suspend-conversion gap.)
 
-- **Suspend conversion: a NON-suspend function value flowing into a `suspend` function-type parameter
-  wraps in a synthesized adapter.** kotlinc's shape: a `FunctionReferenceImpl` subclass implementing
-  `Function{n+1}` plus the `kotlin/coroutines/jvm/internal/SuspendFunction` marker, whose `invoke`
-  DROPS the trailing continuation and delegates to the wrapped value's erased `Function{n}.invoke` —
-  a plain function never suspends, so its erased result (for `Unit`, the `Unit.INSTANCE` an erased
-  Unit lambda already returns) is the completion value verbatim. The adapter class lives in the
-  `$suspendConversion$` name space: its `uniq` is the arg expr id, which a callable-ref VALUE lowered
-  from the same arg already claims under `$fnref$` (a shared name emits two classes under one name —
-  the survivor has the wrong arity → CCE). A SUSPEND value into a suspend parameter passes through
-  unchanged (both erase to `Function{n+1}`). A suspend function VALUE call in CPS position erases its
-  `InvokeFunction` ret to `Object` when the continuation is threaded — a tail-forward `areturn`s the
-  raw erased result (COROUTINE_SUSPENDED or the boxed value); the flattener re-applies the logical
-  coercion from `ir.suspend_calls`. (`tests/suspend_conversion_e2e.rs`; corpus
-  `suspendConversion/` + `callableReference/adaptedReferences/suspendConversion/` — box-OK +10.)
+- **Function-value conversions: suspend conversion and `UnitConversionsOnArbitraryExpressions`.** A
+  regular function value reaching a `suspend` function type converts to it (suspend conversion), and
+  under `+UnitConversionsOnArbitraryExpressions` (KT-84393; kotlinc implements it from 2.4.20, so
+  krusty reproducing 2.4.0/2.4.10 keeps rejecting it even with the flag) a value whose result is not
+  `Unit` converts to the same shape returning `Unit` (unit conversion). The two compose
+  (`() -> String` into `suspend () -> Unit`). Only a regular, non-null value converts, and a callable
+  reference adapts its own result instead. The resolver (`src/resolve/function_value_conversions.rs`)
+  selects the exact callable constituent converted — for a value whose class implements the function
+  type, that function supertype — and applicability admits the non-`Unit` result only through this
+  rule. Checked FIR carries `FirConversionKind::FunctionValue { from, to, ordinal }`; common lowering
+  realizes it as a callable reference bound to the value (`IrCallableReferenceTarget::
+  FunctionValueConversion`) whose adapter invokes the value's `FunctionN.invoke`, discarding the
+  result for a unit conversion and otherwise handing it on as the erased suspend result. The JVM
+  carrier is kotlinc's: a synthetic `FunctionReferenceImpl` (not `AdaptedFunctionReference`, flags 0)
+  implementing the target `FunctionN` (plus `SuspendFunction` for a suspend target), constructed with
+  the value as bound receiver and reflecting `Intrinsics.Kotlin`'s `suspendConversion<N>` with the
+  source function type as first parameter (`suspendConversion0(Lkotlin/jvm/functions/Function0;)V`,
+  or `…Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` for a suspend target); its `invoke`
+  casts `receiver` to the source `FunctionN` and calls it, then `pop`s for a unit conversion.
+  Naming follows kotlinc's one local-class walk: a conversion takes the next position of the sequence
+  it is written in (shifting every later lambda and reference there) and its operand is named inside
+  it, so `src/frontend/local_class_names.rs` replays the walk once resolution has selected the
+  conversions (`settle_generated_class_names`). `N` counts the conversions of the innermost callable
+  in source order: each function, local function, lambda, property initializer, accessor and secondary
+  constructor restarts it, while a class's initializers share one. Without the feature, a mismatched
+  function value is reported as kotlinc's `argument type mismatch` (a regular value reaching a
+  suspend parameter is shown as the suspend type it converted to). Known gaps: an anonymous object
+  following a conversion in the same sequence keeps its pre-resolution position (local classifier
+  identities are published before bodies are resolved); a suspend carrier boxes a primitive argument
+  with `valueOf` where kotlinc's coroutine pass uses `Boxing.box*` (krusty applies that rewrite only
+  to transformed state machines); the conversion is also recorded at declaration and return
+  boundaries, which kotlinc rejects. (`tests/function_value_conversion_e2e.rs`,
+  `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
+  `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
 
 - **A suspend function VALUE invoked in statement position mid-body gets its own resume state.**
   The machine already threads the continuation and parks/resumes correctly; the leaf/machine

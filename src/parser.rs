@@ -44,6 +44,8 @@ fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ImplicitSignedToUnsignedIntegerConversion");
     file.data_copy_respects_ctor_visibility =
         features.has("DataClassCopyRespectsConstructorVisibility");
+    file.unit_conversions_on_arbitrary_expressions =
+        features.has("UnitConversionsOnArbitraryExpressions");
 }
 
 /// Parse with the default language feature set.
