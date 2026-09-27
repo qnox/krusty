@@ -1335,6 +1335,7 @@ struct BuiltinFunction {
     is_operator: bool,
     is_infix: bool,
     context_count: usize,
+    annotations: Vec<TypeName>,
 }
 
 #[derive(Clone)]
@@ -1353,20 +1354,19 @@ pub(super) struct BuiltinPackageFunction {
     pub is_operator: bool,
     pub is_infix: bool,
     pub context_count: usize,
+    pub annotations: Vec<TypeName>,
 }
 
 struct BuiltinClass {
     supertypes: TypeNameList,
-    /// The same supertypes carrying their type ARGUMENTS (`MutableList<E> : List<E>`) — the chain a
-    /// receiver's type argument travels up when no JVM class generic signature is available.
+    /// Supertypes with type arguments, used when no JVM class generic signature is available.
     supertype_tys: Vec<Ty>,
     /// The class's formal type-parameter names, in declaration order (`Map` → `[K, V]`).
     formals: Vec<String>,
     formal_variances: Vec<crate::types::TypeVariance>,
     members: Vec<BuiltinMember>,
     constructors: Vec<BuiltinConstructor>,
-    /// Metadata-declared companion: simple source name plus the companion classifier's exact
-    /// semantic builtin identity.
+    /// Metadata-declared companion source name and exact semantic builtin identity.
     companion_object: Option<(String, TypeName)>,
     kind: crate::libraries::TypeKind,
     visibility: crate::types::Visibility,
@@ -1376,16 +1376,11 @@ struct BuiltinClass {
     nullable_member_returns: Vec<(String, usize)>,
 }
 
-/// One decoded `.kotlin_builtins` member, in the ONE form that is not derivable: its declared
-/// (unerased) signature — its own formals, parameter types and return, including type parameters
-/// (`List<E>.get(Int): E`) and type arguments (`Set<Map.Entry<K, V>>`). A builtin member has no JVM
-/// `Signature` string, so this is the only carrier that lets a type-parameter return bind against the
-/// receiver's type arguments.
+/// A decoded `.kotlin_builtins` member's non-derivable, unerased declaration signature. It retains
+/// formals, type parameters and type arguments so returns can bind against receiver arguments; no
+/// JVM `Signature` string exists for this declaration.
 ///
-/// Deliberately NOT a [`crate::libraries::LibraryMember`]: the erased `params`/`ret`/`descriptor` a
-/// `LibraryMember` carries are [`builtin_erased`] of this signature, and the rest of its fields need
-/// the classpath (the `owner` mapping, the interface flag) which this decode does not have.
-/// [`Classpath::builtin_members_name`] is where the two are joined, and it memoizes its result.
+/// This is not a `LibraryMember`; [`Classpath::builtin_members_name`] joins erasure and classpath facts.
 struct BuiltinMember {
     name: String,
     generic_sig: GenericSig,
@@ -1395,6 +1390,7 @@ struct BuiltinMember {
     is_abstract: bool,
     return_value_status: crate::types::ReturnValueStatus,
     ret_nullable: bool,
+    annotations: Vec<crate::types::TypeName>,
 }
 
 struct BuiltinConstructor {
@@ -1509,6 +1505,7 @@ impl BuiltinsFile {
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
                 context_count: function.context_count,
+                annotations: function.annotations,
             });
         }
         for (internal, class) in package.classes {
@@ -1556,6 +1553,7 @@ impl BuiltinsFile {
                         is_abstract: m.is_abstract,
                         return_value_status: m.return_value_status,
                         ret_nullable: m.ret_nullable,
+                        annotations: m.annotations,
                     }
                 })
                 .collect();
@@ -3127,6 +3125,7 @@ impl Classpath {
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
                 context_count: function.context_count,
+                annotations: function.annotations.clone(),
             })
             .collect()
     }
@@ -3267,6 +3266,7 @@ impl Classpath {
                             is_property: m.is_property,
                             is_operator: m.is_operator,
                             is_infix: m.is_infix,
+                            annotations: &m.annotations,
                         },
                     );
                     crate::libraries::LibraryMember {
@@ -3306,7 +3306,7 @@ impl Classpath {
                             m.generic_sig.params.len(),
                         ),
                         context_count: 0,
-                        annotations: Vec::new(),
+                        annotations: m.annotations.clone(),
                         contract: None,
                         equality_bound: None,
                         return_value_status: Some(m.return_value_status),

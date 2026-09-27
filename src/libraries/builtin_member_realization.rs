@@ -427,6 +427,9 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         && facts.is_operator
         && facts.params == [Ty::Int]
         && facts.ret == Ty::Char
+        && facts
+            .annotations
+            .contains(&crate::types::wk::intrinsic_const_evaluation())
     {
         return MemberRealization::Intrinsic(CompilerIntrinsic::StringGet);
     }
@@ -456,7 +459,24 @@ mod tests {
             is_property: false,
             is_operator: true,
             is_infix: false,
+            annotations: &[],
         }
+    }
+
+    #[test]
+    fn string_get_requires_the_metadata_intrinsic_annotation() {
+        assert_eq!(
+            realization(facts("kotlin/String", "get", &[Ty::Int], Ty::Char)),
+            MemberRealization::Dispatch
+        );
+
+        let annotations = [crate::types::wk::intrinsic_const_evaluation()];
+        let mut declaration = facts("kotlin/String", "get", &[Ty::Int], Ty::Char);
+        declaration.annotations = &annotations;
+        assert_eq!(
+            realization(declaration),
+            MemberRealization::Intrinsic(CompilerIntrinsic::StringGet)
+        );
     }
 
     #[test]

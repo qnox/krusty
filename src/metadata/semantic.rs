@@ -133,6 +133,8 @@ pub struct KotlinMember {
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
     pub vararg: Option<usize>,
+    /// Qualified identities of annotations declared on this member.
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 pub struct KotlinFunction {
@@ -151,6 +153,8 @@ pub struct KotlinFunction {
     pub is_operator: bool,
     pub is_infix: bool,
     pub context_count: usize,
+    /// Qualified identities of annotations declared on this function.
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 #[derive(Default)]
