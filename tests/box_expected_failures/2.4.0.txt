@@ -18,7 +18,6 @@ boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/special.kt
-builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
@@ -35,8 +34,6 @@ casts/objectToPrimitiveWithAssertion.kt
 classes/kt2224.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
-collections/clashWithInternalMapMethod.kt
-collections/inheritFromAbstractMutableListInt.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 contextParameters/classMemberAndTopLevelWithContext.kt
@@ -154,7 +151,6 @@ initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
-inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunction.kt

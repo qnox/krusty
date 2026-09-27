@@ -90,6 +90,34 @@ fn a_stdlib_abstract_list_subclass_inherits_the_final_size_bridge() {
     assert_methods_match_kotlinc("AbstractListSize", ABSTRACT_LIST_SIZE, &["Pair2"]);
 }
 
+const INHERITED_ABSTRACT_MUTABLE_LIST: &str =
+    "abstract class Mid : AbstractMutableList<String>()\n\
+class Tail : Mid() {\n\
+    override val size: Int get() = 1\n\
+    override fun get(index: Int): String = \"a\"\n\
+    override fun add(index: Int, element: String) {}\n\
+    override fun removeAt(index: Int): String = \"a\"\n\
+    override fun set(index: Int, element: String): String = \"a\"\n\
+}\n\
+fun box(): String {\n\
+    val erased: Collection<String> = Tail()\n\
+    return if (erased.size == 1) \"OK\" else \"fail\"\n\
+}\n";
+
+/// `AbstractMutableList` declares no `size` of its own: it inherits the member, and kotlinc still
+/// gives it the final `size()` bridge. No override edge of `Tail.size` names that class, and the
+/// source class between them declares nothing, yet `Tail` must not redeclare the bridge. (`Mid`'s
+/// own substituted `remove`/`contains`/`indexOf` bridges are a separate gap.)
+#[test]
+fn a_subclass_below_an_inherited_stdlib_size_bridge_does_not_redeclare_it() {
+    assert_eq!(run(INHERITED_ABSTRACT_MUTABLE_LIST), "OK");
+    assert_methods_match_kotlinc(
+        "InheritedAbstractMutableList",
+        INHERITED_ABSTRACT_MUTABLE_LIST,
+        &["Tail"],
+    );
+}
+
 const SOURCE_COLLECTION_CHAIN: &str = "abstract class Base : Collection<String> {\n\
     override val size: Int get() = 0\n\
     override fun isEmpty(): Boolean = size == 0\n\
@@ -220,4 +248,64 @@ fn an_unrelated_superclass_property_leaves_the_size_bridge_to_the_implementation
         \x20   return if (erased.size == 5) \"OK\" else \"fail\"\n\
         }\n";
     assert_eq!(run(SRC), "OK");
+}
+
+const PRIVATE_LENGTH_LIB: &str = "package lib\n\
+open class Base {\n\
+    private fun length(): Int = 7\n\
+    fun hidden(): Int = length()\n\
+    companion object {\n\
+        @JvmStatic fun charAt(index: Int): Char = 'z'\n\
+    }\n\
+}\n";
+
+const PRIVATE_LENGTH_MAIN: &str = "import lib.Base\n\
+class Chars : Base(), CharSequence {\n\
+    override val length: Int get() = 1\n\
+    override fun get(index: Int): Char = 'a'\n\
+    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = this\n\
+}\n\
+fun box(): String {\n\
+    val chars = Chars()\n\
+    val erased: CharSequence = chars\n\
+    return if (erased.length == 1 && erased[0] == 'a' && chars.hidden() == 7) \"OK\" else \"fail\"\n\
+}\n";
+
+/// A separately compiled Kotlin superclass whose `length()I` is PRIVATE and whose `charAt(I)C` is a
+/// STATIC `@JvmStatic` method owns neither special bridge though both carry its exact signature: a
+/// private or static method is not inherited, so the subclass still declares both bridges, and an
+/// erased caller reaches them.
+#[test]
+fn a_private_or_static_superclass_method_with_the_bridge_signature_owns_no_special_bridge() {
+    let classes = common::classes_against_kotlinc_lib(
+        "PrivateLength",
+        &[("Lib.kt", PRIVATE_LENGTH_LIB)],
+        PRIVATE_LENGTH_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    let methods = |bytes: &[u8], who: &str| {
+        krusty::jvm::classreader::parse_class(bytes)
+            .unwrap_or_else(|_| panic!("parse {who} Chars.class"))
+            .methods
+            .into_iter()
+            .map(|method| {
+                (
+                    method.name,
+                    method.descriptor,
+                    method.access,
+                    method.signature,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        methods(&classes.krusty["Chars"], "krusty"),
+        methods(&classes.reference["Chars"], "kotlinc"),
+        "Chars: kotlinc's methods"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(PRIVATE_LENGTH_LIB, PRIVATE_LENGTH_MAIN)
+            .expect("reference kotlinc is provisioned"),
+        "OK"
+    );
 }
