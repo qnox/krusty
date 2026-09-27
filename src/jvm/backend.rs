@@ -943,12 +943,9 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) = crate::jvm::function_references::realize(
-            &mut file.ir,
-            &self.cp,
-            &file.classifiers,
-            &facade,
-        ) {
+        if let Err(target) =
+            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
+        {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!(

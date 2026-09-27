@@ -803,6 +803,8 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                // Selected by its Kotlin name, which reflection names (see the extension path).
+                reflection_name: Some(name.to_string()),
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -4597,16 +4599,11 @@ impl JvmLibraries {
                     // type arguments. Without it the reified body cannot be specialized and the call falls
                     // back to a (throwing) direct invoke of the inline-only method.
                     signature: cand.as_ref().and_then(|c| c.signature.clone()),
-                    // The name this extension is DECLARED under, beside the emit handle it is
-                    // realized as. Everything above selected this declaration by `mf.kotlin_name`
-                    // and then derived a JVM method for it, so the two spellings are already known
-                    // to be different things here: `@JvmName` renames the handle outright, and a
-                    // value-class signature makes kotlinc append a hash of the erasure, which is
-                    // why `UInt.downTo` is compiled as `downTo-J1ME1BU`. Neither is recoverable
-                    // from the spelling, and a consumer that needs the Kotlin name should not have
-                    // to re-align the overload to get it. A classifier member already publishes
-                    // both (`LibraryCallable::classifier_member`); this is the same thing for a
-                    // declaration reached through a facade.
+                    // The name this extension is DECLARED under, beside the JVM method it is
+                    // realized as: `@JvmName` renames the method, and a value-class signature
+                    // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
+                    // recoverable from the spelling, so the provider publishes both, as a
+                    // classifier member does (`LibraryCallable::classifier_member`).
                     reflection_name: Some(mf.kotlin_name.clone()),
                     ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
