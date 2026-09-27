@@ -128,10 +128,7 @@ fun bad(): P<String, String, Int, Int> =\n\
 \x20       set = { source: String, _: Int -> source },\n\
 \x20   )\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    // Both compilers now blame the offending lambda on the same LINE. They still word the
-    // mismatch differently and point at different columns — kotlinc at the lambda's result
-    // expression, krusty at the lambda itself — so the exact texts are recorded rather than
-    // matched loosely. Converging the wording is its own diagnostic-parity change.
+    // Both compilers blame the offending lambda's result expression with the same wording.
     assert_eq!(
         common::compiler_errors(&result.krusty_stdout),
         [],
@@ -142,8 +139,8 @@ fun bad(): P<String, String, Int, Int> =\n\
         [common::CompilerError {
             file: "Main.kt".to_string(),
             line: 10,
-            column: 15,
-            message: "type mismatch: inferred type is String but Int was expected".to_string(),
+            column: 35,
+            message: "return type mismatch: expected 'Int', actual 'String'.".to_string(),
         }]
     );
     assert_eq!(

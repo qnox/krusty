@@ -126,7 +126,7 @@ pub(super) fn emit_annotation_impl_class(
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
             // An annotation class's members carry no declaration annotations of their own.
             constructor_defaults::emit_ctor_default_stub(
-                ir, &fq, facade, &param_tys, defaults, false, &mut cw, env,
+                ir, &fq, c.fq_name, facade, &param_tys, defaults, false, &mut cw, env,
             );
         }
     }

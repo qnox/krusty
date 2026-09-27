@@ -786,6 +786,8 @@ mod function_type_is_e2e;
 mod function_type_supertype_e2e;
 #[path = "function_typed_property_e2e.rs"]
 mod function_typed_property_e2e;
+#[path = "function_value_conversion_e2e.rs"]
+mod function_value_conversion_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]

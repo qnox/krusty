@@ -491,8 +491,8 @@ fn emit_bound_prop_ref_class(
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
 /// `INSTANCE` singleton whose `get()` does `invokestatic <facade>.getFoo()` (no receiver), and — for a
 /// `var` — a `set(Object)` doing `invokestatic <facade>.setFoo(v)`. The super ctor is the 4-arg
-/// `(Class, String, String, int)` form with top-level flags = 1. `owner_internal = None` is the facade
-/// sentinel (the declaring file class, unknown until emit).
+/// `(Class, String, String, int)` form, flagged top-level when a package owns the property.
+/// `owner_internal = None` is the facade sentinel (the declaring file class, unknown until emit).
 fn emit_toplevel_prop_ref_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -504,6 +504,8 @@ fn emit_toplevel_prop_ref_class(
 ) -> Vec<u8> {
     let owner = pr.owner_or_facade(facade);
     let call_owner = pr.call_owner().unwrap_or_else(|| facade.to_string());
+    // The accessors of an interface's static property are named by `InterfaceMethodref`s.
+    let call_owner_is_interface = StaticOwner::of(pr.call_owner_internal).is_interface(ir);
     let fq = c.fq_name();
     let superclass = c.superclass();
     let mut cw = property_reference_writer(ir, c, facade, env, opts);
@@ -533,7 +535,13 @@ fn emit_toplevel_prop_ref_class(
     } else {
         prop_jvm
     };
-    let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
+    // e.g. "getFoo()LBox;". A bridged private property reflects the accessor it declares.
+    let reflected_getter = if realization.bridged_storage.is_some() {
+        &realization.declared_getter_name
+    } else {
+        &pr.getter_name
+    };
+    let signature = format!("{reflected_getter}{getter_desc}");
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
     seed_method_header(&mut cw, "<init>", "()V");
@@ -542,7 +550,7 @@ fn emit_toplevel_prop_ref_class(
     ctor.ldc_class(&owner, &mut cw);
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
-    ctor.push_int(1, &mut cw);
+    ctor.push_int(i32::from(realization.package_owner), &mut cw);
     let sup = cw.methodref(
         &superclass,
         "<init>",
@@ -557,7 +565,11 @@ fn emit_toplevel_prop_ref_class(
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
     let mut get = CodeBuilder::new(1);
-    let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
+    let gref = if call_owner_is_interface {
+        cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+    } else {
+        cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
+    };
     get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
     if carrier {
         box_property_reference_value(
@@ -632,7 +644,11 @@ fn emit_toplevel_prop_ref_class(
             let cref = cw.class_ref(&internal);
             set.checkcast(cref);
         }
-        let sref = cw.methodref(&call_owner, &setter, &setter_desc);
+        let sref = if call_owner_is_interface {
+            cw.interface_methodref(&call_owner, &setter, &setter_desc)
+        } else {
+            cw.methodref(&call_owner, &setter, &setter_desc)
+        };
         set.invokestatic(sref, slot_words(setter_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);

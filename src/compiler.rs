@@ -143,6 +143,7 @@ pub fn emit_analyzed<B: Backend>(
         }
         let mut source_failed = false;
         let mut source_rejected = false;
+        let source_diagnostics = diags.diags.len();
         source.visit_declaration_units(diags, |active_file, diags| {
             if source_failed {
                 return;
@@ -224,6 +225,8 @@ pub fn emit_analyzed<B: Backend>(
             // `active_file`, its AST-keyed semantic tables, and checked FIR temporaries all
             // drop when this callback returns, before the parser resumes with the next unit.
         });
+        // kotlinc lists a file's diagnostics by position, whichever member its checker visited first.
+        diags.sort_source_order_from(source_diagnostics);
         if !source_failed && !declaration_cursor.is_finished() {
             diags.error(
                 Span::new(0, 0),
@@ -231,10 +234,7 @@ pub fn emit_analyzed<B: Backend>(
             );
             source_failed = true;
         }
-        if source_failed {
-            continue;
-        }
-        if source_rejected {
+        if source_failed || source_rejected {
             continue;
         }
         if let Err(error) = sink.finish(&index) {

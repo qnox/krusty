@@ -231,7 +231,10 @@ against a generic member and a non-generic extension reports the extension's mis
 unexpected type argument); tied survivors are reported together as NONE_APPLICABLE at the callee
 name (`i?.hashCode(1)` lists `hashCode()` and `Any?.hashCode()`). Earlier releases report the
 member's own error (`too many arguments for 'fun hashCode(): Int'.` at the argument). One call's
-diagnostics are listed in source order. Tests follow the same target:
+diagnostics are listed in source order, and so are one file's body diagnostics: kotlinc lists them
+by position, not in the order the checker visits a class's constructors, property initializers,
+accessors and `init` blocks (`conversion_carriers_take_kotlincs_names` before 2.4.20). Tests
+follow the same target:
 differential tests compare against whichever kotlinc the run provisions, and a test that pins what
 kotlinc says reads it from a values file recorded per version from kotlinc itself
 (`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
@@ -3948,6 +3951,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class of this compilation is always answered from its declaration, never from the naming-convention
   fallback, which has no class file and would mistake an interface for a class.
 
+- **A private static declaration used from another class goes through its static owner's
+  synthetic accessor.** A private top-level function or property lives on its file facade and a
+  private `companion { … }` block member on its declaring class (`IrStaticPlacement`). Code emitted
+  into any other class — a nested class, a lambda or anonymous object there, a callable- or
+  property-reference carrier — calls the owner's `public static final synthetic` accessor, one per
+  target: `access$<name>` forwarding to a function, `access$get<X>$p` / `access$set<X>$p` over a
+  field. Measured against kotlinc 2.4.20, the owner appends them after every declared and lifted
+  member and before `<clinit>`, in the order the file first uses them (evaluation order, a
+  reference counting where it is written). Each maps its body to the owner's declaration line (a
+  facade's is line 1): a function accessor at its forwarding call, with its parameters' names in
+  the `LocalVariableTable`; a setter's value is `<set-?>`. A reference carrier for a block member
+  reflects the declaring class, not the facade, with flags 0, and its classes (and every local
+  class of a block body) are named in that class's chain: `C$ref$g$1`, not `<File>Kt$ref$g$1`. A
+  property reference to a private static property reflects its declared getter (`getP()I`) while
+  calling `access$getP$p`. The owner is an identity (facade or declaring class) from planning to
+  emission; which private storage is bridged is selected once, by storage identity, and both the
+  use sites and a reference's realization consume that selection. An **interface** owner (a block
+  member of an interface) declares its accessor `public static synthetic` — an interface method
+  cannot be `final` — at the interface's declaration line, before the `access$…$jd` bridges, and
+  every use names it by an `InterfaceMethodref`, as does a reference carrier's static call to any
+  interface static. kotlinc treats an interface's block property as an interface property: one
+  without a getter body is abstract whatever its initializer, so a `private` one is rejected with
+  `abstract property in interface cannot be private.` at its `private` modifier, and no private
+  interface storage is ever bridged. Tests: `tests/companion_block_members_e2e.rs`
+  (`private_block_members_used_from_other_classes_go_through_class_accessors`,
+  `private_interface_block_functions_go_through_interface_accessors`,
+  `private_interface_block_property_without_a_getter_is_rejected`),
+  `tests/synthetic_accessor_e2e.rs`
+  (`private_top_level_declarations_used_from_classes_go_through_facade_accessors`).
 - **A private property reached from outside its class gets kotlinc's `access$get<X>$p` bridge.** An
   `inline` body is spliced into its caller, where the private backing field is unreachable. krusty used to
   decline the read, which made the splice bail and emit an ordinary call — silently turning an `inline`
@@ -8845,20 +8877,60 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
   advances from `unresolved` to the separate suspend-conversion gap.)
 
-- **Suspend conversion: a NON-suspend function value flowing into a `suspend` function-type parameter
-  wraps in a synthesized adapter.** kotlinc's shape: a `FunctionReferenceImpl` subclass implementing
-  `Function{n+1}` plus the `kotlin/coroutines/jvm/internal/SuspendFunction` marker, whose `invoke`
-  DROPS the trailing continuation and delegates to the wrapped value's erased `Function{n}.invoke` —
-  a plain function never suspends, so its erased result (for `Unit`, the `Unit.INSTANCE` an erased
-  Unit lambda already returns) is the completion value verbatim. The adapter class lives in the
-  `$suspendConversion$` name space: its `uniq` is the arg expr id, which a callable-ref VALUE lowered
-  from the same arg already claims under `$fnref$` (a shared name emits two classes under one name —
-  the survivor has the wrong arity → CCE). A SUSPEND value into a suspend parameter passes through
-  unchanged (both erase to `Function{n+1}`). A suspend function VALUE call in CPS position erases its
-  `InvokeFunction` ret to `Object` when the continuation is threaded — a tail-forward `areturn`s the
-  raw erased result (COROUTINE_SUSPENDED or the boxed value); the flattener re-applies the logical
-  coercion from `ir.suspend_calls`. (`tests/suspend_conversion_e2e.rs`; corpus
-  `suspendConversion/` + `callableReference/adaptedReferences/suspendConversion/` — box-OK +10.)
+- **Function-value conversions: suspend conversion and `UnitConversionsOnArbitraryExpressions`.** A
+  regular function value reaching a `suspend` function type converts to it (suspend conversion), and
+  under `+UnitConversionsOnArbitraryExpressions` (KT-84393; kotlinc implements it from 2.4.20, so
+  krusty reproducing 2.4.0/2.4.10 keeps rejecting it even with the flag) a value whose result is not
+  `Unit` converts to the same shape returning `Unit` (unit conversion). The two compose
+  (`() -> String` into `suspend () -> Unit`). As in kotlinc's `argumentTypeWithUnitConversion`, kind
+  conversion applies first and the value may already have the expected kind, so a `suspend () ->
+  String` value unit-converts to `suspend () -> Unit`; kind conversion never removes suspension, and a
+  `suspend` value reaching a regular function type is an `argument type mismatch`
+  (`is_assignable` refuses a `suspend` function type as a regular one). Only a non-null value
+  converts, and a callable reference adapts its own result instead. The resolver (`src/resolve/function_value_conversions.rs`)
+  selects the exact callable constituent converted — for a value whose class implements the function
+  type, that function supertype — and applicability admits the non-`Unit` result only through this
+  rule. Checked FIR carries `FirConversionKind::FunctionValue { from, to, ordinal }`; common lowering
+  realizes it as a callable reference bound to the value (`IrCallableReferenceTarget::
+  FunctionValueConversion`) whose adapter invokes the value's `FunctionN.invoke`, discarding the
+  result for a unit conversion and otherwise handing it on as the erased suspend result. The JVM
+  carrier is kotlinc's: a synthetic `FunctionReferenceImpl` (not `AdaptedFunctionReference`, flags 0)
+  implementing the target `FunctionN` (plus `SuspendFunction` for a suspend target), constructed with
+  the value as bound receiver and reflecting `Intrinsics.Kotlin`'s `suspendConversion<N>` with the
+  source function type as first parameter (`suspendConversion0(Lkotlin/jvm/functions/Function0;)V`,
+  or `…Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` for a suspend target); its `invoke`
+  casts `receiver` to the source `FunctionN` and calls it, then `pop`s for a unit conversion. An
+  already-`suspend` value is invoked as a suspension point of the suspend adapter: it receives the
+  adapter's continuation, `COROUTINE_SUSPENDED` returns through, and the carrier's `invoke` becomes a
+  state machine completing with `Unit`. kotlinc 2.4.20's frontend accepts that argument but its JVM
+  lowering fails (`findSubtypeOfBasicFunctionType` requires a regular function type), so there is
+  no kotlinc class to match instruction for instruction; the carrier's header, members and
+  `@Metadata` are those kotlinc writes for the same target converted from a regular value, and its
+  state machine takes krusty's member-suspend-function layout, which differs from kotlinc's in
+  instruction order for any member function with a non-tail suspension.
+  Naming follows kotlinc's one local-class walk: a conversion takes the next position of the sequence
+  it is written in (shifting every later lambda and reference there) and its operand is named inside
+  it, so `src/frontend/local_class_names.rs` replays the walk once resolution has selected the
+  conversions (`settle_generated_class_names`). `N` counts the conversions of the innermost callable
+  in source order: each function, local function, lambda, property initializer, accessor and secondary
+  constructor restarts it, while a class's initializers share one. Without the feature, a mismatched
+  function value is reported as kotlinc's `argument type mismatch` (a regular value reaching a
+  suspend parameter is shown as the suspend type it converted to). Both conversions apply only to a
+  call argument (positional, named, or a conditional passed as one): kotlinc 2.4.0 through 2.4.20
+  reject a regular or non-`Unit` value that an initializer, assignment, `return`, expression body or
+  lambda result would have to convert, as that seam's own type mismatch (a lambda's at its result
+  expression). Only the argument seams consult the conversion, and `expect_assignable`'s
+  same-arity shortcut for function types refuses a value that would need one elsewhere. Known gaps:
+  an anonymous object following a conversion in the same sequence keeps its pre-resolution position
+  (local classifier identities are published before bodies are resolved); a suspend carrier boxes a
+  primitive argument with `valueOf` where kotlinc's coroutine pass uses `Boxing.box*` (krusty applies
+  that rewrite only to transformed state machines); that shortcut still ignores result and parameter
+  types that need no conversion (`val f: () -> Int = g` for `g: () -> String` is accepted); and a
+  generic call passed as the argument (`consume(id(g))`) infers its type argument from the
+  expected type, so krusty accepts it before 2.4.20 where kotlinc rejects it.
+  (`tests/function_value_conversion_e2e.rs`,
+  `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
+  `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
 
 - **A suspend function VALUE invoked in statement position mid-body gets its own resume state.**
   The machine already threads the continuation and parks/resumes correctly; the leaf/machine

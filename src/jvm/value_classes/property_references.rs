@@ -409,6 +409,8 @@ mod tests {
                 declared_setter_name: None,
                 facade_storage: false,
                 accessor_role: PropertyAccessorRole::Member,
+                bridged_storage: None,
+                package_owner: true,
                 getter_function: Some(accessor),
                 setter_function: None,
                 physical_getter_ret: None,

@@ -159,36 +159,91 @@ fn suspend_converted_local_reference_becomes_suspend_wrapper() {
 }
 
 #[test]
-fn suspend_converted_function_value_becomes_checked_forwarding_wrapper() {
+fn suspend_converted_function_value_becomes_bound_conversion_reference() {
     let ir = lower_single_source(
         r#"
-            fun convert(block: (Int) -> String): suspend (Int) -> String = block
+            fun consume(block: suspend (Int) -> String) {}
+            fun convert(block: (Int) -> String) = consume(block)
         "#,
         "SuspendConvertedFunctionValue",
     );
 
-    let wrapper = ir
+    let adapter = ir
         .functions
         .iter()
-        .position(|function| function.name.starts_with("$fir_suspend_delegate_"))
-        .expect("suspend function-value conversion wrapper") as u32;
+        .position(|function| function.name.starts_with("$fir_function_value_conversion_"))
+        .expect("function-value conversion adapter") as u32;
     assert!(matches!(
-        ir.functions[wrapper as usize].params.as_slice(),
+        ir.functions[adapter as usize].params.as_slice(),
         [Ty::Fun(source), Ty::Int]
             if !source.suspend && source.params == [Ty::Int] && source.ret == Ty::String
     ));
-    assert_eq!(ir.functions[wrapper as usize].ret, Ty::String);
-    assert!(ir.suspend_funs.contains(&wrapper));
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::Lambda {
-            impl_fn,
-            arity: 2,
-            captures,
-            sam: None,
-            ..
-        } if *impl_fn == wrapper && captures.len() == 1
-    )));
+    assert_eq!(ir.functions[adapter as usize].ret, Ty::String);
+    assert!(ir.suspend_funs.contains(&adapter));
+    let references = semantic_references(&ir);
+    let [reference] = references.as_slice() else {
+        panic!("one conversion reference, got {references:?}");
+    };
+    assert!(matches!(
+        reference.target,
+        crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 }
+    ));
+    assert_eq!(reference.adapter, adapter);
+    assert!(reference.captures.is_empty() && reference.bound_receiver.is_some());
+    assert!(reference.declaration_suspend && reference.adaptation.is_none());
+    assert!(matches!(reference.function_type, Ty::Fun(signature)
+        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::String));
+}
+
+#[test]
+fn unit_converted_suspend_function_value_suspends_in_its_adapter() {
+    let ir = lower_single_source(
+        r#"// LANGUAGE: +UnitConversionsOnArbitraryExpressions
+            fun consume(block: suspend (Int) -> Unit) {}
+            fun convert(block: suspend (Int) -> String) = consume(block)
+        "#,
+        "UnitConvertedSuspendFunctionValue",
+    );
+
+    let adapter = ir
+        .functions
+        .iter()
+        .position(|function| function.name.starts_with("$fir_function_value_conversion_"))
+        .expect("function-value conversion adapter") as u32;
+    assert!(matches!(
+        ir.functions[adapter as usize].params.as_slice(),
+        [Ty::Fun(source), Ty::Int]
+            if source.suspend && source.params == [Ty::Int] && source.ret == Ty::String
+    ));
+    assert_eq!(
+        ir.functions[adapter as usize].ret,
+        crate::types::stored_value_ty(Ty::Unit)
+    );
+    assert!(ir.suspend_funs.contains(&adapter));
+    // The value keeps its kind: invoking it is a suspension point of the adapter, whose result
+    // the adapter discards.
+    let suspension_points = ir
+        .suspend_calls
+        .iter()
+        .filter(|(invoke, _)| {
+            matches!(ir.exprs[**invoke as usize], IrExpr::InvokeFunction { ref params, .. }
+                if params == &[Ty::Int])
+        })
+        .map(|(_, result)| *result)
+        .collect::<Vec<_>>();
+    assert_eq!(suspension_points, [Ty::String]);
+    let references = semantic_references(&ir);
+    let [reference] = references.as_slice() else {
+        panic!("one conversion reference, got {references:?}");
+    };
+    assert!(matches!(
+        reference.target,
+        crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 }
+    ));
+    assert_eq!(reference.adapter, adapter);
+    assert!(reference.bound_receiver.is_some() && reference.declaration_suspend);
+    assert!(matches!(reference.function_type, Ty::Fun(signature)
+        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::Unit));
 }
 
 #[test]

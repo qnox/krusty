@@ -1,0 +1,78 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_function_value_is_not_converted_by_an_initializer_or_lambda_result]
+2.4.0..2.4.20:
+  Main.kt:3:26: initializer type mismatch: expected '() -> Unit', actual '() -> String'.
+  Main.kt:4:42: initializer type mismatch: expected 'suspend () -> String', actual '() -> String'.
+  Main.kt:6:52: return type mismatch: expected '() -> Unit', actual '() -> String'.
+
+[a_function_value_is_not_converted_when_assigned]
+2.4.0..2.4.20:
+  Main.kt:4:10: assignment type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:6:16: assignment type mismatch: actual type is '() -> String', but 'suspend () -> String' was expected.
+  Main.kt:8:10: assignment type mismatch: actual type is '() -> String', but 'suspend () -> Unit' was expected.
+
+[a_function_value_is_not_converted_when_returned]
+2.4.0..2.4.20:
+  Main.kt:3:12: return type mismatch: expected '() -> Unit', actual '() -> String'.
+  Main.kt:6:12: return type mismatch: expected 'suspend () -> String', actual '() -> String'.
+  Main.kt:8:49: return type mismatch: expected 'suspend () -> Unit', actual '() -> String'.
+
+[a_suspend_value_is_not_converted_to_a_regular_function_type]
+2.4.0..2.4.20:
+  Main.kt:5:13: argument type mismatch: actual type is 'suspend () -> String', but '() -> Unit' was expected.
+  Main.kt:6:10: argument type mismatch: actual type is 'suspend () -> String', but '() -> String' was expected.
+
+[an_already_suspend_value_unit_converts_to_a_suspend_parameter]
+2.4.0..2.4.10:
+  Main.kt:14:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.
+2.4.20:
+
+[an_already_suspend_value_unit_converts_to_a_suspend_parameter#kotlinc backend]
+2.4.0..2.4.10:
+  exit code 1
+2.4.20:
+  exit code 2
+  java.lang.IllegalArgumentException: Failed requirement.
+  at org.jetbrains.kotlin.fir.types.FunctionalTypeUtilsKt.findSubtypeOfBasicFunctionType(FunctionalTypeUtils.kt:176)
+
+[conversion_carriers_take_kotlincs_names]
+2.4.0..2.4.10:
+  Main.kt:6:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:8:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:9:27: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:11:26: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:12:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:15:20: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:16:25: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:17:20: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:18:67: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:19:62: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+2.4.20:
+
+[named_and_conditional_arguments_convert_a_function_value]
+2.4.0..2.4.10:
+  Main.kt:7:17: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:8:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+2.4.20:
+
+[unit_and_suspend_conversion_of_a_value_is_one_carrier]
+2.4.0..2.4.10:
+  Main.kt:12:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.
+2.4.20:
+
+[unit_conversion_of_a_function_subtype_converts_its_function_supertype]
+2.4.0..2.4.10:
+  Main.kt:14:13: argument type mismatch: actual type is 'Source', but '() -> Unit' was expected.
+2.4.20:
+
+[unit_conversion_of_a_value_is_kotlincs_bound_carrier]
+2.4.0..2.4.10:
+  Main.kt:11:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+2.4.20:
+
+[unit_conversion_of_a_value_requires_the_language_feature]
+2.4.0..2.4.20:
+  Main.kt:4:13: argument type mismatch: actual type is '() -> String', but '() -> Unit' was expected.
+  Main.kt:5:12: argument type mismatch: actual type is 'suspend () -> String', but 'suspend () -> Unit' was expected.

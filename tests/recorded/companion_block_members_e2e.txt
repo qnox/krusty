@@ -29,6 +29,11 @@
   Main.kt:12:18: cannot access 'companion fun hiddenCall(): String': it is private in 'Vault'.
   Main.kt:12:39: cannot access 'companion val hiddenValue: String': it is private in 'Vault'.
 
+[private_interface_block_property_without_a_getter_is_rejected]
+2.4.20:
+  Main.kt:4:9: abstract property in interface cannot be private.
+  Main.kt:5:9: abstract property in interface cannot be private.
+
 [qualified_overloaded_block_function_reference_has_one_ambiguity]
 2.4.20:
   Main.kt:8:16: overload resolution ambiguity between candidates:

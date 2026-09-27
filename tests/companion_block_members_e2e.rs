@@ -37,33 +37,9 @@ fn assert_members_and_metadata_match_kotlinc_on(
             &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
         )
         .expect("reference kotlinc and javap are provisioned");
-        let members = |bytes: &[u8]| {
-            let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
-            let fields = info
-                .fields
-                .iter()
-                .map(|field| {
-                    format!(
-                        "field {:#06x} {} {} {:?} {:?}",
-                        field.access,
-                        field.name,
-                        field.descriptor,
-                        field.signature,
-                        field.const_value
-                    )
-                })
-                .collect::<Vec<_>>();
-            let methods = info.methods.iter().map(|method| {
-                format!(
-                    "method {:#06x} {}{} {:?}",
-                    method.access, method.name, method.descriptor, method.signature
-                )
-            });
-            fields.into_iter().chain(methods).collect::<Vec<_>>()
-        };
         assert_eq!(
-            members(&comparison.krusty_bytes),
-            members(&comparison.reference_bytes),
+            common::member_table(&comparison.krusty_bytes),
+            common::member_table(&comparison.reference_bytes),
             "{class}: kotlinc's member table"
         );
         assert_eq!(
@@ -103,6 +79,9 @@ fn block_member_calls_block_member_and_companion_extension_unqualified() {
     assert_eq!(run(SRC).expect("unqualified companion calls"), "OK");
 }
 
+/// Private block members are used from the class's own members and block, and from the classes
+/// kotlinc reaches them through accessors from: a nested class, a lambda in it, and the carrier of
+/// a reference written in a block body.
 #[test]
 fn instance_member_calls_inherited_and_private_block_members() {
     const SRC: &str = "open class Base {\n\
@@ -112,11 +91,197 @@ fn instance_member_calls_inherited_and_private_block_members() {
         \x20   companion {\n\
         \x20       private val k = \"K\"\n\
         \x20       private fun own() = k\n\
+        \x20       fun viaReferences() = (::own)() + (::k)()\n\
         \x20   }\n\
         \x20   fun ok() = base() + own()\n\
+        \x20   class N {\n\
+        \x20       fun viaNested() = own() + k\n\
+        \x20       fun viaLambda(): String {\n\
+        \x20           val l = { own() + k }\n\
+        \x20           return l()\n\
+        \x20       }\n\
+        \x20   }\n\
         }\n\
-        fun box() = C().ok()\n";
-    assert_eq!(run(SRC).expect("instance member calls"), "OK");
+        fun box(): String {\n\
+        \x20   val r = C().ok() + C.viaReferences() + C.N().viaNested() + C.N().viaLambda()\n\
+        \x20   return if (r == \"OKKKKKKK\") \"OK\" else r\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "PrivateBlockMembers");
+}
+
+/// A private block member used from another class — a nested class, a lambda there, an anonymous
+/// object, and the carrier of a `::f`, `::p` or `::v` reference written in a block body or of a
+/// `C::f` in a member — goes through its class's synthetic `access$…` accessors, which follow the
+/// class's members in first-use order. The carriers are named after the declaring class.
+#[test]
+fn private_block_members_used_from_other_classes_go_through_class_accessors() {
+    const SRC: &str = "abstract class Task {\n\
+        \x20   abstract fun run(): Int\n\
+        }\n\
+        class C {\n\
+        \x20   fun member(): Int {\n\
+        \x20       val g = C::f\n\
+        \x20       val h = C::p\n\
+        \x20       return g(1) + h()\n\
+        \x20   }\n\
+        \x20   class N {\n\
+        \x20       fun nested(): Int {\n\
+        \x20           v = 4\n\
+        \x20           val l = { y: Int -> f(y) + p }\n\
+        \x20           return l(1) + v\n\
+        \x20       }\n\
+        \x20       fun anonymous(): Int {\n\
+        \x20           val o = object : Task() {\n\
+        \x20               override fun run(): Int = f(5) + v\n\
+        \x20           }\n\
+        \x20           return o.run()\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       private fun f(x: Int): Int = x\n\
+        \x20       private val p: Int = 2\n\
+        \x20       private var v: Int = 3\n\
+        \x20       fun lam(): Int {\n\
+        \x20           val g = { y: Int -> f(y) + p + v }\n\
+        \x20           return g(1)\n\
+        \x20       }\n\
+        \x20       fun ref(): Int {\n\
+        \x20           val g = ::f\n\
+        \x20           return g(1)\n\
+        \x20       }\n\
+        \x20       fun pref(): Int {\n\
+        \x20           val g = ::p\n\
+        \x20           return g()\n\
+        \x20       }\n\
+        \x20       fun vref(): Int {\n\
+        \x20           val g = ::v\n\
+        \x20           g.set(6)\n\
+        \x20           return g.get()\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val r = C.lam() + C.ref() + C.pref() + C().member() + C.N().nested() + C.vref() +\n\
+        \x20       C.N().anonymous()\n\
+        \x20   return if (r == 36) \"OK\" else \"fail \" + r\n\
+        }\n";
+    const USERS: [&str; 7] = [
+        "C$N",
+        "C$N$anonymous$o$1",
+        "C$member$g$1",
+        "C$member$h$1",
+        "C$ref$g$1",
+        "C$pref$g$1",
+        "C$vref$g$1",
+    ];
+    let mut classes = vec!["C"];
+    classes.extend(USERS);
+    let comparisons = assert_members_and_metadata_match_kotlinc_on(
+        "BlockAccessors",
+        SRC,
+        &classes,
+        &[common::stdlib_jar()],
+    );
+    for header in [
+        "public static final int access$f(int);",
+        "public static final int access$getP$p();",
+        "public static final void access$setV$p(int);",
+        "public static final int access$getV$p();",
+    ] {
+        let accessor = common::method_block(&comparisons[0].reference, header);
+        assert!(!accessor.is_empty(), "kotlinc declares C.{header}");
+        assert_eq!(
+            common::method_block(&comparisons[0].krusty, header),
+            accessor,
+            "C.{header}"
+        );
+    }
+    for (class, comparison) in USERS.iter().zip(&comparisons[1..]) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "{class}: kotlinc's members"
+        );
+    }
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "BlockAccessors");
+}
+
+/// A private block function of an interface is a private static of the interface. Every other
+/// class reaches it through the interface's `access$…` accessor, which as an interface method is
+/// not `final` and is named by `InterfaceMethodref`s: the carriers of references written in a
+/// default member and in the block, and a nested class and its lambda.
+#[test]
+fn private_interface_block_functions_go_through_interface_accessors() {
+    const SRC: &str = "interface Shape {\n\
+        \x20   fun area(): Int {\n\
+        \x20       val g = Shape::scale\n\
+        \x20       return g(3) + twice()\n\
+        \x20   }\n\
+        \x20   class Nested {\n\
+        \x20       fun viaNested(): Int {\n\
+        \x20           val l = { y: Int -> scale(y) }\n\
+        \x20           return l(1) + scale(2)\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       private fun scale(x: Int): Int = x * 2\n\
+        \x20       private fun twice(): Int {\n\
+        \x20           val h = ::scale\n\
+        \x20           return h(4)\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n\
+        class Square : Shape\n\
+        fun box(): String {\n\
+        \x20   val r = Square().area() + Shape.Nested().viaNested()\n\
+        \x20   return if (r == 20) \"OK\" else \"fail\"\n\
+        }\n";
+    const USERS: [&str; 3] = ["Shape$Nested", "Shape$area$g$1", "Shape$twice$h$1"];
+    let mut classes = vec!["Shape"];
+    classes.extend(USERS);
+    let comparisons = assert_members_and_metadata_match_kotlinc_on(
+        "InterfaceBlockAccessors",
+        SRC,
+        &classes,
+        &[common::stdlib_jar()],
+    );
+    let header = "public static int access$scale(int);";
+    let accessor = common::method_block(&comparisons[0].reference, header);
+    assert!(!accessor.is_empty(), "kotlinc declares Shape.{header}");
+    assert_eq!(
+        common::method_block(&comparisons[0].krusty, header),
+        accessor,
+        "Shape.{header}"
+    );
+    for (class, comparison) in USERS.iter().zip(&comparisons[1..]) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "{class}: kotlinc's members"
+        );
+    }
+    common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "InterfaceBlockAccessors");
+}
+
+/// kotlinc treats a block property of an interface as an interface property: without a getter
+/// body it is abstract, initializer or not, and an abstract interface property cannot be private.
+/// So no private interface storage exists to reach through accessors; a private property with a
+/// getter body has no backing field and stays legal.
+#[test]
+fn private_interface_block_property_without_a_getter_is_rejected() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        interface Registry {\n\
+        \x20   companion {\n\
+        \x20       private val seed: Int = 1\n\
+        \x20       private lateinit var count: String\n\
+        \x20       private val derived: Int get() = 3\n\
+        \x20       private fun next(): Int = derived\n\
+        \x20   }\n\
+        }\n";
+    common::assert_errors_match_kotlinc(
+        &[("Main.kt", SRC)],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
 }
 
 #[test]

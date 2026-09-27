@@ -76,6 +76,55 @@ fun calculate() {
 }
 
 #[test]
+fn settled_conversions_take_sequence_positions_and_number_per_callable() {
+    let source = "fun names(g: () -> String) {\n    consume(g)\n    later { 1 }\n    consume(g)\n}";
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut file = parse_source(source, &LangFeatures::new(), &mut diagnostics);
+    assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+    record_local_class_name_provenance(&mut file);
+    let mut values = (0..file.expr_arena.len())
+        .map(|raw| crate::ast::ExprId(raw as u32))
+        .filter(|expression| matches!(file.expr(*expression), crate::ast::Expr::Name(name) if name == "g"))
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|expression| file.expr_spans[expression.0 as usize].lo);
+    let lambda = (0..file.expr_arena.len())
+        .map(|raw| crate::ast::ExprId(raw as u32))
+        .find(|expression| matches!(file.expr(*expression), crate::ast::Expr::Lambda { .. }))
+        .expect("the source has one lambda");
+    assert_eq!(values.len(), 2);
+    assert_eq!(
+        file.callable_reference_provenance[&lambda.0].ordinal,
+        Some(1),
+        "unsettled, the lambda is first in its sequence"
+    );
+
+    let settled = settle_generated_class_names(&file, &values.iter().copied().collect());
+
+    let named = |ordinal| crate::ast::LocalClassNameProvenance {
+        lexical_owner: None,
+        segments: vec!["names".to_string()],
+        ordinal: Some(ordinal),
+    };
+    assert_eq!(
+        values
+            .iter()
+            .map(|value| settled.conversions[value].clone())
+            .collect::<Vec<_>>(),
+        [
+            local_class_names::FunctionValueConversionName {
+                provenance: named(1),
+                ordinal: 0,
+            },
+            local_class_names::FunctionValueConversionName {
+                provenance: named(3),
+                ordinal: 1,
+            },
+        ]
+    );
+    assert_eq!(settled.reference(&file, lambda), Some(&named(2)));
+}
+
+#[test]
 fn continuation_positions_are_keyed_by_exact_declarations_in_source_order() {
     let source = "suspend fun first() {}\nsuspend fun First() {}";
     let mut diagnostics = crate::diag::DiagSink::new();

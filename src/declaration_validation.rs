@@ -62,3 +62,17 @@ pub(crate) fn interface_property_diagnostics(property: &PropDecl) -> Vec<Declara
         message: "property in interface cannot have a backing field.",
     }]
 }
+
+/// A `companion { … }` block member of an interface is an interface member to kotlinc: a property
+/// without a getter body is abstract there, whatever its initializer, and an abstract interface
+/// property cannot be private. Reported at the member's own `private` modifier.
+pub(crate) fn interface_block_property_diagnostics(
+    property: &PropDecl,
+    private_modifier: Option<Span>,
+) -> Option<DeclarationDiagnostic> {
+    let span = private_modifier.filter(|_| property.getter.is_none())?;
+    Some(DeclarationDiagnostic {
+        span,
+        message: "abstract property in interface cannot be private.",
+    })
+}

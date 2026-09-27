@@ -181,6 +181,7 @@ pub(super) fn emit_suspend_lambda_class(
     emit_method(
         ir,
         lambda.invoke_suspend,
+        StaticOwner::Class(c.fq_name),
         &shape.class,
         facade,
         &mut cw,
