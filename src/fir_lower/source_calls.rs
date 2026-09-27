@@ -1472,9 +1472,12 @@ impl BodyLowering<'_> {
                 .enclosing_classifier(callable.declaration)
                 .map(|classifier| Ty::obj_name(classifier.classifier)),
         };
-        let mut parameter_types = declared_parameters;
+        let mut selected_parameter_types = specialized_parameters.to_vec();
         if let Some(receiver) = declared_extension_receiver {
-            parameter_types.insert(extension_position, receiver.get());
+            selected_parameter_types.insert(
+                extension_position,
+                crate::types::ty_subst_keep_unbound(receiver.get(), &bindings),
+            );
         }
         // Keep the declaration's unspecialized signature separate from the selected semantic
         // argument/result types. A sibling generic member `fun <T> id(T): T`, selected as
@@ -1673,6 +1676,15 @@ impl BodyLowering<'_> {
             self.ir.call_declared_params.insert(
                 call,
                 selected_declaration_parameter_types.into_boxed_slice(),
+            );
+        }
+        if dispatch_receiver.is_some() && !has_defaults {
+            self.ir.module_member_accesses.insert(
+                call,
+                crate::ir::IrModuleMemberAccess::Callable {
+                    target,
+                    selected_parameters: selected_parameter_types.into_boxed_slice(),
+                },
             );
         }
         // A sibling-source callable is realized into `CrossFile` only after common lowering. Keep

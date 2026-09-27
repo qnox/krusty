@@ -154,6 +154,43 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// Operands redirected through a protected synthetic accessor. A generic declaration boundary
+    /// may already have wrapped a concrete scalar in an `ImplicitCoercion` to its erased reference
+    /// parameter. The accessor is specialized to the selected call-site shape, so consume that
+    /// exact wrapper and let the accessor perform the one erased adaptation internally.
+    pub(super) fn emit_source_access_bridge_operands(
+        &mut self,
+        ops: &[u32],
+        physical: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Result<(), DescriptorArityMismatch> {
+        DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
+        let ops = ops
+            .iter()
+            .zip(physical)
+            .map(|(&expression, &target)| match self.ir.expr(expression) {
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if target.is_jvm_scalar()
+                    && type_operand.is_reference()
+                    && self.value_ty(*arg).is_jvm_scalar() =>
+                {
+                    *arg
+                }
+                _ => expression,
+            })
+            .collect::<Vec<_>>();
+        let mut index = 0usize;
+        self.emit_operands_adapted(None, &ops, code, |this, source, code| {
+            let target = physical[index];
+            index += 1;
+            this.coerce_reference_on_stack(source, target, code);
+        });
+        Ok(())
+    }
+
     /// Operands of a call to a function this module declares. Lowering already realized every
     /// representation change its checked arguments need, so each reference operand is only
     /// materialized at its parameter's type, the cast kotlinc writes for an upcast.

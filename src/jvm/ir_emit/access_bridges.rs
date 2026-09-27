@@ -92,18 +92,63 @@ fn set_bridge_locals(
     cw.set_method_debug(name, descriptor, None, &locals);
 }
 
-/// Find private instance calls whose caller and declaration are different JVM classes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ProtectedMemberAccessBridge {
+    pub owner: crate::types::TypeName,
+    name: String,
+    target_parameters: Vec<Ty>,
+    pub bridge_parameters: Vec<Ty>,
+    result: Ty,
+    parameter_names: Vec<Option<String>>,
+}
+
+pub(super) struct MemberAccessBridges {
+    pub private: std::collections::HashSet<u32>,
+    pub protected: std::collections::HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
+}
+
+fn protected_bridge_owner(
+    ir: &IrFile,
+    expression: crate::ir::ExprId,
+    receiver: Option<crate::ir::ExprId>,
+    physical_owner: &str,
+    target_owner: crate::types::TypeName,
+) -> Option<crate::types::TypeName> {
+    let receiver_owner = receiver
+        .and_then(|receiver| ir.logical_types.get(&receiver))
+        .copied()
+        .and_then(crate::types::Ty::kotlin_class_internal);
+    receiver_owner
+        .filter(|receiver| *receiver != target_owner && ir.class_id_by_name(*receiver).is_some())
+        .or_else(|| {
+            std::iter::successors(
+                ir.expression_owners.get(&expression).copied(),
+                |enclosing| enclosing.nested_owner(),
+            )
+            .find(|enclosing| {
+                !enclosing.matches(physical_owner) && ir.class_id_by_name(*enclosing).is_some()
+            })
+        })
+        .filter(|bridge_owner| {
+            !bridge_owner.matches(physical_owner)
+                && bridge_owner.namespace() != target_owner.namespace()
+        })
+}
+
+/// Find private instance calls whose caller and declaration are different JVM classes, and
+/// protected calls physically emitted outside the checked receiver subclass that grants access.
 ///
 /// FIR/common IR retain Kotlin ownership and the selected member identity only. The Java-8 access
 /// bridge is a physical realization, so this whole-file reachability walk belongs at the backend
 /// boundary and runs once per emission pass, never once per method candidate.
-pub(super) fn cross_owner_private_member_calls(
+pub(super) fn cross_owner_member_calls(
     ir: &IrFile,
     facade: &str,
     class_member_fids: &std::collections::HashSet<u32>,
     private_interface_bodies_are_members: bool,
-) -> std::collections::HashSet<u32> {
-    let mut result = std::collections::HashSet::new();
+) -> MemberAccessBridges {
+    let mut private = std::collections::HashSet::new();
+    let mut protected = std::collections::HashMap::new();
     let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
@@ -111,33 +156,299 @@ pub(super) fn cross_owner_private_member_calls(
             if !seen.insert(expression) {
                 continue;
             }
-            // A value-class `-impl` call and a private getter read carry their exact target.
-            let target = match ir.expr(expression) {
-                IrExpr::MethodCall { class, index, .. } => {
-                    Some((*class, ir.classes[*class as usize].methods[*index as usize]))
-                }
+            // Local members carry a `FunId`; sibling-source members carry the exact stable module
+            // declaration selected by FIR. Neither path reconstructs identity from owner/name.
+            let local_target = match ir.expr(expression) {
+                IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver,
+                    ..
+                } => Some((
+                    *class,
+                    ir.classes[*class as usize].methods[*index as usize],
+                    Some(*receiver),
+                )),
                 IrExpr::Call {
                     callee: Callee::Static { owner, .. },
                     ..
+                } => ir.jvm_member_targets.get(&expression).map(|&function| {
+                    let class = ir.class_id_by_name(*owner);
+                    (
+                        class.expect("a realized member's owner is in this file"),
+                        function,
+                        None,
+                    )
+                }),
+                IrExpr::Call {
+                    callee: Callee::Virtual { owner, .. },
+                    dispatch_receiver: Some(receiver),
+                    ..
+                } => ir.jvm_member_targets.get(&expression).map(|&function| {
+                    let class = ir.class_id_by_name(*owner);
+                    (
+                        class.expect("a realized member's owner is in this file"),
+                        function,
+                        Some(*receiver),
+                    )
+                }),
+                IrExpr::PropertyRead {
+                    owner, receiver, ..
                 }
-                | IrExpr::PropertyRead { owner, .. } => {
-                    ir.jvm_member_targets.get(&expression).map(|&function| {
-                        let class = ir.class_id_by_name(*owner);
-                        (
-                            class.expect("a realized member's owner is in this file"),
-                            function,
-                        )
-                    })
-                }
+                | IrExpr::PropertyWrite {
+                    owner, receiver, ..
+                } => ir.jvm_member_targets.get(&expression).map(|&function| {
+                    let class = ir.class_id_by_name(*owner);
+                    (
+                        class.expect("a realized member's owner is in this file"),
+                        function,
+                        *receiver,
+                    )
+                }),
                 _ => None,
             };
-            if let Some((class, target)) = target {
+            if let Some((class, target, receiver)) = local_target {
                 let target_class = &ir.classes[class as usize];
+                let visibility = ir.method_visibility(target);
                 if target_class.fq_name() != owner
                     && (private_interface_bodies_are_members || !target_class.is_interface)
-                    && ir.method_visibility(target).is_private()
+                    && visibility.is_private()
                 {
-                    result.insert(target);
+                    private.insert(target);
+                }
+                if visibility == crate::types::Visibility::Protected {
+                    let receiver_owner = receiver
+                        .and_then(|receiver| ir.logical_types.get(&receiver))
+                        .copied()
+                        .and_then(crate::types::Ty::kotlin_class_internal);
+                    // Prefer the checked receiver classifier. Generic member selection may have
+                    // already coerced that receiver to the declaring superclass; in that case the
+                    // semantic containment edge identifies the enclosing source subclass. Walking
+                    // `nested_owner` follows typed name-tree identity, never rendered JVM `$` text.
+                    let bridge_owner = receiver_owner
+                        .filter(|receiver| {
+                            *receiver != target_class.fq_name_id()
+                                && ir.class_id_by_name(*receiver).is_some()
+                        })
+                        .or_else(|| {
+                            std::iter::successors(
+                                ir.expression_owners.get(&expression).copied(),
+                                |enclosing| enclosing.nested_owner(),
+                            )
+                            .find(|enclosing| {
+                                !enclosing.matches(owner)
+                                    && ir.class_id_by_name(*enclosing).is_some()
+                            })
+                        });
+                    if let Some(bridge_owner) = bridge_owner.filter(|bridge_owner| {
+                        !bridge_owner.matches(owner)
+                            && bridge_owner.namespace() != target_class.fq_name_id().namespace()
+                    }) {
+                        let function = &ir.functions[target as usize];
+                        let target_parameters = jvm_function_params(ir, target);
+                        let bridge_parameters = ir
+                            .module_member_accesses
+                            .get(&expression)
+                            .map(|access| match access {
+                                crate::ir::IrModuleMemberAccess::Callable {
+                                    selected_parameters,
+                                    ..
+                                } => selected_parameters
+                                    .iter()
+                                    .map(jvm_declared_ty)
+                                    .collect::<Vec<_>>(),
+                                crate::ir::IrModuleMemberAccess::Property {
+                                    selected_parameters,
+                                    ..
+                                } => selected_parameters
+                                    .iter()
+                                    .map(jvm_declared_ty)
+                                    .collect::<Vec<_>>(),
+                            })
+                            .unwrap_or_else(|| target_parameters.clone());
+                        let parameter_names = crate::jvm::parameter_names::function_locals(
+                            ir,
+                            target,
+                            &bridge_parameters,
+                        )
+                        .expect("an access bridge target carries exact parameter identities");
+                        protected.insert(
+                            expression,
+                            ProtectedMemberAccessBridge {
+                                owner: bridge_owner,
+                                name: function.name.clone(),
+                                target_parameters,
+                                bridge_parameters,
+                                result: jvm_declared_ty(&function.ret),
+                                parameter_names,
+                            },
+                        );
+                    }
+                }
+            }
+            if let Some(crate::ir::IrModuleMemberAccess::Callable {
+                target,
+                selected_parameters,
+            }) = ir.module_member_accesses.get(&expression)
+            {
+                crate::trace_compiler!(
+                    "emit",
+                    "module member access expression={expression} target={target:?} physical_owner={owner} local={}",
+                    local_target.is_some()
+                );
+                if local_target.is_none() {
+                    let Some(callable) = ir.referenced_module_callables.get(target) else {
+                        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                            stack.push(child)
+                        });
+                        continue;
+                    };
+                    let Some(target_owner) = callable.owner else {
+                        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                            stack.push(child)
+                        });
+                        continue;
+                    };
+                    crate::trace_compiler!(
+                        "emit",
+                        "module member declaration expression={expression} owner={} visibility={:?}",
+                        target_owner,
+                        callable.visibility
+                    );
+                    let (name, target_parameters, result, receiver) = match ir.expr(expression) {
+                        IrExpr::Call {
+                            callee:
+                                Callee::Virtual {
+                                    name,
+                                    params: Some((parameters, result)),
+                                    ..
+                                },
+                            dispatch_receiver: Some(receiver),
+                            ..
+                        } => (
+                            name.clone(),
+                            parameters.iter().map(jvm_declared_ty).collect(),
+                            jvm_declared_ty(result),
+                            Some(*receiver),
+                        ),
+                        _ => {
+                            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                                stack.push(child)
+                            });
+                            continue;
+                        }
+                    };
+                    if callable.visibility == crate::types::Visibility::Protected {
+                        if let Some(bridge_owner) =
+                            protected_bridge_owner(ir, expression, receiver, owner, target_owner)
+                        {
+                            crate::trace_compiler!(
+                                "emit",
+                                "protected member bridge expression={expression} owner={} target_owner={}",
+                                bridge_owner,
+                                target_owner
+                            );
+                            protected.insert(
+                                expression,
+                                ProtectedMemberAccessBridge {
+                                    owner: bridge_owner,
+                                    name,
+                                    target_parameters,
+                                    bridge_parameters: selected_parameters
+                                        .iter()
+                                        .map(jvm_declared_ty)
+                                        .collect(),
+                                    result,
+                                    parameter_names: callable
+                                        .parameter_identities
+                                        .iter()
+                                        .map(|identity| identity.source_name.clone())
+                                        .collect(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(crate::ir::IrModuleMemberAccess::Property {
+                target,
+                write,
+                selected_parameters,
+            }) = ir.module_member_accesses.get(&expression)
+            {
+                let Some(property) = ir.referenced_module_properties.get(target) else {
+                    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                        stack.push(child)
+                    });
+                    continue;
+                };
+                let Some(target_owner) = property.owner else {
+                    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                        stack.push(child)
+                    });
+                    continue;
+                };
+                let visibility = if *write {
+                    property.setter_visibility
+                } else {
+                    property.visibility
+                };
+                if visibility == crate::types::Visibility::Protected {
+                    let (name, result, receiver) = match ir.expr(expression) {
+                        IrExpr::Call {
+                            callee: Callee::Virtual { name, .. },
+                            dispatch_receiver: Some(receiver),
+                            ..
+                        } => (
+                            name.clone(),
+                            if *write { Ty::Unit } else { property.ty },
+                            Some(*receiver),
+                        ),
+                        IrExpr::PropertyRead { receiver, .. } => (
+                            crate::names::property_getter_name(&property.name),
+                            property.ty,
+                            *receiver,
+                        ),
+                        IrExpr::PropertyWrite { receiver, .. } => (
+                            crate::names::property_setter_name(&property.name),
+                            Ty::Unit,
+                            *receiver,
+                        ),
+                        _ => {
+                            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                                stack.push(child)
+                            });
+                            continue;
+                        }
+                    };
+                    if let Some(bridge_owner) =
+                        protected_bridge_owner(ir, expression, receiver, owner, target_owner)
+                    {
+                        let mut target_parameters = property.context_parameters.clone();
+                        if let Some(extension) = property.extension_receiver {
+                            target_parameters.push(extension);
+                        }
+                        if *write {
+                            target_parameters.push(property.ty);
+                        }
+                        protected.insert(
+                            expression,
+                            ProtectedMemberAccessBridge {
+                                owner: bridge_owner,
+                                name,
+                                target_parameters: target_parameters
+                                    .iter()
+                                    .map(jvm_declared_ty)
+                                    .collect(),
+                                bridge_parameters: selected_parameters
+                                    .iter()
+                                    .map(jvm_declared_ty)
+                                    .collect(),
+                                result: jvm_declared_ty(&result),
+                                parameter_names: vec![None; target_parameters.len()],
+                            },
+                        );
+                    }
                 }
             }
             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
@@ -207,7 +518,7 @@ pub(super) fn cross_owner_private_member_calls(
         );
         scan(&owner, roots);
     }
-    result
+    MemberAccessBridges { private, protected }
 }
 
 /// The `access$…` bridges of `class`'s private members that another class calls, after its declared
@@ -227,6 +538,147 @@ pub(super) fn emit_private_member_access_bridges(
         } else {
             emit_private_member_access_bridge(ir, fid, owner, cw, false, class.decl_line);
         }
+    }
+}
+
+/// Emit the static forwarders that let a nested/generated class call a protected member through
+/// the exact checked receiver subclass. The bridge lives on that subclass, which is the JVM class
+/// legally allowed to issue the inherited protected invocation.
+pub(super) fn emit_protected_member_access_bridges(
+    class: &IrClass,
+    owner: &str,
+    cw: &mut ClassWriter,
+    run: &EmitRun,
+) {
+    let bridges = run.protected_member_access_bridges.borrow();
+    let mut emitted = std::collections::HashSet::new();
+    for bridge in bridges
+        .values()
+        .filter(|bridge| bridge.owner == class.fq_name_id())
+    {
+        let descriptor = method_descriptor(&bridge.bridge_parameters, bridge.result);
+        if emitted.insert((bridge.name.clone(), descriptor)) {
+            emit_protected_member_access_bridge(bridge, owner, cw, class.decl_line);
+        }
+    }
+}
+
+fn emit_protected_member_access_bridge(
+    bridge: &ProtectedMemberAccessBridge,
+    owner: &str,
+    cw: &mut ClassWriter,
+    line: u32,
+) {
+    let target_descriptor = method_descriptor(&bridge.target_parameters, bridge.result);
+    let mut bridge_parameters = Vec::with_capacity(bridge.bridge_parameters.len() + 1);
+    bridge_parameters.push(Ty::obj_name(bridge.owner));
+    bridge_parameters.extend(bridge.bridge_parameters.iter().copied());
+    let bridge_descriptor = method_descriptor(&bridge_parameters, bridge.result);
+    let bridge_name = format!("access${}", bridge.name);
+    if cw.declares_method(&bridge_name, &bridge_descriptor) {
+        return;
+    }
+    let mut code = CodeBuilder::new(
+        bridge_parameters
+            .iter()
+            .map(|parameter| slot_words(*parameter))
+            .sum(),
+    );
+    code.aload(0);
+    let mut slot = 1;
+    for (&bridge_parameter, &target_parameter) in bridge
+        .bridge_parameters
+        .iter()
+        .zip(&bridge.target_parameters)
+    {
+        load(bridge_parameter, slot, &mut code);
+        slot += slot_words(bridge_parameter);
+        if bridge_parameter != target_parameter {
+            if bridge_parameter.is_jvm_scalar() && target_parameter.is_reference() {
+                box_prim_free(cw, &mut code, bridge_parameter);
+            } else if bridge_parameter.is_reference() && target_parameter.is_jvm_scalar() {
+                unbox_prim_from(cw, &mut code, bridge_parameter, target_parameter);
+            } else if bridge_parameter.is_jvm_scalar() && target_parameter.is_jvm_scalar() {
+                emit_num_conv(bridge_parameter, target_parameter, &mut code);
+            } else if bridge_parameter.is_reference() && target_parameter.is_reference() {
+                let class = cw.class_ref(&crate::jvm::names::instanceof_internal_name(
+                    target_parameter,
+                ));
+                code.checkcast(class);
+            }
+        }
+    }
+    let target = cw.methodref(owner, &bridge.name, &target_descriptor);
+    if line != 0 {
+        code.mark_line(line);
+    }
+    let argument_words = bridge
+        .target_parameters
+        .iter()
+        .map(|parameter| slot_words(*parameter) as i32)
+        .sum();
+    code.invokevirtual(target, argument_words, slot_words(bridge.result) as i32);
+    emit_return(bridge.result, &mut code);
+    code.ensure_locals(slot);
+    code.link();
+    cw.add_method(
+        0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+        &bridge_name,
+        &bridge_descriptor,
+        &code,
+    );
+    set_protected_bridge_locals(bridge, owner, &bridge_name, &bridge_descriptor, cw);
+}
+
+fn set_protected_bridge_locals(
+    bridge: &ProtectedMemberAccessBridge,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+    cw: &mut ClassWriter,
+) {
+    let mut locals = vec![("$this".to_string(), format!("L{owner};"), 0)];
+    let mut slot = 1u16;
+    for (source_name, &parameter) in bridge.parameter_names.iter().zip(&bridge.bridge_parameters) {
+        if let Some(source_name) = source_name {
+            locals.push((source_name.clone(), local_variable_desc(parameter), slot));
+        }
+        slot += slot_words(parameter);
+    }
+    cw.set_method_debug(name, descriptor, None, &locals);
+}
+
+/// Redirect a selected property accessor through its protected bridge when this exact operation's
+/// physical owner is outside the checked receiver subclass.
+pub(super) fn protected_property_access(
+    run: &EmitRun,
+    expression: crate::ir::ExprId,
+    access: crate::jvm::inline::PropertyAccess,
+) -> crate::jvm::inline::PropertyAccess {
+    use crate::jvm::inline::PropertyAccess;
+    let Some(bridge) = run
+        .protected_member_access_bridges
+        .borrow()
+        .get(&expression)
+        .cloned()
+    else {
+        return access;
+    };
+    if !matches!(
+        access,
+        PropertyAccess::Accessor {
+            is_static: false,
+            ..
+        }
+    ) {
+        return access;
+    }
+    let mut parameters = vec![Ty::obj_name(bridge.owner)];
+    parameters.extend(bridge.bridge_parameters.iter().copied());
+    PropertyAccess::AccessBridge {
+        owner: bridge.owner.render(),
+        name: format!("access${}", bridge.name),
+        descriptor: method_descriptor(&parameters, bridge.result),
     }
 }
 

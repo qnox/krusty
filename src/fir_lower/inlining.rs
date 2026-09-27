@@ -1096,6 +1096,19 @@ fn specialize_expression_facts(
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
         specialize_tys(parameters, bindings);
     }
+    if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
+        let parameters = match access {
+            crate::ir::IrModuleMemberAccess::Callable {
+                selected_parameters,
+                ..
+            }
+            | crate::ir::IrModuleMemberAccess::Property {
+                selected_parameters,
+                ..
+            } => selected_parameters,
+        };
+        specialize_tys(parameters, bindings);
+    }
     if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
         specialize_tys(parameters, bindings);
     }

@@ -2351,6 +2351,10 @@ pub struct IrFile {
     pub method_visibilities: std::collections::HashMap<FunId, crate::types::Visibility>,
     /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
     pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Member operations tied to an exact selected declaration in this module. The target identity
+    /// survives physical virtual/property realization so a backend can implement access bridges
+    /// without owner/name lookup.
+    pub(crate) module_member_accesses: std::collections::HashMap<ExprId, IrModuleMemberAccess>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
@@ -2847,18 +2851,42 @@ pub struct IrModuleCallable {
     /// decides what the kind means physically). Ordinary member calls are virtual/special calls.
     pub owner: Option<TypeName>,
     pub owner_kind: Option<IrClassifierKind>,
+    /// Final Kotlin declaration visibility. A target may need it to realize access from a
+    /// physically separate nested/generated class, but must not recover it from an emitted name or
+    /// owner.
+    pub visibility: crate::types::Visibility,
     /// Final source declaration flags needed after stable module calls cross into target realization.
     pub flags: crate::fir::DeclarationFlags,
     /// Final declaration signature, including context and extension receiver parameters but never
     /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
     /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
     pub parameters: Box<[Ty]>,
+    /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
+    /// and parameter metadata on synthesized adapters instead of inventing positional names.
+    pub parameter_identities: Box<[IrParameterIdentity]>,
     pub result: Ty,
     /// Resolved declaration annotations with only the compact constant-string payload needed by
     /// target realization. No source spelling, expression, or parser coordinate survives here.
     pub annotations: Box<[IrHeaderAnnotation]>,
     /// Where the function lives when `owner` is absent.
     pub placement: IrStaticPlacement,
+}
+
+/// Exact current-module declaration selected for a member operation, plus the selected semantic
+/// parameter shape at that use site. The stable declaration identity remains authoritative for
+/// visibility/ownership; the selected parameters let a backend build a representation adapter for
+/// a generic call without reverse-engineering types from operands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IrModuleMemberAccess {
+    Callable {
+        target: crate::fir::CallableId,
+        selected_parameters: Box<[Ty]>,
+    },
+    Property {
+        target: crate::fir::PropertyId,
+        write: bool,
+        selected_parameters: Box<[Ty]>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

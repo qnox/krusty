@@ -147,6 +147,49 @@ fun box(): String {
     );
 }
 
+/// A nested class and a callable-reference carrier are separate JVM classes, even though Kotlin
+/// checks both accesses inside the subclass's lexical scope. Preserve the selected declaration and
+/// concrete generic argument so the subclass can own one legal static bridge: its public ABI takes
+/// `Long`, while the bridge alone boxes for the inherited method's erased `Object` parameter.
+/// Repository-local names keep this regression independent of stdlib intrinsics.
+#[test]
+fn cross_package_nested_calls_keep_typed_protected_member_bridges() {
+    let declaration = r#"
+package sample.source
+
+open class Reservoir<T> {
+    protected fun sample(value: T): String = "sample"
+    protected fun token(): String = "token"
+}
+"#;
+    let subclass = r#"
+package sample.use
+
+class Consumer : sample.source.Reservoir<Long>() {
+    inner class Nested {
+        fun read(): String = sample(7L)
+    }
+
+    fun bound(): () -> String = this::token
+}
+"#;
+    let main = r#"
+fun box(): String {
+    val consumer = sample.use.Consumer()
+    val value = consumer.Nested().read() + ":" + consumer.bound().invoke()
+    return if (value == "sample:token") "OK" else "fail: " + value
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Reservoir.kt", declaration),
+            ("Consumer.kt", subclass),
+            ("Main.kt", main),
+        ],
+        "cross-package typed protected member bridges",
+    );
+}
+
 /// Each field's name, descriptor and access flags, in classfile order.
 fn field_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
