@@ -9159,12 +9159,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array's iterator is one class per array kind: a `BooleanArray`'s through a `DoubleArray`'s subclass
   the abstract `BooleanIterator` through `DoubleIterator` (so `IntArray(1).iterator() is
   IntIterator`), and an `Array<T>`'s and the unsigned arrays' subclass `Any` and implement
-  `Iterator`. The superclasses and `is` answers are compared with kotlinc's for
-  `iterator_identity.kt` on every run, as are the progression iterators' and the unsigned arrays'
-  class names (`kotlin.UIntArray.Iterator`). The other arrays' class names are platform-defined —
-  the JVM's `kotlin.jvm.internal.ArrayIntIterator` is Kotlin/Native's `kotlin.IntArrayIterator`
-  (and `kotlin.ArrayIterator` for an `Array<T>`) — and the runtime publishes Kotlin/Native's, which
-  the driver pins.
+  `Iterator`. The class names, superclasses and `is` answers are compared with kotlinc's for
+  `iterator_identity.kt` on every run. The unsigned arrays' and the progressions' class names agree
+  (`kotlin.UIntArray.Iterator`); the other arrays' are Kotlin/Native's, `kotlin.IntArrayIterator`
+  (and `kotlin.ArrayIterator` for an `Array<T>`), where the JVM's is
+  `kotlin.jvm.internal.ArrayIntIterator` -- a declared divergence. A list's iterator is
+  Kotlin/Native's too: `mutableListOf(1, 2).iterator()` is `kotlin.collections.ArrayList.Itr`
+  (the JVM's `java.util.ArrayList.Itr`), and `listOf(1, 2).iterator()` the anonymous iterator
+  Kotlin/Native's `Array.asList` makes, with no qualified name (the JVM's
+  `java.util.Arrays.ArrayItr`), both declared.
   Tests: `tests/native_runtime_e2e.rs` (`iterator_identity`).
 - **The native list, walk and array entry points answer as Kotlin does on the ordinary path.**
   `listOf`/`mutableListOf` and their members (`get`, `first`, `last`, `indexOf`, `lastIndexOf`,

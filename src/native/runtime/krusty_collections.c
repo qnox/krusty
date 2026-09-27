@@ -156,17 +156,23 @@ typedef struct KListIterator {
 
 static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
 
-/* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. */
-const KType kt_type_list_iterator = {
-    KT_ANONYMOUS("kotlin.collections.Iterator"),
-    .instance_size = sizeof(KListIterator),
-    .reference_count = 1,
-    .reference_offsets = kt_list_iterator_offsets,
-    .super = &kt_type_any,
-    .vtable = kt_any_vtable,
-    .vtable_length = 3,
-    .interfaces = kt_iterator_interfaces,
-    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)};
+/* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. Its
+   class is Kotlin/Native's: a read-only list's is the anonymous iterator `Array.asList` answers
+   (`listOf(a, b)` is `a, b` as a list), a growable one's `ArrayList`'s nested `Itr`. */
+#define KT_LIST_ITERATOR_TYPE                                                                      \
+    .instance_size = sizeof(KListIterator), .reference_count = 1,                                  \
+    .reference_offsets = kt_list_iterator_offsets, .super = &kt_type_any, .vtable = kt_any_vtable, \
+    .vtable_length = 3, .interfaces = kt_iterator_interfaces,                                      \
+    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)
+const KType kt_type_list_iterator = {KT_ANONYMOUS("kotlin.collections.Iterator"),
+                                     KT_LIST_ITERATOR_TYPE};
+static const KType kt_type_array_list_iterator = {KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
+                                                  KT_LIST_ITERATOR_TYPE};
+
+static kt_boolean kt_is_list_iterator(KRef value) {
+    return value != NULL && (value->header.type == &kt_type_list_iterator ||
+                             value->header.type == &kt_type_array_list_iterator);
+}
 
 static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
 
@@ -482,8 +488,9 @@ void kt_mutable_list_clear(KRef self) {
 }
 
 KRef kt_list_iterator(KRef list) {
-    KListIterator *iterator =
-        (KListIterator *)kt_gc_allocate(&kt_type_list_iterator, sizeof(KListIterator));
+    const KType *type = kt_is_mutable_list(list) ? &kt_type_array_list_iterator
+                                                 : &kt_type_list_iterator;
+    KListIterator *iterator = (KListIterator *)kt_gc_allocate(type, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
     iterator->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications
@@ -1222,7 +1229,7 @@ KRef kt_iterable_iterator(KRef iterable) {
 }
 
 kt_boolean kt_iterator_has_next(KRef iterator) {
-    if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
+    if (kt_is_list_iterator(iterator)) {
         return kt_list_iterator_has_next(iterator);
     }
     if (kt_walk_is(iterator)) {
@@ -1909,7 +1916,7 @@ KRef kt_iterator_next(KRef iterator) {
     if (iterator == NULL) {
         KT_FAIL("krusty: member access on a null receiver\n");
     }
-    if (iterator->header.type == &kt_type_list_iterator) {
+    if (kt_is_list_iterator(iterator)) {
         return kt_list_iterator_next(iterator);
     }
     if (kt_walk_is(iterator)) {

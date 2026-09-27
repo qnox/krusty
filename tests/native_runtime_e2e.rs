@@ -947,7 +947,80 @@ fn a_map_or_for_each_over_a_list_its_lambda_changes_stops_where_kotlins_iterator
 
 #[test]
 fn an_iterator_is_an_iterator_and_an_arrays_is_its_kinds_iterator() {
-    run_driver_against_kotlin("iterator_identity");
+    // Kotlin/Native's classes: `kotlin.ArrayIterator` and `kotlin.IntArrayIterator` and kin
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/Arrays.kt, JetBrains/kotlin v2.4.10), the
+    // anonymous iterator of `Array.asList`, which `listOf(1, 2)` answers
+    // (kotlin-native/runtime/src/main/kotlin/generated/_ArraysNative.kt), and `ArrayList`'s `Itr`
+    // (libraries/stdlib/native-wasm/src/kotlin/collections/ArrayList.kt).
+    run_driver_against_kotlin_with(
+        "iterator_identity",
+        &[
+            Divergence::native_behaviour(
+                "arrayOf(1).iterator(): kotlin.jvm.internal.ArrayIterator super=kotlin.Any is \
+                 Iterator",
+                "arrayOf(1).iterator(): kotlin.ArrayIterator super=kotlin.Any is Iterator",
+            ),
+            Divergence::native_behaviour(
+                "BooleanArray(1).iterator(): kotlin.jvm.internal.ArrayBooleanIterator \
+                 super=kotlin.collections.BooleanIterator is Iterator BooleanIterator",
+                "BooleanArray(1).iterator(): kotlin.BooleanArrayIterator \
+                 super=kotlin.collections.BooleanIterator is Iterator BooleanIterator",
+            ),
+            Divergence::native_behaviour(
+                "ByteArray(1).iterator(): kotlin.jvm.internal.ArrayByteIterator \
+                 super=kotlin.collections.ByteIterator is Iterator ByteIterator",
+                "ByteArray(1).iterator(): kotlin.ByteArrayIterator \
+                 super=kotlin.collections.ByteIterator is Iterator ByteIterator",
+            ),
+            Divergence::native_behaviour(
+                "CharArray(1).iterator(): kotlin.jvm.internal.ArrayCharIterator \
+                 super=kotlin.collections.CharIterator is Iterator CharIterator",
+                "CharArray(1).iterator(): kotlin.CharArrayIterator \
+                 super=kotlin.collections.CharIterator is Iterator CharIterator",
+            ),
+            Divergence::native_behaviour(
+                "ShortArray(1).iterator(): kotlin.jvm.internal.ArrayShortIterator \
+                 super=kotlin.collections.ShortIterator is Iterator ShortIterator",
+                "ShortArray(1).iterator(): kotlin.ShortArrayIterator \
+                 super=kotlin.collections.ShortIterator is Iterator ShortIterator",
+            ),
+            Divergence::native_behaviour(
+                "IntArray(1).iterator(): kotlin.jvm.internal.ArrayIntIterator \
+                 super=kotlin.collections.IntIterator is Iterator IntIterator",
+                "IntArray(1).iterator(): kotlin.IntArrayIterator \
+                 super=kotlin.collections.IntIterator is Iterator IntIterator",
+            ),
+            Divergence::native_behaviour(
+                "LongArray(1).iterator(): kotlin.jvm.internal.ArrayLongIterator \
+                 super=kotlin.collections.LongIterator is Iterator LongIterator",
+                "LongArray(1).iterator(): kotlin.LongArrayIterator \
+                 super=kotlin.collections.LongIterator is Iterator LongIterator",
+            ),
+            Divergence::native_behaviour(
+                "FloatArray(1).iterator(): kotlin.jvm.internal.ArrayFloatIterator \
+                 super=kotlin.collections.FloatIterator is Iterator FloatIterator",
+                "FloatArray(1).iterator(): kotlin.FloatArrayIterator \
+                 super=kotlin.collections.FloatIterator is Iterator FloatIterator",
+            ),
+            Divergence::native_behaviour(
+                "DoubleArray(1).iterator(): kotlin.jvm.internal.ArrayDoubleIterator \
+                 super=kotlin.collections.DoubleIterator is Iterator DoubleIterator",
+                "DoubleArray(1).iterator(): kotlin.DoubleArrayIterator \
+                 super=kotlin.collections.DoubleIterator is Iterator DoubleIterator",
+            ),
+            Divergence::native_behaviour(
+                "listOf(1, 2).iterator(): java.util.Arrays.ArrayItr super=kotlin.Any is \
+                 Iterator",
+                "listOf(1, 2).iterator(): null super=kotlin.Any is Iterator",
+            ),
+            Divergence::native_behaviour(
+                "mutableListOf(1, 2).iterator(): java.util.ArrayList.Itr super=kotlin.Any is \
+                 Iterator",
+                "mutableListOf(1, 2).iterator(): kotlin.collections.ArrayList.Itr \
+                 super=kotlin.Any is Iterator",
+            ),
+        ],
+    );
 }
 
 fn compiled_build_script() -> PathBuf {

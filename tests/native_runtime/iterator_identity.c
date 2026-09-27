@@ -5,10 +5,11 @@
    generic array iterator, so `intArrayOf(1).iterator() is IntIterator` was false.
 
    The driver prints each iterator's identity, and the harness compares the lines with what
-   `iterator_identity.kt` answers under the reference kotlinc. An array's iterator's class name is
-   platform-defined -- the JVM's `kotlin.jvm.internal.ArrayIntIterator` is Kotlin/Native's
-   `kotlin.IntArrayIterator` -- and this runtime is the native one, so the driver pins those names
-   instead. */
+   `iterator_identity.kt` answers under the reference kotlinc. An array's or a list's iterator is
+   Kotlin/Native's class, a declared divergence: the JVM's `intArrayOf(1).iterator()` is
+   `kotlin.jvm.internal.ArrayIntIterator`, Kotlin/Native's `kotlin.IntArrayIterator`; the JVM's
+   `listOf(1, 2).iterator()` is `java.util.Arrays.ArrayItr`, Kotlin/Native's the anonymous one
+   `Array.asList` makes, with no qualified name. */
 #include "collections_later_tiers.h"
 #include "transcript.h"
 
@@ -37,32 +38,15 @@ static const struct {
     {"DoubleIterator", &kt_type_double_iterator},
 };
 
-/* What `show` does with an iterator's class name: `NAMED` prints it, `UNNAMED` leaves it out (a
-   list's iterator, whose class is platform-defined and not this driver's subject), and any other
-   text is the name it must be, Kotlin/Native's. */
-static const char NAMED[] = "named";
-static const char UNNAMED[] = "unnamed";
-
-/* `label: [name ]super=<superclass> is <kinds>`. */
-static void show(const char *label, KRef iterator, const char *pinned) {
+/* `label: <name> super=<superclass> is <kinds>`. */
+static void show(const char *label, KRef iterator) {
     KRef literal = kt_class_of(iterator);
     say(label);
     say(": ");
-    if (pinned == NAMED) {
-        say_value(kt_class_qualified_name(literal));
-        say(" ");
-    } else if (pinned != UNNAMED) {
-        kt_int length = 0;
-        while (pinned[length] != 0) {
-            length++;
-        }
-        KRef name = kt_class_qualified_name(literal);
-        CHECK(name != NULL && text_is(name, pinned, length),
-              "an array iterator's class is not Kotlin/Native's\n");
-    }
+    say_value(kt_class_qualified_name(literal));
     const KType *parent = type_of(iterator)->super;
     CHECK(parent != NULL, "an iterator class has no superclass\n");
-    say("super=");
+    say(" super=");
     say_bytes(parent->name, (kt_int)parent->name_length);
     say(" is");
     for (unsigned at = 0; at < sizeof(kinds) / sizeof(kinds[0]); at++) {
@@ -80,40 +64,34 @@ static KRef array_iterator(const KType *type) {
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();
-    show("(1..2).iterator()", kt_range_iterator(kt_int_range(1, 2)), NAMED);
-    show("(2 downTo 1).iterator()", kt_range_iterator(kt_int_range_down_to(2, 1)), NAMED);
-    show("(1L..2L).iterator()", kt_range_iterator(kt_long_range(1, 2)), NAMED);
-    show("('a'..'b').iterator()", kt_range_iterator(kt_char_range('a', 'b')), NAMED);
-    show("(1u..2u).iterator()", kt_range_iterator(kt_uint_range(1, 2)), NAMED);
-    show("(1uL..2uL).iterator()", kt_range_iterator(kt_ulong_range(1, 2)), NAMED);
-    show("arrayOf(1).iterator()", array_iterator(&kt_type_array), "kotlin.ArrayIterator");
-    show("BooleanArray(1).iterator()", array_iterator(&kt_type_boolean_array),
-         "kotlin.BooleanArrayIterator");
-    show("ByteArray(1).iterator()", array_iterator(&kt_type_byte_array),
-         "kotlin.ByteArrayIterator");
-    show("CharArray(1).iterator()", array_iterator(&kt_type_char_array),
-         "kotlin.CharArrayIterator");
-    show("ShortArray(1).iterator()", array_iterator(&kt_type_short_array),
-         "kotlin.ShortArrayIterator");
-    show("IntArray(1).iterator()", array_iterator(&kt_type_int_array), "kotlin.IntArrayIterator");
-    show("LongArray(1).iterator()", array_iterator(&kt_type_long_array),
-         "kotlin.LongArrayIterator");
-    show("FloatArray(1).iterator()", array_iterator(&kt_type_float_array),
-         "kotlin.FloatArrayIterator");
-    show("DoubleArray(1).iterator()", array_iterator(&kt_type_double_array),
-         "kotlin.DoubleArrayIterator");
-    show("UByteArray(1).iterator()", array_iterator(&kt_type_ubyte_array), NAMED);
-    show("UShortArray(1).iterator()", array_iterator(&kt_type_ushort_array), NAMED);
-    show("UIntArray(1).iterator()", array_iterator(&kt_type_uint_array), NAMED);
-    show("ULongArray(1).iterator()", array_iterator(&kt_type_ulong_array), NAMED);
-    show("\"ab\".iterator()", kt_iterable_iterator(kt_string_utf8("ab", 2)), NAMED);
+    show("(1..2).iterator()", kt_range_iterator(kt_int_range(1, 2)));
+    show("(2 downTo 1).iterator()", kt_range_iterator(kt_int_range_down_to(2, 1)));
+    show("(1L..2L).iterator()", kt_range_iterator(kt_long_range(1, 2)));
+    show("('a'..'b').iterator()", kt_range_iterator(kt_char_range('a', 'b')));
+    show("(1u..2u).iterator()", kt_range_iterator(kt_uint_range(1, 2)));
+    show("(1uL..2uL).iterator()", kt_range_iterator(kt_ulong_range(1, 2)));
+    show("arrayOf(1).iterator()", array_iterator(&kt_type_array));
+    show("BooleanArray(1).iterator()", array_iterator(&kt_type_boolean_array));
+    show("ByteArray(1).iterator()", array_iterator(&kt_type_byte_array));
+    show("CharArray(1).iterator()", array_iterator(&kt_type_char_array));
+    show("ShortArray(1).iterator()", array_iterator(&kt_type_short_array));
+    show("IntArray(1).iterator()", array_iterator(&kt_type_int_array));
+    show("LongArray(1).iterator()", array_iterator(&kt_type_long_array));
+    show("FloatArray(1).iterator()", array_iterator(&kt_type_float_array));
+    show("DoubleArray(1).iterator()", array_iterator(&kt_type_double_array));
+    show("UByteArray(1).iterator()", array_iterator(&kt_type_ubyte_array));
+    show("UShortArray(1).iterator()", array_iterator(&kt_type_ushort_array));
+    show("UIntArray(1).iterator()", array_iterator(&kt_type_uint_array));
+    show("ULongArray(1).iterator()", array_iterator(&kt_type_ulong_array));
+    show("\"ab\".iterator()", kt_iterable_iterator(kt_string_utf8("ab", 2)));
     show("StringBuilder(\"ab\").iterator()",
-         kt_iterable_iterator(kt_string_builder_with_text(kt_string_utf8("ab", 2))), NAMED);
+         kt_iterable_iterator(kt_string_builder_with_text(kt_string_utf8("ab", 2))));
 
-    KRef one = kt_array_new(&kt_type_array, 1);
-    ((KRef *)((KArray *)one + 1))[0] = kt_box_int(1);
-    show("listOf(1).iterator()", kt_iterable_iterator(kt_list_of(one)), UNNAMED);
-    show("mutableListOf(1).iterator()", kt_iterable_iterator(kt_mutable_list_of(one)), UNNAMED);
+    KRef two = kt_array_new(&kt_type_array, 2);
+    ((KRef *)((KArray *)two + 1))[0] = kt_box_int(1);
+    ((KRef *)((KArray *)two + 1))[1] = kt_box_int(2);
+    show("listOf(1, 2).iterator()", kt_iterable_iterator(kt_list_of(two)));
+    show("mutableListOf(1, 2).iterator()", kt_iterable_iterator(kt_mutable_list_of(two)));
     CHECK(kt_pending_exception() == NULL, "making an iterator raised\n");
     kt_sys_write(1, "OK\n", 3);
 }
