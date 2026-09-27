@@ -10,6 +10,12 @@
 # the release is out. A lock older than the TTL belongs to a job that can no longer be running (the
 # release job's timeout is shorter) and is taken over.
 #
+# Availability, not correctness: a lock orphaned by a killed job is taken over only once the TTL
+# (30 minutes) has passed, which outlasts the acquisition wait (15 minutes), so a release job that
+# meets a fresh orphan fails and publishing resumes with the next master run or a re-run after the
+# TTL. A job that waits the full 15 minutes has 5 minutes of its 20-minute timeout left to publish.
+# Neither case can publish an older commit over a newer one.
+#
 #   scripts/release-publisher.sh acquire           take the lock; prints the lock commit
 #   scripts/release-publisher.sh check             prints publish=true|false for $GITHUB_OUTPUT
 #   scripts/release-publisher.sh record            record the commit as the last published one
@@ -30,7 +36,7 @@ wait_limit=${RELEASE_LOCK_WAIT:-900}
 poll=${RELEASE_LOCK_POLL:-10}
 
 usage() {
-  sed -n '13,20p' "$0" >&2
+  sed -n '19,26p' "$0" >&2
   exit 2
 }
 
