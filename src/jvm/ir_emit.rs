@@ -103,7 +103,7 @@ pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::function_descriptor;
 pub(crate) use declaration_types::jvm_tys;
 pub(super) use declaration_types::{class_ctor_jvm_tys, ir_method_desc};
-use declaration_types::{field_jvm_tys, jvm_declared_ty};
+use declaration_types::{field_jvm_tys, jvm_declared_ty, signature_function_params};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
@@ -8812,7 +8812,7 @@ fn method_signature_shape(
             .unwrap_or(declared_ret);
         return suspend_method_sig(formatter, params, ret);
     }
-    method_parameterized_sig(formatter, &f.params, &f.ret)
+    method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
 }
 
 fn suspend_generic_method_sig(

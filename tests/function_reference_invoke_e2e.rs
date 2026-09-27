@@ -770,8 +770,8 @@ fun box(): String {
 
 /// A local function that writes a captured `var` shares the variable's cell with its reference:
 /// the carrier stores that cell in a field named after the variable and passes it to the lifted
-/// function, which names it after the variable too. An object cell's generic field signature is
-/// not yet written, so that carrier is only run.
+/// function, which names it after the variable too. An object cell is typed `Ref.ObjectRef<T>`,
+/// so the carrier's field and constructor carry that generic `Signature`.
 #[test]
 fn shared_capture_reference_carriers_store_the_cell() {
     assert_carriers_match_and_run(&Fixture {
@@ -781,6 +781,7 @@ fn shared_capture_reference_carriers_store_the_cell() {
         carriers: &[
             "SharedCaptureReferenceInvokeKt$carriers$counter$1",
             "SharedCaptureReferenceInvokeKt$carriers$adder$1",
+            "SharedCaptureReferenceInvokeKt$carriers$noter$1",
         ],
     });
 }
