@@ -56,6 +56,7 @@ mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
 mod interface_compatibility;
+mod lambda_class_names;
 mod local_updates;
 mod loop_emission;
 mod member_schedule;
@@ -13047,46 +13048,8 @@ impl<'a> Emitter<'a> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    // Common lowering records the source lambda's stable lexical origin. Consume that
-                    // edge directly: a source lambda lowered into multiple constructors keeps one name
-                    // and identity, and no generated method spelling or value table is searched here.
-                    let origin = self.ir.lambda_origins.get(impl_fn);
-                    let (internal, identity) = if let Some(origin) = origin {
-                        let ordinal = origin.ordinal + 1;
-                        // A class-initialization origin (a property initializer or an init block)
-                        // has the EMPTY enclosing name — kotlinc emits no function segment there
-                        // (`C$prop$1`, `C$local$1`, `C$1`), so an empty segment is dropped, never
-                        // printed as `C$$1`.
-                        let mut internal = impl_owner.clone();
-                        for segment in [
-                            Some(origin.enclosing_name.as_str()),
-                            origin.binding_name.as_deref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .filter(|segment| !segment.is_empty())
-                        {
-                            internal.push('$');
-                            internal.push_str(segment);
-                        }
-                        internal.push('$');
-                        internal.push_str(&ordinal.to_string());
-                        (internal, LambdaClassIdentity::Source(origin.identity))
-                    } else {
-                        // Backend-synthesized lambdas have no source expression. Their implementation
-                        // id is already the exact stable identity; its generated name is serialization
-                        // input only for this JVM artifact boundary.
-                        let (enclosing, index) = impl_name
-                            .split_once("$lambda$")
-                            .map(|(head, tail)| {
-                                (head.to_string(), tail.parse::<u32>().unwrap_or(0))
-                            })
-                            .unwrap_or_else(|| (impl_name.clone(), 0));
-                        (
-                            format!("{impl_owner}${enclosing}${}", index + 1),
-                            LambdaClassIdentity::Synthetic(*impl_fn),
-                        )
-                    };
+                    let (internal, identity) =
+                        lambda_class_names::class_name(self.ir, *impl_fn, &impl_name, &impl_owner);
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),

@@ -77,9 +77,37 @@ pub struct FirStatementDebugLines {
     pub target: u32,
 }
 
+/// A body's line-only source metadata: one entry per expression and statement, the file's line
+/// count, and a local callable's closing line.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FirBodyDebugLines {
+    /// Physical source-line count for debug output; it carries no source lookup capability.
+    source_line_count: u32,
+    expressions: Vec<FirExpressionDebugLines>,
+    statements: Vec<FirStatementDebugLines>,
+    /// 1-based line of a local callable's closing `}` (0 = unknown).
+    close_line: u32,
+}
+
+impl FirBodyDebugLines {
+    pub(super) fn add_expression(&mut self) {
+        self.expressions.push(FirExpressionDebugLines::default());
+    }
+
+    pub(super) fn add_statement(&mut self) {
+        self.statements.push(FirStatementDebugLines::default());
+    }
+
+    pub(super) fn payload_bytes(&self) -> usize {
+        self.expressions.len() * std::mem::size_of::<FirExpressionDebugLines>()
+            + self.statements.len() * std::mem::size_of::<FirStatementDebugLines>()
+    }
+}
+
 impl FirBody {
     pub fn expression_debug_lines(&self, expression: FirExprId) -> FirExpressionDebugLines {
-        self.expression_debug_lines
+        self.debug_lines
+            .expressions
             .get(expression.raw() as usize)
             .copied()
             .unwrap_or_default()
@@ -96,24 +124,25 @@ impl FirBody {
     }
 
     fn statement_debug_lines(&self, statement: FirStatementId) -> FirStatementDebugLines {
-        self.statement_debug_lines
+        self.debug_lines
+            .statements
             .get(statement.raw() as usize)
             .copied()
             .unwrap_or_default()
     }
 
     pub const fn source_line_count(&self) -> u32 {
-        self.source_line_count
+        self.debug_lines.source_line_count
     }
 
     /// The closing `}` line of this local callable's block body or lambda, where kotlinc marks
     /// the return a body falling off its end gets; 0 when there is none.
     pub const fn close_line(&self) -> u32 {
-        self.close_line
+        self.debug_lines.close_line
     }
 
     pub(crate) fn set_close_line(&mut self, line: u32) {
-        self.close_line = line;
+        self.debug_lines.close_line = line;
     }
 
     pub(crate) fn attach_debug_lines(
@@ -124,7 +153,7 @@ impl FirBody {
         expression_lines: &HashMap<Span, FirExpressionDebugLines>,
         statement_lines: &HashMap<Span, FirStatementDebugLines>,
     ) {
-        self.source_line_count = source_line_count;
+        self.debug_lines.source_line_count = source_line_count;
         let source_span = |origin| {
             let mut current = origin;
             loop {
@@ -134,7 +163,7 @@ impl FirBody {
                 }
             }
         };
-        self.expression_debug_lines = self
+        self.debug_lines.expressions = self
             .expressions
             .iter()
             .map(|expression| {
@@ -143,7 +172,7 @@ impl FirBody {
                     .unwrap_or_default()
             })
             .collect();
-        self.statement_debug_lines = self
+        self.debug_lines.statements = self
             .statements
             .iter()
             .map(|statement| {
