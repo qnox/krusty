@@ -121,7 +121,8 @@ fn project_classifier_parents(
         }
     }
     // The legacy view keeps function supertypes out of `interfaces`, so count only nominal ones.
-    let written_before = header.interfaces[..header.interfaces_before_superclass as usize]
+    let written_before = header
+        .interfaces_written_before_superclass()
         .iter()
         .filter(|parent| relative(parent.get()).obj_internal().is_some())
         .count();

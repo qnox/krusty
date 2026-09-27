@@ -2912,71 +2912,29 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             }
                         }
                     };
-                    // The parser can promote only a SAME-FILE base; at this all-files signature pass,
-                    // classify an other-file module declaration from the bootstrap index and otherwise
-                    // ask the library source. Both origins feed the same `super_internal` field, so later
-                    // checking/lowering never needs separate file/module/classpath branches.
-                    let parenless_base = if c.primary_ctor_annotations.is_some()
-                        || classifier_header.base.is_some()
-                        || !c.secondary_ctors.iter().any(|constructor| {
-                            matches!(
-                                constructor.delegation,
-                                crate::ast::CtorDelegation::Super(_)
-                                    | crate::ast::CtorDelegation::None
-                            )
-                        }) {
-                        None
-                    } else {
-                        classifier_header
-                            .supertypes
-                            .iter()
-                            .find(|supertype| {
-                                declared_supertype_name(
-                                    c,
-                                    &supertype.name,
-                                    &header_class_names,
-                                    &lexical_inheritors,
-                                )
-                                .is_some_and(|internal| {
-                                    user_base_classes.contains(&internal)
-                                        || libraries
-                                            .classifier(internal)
-                                            .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
-                                })
-                            })
-                            .map(|supertype| supertype.name.clone())
-                    };
-                    let written_interfaces = classifier_header
-                        .supertypes
+                    let written = WrittenSupertypes::split(c, &classifier_header, |supertype| {
+                        declared_supertype_name(
+                            c,
+                            &supertype.name,
+                            &header_class_names,
+                            &lexical_inheritors,
+                        )
+                        .is_some_and(|internal| {
+                            user_base_classes.contains(&internal)
+                                || libraries
+                                    .classifier(internal)
+                                    .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
+                        })
+                    });
+                    let mut interfaces: Vec<String> = written
+                        .interfaces
                         .iter()
-                        // A function supertype through the numbered semantic classifier contributes
-                        // both its nominal `kotlin/FunctionN` edge and its exact callable shape. Only
-                        // the unmaterialized `<fun>` marker used by suspend/big-arity shapes lacks a
-                        // nominal classifier and must stay out of hierarchy traversal.
-                        .filter(|t| t.name != "<fun>")
-                        .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
-                        .collect::<Vec<_>>();
-                    let superclass_start = classifier_header.base.as_ref().or_else(|| {
-                        let base = parenless_base.as_deref()?;
-                        classifier_header.supertypes.iter().find(|t| t.name == base)
-                    });
-                    let interfaces_before_superclass = superclass_start.map_or(0, |base| {
-                        written_interfaces
-                            .iter()
-                            .filter(|t| t.span.lo < base.span.lo)
-                            .count()
-                    });
-                    let mut interfaces: Vec<String> = written_interfaces
-                        .into_iter()
                         .map(|t| resolve_super(&t.name))
                         .collect();
                     interfaces.extend(implicit_source_supertypes(c).map(TypeName::render));
-                    let super_internal = classifier_header
-                        .base
-                        .as_ref()
-                        .map(|base| base.name.as_str())
-                        .or(parenless_base.as_deref())
-                        .map(&mut resolve_super)
+                    let super_internal = written
+                        .superclass
+                        .map(|base| resolve_super(&base.name))
                         .or_else(|| classifier_is_enum.then(|| "kotlin/Enum".to_string()));
                     let resolved_annotations: Vec<_> = c
                         .annotations
@@ -3475,13 +3433,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             interfaces: interfaces_ref,
                             callable_signature,
                             callable_signatures,
-                            interface_type_args: classifier_header
-                                .supertypes
+                            interface_type_args: written
+                                .interfaces
                                 .iter()
-                                .filter(|interface| interface.name != "<fun>")
-                                .filter(|interface| {
-                                    parenless_base.as_deref() != Some(interface.name.as_str())
-                                })
                                 .map(|interface| {
                                     interface
                                         .targs
@@ -3505,27 +3459,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 })
                                 .collect(),
                             super_internal: super_internal_ref,
-                            interfaces_before_superclass: u32::try_from(
-                                interfaces_before_superclass,
-                            )
-                            .expect("a classifier's interface count fits u32"),
+                            interfaces_before_superclass: written.interfaces_before_superclass,
                             // An `enum class E`'s implicit superclass is the PARAMETERIZED
                             // `kotlin.Enum<E>`; the declaration writes no argument list, so the
                             // self argument is recorded here rather than read off the source.
                             super_type_args: if classifier_is_enum {
                                 vec![Ty::obj_name(internal_ref)]
                             } else {
-                                classifier_header
-                                    .base
-                                    .as_ref()
-                                    .or_else(|| {
-                                        parenless_base.as_deref().and_then(|base| {
-                                            classifier_header
-                                                .supertypes
-                                                .iter()
-                                                .find(|supertype| supertype.name == base)
-                                        })
-                                    })
+                                written
+                                    .superclass
                                     .map(|base| base.targs.as_slice())
                                     .unwrap_or_default()
                                     .iter()

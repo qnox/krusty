@@ -22,6 +22,7 @@ mod source_declaration_spellings;
 mod supertype_cycles;
 mod top_level_overload_conflicts;
 mod type_universe;
+mod written_supertypes;
 
 pub(in crate::resolve) use annotation_occurrences::*;
 pub(in crate::resolve) use collection::*;
@@ -34,6 +35,7 @@ pub(in crate::resolve) use source_declaration_spellings::*;
 pub(in crate::resolve) use supertype_cycles::*;
 pub(in crate::resolve) use top_level_overload_conflicts::*;
 pub(in crate::resolve) use type_universe::*;
+pub(in crate::resolve) use written_supertypes::*;
 
 /// Stage C: collect top-level function + class signatures across all files. Two passes so that a
 /// class type can be referenced before its declaration (and across files).

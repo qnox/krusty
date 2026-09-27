@@ -15,7 +15,10 @@ use super::ResolvedParameterIdentity;
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 
 mod selections;
+pub use classifier_headers::ResolvedClassifierHeader;
+pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
 pub use selections::*;
+mod classifier_headers;
 mod declaration_metadata;
 mod source_packages;
 
@@ -1707,22 +1710,6 @@ pub struct ResolvedClassifierContextParameter {
     pub ty: ResolvedTy,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedClassifierHeader {
-    pub declaration: DeclarationId,
-    pub classifier: TypeName,
-    pub superclass: Option<ResolvedTy>,
-    /// How many of [`Self::interfaces`] the declaration lists before its superclass.
-    pub interfaces_before_superclass: u32,
-    pub interfaces: Box<[ResolvedTy]>,
-    pub interface_delegations: Box<[ResolvedInterfaceDelegation]>,
-    /// Constructor-supplied implicit receivers available to every instance body, in source order.
-    pub context_parameters: Box<[ResolvedClassifierContextParameter]>,
-    /// Closed direct subclass identities for a sealed classifier. Pass 1 computes this from stable
-    /// declarations; common-IR lowering copies it without reopening a symbol table.
-    pub sealed_subclasses: Box<[TypeName]>,
-}
-
 /// One classifier in a source class's already-applied semantic hierarchy.
 ///
 /// `applied` preserves owner type arguments (for example `I<String>`), while `classifier` is the
@@ -2626,72 +2613,6 @@ impl ResolvedModuleIndex {
                 .or_default()
                 .push(declaration);
         }
-    }
-
-    pub fn publish_classifier_header(
-        &mut self,
-        declaration: DeclarationId,
-        classifier: TypeName,
-        superclass: Option<super::DeclaredSuperclass>,
-        interfaces: impl IntoIterator<Item = Ty>,
-        interface_delegations: impl IntoIterator<Item = ResolvedInterfaceDelegation>,
-        context_parameters: impl IntoIterator<
-            Item = (Option<Box<str>>, crate::types::ContextParameterKind, Ty),
-        >,
-        sealed_subclasses: impl IntoIterator<Item = TypeName>,
-    ) -> Result<(), UnpublishableType> {
-        let interfaces_before_superclass = superclass.map_or(0, |parent| parent.interfaces_before);
-        let superclass = superclass
-            .map(|parent| ResolvedTy::new(parent.ty))
-            .transpose()?;
-        let interfaces = interfaces
-            .into_iter()
-            .map(ResolvedTy::new)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
-        assert!(
-            interfaces_before_superclass as usize <= interfaces.len(),
-            "a superclass slot must lie within the declared interfaces"
-        );
-        let interface_delegations = interface_delegations
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let context_parameters = context_parameters
-            .into_iter()
-            .map(|(name, kind, ty)| {
-                Ok(ResolvedClassifierContextParameter {
-                    name,
-                    kind,
-                    ty: ResolvedTy::new(ty)?,
-                })
-            })
-            .collect::<Result<Vec<_>, UnpublishableType>>()?
-            .into_boxed_slice();
-        let sealed_subclasses = sealed_subclasses
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        self.publish_classifier_identity(declaration, classifier);
-        assert!(
-            self.classifiers
-                .insert(
-                    declaration,
-                    ResolvedClassifierHeader {
-                        declaration,
-                        classifier,
-                        superclass,
-                        interfaces_before_superclass,
-                        interfaces,
-                        interface_delegations,
-                        context_parameters,
-                        sealed_subclasses,
-                    },
-                )
-                .is_none(),
-            "a stable classifier may publish only one semantic header"
-        );
-        Ok(())
     }
 
     /// Publish only a classifier's stable semantic identity. Ordinary body-local parent types may
