@@ -38,6 +38,7 @@ mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+mod copied_code;
 mod coroutine_machine;
 mod data_class_value_classes;
 mod debug_lines;
@@ -66,6 +67,7 @@ mod metadata_policy;
 mod method_access;
 mod method_defaults;
 mod method_signatures;
+mod must_inline_lambdas;
 mod non_null_operands;
 mod numeric_comparison;
 mod object_static_initialization;
@@ -131,6 +133,8 @@ use method_defaults::{
     body_has_reified_markers, default_stub_access, default_stub_params, emit_default_stub,
     emit_facade_default_stub, static_default_stub_marker, static_default_stub_params,
 };
+pub use must_inline_lambdas::mark_must_inline_lambdas;
+use must_inline_lambdas::splice_called_impls;
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use scalar_coercion::{
     box_prim_free, emit_num_conv, native_unsigned_impl_target, semantic_scalar_adapter, unbox_prim,
@@ -3391,66 +3395,6 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
             }
             crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
         }
-    }
-}
-
-/// Lambda impl methods that a lambda's own `inline_body` CALLS. An ANONYMOUS FUNCTION cannot be
-/// spliced verbatim — its `return` is LOCAL, so a copied body would return from the enclosing method —
-/// and the lowerer therefore gives it an `inline_body` that is an `invokestatic` to its impl. Such an
-/// impl is LIVE even though no `invokedynamic` ever references it, and must survive both the
-/// must-inline dead-marking and the facade dead-lambda sweep.
-fn splice_called_impls(ir: &IrFile) -> std::collections::HashSet<u32> {
-    ir.exprs
-        .iter()
-        .filter_map(|expression| match expression {
-            IrExpr::Lambda {
-                impl_fn,
-                inline_body: Some(body),
-                ..
-            } => matches!(
-                &ir.exprs[*body as usize],
-                IrExpr::Call { callee: Callee::Local(f), .. } if f == impl_fn
-            )
-            .then_some(*impl_fn),
-            _ => None,
-        })
-        .collect()
-}
-
-pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
-    let spliced_as_a_call = splice_called_impls(ir);
-    let mut dead: Vec<u32> = Vec::new();
-    for i in 0..ir.exprs.len() {
-        let args = match &ir.exprs[i] {
-            IrExpr::Call {
-                callee:
-                    Callee::Static {
-                        inline: crate::libraries::InlineKind::MustInline,
-                        ..
-                    },
-                args,
-                ..
-            } => args.clone(),
-            IrExpr::Call { args, .. }
-                if ir
-                    .module_inline_calls
-                    .contains(&(u32::try_from(i).expect("IR expression index exceeds ExprId"))) =>
-            {
-                args.clone()
-            }
-            _ => continue,
-        };
-        for a in args {
-            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] {
-                if !spliced_as_a_call.contains(impl_fn) {
-                    dead.push(*impl_fn);
-                }
-            }
-        }
-    }
-    for fid in dead {
-        ir.inline_only_fns.insert(fid);
-        ir.must_inline_lambdas.insert(fid);
     }
 }
 
@@ -10232,6 +10176,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
+        self.emitting(e, |emitter| emitter.emit_node(e, code));
+    }
+
+    fn emit_node(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
                 self.link_safe_call_chain(e, code);
@@ -10361,6 +10309,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
+        self.emitting(e, |emitter| emitter.emit_value_expression(e, code));
+    }
+
+    fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::mark_expression_start(self.ir, e, code);
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
         // position, so an offset recorded before it would be worthless, whereas an instruction

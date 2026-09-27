@@ -3,7 +3,7 @@
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
 use crate::kt_string::KtString;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +23,7 @@ mod enclosing_method;
 mod inner_classes;
 mod line_numbers;
 mod local_variables;
+mod member_mapping;
 mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
@@ -208,11 +209,15 @@ impl ConstPool {
 
     /// Whether a typed constant-pool descriptor mentions `internal`. Arbitrary `Utf8` entries are
     /// deliberately excluded: a source string literal can itself spell `Lowner/Nested;`.
-    /// Feed every descriptor the pool carries in a typed position to `record`.
-    fn record_typed_descriptor_names(&self, record: &mut impl FnMut(&str)) {
-        for entry in &self.entries {
-            let descriptor = match entry {
-                Const::NameAndType(_, descriptor) | Const::MethodType(descriptor) => *descriptor,
+    /// Feed every descriptor the pool carries in a typed position to `record`, except those of the
+    /// `copied` `NameAndType` entries.
+    fn record_typed_descriptor_names(&self, copied: &HashSet<u16>, record: &mut impl FnMut(&str)) {
+        for (slot, &entry) in self.slot_entries.iter().enumerate() {
+            let descriptor = match self.entries.get(entry as usize) {
+                Some(Const::NameAndType(_, _)) if copied.contains(&(slot as u16 + 1)) => continue,
+                Some(Const::NameAndType(_, descriptor) | Const::MethodType(descriptor)) => {
+                    *descriptor
+                }
                 _ => continue,
             };
             if let Some(value) = self.utf8_value(descriptor) {
@@ -545,6 +550,8 @@ pub struct ClassWriter {
     /// whole compile. The set answers the same question in one lookup, and the recorded sizes make
     /// a stale answer impossible: anything appended invalidates it.
     mentioned_names: std::cell::RefCell<Option<DescriptorMentionCache>>,
+    /// Which member references only code copied from an inline function names.
+    members: member_mapping::MappedMembers,
     /// The frames computed so far for this class's method bodies (see [`stack_maps`]).
     computed_bodies: stack_maps::ComputedBodies,
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
@@ -644,6 +651,7 @@ impl ClassWriter {
         ClassWriter {
             cp,
             mentioned_names: std::cell::RefCell::new(None),
+            members: member_mapping::MappedMembers::default(),
             computed_bodies: stack_maps::ComputedBodies::default(),
             param_assertions: true,
             nullability_annotations: true,
@@ -1179,16 +1187,6 @@ impl ClassWriter {
     /// The verification type an `ldc` of the constant at `index` pushes, for the same reason.
     pub fn loadable_constant_type_at(&self, index: u16) -> Option<VerifType> {
         self.cp.loadable_constant_type(index)
-    }
-
-    pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        self.cp.methodref(class, name, desc)
-    }
-    pub fn interface_methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        self.cp.interface_methodref(class, name, desc)
-    }
-    pub fn fieldref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        self.cp.fieldref(class, name, desc)
     }
 
     pub fn const_string(&mut self, s: &str) -> u16 {

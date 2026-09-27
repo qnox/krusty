@@ -137,9 +137,9 @@ impl SignatureReader<'_> {
     }
 }
 
-/// The sizes a [`DescriptorMentionCache`] was computed from: fields, methods, pool entries, and
-/// the class signature. Anything appended or set changes one of them.
-pub(super) type MentionSizes = (usize, usize, usize, Option<u16>);
+/// The sizes a [`DescriptorMentionCache`] was computed from: fields, methods, pool entries, the
+/// class signature, and the member references the class's own code names. Anything appended or set changes one of them.
+pub(super) type MentionSizes = (usize, usize, usize, Option<u16>, usize);
 
 pub(super) struct DescriptorMentionCache {
     sizes: MentionSizes,
@@ -186,7 +186,9 @@ impl ClassWriter {
                     code.get(pc + 1..pc + 3)
                         .map(|operand| u16::from_be_bytes([operand[0], operand[1]]))
                 };
+                let copied = index().is_some_and(|index| self.members.copied_only(index));
                 let descriptor = match code[pc] {
+                    _ if copied => None,
                     // getstatic, putstatic, getfield, putfield
                     0xb2..=0xb5 => index().and_then(|index| self.cp.fieldref_descriptor(index)),
                     // invokevirtual, invokespecial, invokestatic, invokeinterface
@@ -209,6 +211,7 @@ impl ClassWriter {
             self.methods.len(),
             self.cp.entries.len(),
             self.class_signature,
+            self.members.mapped_count(),
         )
     }
 
@@ -235,9 +238,10 @@ impl ClassWriter {
                 });
             }
         }
-        self.cp.record_typed_descriptor_names(&mut |value| {
-            record_mentioned_names(value, &mut names);
-        });
+        self.cp
+            .record_typed_descriptor_names(&self.copied_only_name_and_types(), &mut |value| {
+                record_mentioned_names(value, &mut names);
+            });
         for value in self.referenced_member_descriptors() {
             record_signature_classes(value, &mut |class| {
                 classes.insert(class.to_string());

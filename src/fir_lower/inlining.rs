@@ -501,6 +501,7 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
+            self.ir.mark_inline_copy(copy);
             let generated_zero = match self.ir.expr(source) {
                 IrExpr::Variable {
                     ty,
@@ -566,6 +567,7 @@ impl BodyLowering<'_> {
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
