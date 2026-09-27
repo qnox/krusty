@@ -636,6 +636,8 @@ mod enum_entry_deferred_val_e2e;
 mod enum_entry_named_arg_e2e;
 #[path = "enum_entry_property_e2e.rs"]
 mod enum_entry_property_e2e;
+#[path = "enum_equality_e2e.rs"]
+mod enum_equality_e2e;
 #[path = "enum_generic_interface_e2e.rs"]
 mod enum_generic_interface_e2e;
 #[path = "enum_implements_interface_e2e.rs"]
@@ -832,6 +834,8 @@ mod generic_vararg_inference_e2e;
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
 mod iconsapi_byte_residue_e2e;
+#[path = "ieee754_equality_e2e.rs"]
+mod ieee754_equality_e2e;
 #[path = "implicit_any_super_method_e2e.rs"]
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]
@@ -1489,10 +1493,14 @@ mod primitive_bound_generic_e2e;
 mod primitive_box_cast_e2e;
 #[path = "primitive_compare_branch_e2e.rs"]
 mod primitive_compare_branch_e2e;
+#[path = "primitive_iterator_next_e2e.rs"]
+mod primitive_iterator_next_e2e;
 #[path = "primitive_operator_extension_e2e.rs"]
 mod primitive_operator_extension_e2e;
 #[path = "primitive_spread_e2e.rs"]
 mod primitive_spread_e2e;
+#[path = "primitive_to_string_e2e.rs"]
+mod primitive_to_string_e2e;
 #[path = "private_classifier_access_e2e.rs"]
 mod private_classifier_access_e2e;
 #[path = "private_constructor_access_e2e.rs"]

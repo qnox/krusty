@@ -29,6 +29,7 @@ mod erased_parameters;
 mod error;
 mod expression;
 mod external_references;
+mod floating_equality;
 mod function_references;
 mod function_value_conversions;
 mod generics;

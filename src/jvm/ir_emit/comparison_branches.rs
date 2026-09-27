@@ -83,6 +83,14 @@ impl Emitter<'_> {
     }
 
     fn emit_comparison_value(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        // kotlinc's `Ieee754Equals` produces its Boolean itself, and `!=` is `Not` over it.
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs) {
+            self.emit_ieee754_equals(lhs, rhs, code);
+            if op == IrBinOp::Ne {
+                self.negate_material_bool(code);
+            }
+            return;
+        }
         let f = code.new_label();
         // Every comparison that needs a conditional branch goes through the same classifier and
         // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
@@ -96,12 +104,50 @@ impl Emitter<'_> {
 
         // The shared emitter returns false only for structural equality between two non-null
         // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
-        // position, so branching merely to reconstruct it would be longer and less faithful.
+        // position; `!=` is kotlinc's `Not` over it, which materializes the negation with a branch.
         self.emit_structural_equality(lhs, rhs, code);
         if op == IrBinOp::Ne {
-            code.push_int(1, self.cw);
-            code.ixor();
+            self.negate_material_bool(code);
         }
+    }
+
+    /// Whether `operand`'s type names an enum class (kotlinc's `isEnumValue`), nullable or not.
+    fn is_enum_value(&self, operand: ExprId) -> bool {
+        self.value_ty(operand)
+            .non_null()
+            .obj_internal()
+            .and_then(|classifier| self.classifiers.classifier(classifier))
+            .is_some_and(|classifier| classifier.is_enum())
+    }
+
+    /// Negate the Boolean on the operand stack as kotlinc's `Not` materializes it:
+    /// `ifne F; iconst_1; goto E; F: iconst_0; E:`.
+    fn negate_material_bool(&mut self, code: &mut CodeBuilder) {
+        let f = code.new_label();
+        code.ifne(f);
+        self.materialize_cmp_bool(f, code);
+    }
+
+    /// `==`/`!=` between two non-null `Float`s or two non-null `Double`s: kotlinc's `Ieee754Equals`
+    /// on primitives. Identity (`===`) compares the primitives directly and is not this operation.
+    fn is_ieee754_equality(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        let left = self.value_ty(lhs);
+        matches!(left, Ty::Float | Ty::Double) && self.value_ty(rhs) == left
+    }
+
+    /// Put kotlinc's `Ieee754Equals` result for two primitive operands on the operand stack.
+    ///
+    /// The intrinsic marks the comparison's line before its `fcmpg`/`dcmpg` and always materializes
+    /// the Boolean (`ifne F; iconst_1; goto E; F: iconst_0; E:`); a condition then branches on it.
+    fn emit_ieee754_equals(&mut self, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder) {
+        self.emit_comparison_operands(lhs, rhs, code);
+        self.mark_comparison_decision(&[lhs, rhs], code);
+        if self.value_ty(lhs) == Ty::Double {
+            code.dcmpg();
+        } else {
+            code.fcmpg();
+        }
+        self.negate_material_bool(code);
     }
 
     /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
@@ -190,6 +236,15 @@ impl Emitter<'_> {
             }
             return true;
         }
+        if matches!(op, Eq | Ne) && self.is_ieee754_equality(lhs, rhs) {
+            self.emit_ieee754_equals(lhs, rhs, code);
+            if (op == Eq) == jt {
+                code.ifne(target);
+            } else {
+                code.ifeq(target);
+            }
+            return true;
+        }
         let op = match op {
             RefEq => Eq,
             RefNe => Ne,
@@ -210,6 +265,22 @@ impl Emitter<'_> {
             }
             return true;
         }
+        // kotlinc's `Equals` compares by reference when either operand's type is an enum class:
+        // an enum constant is a singleton and `Enum.equals` is identity.
+        if matches!(op, Eq | Ne)
+            && !lt.is_jvm_scalar()
+            && !self.value_ty(rhs).is_jvm_scalar()
+            && (self.is_enum_value(lhs) || self.is_enum_value(rhs))
+        {
+            self.emit_identity_operands(lhs, rhs, code);
+            self.mark_comparison_decision(&[lhs, rhs], code);
+            if (op == Eq) == jt {
+                code.if_acmpeq(target);
+            } else {
+                code.if_acmpne(target);
+            }
+            return true;
+        }
         // Structural equality's value result has different optimal consumers: value position can use it
         // directly, while control flow branches on it. Tell the caller to select that final operation;
         // the semantic classification itself still occurs once, here.
@@ -218,6 +289,44 @@ impl Emitter<'_> {
         }
         self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
         true
+    }
+
+    /// Kotlin's IEEE equality with a nullable floating operand: kotlinc's `Ieee754Equals` calls the
+    /// `Intrinsics.areEqual` overload typed by each operand's nullability (`(Ljava/lang/Double;D)Z`,
+    /// `(DLjava/lang/Double;)Z`, `(Ljava/lang/Double;Ljava/lang/Double;)Z`), marking the
+    /// comparison's line before the call.
+    pub(super) fn emit_nullable_ieee754_equals(
+        &mut self,
+        expression: ExprId,
+        operand: Ty,
+        args: &[ExprId],
+        code: &mut CodeBuilder,
+    ) {
+        let &[lhs, rhs] = args else {
+            panic!("IEEE equality has two operands, not {args:?}");
+        };
+        self.emit_operands(&[lhs, rhs], code);
+        let descriptor = |ty: Ty| {
+            if ty.is_jvm_scalar() {
+                type_descriptor(operand)
+            } else {
+                type_descriptor(Ty::nullable(operand))
+            }
+        };
+        let (left, right) = (self.value_ty(lhs), self.value_ty(rhs));
+        let method = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "areEqual",
+            &format!("({}{})Z", descriptor(left), descriptor(right)),
+        );
+        self.at_comparison_line(expression, |this| {
+            this.mark_comparison_decision(&[lhs, rhs], code)
+        });
+        let words = [left, right]
+            .iter()
+            .map(|ty| if ty.is_jvm_scalar() { slot_words(*ty) } else { 1 } as i32)
+            .sum::<i32>();
+        code.invokestatic(method, words, 1);
     }
 
     /// Put the null-safe structural equality result for two references on the operand stack.

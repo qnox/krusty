@@ -39,7 +39,9 @@ fn reject_all(
 
 fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType> {
     match operation {
-        IrIntrinsic::PrimitiveCompare { operand, .. } => reject("intrinsic operand", *operand),
+        IrIntrinsic::PrimitiveCompare { operand, .. } | IrIntrinsic::Ieee754Equals { operand } => {
+            reject("intrinsic operand", *operand)
+        }
         IrIntrinsic::UnsignedToString { source } => reject("intrinsic source", *source),
         IrIntrinsic::PrimitiveArrayNew { element } => reject("intrinsic array element", *element),
         IrIntrinsic::EnumValueOf { classifier } => reject("enum valueOf classifier", *classifier),

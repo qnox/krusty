@@ -8559,6 +8559,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
   no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
 
+- **A primitive iterator's `next()` calls its unboxed element operation** (kotlinc's
+  `IteratorNext` intrinsic): a call of `next()` declared by a `kotlin.collections` primitive
+  iterator (`IntIterator`, `LongIterator`, … `BooleanIterator`), in source or in a `for` loop over
+  an `iterator()` returning one, is `invokevirtual IntIterator.nextInt()I` rather than the boxed
+  `next()` and an `intValue()`. The provider marks that exact declaration (owner, `operator`, no
+  parameters, the iterator's element result) as `CompilerIntrinsic::PrimitiveIteratorNext`; the JVM
+  target realizes it only when the receiver's checked type is that iterator class, since kotlinc
+  keys the intrinsic on the callee's parent and a subclass receiver selects its own inherited
+  member. A generic `Iterator<Int>` keeps `Iterator.next()` and its cast. Test:
+  `tests/primitive_iterator_next_e2e.rs`.
+
+- **Floating `==` materializes its Boolean; `!=` negates a materialized equality** (kotlinc's
+  `Ieee754Equals` and `Not`). `==`/`!=` between two non-null `Float`s or two non-null `Double`s
+  (a smart-cast operand included) is IEEE equality that always produces its Boolean:
+  `dcmpg; ifne F; iconst_1; goto E; F: iconst_0; E:`, with the comparison's line marked before the
+  `dcmpg`. A condition branches on that value (`ifeq`/`ifne`); `!=` is `Not` over it, which in
+  value position materializes again (`ifne F'; iconst_1; goto E'; F': iconst_0`). Structural `!=`
+  on references is `Not` over `Intrinsics.areEqual` the same way — a branch, never `iconst_1; ixor`.
+  Identity (`===`) and ordering keep the direct compare-and-jump. Test:
+  `tests/ieee754_equality_e2e.rs`.
+
+- **Floating `==` with a nullable operand is one IEEE equality operation** (fir2ir's
+  `ieee754equals`, kotlinc's `Ieee754Equals`). An equality between two operands of one floating
+  type, either of them nullable, lowers to `IrIntrinsic::Ieee754Equals` over both operands in
+  source order (two nulls are equal, a null and a value are not, two values compare as IEEE
+  primitives); `!=` negates it. Common lowering no longer expands it into null tests: the JVM calls
+  the `Intrinsics.areEqual` overload typed by each operand's nullability
+  (`(Ljava/lang/Double;D)Z`, `(DLjava/lang/Double;)Z`, `(Ljava/lang/Double;Ljava/lang/Double;)Z`,
+  and the `Float` forms), marking the comparison's line before the call, and JavaScript compares
+  with `===`. A nullable integral equality keeps its null tests (kotlinc's
+  `PrimitiveToObjectComparison` is a separate rule). Test: `tests/ieee754_equality_e2e.rs`.
+
+- **`toString()` on a primitive is `String.valueOf`** (kotlinc's `FlattenStringConcatenationLowering`,
+  which makes a primitive receiver's `toString()` a one-argument string concatenation, and
+  `JvmStringConcatenationLowering`, which realizes that as `String.valueOf`). The provider marks each
+  builtin primitive's own `toString(): String` as the value's string conversion, the operation
+  `Any?.toString()` already is; the JVM calls `String.valueOf` overloaded by the primitive (`(I)` for
+  `Byte`/`Short`) and marks the call's line there, in a source call and in a callable reference's
+  adapter body alike, where krusty boxed the value and called the box's `toString()`. Test:
+  `tests/primitive_to_string_e2e.rs`.
+
+- **Equality with an enum operand compares references** (kotlinc's `Equals`, which takes
+  `referenceEquals` when `a.isEnumValue || b.isEnumValue`). `==`/`!=` where either operand's type
+  names an enum class — nullable or not, source-declared or from a library, the other side any
+  reference — is `if_acmpeq`/`if_acmpne` (materialized with a branch in value position), with the
+  comparison's line marked before the jump, not `Intrinsics.areEqual`. A null literal operand
+  keeps the `ifnull`/`ifnonnull` form. The emitter reads the classifier kind from the checked
+  classifier facts for the operand's type. Test: `tests/enum_equality_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare

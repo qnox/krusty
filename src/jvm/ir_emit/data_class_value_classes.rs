@@ -1,9 +1,52 @@
-//! JVM realization of data-class equality and hash operations over value-class fields.
+//! JVM realization of data-class hash operations, and of equality over value-class fields.
 
 use super::*;
 use crate::ir::ExprId;
 
 impl Emitter<'_> {
+    /// Emit a data-class property's contribution to `hashCode`: the value class's `hashCode-impl`,
+    /// `Arrays.hashCode`, a boxed scalar's static `hashCode`, or the reference's own `hashCode()`.
+    pub(super) fn emit_data_class_field_hash(
+        &mut self,
+        ty: Ty,
+        value: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        if self.emit_data_class_value_hash(ty, value, code) {
+            return;
+        }
+        if ty.is_array() {
+            self.emit_value(value, code);
+            let descriptor = format!("({})I", type_descriptor(ty));
+            let method = self
+                .cw
+                .methodref("java/util/Arrays", "hashCode", &descriptor);
+            code.invokestatic(method, 1, 1);
+        } else if ty.non_null().is_jvm_scalar() && !ty.is_nullable() {
+            let scalar = ty.non_null();
+            self.emit_value(value, code);
+            let (owner, descriptor) = match scalar {
+                Ty::Int => ("java/lang/Integer", "(I)I"),
+                Ty::Short => ("java/lang/Short", "(S)I"),
+                Ty::Byte => ("java/lang/Byte", "(B)I"),
+                Ty::Char => ("java/lang/Character", "(C)I"),
+                Ty::Boolean => ("java/lang/Boolean", "(Z)I"),
+                Ty::Long => ("java/lang/Long", "(J)I"),
+                Ty::Double => ("java/lang/Double", "(D)I"),
+                Ty::Float => ("java/lang/Float", "(F)I"),
+                _ => unreachable!("scalar data hash"),
+            };
+            let method = self.cw.methodref(owner, "hashCode", descriptor);
+            code.invokestatic(method, slot_words(scalar) as i32, 1);
+        } else {
+            self.emit_value(value, code);
+            let owner = data_class_hashcode_owner(self.ir, self.bodies, ty)
+                .expect("checked reference data-class field has a JVM hash owner");
+            let method = self.cw.methodref(&owner, "hashCode", "()I");
+            code.invokevirtual(method, 0, 1);
+        }
+    }
+
     /// Emit `equals-impl0` for an unboxed value-class field. A boxed nullable field deliberately
     /// declines so the caller compares the two boxes through ordinary reference equality semantics.
     pub(super) fn emit_data_class_value_equals(

@@ -1348,6 +1348,8 @@ pub enum FirExprKind {
         nullable: FirExprId,
         primitive: FirExprId,
         primitive_ty: ResolvedTy,
+        /// The nullable operand is the source's left one; source order is evaluation order.
+        nullable_first: bool,
     },
     /// Kotlin numeric equality between two nullable scalar values. Both operands are evaluated,
     /// nulls compare structurally, and two present values are unboxed and promoted to `comparison`

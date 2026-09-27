@@ -1863,15 +1863,12 @@ impl JvmLibraries {
                         is_infix: declaration.is_infix(),
                         annotations: &member.annotations,
                     };
-                    let range =
-                        crate::libraries::builtin_member_realization::unsigned_range_construction(
-                            &facts,
-                        );
-                    let operation =
-                        crate::libraries::builtin_member_realization::unsigned_member_operation(
-                            &facts,
-                        );
-                    if let Some(realization) = range {
+                    use crate::libraries::builtin_member_realization as rules;
+                    let range = rules::unsigned_range_construction(&facts);
+                    let operation = rules::unsigned_member_operation(&facts);
+                    if let Some(realization) =
+                        range.or_else(|| rules::primitive_iterator_next(&facts))
+                    {
                         member.realization = realization;
                     }
                     if let Some((element, operation)) = operation {
