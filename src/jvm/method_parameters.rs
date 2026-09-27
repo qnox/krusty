@@ -188,7 +188,7 @@ pub(super) fn primary_constructor(
     );
     let prefix = class.constructor_prefix_count as usize;
     let mut parameters = constructor_prefix(class, prefix);
-    let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
+    let projected = crate::jvm::parameter_names::constructor_method_parameters(class);
     parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
 }
@@ -200,7 +200,7 @@ pub(super) fn primary_constructor_identities(
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<Option<String>> {
-    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    let identities = crate::jvm::parameter_names::constructor_local_variables(class);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
 }

@@ -8600,6 +8600,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm::parameter_assertions`, replacing the receiver-only guard common lowering used to record.
   Test: `tests/lambda_parameter_checks_e2e.rs`.
 
+- **An inner class constructor names its enclosing instance `this$0`, and a destructuring loop's
+  temporary has no local** (kotlinc's `writeParameterInLocalVariableTable` and `isVisibleInLVT`).
+  The primary constructor of an `inner class` (nested, or inside a local class) lists its leading
+  enclosing-instance parameter in the `LocalVariableTable` as `this$0`; its parameter identity is
+  `IrGeneratedParameterRole::OuterInstance`, which no null check guards. A `for ((a, b) in xs)`
+  loop's own variable is a compiler temporary that only the prepended `val (a, b) = …` reads: the
+  parser records the loop (`File::destructured_loops`) and checked FIR publishes no debug name for
+  its variable, so no row is written where krusty wrote `$dest$<offset>`. Test:
+  `tests/outer_instance_and_loop_temporary_locals_e2e.rs`.
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare

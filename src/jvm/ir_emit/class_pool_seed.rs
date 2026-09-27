@@ -102,9 +102,7 @@ pub(super) fn seed_enum_constructor_locals(
 fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)> {
     c.ctor_args
         .iter()
-        .zip(crate::jvm::parameter_names::constructor_local_variables(
-            &c.ctor_args,
-        ))
+        .zip(crate::jvm::parameter_names::constructor_local_variables(c))
         .filter_map(|(argument, name)| {
             Some((name?, crate::jvm::names::type_descriptor(argument.ty)))
         })

@@ -2533,7 +2533,7 @@ fn attach_synth_debug_tables(
     }
     // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
     // reflection/assertion label names the physical constructor local too.
-    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
+    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(c);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
             ctor_locals.push((name, desc(argument.ty), slot));

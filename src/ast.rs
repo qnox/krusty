@@ -1717,6 +1717,9 @@ pub struct File {
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
     /// Absent ⇒ the whole destructuring is positional.
     pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// Loops whose variable is a destructuring pattern (`for ((a, b) in xs)`). Such a loop's own
+    /// variable is a compiler temporary, read only by the `val (a, b) = …` prepended to its body.
+    pub destructured_loops: std::collections::HashSet<StmtId>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     /// These remain parser-owned syntax; resolution publishes their semantic types before checked
     /// FIR consumes the active bounded unit.
@@ -1897,6 +1900,7 @@ impl File {
         self.lambda_labels = Default::default();
         self.lambda_call_labels = Default::default();
         self.destructure_source_props = Default::default();
+        self.destructured_loops = Default::default();
         self.destructure_entry_types = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();

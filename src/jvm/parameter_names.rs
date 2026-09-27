@@ -5,7 +5,7 @@
 //! common-IR identity or leaking onto another class-file surface.
 
 use crate::ir::{
-    IrCapturedDeclaration, IrCapturingCallable, IrFile, IrGeneratedParameterRole,
+    IrCapturedDeclaration, IrCapturingCallable, IrClass, IrFile, IrGeneratedParameterRole,
     IrParameterIdentity, IrParameterRole,
 };
 
@@ -38,6 +38,7 @@ pub(super) fn local_variable(
         IrParameterRole::PropertySetterValue => Some("<set-?>".to_string()),
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
+            IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
             IrGeneratedParameterRole::ValueClassCarrier => Some("arg0".to_string()),
@@ -315,12 +316,21 @@ fn function_semantic_parameter_types(
         .collect()
 }
 
-fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameterIdentity> {
+/// An inner class's first constructor argument is its enclosing instance; the rest follow the
+/// declaration.
+fn constructor_identities(class: &IrClass) -> Vec<IrParameterIdentity> {
     let mut context_ordinal = 0u32;
-    arguments
+    class
+        .ctor_args
         .iter()
         .enumerate()
         .map(|(physical_ordinal, argument)| {
+            if class.is_inner_class && physical_ordinal == 0 {
+                return IrParameterIdentity::generated(
+                    IrGeneratedParameterRole::OuterInstance,
+                    None,
+                );
+            }
             let identity = match argument.context_kind {
                 crate::types::ContextParameterKind::Named => IrParameterIdentity::context_value(
                     argument
@@ -363,11 +373,9 @@ fn constructor_anonymous_labels(
     disambiguated_anonymous_context_labels(identities, &semantic_types)
 }
 
-pub(super) fn constructor_method_parameters(
-    arguments: &[crate::ir::IrCtorArg],
-) -> Vec<Option<String>> {
-    let identities = constructor_identities(arguments);
-    let anonymous = constructor_anonymous_labels(arguments, &identities);
+pub(super) fn constructor_method_parameters(class: &IrClass) -> Vec<Option<String>> {
+    let identities = constructor_identities(class);
+    let anonymous = constructor_anonymous_labels(&class.ctor_args, &identities);
     identities
         .iter()
         .enumerate()
@@ -379,12 +387,10 @@ pub(super) fn constructor_method_parameters(
         .collect()
 }
 
-pub(super) fn constructor_local_variables(
-    arguments: &[crate::ir::IrCtorArg],
-) -> Vec<Option<String>> {
-    let identities = constructor_identities(arguments);
+pub(super) fn constructor_local_variables(class: &IrClass) -> Vec<Option<String>> {
+    let identities = constructor_identities(class);
     let anonymous = if anonymous_context_parameters_are_locals() {
-        constructor_anonymous_labels(arguments, &identities)
+        constructor_anonymous_labels(&class.ctor_args, &identities)
     } else {
         vec![None; identities.len()]
     };
@@ -395,9 +401,9 @@ pub(super) fn constructor_local_variables(
         .collect()
 }
 
-pub(super) fn constructor_assertions(arguments: &[crate::ir::IrCtorArg]) -> Vec<Option<String>> {
-    let identities = constructor_identities(arguments);
-    let anonymous = constructor_anonymous_labels(arguments, &identities);
+pub(super) fn constructor_assertions(class: &IrClass) -> Vec<Option<String>> {
+    let identities = constructor_identities(class);
+    let anonymous = constructor_anonymous_labels(&class.ctor_args, &identities);
     identities
         .iter()
         .enumerate()
@@ -468,6 +474,8 @@ pub(super) fn function_assertions(
 pub(super) fn assertion(identity: &IrParameterIdentity) -> Option<String> {
     match identity.role {
         IrParameterRole::ExtensionReceiver => Some("<this>".to_string()),
+        // kotlinc never guards the enclosing instance (`FIELD_FOR_OUTER_THIS`).
+        IrParameterRole::Generated(IrGeneratedParameterRole::OuterInstance) => None,
         IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue => {
             metadata(identity).map(str::to_owned)
         }

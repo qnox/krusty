@@ -964,6 +964,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();
+    file.destructured_loops = std::mem::take(&mut file.destructured_loops)
+        .into_iter()
+        .filter_map(|old| statements.get(&old).copied())
+        .collect();
     file.local_class_nested = std::mem::take(&mut file.local_class_nested)
         .into_iter()
         .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))

@@ -1441,6 +1441,8 @@ mod operator_inc_dec_e2e;
 mod operator_index_e2e;
 #[path = "optimization_gate_e2e.rs"]
 mod optimization_gate_e2e;
+#[path = "outer_instance_and_loop_temporary_locals_e2e.rs"]
+mod outer_instance_and_loop_temporary_locals_e2e;
 #[path = "overload_declaration_specificity_e2e.rs"]
 mod overload_declaration_specificity_e2e;
 #[path = "overloaded_extension_e2e.rs"]

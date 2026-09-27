@@ -66,6 +66,8 @@ pub enum IrGeneratedParameterRole {
     Positional {
         ordinal: u32,
     },
+    /// An inner class constructor's enclosing instance.
+    OuterInstance,
     Continuation,
     HolderReceiver,
     ValueClassCarrier,
