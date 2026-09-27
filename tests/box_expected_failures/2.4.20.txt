@@ -20,7 +20,6 @@ boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/special.kt
-callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
 callableReference/callableReferenceOnObjectTypealias.kt
