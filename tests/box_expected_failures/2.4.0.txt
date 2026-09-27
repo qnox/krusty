@@ -11,7 +11,6 @@ annotations/instances/typeAliasesAndGenericsInterop.kt
 argumentOrder/defaults.kt
 basics/k42000_1.kt
 basics/k42000_crossmodule.kt
-basics/unchecked_cast10.kt
 binaryOp/eqNullableDoublesWithTP.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/unsignedArrayForEach.kt
@@ -29,7 +28,6 @@ callableReference/genericLocalClassConstructorReference.kt
 callableReference/kt21014.kt
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 callableReference/property/privateSetterOutsideClass.kt
-casts/kt80795.kt
 casts/objectToPrimitiveWithAssertion.kt
 classes/kt2224.kt
 closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
