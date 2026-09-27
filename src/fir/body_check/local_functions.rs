@@ -232,11 +232,10 @@ impl BodyFirChecker<'_> {
             } else {
                 nested.bind_local(&parameter.name, ty)
             };
-            nested.body.add_parameter(FirValueParameter {
-                origin: nested.origins.source(nested.source, parameter.ty.span),
-                value,
-                ty,
-            });
+            let origin = nested.origins.source(nested.source, parameter.ty.span);
+            nested
+                .body
+                .add_parameter(FirValueParameter::bound(origin, value, ty));
         }
         for capture in &info.captures {
             if let Some((depth, binding)) = nested.outer_values.get(&capture.name).copied() {

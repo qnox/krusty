@@ -3,7 +3,7 @@ use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
 mod context_parameters;
-mod value_parameters;
+pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};

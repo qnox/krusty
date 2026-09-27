@@ -1338,14 +1338,25 @@ fn local_function_parameter_identities(
         body.parameters()
             .iter()
             .skip(context_value_count)
-            .map(|parameter| {
-                body.debug_value_name(parameter.value)
+            .map(|parameter| match parameter.name {
+                crate::fir::FirValueParameterName::Bound => body
+                    .debug_value_name(parameter.value)
                     .map(crate::ir::IrParameterIdentity::source)
                     .unwrap_or(crate::ir::IrParameterIdentity {
                         source_name: None,
                         role: crate::ir::IrParameterRole::Value,
                         provenance: crate::ir::IrParameterProvenance::SourceDeclared,
-                    })
+                    }),
+                crate::fir::FirValueParameterName::Unused => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::UnusedValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
+                crate::fir::FirValueParameterName::Destructured => crate::ir::IrParameterIdentity {
+                    source_name: None,
+                    role: crate::ir::IrParameterRole::DestructuredValue,
+                    provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                },
             }),
     );
     Ok(identities)

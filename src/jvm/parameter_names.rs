@@ -26,6 +26,8 @@ pub(super) fn local_variable(
     }
     match identity.role {
         IrParameterRole::Value | IrParameterRole::ContextValue => None,
+        // kotlinc writes no local-variable row for a parameter with a special name.
+        IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue => None,
         IrParameterRole::AnonymousContextParameter { .. } => None,
         IrParameterRole::ContextReceiver { ordinal } => {
             Some(format!("$context_receiver_{ordinal}"))
@@ -181,14 +183,20 @@ pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String
 
 /// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
 /// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
-/// parameter.
+/// parameter; a destructuring one is `<destruct>`.
 pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
-    match (identity.role, identity.source_name.as_deref()) {
-        (IrParameterRole::AnonymousContextParameter { .. }, _)
-        | (IrParameterRole::Value, Some("_")) => Some("<unused var>"),
-        (_, name) => name,
+    match identity.role {
+        IrParameterRole::AnonymousContextParameter { .. } | IrParameterRole::UnusedValue => {
+            Some("<unused var>")
+        }
+        IrParameterRole::DestructuredValue => Some(DESTRUCTURED),
+        _ => identity.source_name.as_deref(),
     }
 }
+
+/// Kotlin's special name for a parameter written as a destructuring declaration. A suspend lambda's
+/// body also reads the parameter back into a local of this name.
+pub(super) const DESTRUCTURED: &str = "<destruct>";
 
 pub(super) fn metadata_context_kind(
     identity: &IrParameterIdentity,
@@ -454,6 +462,9 @@ pub(super) fn function_assertions(
 pub(super) fn assertion(identity: &IrParameterIdentity) -> Option<String> {
     match identity.role {
         IrParameterRole::ExtensionReceiver => Some("<this>".to_string()),
+        IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue => {
+            metadata(identity).map(str::to_owned)
+        }
         _ => local_variable(identity, ""),
     }
 }
@@ -583,6 +594,23 @@ mod tests {
         );
         assert_eq!(assertion(&receiver), Some("<this>".to_string()));
         assert_eq!(metadata(&receiver), None);
+    }
+
+    #[test]
+    fn a_lambda_parameter_with_a_special_name_has_no_local_variable_row() {
+        for (role, name) in [
+            (IrParameterRole::UnusedValue, "<unused var>"),
+            (IrParameterRole::DestructuredValue, "<destruct>"),
+        ] {
+            let parameter = IrParameterIdentity {
+                source_name: None,
+                role,
+                provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+            };
+            assert_eq!(local_variable(&parameter, "box$lambda$0"), None);
+            assert_eq!(metadata(&parameter), Some(name));
+            assert_eq!(assertion(&parameter), Some(name.to_string()));
+        }
     }
 
     #[test]

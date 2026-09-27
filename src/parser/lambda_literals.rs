@@ -128,6 +128,8 @@ impl Parser<'_> {
             Span,
         );
         let mut destructures: Vec<LambdaDestructure> = Vec::new();
+        // How each parameter was written, parallel to `params`.
+        let mut roles: Vec<LambdaParameterRole> = Vec::new();
         let params = if has_params {
             let mut ps = Vec::new();
             loop {
@@ -186,6 +188,7 @@ impl Parser<'_> {
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
                     param_types.push(None);
+                    roles.push(LambdaParameterRole::Destructured);
                     destructures.push((synth, entries, source_props, entry_types, sp));
                 } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
                     // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
@@ -226,10 +229,16 @@ impl Parser<'_> {
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
                     param_types.push(None);
+                    roles.push(LambdaParameterRole::Destructured);
                     // The `[a, b]` bracket form is positional (`componentN`), never by-name.
                     let source_props = vec![None; entries.len()];
                     destructures.push((synth, entries, source_props, entry_types, sp));
                 } else if self.at(TokenKind::Ident) {
+                    roles.push(if self.text() == "_" && !self.escaped_ident() {
+                        LambdaParameterRole::Unused
+                    } else {
+                        LambdaParameterRole::Named
+                    });
                     ps.push(self.text().to_string());
                     self.bump();
                     if self.at(TokenKind::Colon) {
@@ -294,6 +303,9 @@ impl Parser<'_> {
         }
         if param_types.iter().any(|t| t.is_some()) {
             self.file.lambda_param_types.insert(lam.0, param_types);
+        }
+        if roles.iter().any(|role| *role != LambdaParameterRole::Named) {
+            self.file.lambda_parameter_roles.insert(lam.0, roles);
         }
         lam
     }

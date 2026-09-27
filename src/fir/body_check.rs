@@ -457,11 +457,9 @@ fn bind_parameters_and_check_defaults(
             checker.bind_local(parameter.name, parameter.ty)
         };
         let origin = checker.origins.source(checker.source, parameter.span);
-        checker.body.add_parameter(FirValueParameter {
-            origin,
-            value,
-            ty: parameter.ty,
-        });
+        checker
+            .body
+            .add_parameter(FirValueParameter::bound(origin, value, parameter.ty));
     }
     if defaults.next().is_some() {
         return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
