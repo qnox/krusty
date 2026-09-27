@@ -400,6 +400,8 @@ mod companion_supertype_e2e;
 mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
+#[path = "comparison_jump_line_e2e.rs"]
+mod comparison_jump_line_e2e;
 #[path = "comparison_under_operands_e2e.rs"]
 mod comparison_under_operands_e2e;
 #[path = "compound_index_assign_e2e.rs"]

@@ -8360,6 +8360,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   emitter turns it into a `nop`. Tests: `tests/source_when_stepping_nop_e2e.rs`,
   `fir_lower::when_result_type_tests::only_a_source_when_carries_the_when_origin`.
 
+- **A comparison's jump carries the comparison's own line** (kotlinc's `BooleanComparison`, which
+  calls `markLineNumber(expression)` right before the jump, after the `lcmp`/`dcmp*`/`fcmp*` of a
+  wide comparison). A `when` branch condition on a line of its own therefore keeps that line
+  through its jump rather than returning to the line of the statement holding the `when`. A
+  subject `when`'s comparison is built at the condition's offsets, so common lowering gives the
+  generated `==` the condition's source line. A comparison with no line of its own still returns
+  to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
