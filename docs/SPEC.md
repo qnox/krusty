@@ -7815,8 +7815,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
-  parameters or context parameters, returns `Unit`, and takes nothing or one array of `String`
-  (`Array<String>`, `Array<out String>`, or `vararg args: String`). A member `main` of a class or
+  parameters or context parameters, returns `Unit`, and takes nothing or one array whose elements
+  read as a non-null `String` (`Array<String>`, `Array<out String>`, or `vararg args: String`); the
+  array itself may be nullable (`Array<String>?`). kotlinc 2.4.20 agrees on every boundary: two files
+  of one package may each declare `main(args: Array<String>?)`, while `Array<String?>`, `Array<Int>`,
+  `Array<in String>`, `Array<*>` and `vararg args: String?` make ordinary functions that conflict. A member `main` of a class or
   object, `main(x: Int)`, `fun <T> main()`, `fun String.main()` and `fun main(): Int` are ordinary
   functions. The rule is stated once (`fir::MainEntryShape`) and the resolver applies it once,
   after signatures are final, where it classifies top-level overload conflicts: an entry point is

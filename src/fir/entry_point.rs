@@ -24,7 +24,9 @@ pub struct MainEntryShape<'a> {
 impl MainEntryShape<'_> {
     /// The entry-point form of this function, or `None` when Kotlin does not treat it as `main`:
     /// it must be named `main`, have no extension receiver, type parameters, or context
-    /// parameters, return `Unit`, and take either nothing or one array of `String`.
+    /// parameters, return `Unit`, and take either nothing or one array whose elements read as a
+    /// non-null `String` (`Array<String>`, `Array<out String>`, `vararg String`). The array itself
+    /// may be nullable; `Array<String?>`, `Array<in String>` and `Array<*>` are not entry points.
     pub fn entry_parameters(&self) -> Option<MainEntryParameters> {
         if self.name != "main"
             || self.has_extension_receiver
@@ -36,7 +38,7 @@ impl MainEntryShape<'_> {
         }
         match self.parameters {
             [] => Some(MainEntryParameters::None),
-            [parameter] if parameter.array_read_elem() == Some(Ty::String) => {
+            [parameter] if parameter.non_null().array_read_elem() == Some(Ty::String) => {
                 Some(MainEntryParameters::Arguments)
             }
             _ => None,

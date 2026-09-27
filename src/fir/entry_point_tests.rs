@@ -184,3 +184,42 @@ fn a_unit_without_main_has_no_entry_point() {
     assert_eq!(unit.names(), ["box"]);
     assert_eq!(unit.entry, None);
 }
+
+#[test]
+fn a_nullable_string_array_parameter_is_the_arguments_form() {
+    let unit = single("fun main(args: Array<String>?) {}\n");
+    assert_eq!(unit.names(), ["main"]);
+    assert_eq!(unit.entry, unit.expected(0, MainEntryParameters::Arguments));
+}
+
+#[test]
+fn an_array_of_nullable_strings_is_not_an_entry_point() {
+    let unit = single("fun main(args: Array<String?>) {}\n");
+    assert_eq!(unit.names(), ["main"]);
+    assert_eq!(unit.entry, None);
+}
+
+#[test]
+fn an_array_of_non_string_elements_is_not_an_entry_point() {
+    let unit = single("fun main(args: Array<Int>) {}\n");
+    assert_eq!(unit.names(), ["main"]);
+    assert_eq!(unit.entry, None);
+}
+
+#[test]
+fn a_nullable_array_main_in_two_units_of_one_package_does_not_conflict() {
+    // kotlinc 2.4.20 accepts these two files: each `main` is its file's entry point, which is
+    // file-local, so the two do not conflict. `analyze` asserts that no diagnostic is reported.
+    let units = analyze(&[
+        "package app\nfun main(args: Array<String>?) {}\n",
+        "package app\nfun main(args: Array<String>?) {}\n",
+    ]);
+    assert_eq!(
+        units[0].entry,
+        units[0].expected(0, MainEntryParameters::Arguments)
+    );
+    assert_eq!(
+        units[1].entry,
+        units[1].expected(0, MainEntryParameters::Arguments)
+    );
+}
