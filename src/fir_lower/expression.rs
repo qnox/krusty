@@ -1149,6 +1149,7 @@ impl BodyLowering<'_> {
                                 .map(|name| crate::ir::IrCatchBinding::source(name.to_owned())),
                             exc_internal,
                             body: self.expression(catch.body)?,
+                            line: (catch.debug_line != 0).then_some(catch.debug_line),
                         })
                     })
                     .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
