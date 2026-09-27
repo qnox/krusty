@@ -6109,6 +6109,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MaybeCountBox(Count?)` calls `MaybeCountBox.hashCode-impl(Count)`, the boxed carrier the nested
   class erases to, not the terminal primitive.
   Tests: `tests/value_class_equals_hash_e2e.rs`.
+- **A function returning `X?` over a non-null reference carrier unboxes a boxed result
+  null-safely.** `X?` is then the carrier (`fun apply(f: (Tag?) -> Tag?, t: Tag?): Tag?` returns
+  `String`), but a function value's `invoke` answers the box through its `Object` slot. kotlinc
+  returns it through a safe `unbox-impl` call, `checkcast Tag; dup; ifnull L; unbox-impl; goto E;
+  L: pop; aconst_null`; krusty had returned the box itself, which the verifier rejects. The
+  null-safe box and unbox around a value class use the safe-call layout (the value on the stack,
+  `ifnull` to the null arm) like a safe call, and a function value stays on the stack while an
+  argument branches, as kotlinc keeps it; only an argument that clears the stack (a `try`, a
+  suspension) spills it. Tests: `tests/value_class_nullable_function_result_e2e.rs`.
 - **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
   accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
