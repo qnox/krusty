@@ -12,7 +12,7 @@ pub(crate) struct EmitMetadata<'a> {
     pub(crate) emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     /// Forwarded suspend returns requiring the target version's physical `Unit` adaptation.
     pub(crate) suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
-    pub(crate) bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    pub(crate) bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     pub(crate) function_argument_arrays:
         &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 }

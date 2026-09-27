@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::ir::Bridge;
-use crate::jvm::bridge_return_adaptations::BridgeReturnUnboxing;
+use crate::jvm::bridge_adaptations::ValueClassAdapter;
 
 pub(super) fn mentions_value_class(
     params: &[Ty],
@@ -32,7 +32,7 @@ pub(super) fn plan_unboxing(
     bridge: &Bridge,
     value_class: Option<TypeName>,
     under: &std::collections::HashMap<TypeName, Ty>,
-) -> Option<BridgeReturnUnboxing> {
+) -> Option<ValueClassAdapter> {
     let owner = value_class?;
     // A nullable `X?` whose underlying is itself null-carrying stays UNBOXED and carries the null;
     // one that BOXES (over a primitive, or a null-capable chain) is a reference the bridge returns
@@ -40,7 +40,7 @@ pub(super) fn plan_unboxing(
     if bridge.erased_ret.is_nullable() && nullable_is_boxed(owner, under) {
         return None;
     }
-    Some(BridgeReturnUnboxing::new(
+    Some(ValueClassAdapter::new(
         owner,
         // `unbox-impl` is an instance call: a legally null result must go past it, not into it.
         bridge.erased_ret.is_nullable(),

@@ -415,7 +415,7 @@ pub(super) struct EmitEnv<'a> {
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
-    bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
     function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
@@ -3325,7 +3325,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
         suspended_result_returns: facts.metadata.suspended_result_returns,
-        bridge_return_adaptations: facts.metadata.bridge_returns,
+        bridge_adaptations: facts.metadata.bridge_adaptations,
         function_argument_arrays: facts.metadata.function_argument_arrays,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
@@ -14406,8 +14406,7 @@ mod invariant_tests {
             crate::jvm::property_references::PropertyReferenceRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
-        let bridge_returns =
-            crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let bridge_adaptations = crate::jvm::bridge_adaptations::BridgeAdaptations::default();
         let function_argument_arrays =
             crate::jvm::function_argument_arrays::FunctionArgumentArrays::default();
         let suspended_result_returns = crate::jvm::suspend::SuspendedResultReturns::default();
@@ -14419,7 +14418,7 @@ mod invariant_tests {
                 metadata: EmitMetadata {
                     facade: None,
                     continuations: &continuations,
-                    bridge_returns: &bridge_returns,
+                    bridge_adaptations: &bridge_adaptations,
                     function_argument_arrays: &function_argument_arrays,
                     emit_time_machines,
                     suspended_result_returns: &suspended_result_returns,

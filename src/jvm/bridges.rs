@@ -18,7 +18,7 @@ use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
-pub(crate) fn derive_bridges(
+pub(super) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
     boxed_results: &crate::jvm::override_results::BoxedResults,
@@ -377,10 +377,6 @@ fn superclass_method_bridges(
             type_safe_barrier: false,
             special,
             target_name,
-            box_ret: None,
-            box_ret_nullable: false,
-            unbox_params: Vec::new(),
-            unbox_param_nullable: Vec::new(),
         });
         if packed_arguments {
             let class = &ir.classes[cid];
@@ -535,10 +531,6 @@ fn push_member_extension_accessor_bridges(
         type_safe_barrier: false,
         special: false,
         target_name: None,
-        box_ret: None,
-        box_ret_nullable: false,
-        unbox_params: Vec::new(),
-        unbox_param_nullable: Vec::new(),
     };
     let mut accessors = vec![accessor(
         property_getter_name(&edge.name),
@@ -600,10 +592,6 @@ fn push_property_bridge(
             type_safe_barrier: false,
             special,
             target_name,
-            box_ret: None,
-            box_ret_nullable: false,
-            unbox_params: Vec::new(),
-            unbox_param_nullable: Vec::new(),
         });
     }
     if !needs_setter {
@@ -631,10 +619,6 @@ fn push_property_bridge(
             type_safe_barrier: false,
             special: false,
             target_name: None,
-            box_ret: None,
-            box_ret_nullable: false,
-            unbox_params: Vec::new(),
-            unbox_param_nullable: Vec::new(),
         });
     }
 }
