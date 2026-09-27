@@ -116,3 +116,21 @@ fn a_facade_interns_an_enclosing_row_its_nested_row_keeps() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|e| panic!("the facade is byte-identical to kotlinc: {e}"));
 }
+
+/// kotlinc writes a local class's `EnclosingMethod` before its `InnerClasses` table, so the
+/// enclosing class and method interned ahead of the local class's own simple name. The post-metadata
+/// seeding interned the row's name first.
+#[test]
+fn a_local_class_interns_its_enclosing_method_before_its_own_row() {
+    let src = "fun outer(): String {\n\
+               \x20   class Local { fun value() = \"OK\" }\n\
+               \x20   return Local().value()\n\
+               }\n";
+    common::byte_diff_against_kotlinc(
+        "InnerNameLocalEnclosing",
+        src,
+        "InnerNameLocalEnclosingKt$outer$Local",
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|e| panic!("the local class is byte-identical to kotlinc: {e}"));
+}

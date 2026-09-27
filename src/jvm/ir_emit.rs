@@ -6074,11 +6074,11 @@ fn emit_class(
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
-    // Seed every retained `InnerClasses` row's outer-class ref and simple name at kotlinc's
-    // post-metadata pool position, in the table's sorted order. An ANONYMOUS class has neither for
-    // its own row; its enclosing refs use the `EnclosingMethod` window in `finish`.
+    // Intern the `EnclosingMethod` refs, then every retained `InnerClasses` row's outer-class ref
+    // and simple name, at kotlinc's post-metadata pool position, in the table's sorted order. An
+    // ANONYMOUS class has neither for its own row; its enclosing refs use the window in `finish`.
     if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
-        cw.seed_inner_class_names();
+        cw.intern_post_metadata_attribute_refs();
     }
     env.run.finish_class(cw)
 }
@@ -7447,9 +7447,9 @@ fn emit_enum_class(
     if let Some(m) = class_metadata {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
-    // Each retained row's outer-class ref and simple name intern at kotlinc's post-metadata window,
-    // in the finished table's sorted order — the same seeding every other classifier path does.
-    cw.seed_inner_class_names();
+    // The `EnclosingMethod` refs, then each retained row's outer-class ref and simple name, intern
+    // at kotlinc's post-metadata window — the same step every other classifier path takes.
+    cw.intern_post_metadata_attribute_refs();
     cw.finish()
 }
 

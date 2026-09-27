@@ -17,6 +17,7 @@ mod coroutine_markers;
 mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
+mod enclosing_method;
 mod inner_classes;
 mod line_numbers;
 mod method_parameters;
@@ -804,24 +805,6 @@ impl ClassWriter {
 
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
-    }
-
-    /// Set the enclosing class and method for a local class.
-    pub fn set_enclosing_method(&mut self, owner: &str, method: &str, descriptor: &str) {
-        self.enclosing_method = Some((
-            owner.to_string(),
-            method.to_string(),
-            descriptor.to_string(),
-        ));
-    }
-
-    /// Set only the enclosing CLASS. The JVM spec allows `method_index = 0` — "not immediately
-    /// enclosed by a method or constructor" — and the attribute's presence is what makes reflection
-    /// treat the class as local rather than top-level, which is what decides `simpleName`. Used
-    /// where the enclosing method's descriptor is not reconstructable; a wrong one would make
-    /// `Class.getEnclosingMethod()` throw, while absent is well-defined.
-    pub fn set_enclosing_class(&mut self, owner: &str) {
-        self.enclosing_method = Some((owner.to_string(), String::new(), String::new()));
     }
 
     pub(crate) fn set_value_classes(
@@ -2279,15 +2262,7 @@ impl ClassWriter {
         // kotlinc's field visit precedes every class-attribute window.
         self.intern_late_fields();
         self.resolve_inner_classes();
-        // The `EnclosingMethod` refs (owner Class, method NameAndType) intern BEFORE the
-        // `InnerClasses` entries' refs — kotlinc's attribute visit order on an anonymous class.
-        // (The attribute NAME interns later, with the other attribute names.)
-        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
-            self.cp.class(&owner);
-            if !method.is_empty() {
-                self.cp.name_and_type(&method, &desc);
-            }
-        }
+        self.intern_enclosing_method_refs();
         // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
         // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
         // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
@@ -2543,20 +2518,7 @@ impl ClassWriter {
         // The `EnclosingMethod` attribute NAME interns between `InnerClasses` and `SourceFile`
         // (kotlinc's anonymous-class attribute order); its refs were interned at the top of
         // `finish`, so this build only adds the name.
-        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
-            let name = self.cp.utf8("EnclosingMethod");
-            let class_idx = self.cp.class(&owner);
-            // An empty method name is the class-only form: `method_index = 0`.
-            let nat_idx = if method.is_empty() {
-                0
-            } else {
-                self.cp.name_and_type(&method, &desc)
-            };
-            let mut body = Vec::new();
-            u2(&mut body, class_idx);
-            u2(&mut body, nat_idx);
-            (name, body)
-        });
+        let enclosing_method_attr = self.enclosing_method_attribute();
         // A class-only `Signature` interns its name after `InnerClasses` and `EnclosingMethod`, the
         // order kotlinc writes the three in.
         let signature_attr_name =
