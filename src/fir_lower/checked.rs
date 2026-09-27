@@ -462,7 +462,8 @@ impl BodyLowering<'_> {
         if reference.suspend {
             self.ir.suspend_funs.push(function);
         }
-        self.ir.private_methods.insert(function);
+        self.ir
+            .set_method_visibility(function, crate::types::Visibility::Private);
         self.ir
             .lambda_own_params_from
             .insert(function, parameters.len() as u32);

@@ -75,7 +75,8 @@ impl BodyLowering<'_> {
         if target.suspend {
             self.ir.suspend_funs.push(adapter);
         }
-        self.ir.private_methods.insert(adapter);
+        self.ir
+            .set_method_visibility(adapter, crate::types::Visibility::Private);
         // The converted value is the adapter's bound receiver, ahead of its own parameters.
         self.ir.lambda_own_params_from.insert(adapter, 1);
         self.attach_generated_static_to_lexical_class(adapter);

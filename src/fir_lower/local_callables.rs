@@ -681,7 +681,8 @@ impl BodyLowering<'_> {
         if reference_suspend {
             self.ir.suspend_funs.push(wrapper);
         }
-        self.ir.private_methods.insert(wrapper);
+        self.ir
+            .set_method_visibility(wrapper, crate::types::Visibility::Private);
         self.attach_generated_static_to_lexical_class(wrapper);
         self.ir.lambda_own_params_from.insert(
             wrapper,
@@ -872,7 +873,8 @@ impl BodyLowering<'_> {
         self.ir
             .fn_source_names
             .insert(function, source_name.to_owned());
-        self.ir.private_methods.insert(function);
+        self.ir
+            .set_method_visibility(function, crate::types::Visibility::Private);
         if let Some(vararg) = body.vararg_parameter() {
             self.ir.fn_varargs.insert(
                 function,

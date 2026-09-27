@@ -1399,11 +1399,7 @@ fn extract_file_stub_inventory(
                 signature_inference: None,
                 initialization_order: None,
                 kind: DeclarationKind::Accessor,
-                visibility: if setter.is_private {
-                    Visibility::Private
-                } else {
-                    property.visibility
-                },
+                visibility: setter.visibility.unwrap_or(property.visibility),
                 flags: DeclarationFlags::default().with(DeclarationFlags::INLINE, setter.is_inline),
             });
         }

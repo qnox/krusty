@@ -94,7 +94,7 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
     move_marker(&mut ir.open_methods, implementation, declaration);
     move_marker(&mut ir.deprecated_methods, implementation, declaration);
     move_marker(&mut ir.public_inline_functions, implementation, declaration);
-    move_marker(&mut ir.internal_methods, implementation, declaration);
+    move_fact(&mut ir.method_visibilities, implementation, declaration);
     move_list_marker(&mut ir.fresh_method_decls, implementation, declaration);
 }
 
@@ -122,7 +122,7 @@ fn splits(ir: &IrFile, class: &IrClass, fid: u32) -> bool {
     !function.is_static
         && function.body.is_some()
         && ir.suspend_funs.contains(&fid)
-        && !ir.private_methods.contains(&fid)
+        && !ir.method_visibility(fid).is_private()
         && (class.is_interface || splits_in_class())
 }
 

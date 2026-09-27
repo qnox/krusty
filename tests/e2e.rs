@@ -1040,6 +1040,8 @@ mod lambda_result_inference_e2e;
 mod lambda_result_type_variable_e2e;
 #[path = "lambda_vs_block_fun_type_e2e.rs"]
 mod lambda_vs_block_fun_type_e2e;
+#[path = "lateinit_field_visibility_e2e.rs"]
+mod lateinit_field_visibility_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]

@@ -212,7 +212,7 @@ fn synthesize_components_and_copy(
             defaults,
         ),
     );
-    if !ir.private_methods.contains(&copy) {
+    if !ir.method_visibility(copy).is_private() {
         ir.functions[copy as usize].param_checks = fields
             .iter()
             .map(|field| {

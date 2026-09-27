@@ -167,7 +167,8 @@ impl BodyLowering<'_> {
         if adaptation.is_some_and(|adaptation| adaptation.suspend_conversion) {
             self.ir.suspend_funs.push(function);
         }
-        self.ir.private_methods.insert(function);
+        self.ir
+            .set_method_visibility(function, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(function, 0);
         let arity = u8::try_from(reference.params.len())
             .map_err(|_| FirLoweringFailure::UnsupportedIntrinsicCall)?;

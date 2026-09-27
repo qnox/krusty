@@ -106,7 +106,7 @@ fn callable_parameter_identity(
         .map(|identity| resolved_parameter_identity(&identity))
 }
 
-fn resolved_parameter_identity(
+pub(super) fn resolved_parameter_identity(
     identity: &crate::fir::ResolvedParameterIdentity,
 ) -> crate::ir::IrParameterIdentity {
     use crate::fir::ResolvedParameterIdentity as Resolved;

@@ -1132,7 +1132,7 @@ fn structural_nested_constructor_reference_retains_its_adapter_identity() {
         })
         .expect("semantic constructor reference");
     assert_eq!(reference.adapter, adapter);
-    assert!(ir.private_methods.contains(&adapter));
+    assert!(ir.method_visibility(adapter).is_private());
 }
 
 #[test]

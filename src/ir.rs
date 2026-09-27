@@ -49,6 +49,7 @@ mod local_class_names;
 mod operators;
 mod overrides;
 mod progression;
+mod properties;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod sam_target;
@@ -77,6 +78,7 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
+pub use properties::{IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp};
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
 };
@@ -1239,124 +1241,6 @@ pub struct IrCtorArg {
     pub capture: Option<IrConstructorCapture>,
 }
 
-/// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one
-/// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
-/// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and
-/// dispatch to the backend.
-/// One member EXTENSION property declaration ([`IrFile::member_ext_props`]): the SEMANTIC types
-/// (checker-resolved, pre-erasure) plus the accessor realization, everything a class `Property`
-/// metadata record needs.
-#[derive(Clone, Debug)]
-pub struct MemberExtProp {
-    pub name: String,
-    /// Declared extension receiver (`Int` in `val Int.doubled`).
-    pub receiver: crate::types::Ty,
-    /// Declared property type.
-    pub ty: crate::types::Ty,
-    pub is_var: bool,
-    /// Whether this declaration has no accessor implementation and must be realized abstractly.
-    pub is_abstract: bool,
-    pub modifiers: IrPropertyModifiers,
-    /// See [`IrProperty::delegate_field`].
-    pub delegate_field: Option<u32>,
-    /// Getter function id. Abstract properties point at a bodyless common-IR function.
-    pub getter: u32,
-    /// Setter function id, for a `var`.
-    pub setter: Option<u32>,
-    pub visibility: crate::types::Visibility,
-    /// Declaration-owned generic parameters. Source names are metadata payload; semantic names are
-    /// the stable identities used by `receiver` and `ty`.
-    pub type_params: Vec<IrTypeParameter>,
-}
-
-/// How a member property is declared, as Kotlin metadata records it; no JVM shape encodes these.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct IrPropertyModifiers {
-    pub modality: IrPropertyModality,
-    /// Source declares the getter, or the property is delegated; an accessor the compiler
-    /// supplies on its own is the default one.
-    pub declared_getter: bool,
-    /// Source wrote the setter's body, or the property is a delegated `var`. A bodiless `set`
-    /// keeps the default implementation; whether it narrows visibility is recorded separately.
-    pub declared_setter: bool,
-    pub delegated: bool,
-    pub lateinit: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum IrPropertyModality {
-    #[default]
-    Final,
-    /// `open`, an `override` not marked `final`, or an interface member with a getter.
-    Open,
-    /// `abstract`, or an interface member without a getter.
-    Abstract,
-}
-
-#[derive(Clone, Debug)]
-pub struct IrProperty {
-    pub name: String,
-    /// Named context parameters in source order. Metadata records these separately from ordinary
-    /// value parameters, and checked call sites supply their operands implicitly.
-    pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
-    /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
-    /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
-    pub source_order: u32,
-    pub decl_line: u32,
-    /// The property's language-level type. This is also the type exposed by its accessors.
-    pub ty: Ty,
-    /// Kotlin declaration visibility. Backends consume this semantic fact when choosing the
-    /// visibility of an accessor or a target-specific storage realization; they must not recover it
-    /// from a rendered owner/property-name key.
-    pub visibility: crate::types::Visibility,
-    /// Checked Kotlin return-value status, inherited from the property this one overrides.
-    pub return_value_status: crate::types::ReturnValueStatus,
-    /// Resolved Kotlin annotation identities. Backends interpret annotations in their own namespace;
-    /// common lowering does not turn them into storage or calling-convention choices.
-    pub annotations: Box<[TypeName]>,
-    /// The declaration initializer after common lowering, before any backend chooses storage.
-    /// `None` means the declaration has no initializer (or its source shape is not represented),
-    /// which is distinct from an explicit nullable initializer lowered to `IrConst::Null`.
-    /// Keeping this on the declaration lets a backend relocate storage without re-reading the AST
-    /// or mistaking a later assignment in an `init` block for the declaration initializer.
-    pub initializer: Option<ExprId>,
-    /// The declared type of an explicit backing field when it differs from the property's public type.
-    /// The JVM value-class pass may erase the physical [`IrField`] to its carrier, so retaining this
-    /// semantic storage boundary lets the backend box/unbox at the accessor without resolving anything.
-    pub storage_ty: Option<Ty>,
-    /// Index into [`IrClass::fields`] for the backing field, `None` for a computed/delegated property
-    /// (which stores nothing).
-    pub backing_field: Option<u32>,
-    pub is_var: bool,
-    /// Non-final: the accessor a backend emits for it must be overridable.
-    pub is_open: bool,
-    pub modifiers: IrPropertyModifiers,
-    /// Index into [`IrClass::fields`] of a delegated property's `x$delegate` field, which Kotlin
-    /// metadata names as the property's JVM field.
-    pub delegate_field: Option<u32>,
-    /// A `private` property. kotlinc emits NO accessor for one — in-class reads go straight to the
-    /// backing field — so a use from outside the declaring class has nothing to call, and whichever
-    /// path is lowering it does not own the access.
-    pub is_private: bool,
-    /// `true` for a `var` whose setter alone is declared `private`. This is declaration visibility, not
-    /// a JVM flag: every backend must preserve it when realizing a default setter.
-    pub setter_is_private: bool,
-    /// The lowered body of a source-written getter/setter (a computed, `field`-using, or delegated
-    /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
-    pub getter: Option<FunId>,
-    pub setter: Option<FunId>,
-    /// The JVM name a backend must use for the synthesized accessor when the plain spelling is wrong —
-    /// a value-class-typed property's accessor is `@JvmName`-mangled. Stamped by the pass that knows the
-    /// value classes; `None` means the ordinary spelling applies.
-    pub getter_jvm_name: Option<String>,
-    pub setter_jvm_name: Option<String>,
-    /// Some use of this PRIVATE property reaches it from outside the declaring class — an `inline`
-    /// function's body, spliced into its caller. The declaring class must then expose a synthetic
-    /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
-    /// silently degrading the `inline` call instead would change what the program does.
-    pub needs_access_bridge: bool,
-}
-
 /// The executable scope a local, anonymous or generated class is declared in. A backend realizes it
 /// as its own enclosure record (the JVM's `EnclosingMethod`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2450,10 +2334,16 @@ pub struct IrFile {
     /// final, in an open class as much as in a final one. The JVM backend omits `ACC_FINAL` for a
     /// `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
-    /// Methods kotlinc emits `private`; the JVM backend gives a `FunId` in this set `ACC_PRIVATE`.
-    pub private_methods: std::collections::HashSet<u32>,
+    /// Kotlin visibility of methods whose declaration is not public. This is the single semantic
+    /// source for method access, dispatch, metadata, parameter checks, and generated bridges;
+    /// backends map it to their own access representation without parallel private/protected sets.
+    pub method_visibilities: std::collections::HashMap<FunId, crate::types::Visibility>,
     /// Operations realized as a call to one exact function: value-class `-impl` calls, private getters.
     pub(crate) jvm_member_targets: std::collections::HashMap<ExprId, FunId>,
+    /// Member operations tied to an exact selected declaration in this module. The target identity
+    /// survives physical virtual/property realization so a backend can implement access bridges
+    /// without owner/name lookup.
+    pub(crate) module_member_accesses: std::collections::HashMap<ExprId, IrModuleMemberAccess>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
@@ -2607,10 +2497,6 @@ pub struct IrFile {
     /// them onto the constructor it builds, which happens after that unit's syntax is gone.
     pub secondary_ctor_lines:
         std::collections::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
-    /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
-    /// method stays public; only metadata carries the module boundary). `private_methods` keeps
-    /// its own set because privacy ALSO changes dispatch (`invokespecial`).
-    pub internal_methods: std::collections::HashSet<u32>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
     /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
@@ -2914,18 +2800,42 @@ pub struct IrModuleCallable {
     /// decides what the kind means physically). Ordinary member calls are virtual/special calls.
     pub owner: Option<TypeName>,
     pub owner_kind: Option<IrClassifierKind>,
+    /// Final Kotlin declaration visibility. A target may need it to realize access from a
+    /// physically separate nested/generated class, but must not recover it from an emitted name or
+    /// owner.
+    pub visibility: crate::types::Visibility,
     /// Final source declaration flags needed after stable module calls cross into target realization.
     pub flags: crate::fir::DeclarationFlags,
     /// Final declaration signature, including context and extension receiver parameters but never
     /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
     /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
     pub parameters: Box<[Ty]>,
+    /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
+    /// and parameter metadata on synthesized adapters instead of inventing positional names.
+    pub parameter_identities: Box<[IrParameterIdentity]>,
     pub result: Ty,
     /// Resolved declaration annotations with only the compact constant-string payload needed by
     /// target realization. No source spelling, expression, or parser coordinate survives here.
     pub annotations: Box<[IrHeaderAnnotation]>,
     /// Where the function lives when `owner` is absent.
     pub placement: IrStaticPlacement,
+}
+
+/// Exact current-module declaration selected for a member operation, plus the selected semantic
+/// parameter shape at that use site. The stable declaration identity remains authoritative for
+/// visibility/ownership; the selected parameters let a backend build a representation adapter for
+/// a generic call without reverse-engineering types from operands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IrModuleMemberAccess {
+    Callable {
+        target: crate::fir::CallableId,
+        selected_parameters: Box<[Ty]>,
+    },
+    Property {
+        target: crate::fir::PropertyId,
+        write: bool,
+        selected_parameters: Box<[Ty]>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2951,7 +2861,7 @@ pub struct IrModuleProperty {
     /// singleton-association edge; it says nothing about target storage.
     pub companion_owner: Option<TypeName>,
     pub visibility: crate::types::Visibility,
-    pub setter_is_private: bool,
+    pub setter_visibility: crate::types::Visibility,
     /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
@@ -2983,6 +2893,23 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
+    /// A method's Kotlin declaration visibility. Public is the compact default for generated and
+    /// ordinary declarations; every non-public source or generated method is recorded explicitly.
+    pub fn method_visibility(&self, function: FunId) -> crate::types::Visibility {
+        self.method_visibilities
+            .get(&function)
+            .copied()
+            .unwrap_or(crate::types::Visibility::Public)
+    }
+
+    pub fn set_method_visibility(&mut self, function: FunId, visibility: crate::types::Visibility) {
+        if visibility.is_public() {
+            self.method_visibilities.remove(&function);
+        } else {
+            self.method_visibilities.insert(function, visibility);
+        }
+    }
+
     pub(crate) fn record_generated_secondary_constructor(
         &mut self,
         class: ClassId,

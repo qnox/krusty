@@ -21,6 +21,7 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
+        let access = access_bridges::protected_property_access(self.run, operation, access);
         let exact_field = matches!(&access, PropertyAccess::Field { .. });
         // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
         // does not evaluate it.  A write is observably different and still evaluates an explicit

@@ -426,7 +426,7 @@ pub(crate) fn lower_suspend(
                         ir.functions[fid as usize].name,
                         ir.functions[fid as usize].is_static,
                         ir.open_methods.contains(&fid),
-                        ir.private_methods.contains(&fid),
+                        ir.method_visibility(fid).is_private(),
                         ignored.len()
                     );
                 }

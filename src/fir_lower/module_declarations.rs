@@ -48,12 +48,10 @@ fn publish_callable(
             DeclarationId::from_raw(target.raw()),
         ))?;
     let declaration_source = source(index, callable.declaration)?;
-    let flags = index
-        .declaration_header(callable.declaration)
-        .ok_or(FirFileLoweringFailure::MissingCallable(
-            callable.declaration,
-        ))?
-        .flags;
+    let declaration_header = index.declaration_header(callable.declaration).ok_or(
+        FirFileLoweringFailure::MissingCallable(callable.declaration),
+    )?;
+    let flags = declaration_header.flags;
     let owner = index.enclosing_classifier(callable.declaration);
     let owner_kind = owner
         .map(|classifier| {
@@ -103,7 +101,17 @@ fn publish_callable(
                 .into(),
             owner,
             owner_kind,
+            visibility: declaration_header.visibility,
             flags,
+            parameter_identities: index
+                .callable_parameter_identities(target, parameters.len())
+                .ok_or(FirFileLoweringFailure::MissingCallable(
+                    callable.declaration,
+                ))?
+                .iter()
+                .map(super::resolved_parameter_identity)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
             result: signature.result.get(),
             annotations: index
@@ -126,13 +134,6 @@ fn publish_callable(
         },
     );
     Ok(())
-}
-
-fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
-    index
-        .owned_declaration(declaration, crate::fir::DeclarationKind::Accessor, 1)
-        .and_then(|setter| index.declaration_header(setter))
-        .is_some_and(|header| header.visibility.is_private())
 }
 
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
@@ -216,7 +217,11 @@ fn publish_property(
             companion_associated: header.flags.has(DeclarationFlags::COMPANION),
             companion_owner,
             visibility: header.visibility,
-            setter_is_private: setter_is_private(index, property.declaration),
+            setter_visibility: super::properties::setter_visibility(
+                index,
+                property.declaration,
+                header.visibility,
+            ),
             annotations: index
                 .declaration_annotations(property.declaration)
                 .to_vec()
@@ -320,6 +325,16 @@ pub(super) fn publish_referenced(
                 }
             }
             _ => {}
+        }
+    }
+    for access in ir.module_member_accesses.values() {
+        match access {
+            crate::ir::IrModuleMemberAccess::Callable { target, .. } => {
+                callables.insert(*target);
+            }
+            crate::ir::IrModuleMemberAccess::Property { target, .. } => {
+                properties.insert(*target);
+            }
         }
     }
     for class in &ir.classes {

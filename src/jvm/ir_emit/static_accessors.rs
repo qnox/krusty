@@ -130,7 +130,7 @@ pub(super) fn emission_contexts(
 /// Whether code reaches a private static `function` through its owner's accessor: exactly when
 /// the code is emitted into another class than the owner.
 pub(super) fn routes_through_accessor(ir: &IrFile, emitted_by_owner: bool, function: u32) -> bool {
-    !emitted_by_owner && ir.private_methods.contains(&function)
+    !emitted_by_owner && ir.method_visibility(function).is_private()
 }
 
 /// The constant naming static method `name` of `owner`: an interface's through an

@@ -213,7 +213,7 @@ pub(super) fn eligible_points(
             "not top-level or a class member",
         ),
         (
-            &|| subject == Subject::NamedFunction && ir.private_methods.contains(&fid),
+            &|| subject == Subject::NamedFunction && ir.method_visibility(fid).is_private(),
             "private",
         ),
         (
