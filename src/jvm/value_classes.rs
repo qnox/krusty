@@ -2073,12 +2073,12 @@ pub(crate) fn lower_value_classes(
                 IrExpr::Const(crate::ir::IrConst::zero_for_value_type(erased));
         }
     }
-    // `exhaustive_whens` drives the emitter's verifier-visible merge type, not Kotlin type checking.
+    // The exhaustive `when` result drives the emitter's verifier-visible merge type, not Kotlin type checking.
     // Once a value class has been realized as its carrier, the merge frame must use that same carrier
     // (`SampleId?` over a non-null `String` field is `String`, including its null branch). Leaving the
     // semantic classifier here while branch expressions have been erased produces a StackMapTable that
     // claims `LSampleId;` above an actual `String`.
-    for result in ir.exhaustive_whens.values_mut() {
+    for result in ir.whens.exhaustive.values_mut() {
         *result = erase(result, &under);
     }
 

@@ -51,7 +51,6 @@ controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
 controlflow/for_loops_array_nested.kt
-coroutines/accessorForSuspend.kt
 coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow_finally2.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
@@ -68,7 +67,6 @@ coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_InlineAny.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/direct/bridgeGenerationCrossinline.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClass_NullableAny_null.kt
-coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
 coroutines/inlineClasses/direct/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt
@@ -78,7 +76,6 @@ coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/resume/bridgeGenerationCrossinline.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineClass_NullableAny_null.kt
 coroutines/inlineClasses/resume/defaultStub.kt
-coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
 coroutines/inlineClasses/resume/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/resume/invokeOperator.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
@@ -86,15 +83,11 @@ coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_suspendFunT
 coroutines/inlineClasses/resumeWithException/interfaceDelegateWithInlineClass.kt
 coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
-coroutines/inlineSuspendFunction.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
-coroutines/suspendFunctionAsCoroutine/superCall.kt
-coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
-coroutines/suspendFunctionAsCoroutine/superCallOverload.kt
 coroutines/suspendFunctionAsSupertype.kt
 coroutines/suspendFunctionAsSupertypeCall.kt
 coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt

@@ -50,6 +50,7 @@ mod type_check_role;
 mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
+mod when_facts;
 
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
@@ -2426,10 +2427,8 @@ pub struct IrFile {
     /// `String` types only, where logical = physical representation — by the suspend pass's operand
     /// snapshot typing (`hoisted_value_ty`) for external callees.
     pub logical_types: std::collections::HashMap<u32, Ty>,
-    /// Checked `when`/`if` result types by common-IR identity, as fir2ir types them (`Unit` when not
-    /// exhaustive down an `else if` chain). Backends use this to preserve value flow and emit the
-    /// mandatory no-match failure path without re-running exhaustiveness analysis.
-    pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
+    /// What common lowering decided about each `when` (and `if`) a backend emits.
+    pub(crate) whens: when_facts::IrWhenFacts,
     /// Source binding reads and the checked binding's reassignment contract. The expression key is
     /// always an [`IrExpr::GetValue`]; storage realization remains backend-owned.
     pub binding_read_stability: std::collections::HashMap<ExprId, IrBindingStability>,

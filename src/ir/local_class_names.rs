@@ -874,7 +874,8 @@ impl super::IrFile {
         self.physical_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
-        self.exhaustive_whens
+        self.whens
+            .exhaustive
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.suspend_calls

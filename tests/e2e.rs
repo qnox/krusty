@@ -1344,6 +1344,8 @@ mod redundant_null_check_e2e;
 mod redundant_null_jumps_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "source_when_nop_e2e.rs"]
+mod source_when_nop_e2e;
 #[path = "spill_order_e2e.rs"]
 mod spill_order_e2e;
 #[path = "spliced_expression_null_check_e2e.rs"]
@@ -1770,6 +1772,8 @@ mod suspend_loop_compound_assign_e2e;
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_member_call_points_e2e.rs"]
+mod suspend_member_call_points_e2e;
 #[path = "suspend_normalization_e2e.rs"]
 mod suspend_normalization_e2e;
 #[path = "suspend_operator_convention_cross_file_e2e.rs"]

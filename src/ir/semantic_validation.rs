@@ -616,7 +616,7 @@ impl IrFile {
             )?;
         }
         reject_all("logical expression", self.logical_types.values().copied())?;
-        reject_all("exhaustive when", self.exhaustive_whens.values().copied())?;
+        reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
         reject_all("physical expression", self.physical_types.values().copied())?;
         for properties in self.member_ext_props.values() {
             for property in properties {

@@ -1093,7 +1093,7 @@ impl BodyLowering<'_> {
                 // The checker decided whether fir2ir types this `if` by its checked result; a
                 // `Unit` one is a statement, whatever its branches' values.
                 if expression.ty.get() == Ty::Unit || !*deeply_exhaustive {
-                    self.ir.exhaustive_whens.insert(conditional, Ty::Unit);
+                    self.ir.whens.exhaustive.insert(conditional, Ty::Unit);
                 }
                 conditional
             }
@@ -1137,7 +1137,14 @@ impl BodyLowering<'_> {
                 branches,
                 deeply_exhaustive,
             } => {
-                self.when_expression(*subject, branches, expression.ty.get(), *deeply_exhaustive)?
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.when_expression(
+                    *subject,
+                    branches,
+                    expression.ty.get(),
+                    *deeply_exhaustive,
+                    line,
+                )?
             }
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
