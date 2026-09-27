@@ -93,10 +93,10 @@ pub struct IrLambdaOrigin {
     /// signature. Captures and context receivers precede it. This semantic coordinate lets inline
     /// expansion preserve the receiver without recognizing the debug placeholder `<this>`.
     pub receiver_parameter: Option<u32>,
-    /// Source spelling of the label the checker bound the extension receiver's `this@label` to:
-    /// the literal's own label, else the call it is an argument of. `None` for a receiver lambda
-    /// that is neither labelled nor a call argument.
-    pub receiver_label: Option<String>,
+    /// Source spelling of a lambda literal's label: its own, else the call it is written in.
+    /// `None` for a lambda outside every call, or in a scope that names none (a property
+    /// initializer, an assignment, a non-infix operator), and for an anonymous function.
+    pub label: Option<String>,
 }
 
 /// A `catch (e: E)` parameter's debug-local facts.

@@ -16,16 +16,6 @@ pub struct FirCapture {
     pub shared_cell: bool,
 }
 
-/// Which source form a lambda body was written in. Both lift alike; a target may name what they
-/// capture differently (kotlinc treats an anonymous function as a local function there).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirLambdaForm {
-    /// `{ … }`
-    Literal,
-    /// `fun(…) { … }`
-    AnonymousFunction,
-}
-
 /// Where a nested callable's capture is read from in the body that supplies it.
 ///
 /// Almost every capture names a value slot of the enclosing body. The exception is a capture

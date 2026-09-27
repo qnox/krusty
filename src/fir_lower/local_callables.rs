@@ -943,12 +943,12 @@ impl BodyLowering<'_> {
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
-        if body.source_lambda().is_some() {
+        if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put
             // the diagnostic placeholder `<anonymous>` into common IR: angle-bracket names are
             // illegal JVM methods, and other targets own their own physical spelling.
             let enclosing_name = body.debug_name().unwrap_or_default().to_owned();
-            let binding_name = body.debug_binding_name().map(str::to_owned);
+            let binding_name = source_lambda.binding_name().map(str::to_owned);
             // A local binding contributes to the lambda CLASS name, not to its implementation
             // method. Inside `init { val x = { ... } }`, for example, the class is `C$x$1` while
             // the method remains in the class-initializer sequence.
@@ -996,7 +996,7 @@ impl BodyLowering<'_> {
                     implementation_name,
                     implementation_ordinal,
                     receiver_parameter,
-                    receiver_label: body.receiver_label().map(str::to_owned),
+                    label: source_lambda.label().map(str::to_owned),
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");
@@ -1271,7 +1271,7 @@ fn local_function_parameter_identities(
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     body: &FirBody,
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
-    let capturer = match body.source_lambda() {
+    let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
         None => crate::ir::IrCapturingCallable::LocalFunction,
         Some(crate::fir::FirLambdaForm::AnonymousFunction) => {
             crate::ir::IrCapturingCallable::AnonymousFunction

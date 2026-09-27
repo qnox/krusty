@@ -7484,6 +7484,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers the positive `0x7FF8…` instead.
   Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
 
+- **A lambda literal's label.** kotlinc names a lambda literal after the innermost call it is
+  written in: a lambda in a call's argument list, its trailing lambda or an infix call's operand
+  takes the call's simple name, and a call whose callee is not a simple name is `invoke`. `if`,
+  `when`, `try`, parentheses, `!!` and an enclosing lambda's body or local function pass that name
+  through (`b(run2 { { … } })` is labelled `run2`); a property initializer, an assignment and a
+  non-infix binary operator (`?:`, `+`, `..`, `in`, …) name nothing. A label written on the literal
+  replaces the call's, and an anonymous function has none. The parser records the label
+  (`parser::lambda_literals`); a receiver lambda's receiver local is `$this$<label>`, or `<this>`
+  without one. Test: `tests/lambda_receiver_label_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

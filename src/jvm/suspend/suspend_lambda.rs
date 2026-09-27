@@ -330,7 +330,11 @@ fn layout(
         let receiver = identity.role == IrParameterRole::ExtensionReceiver;
         let name = match (&identity.source_name, receiver) {
             (Some(name), _) => Some(name.clone()),
-            (None, true) => Some(crate::jvm::parameter_names::lambda_receiver(ir, fid)),
+            (None, true) => Some(crate::jvm::parameter_names::lambda_receiver(
+                ir.lambda_origins
+                    .get(&fid)
+                    .expect("a suspend lambda class is a source lambda's"),
+            )),
             (None, false) => None,
         };
         let field = if read(parameter) {

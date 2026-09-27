@@ -117,15 +117,10 @@ fn anonymous_context_ordinal_separator() -> char {
     }
 }
 
-/// kotlinc's spelling of a lambda's extension receiver: `$this$<label>` after the label the checker
-/// bound `this@label` to, and `<this>` for a lambda with no label (neither labelled nor a call
-/// argument).
-pub(super) fn lambda_receiver(ir: &IrFile, function: u32) -> String {
-    match ir
-        .lambda_origins
-        .get(&function)
-        .and_then(|origin| origin.receiver_label.as_deref())
-    {
+/// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
+/// label, and `<this>` for a lambda without one.
+pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
+    match origin.label.as_deref() {
         Some(label) => format!("$this${}", super::debug_local_names::escaped(label)),
         None => "<this>".to_string(),
     }
@@ -143,8 +138,14 @@ fn function_local_variable(
     identity: &IrParameterIdentity,
 ) -> Option<String> {
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
+        // Only a source lambda's implementation takes an extension receiver among the functions
+        // with lambda parameters; a generated adapter passes its receiver as a value.
         if ir.lambda_own_params_from.contains_key(&function) {
-            return Some(lambda_receiver(ir, function));
+            let origin = ir
+                .lambda_origins
+                .get(&function)
+                .expect("a lambda's extension receiver belongs to a source lambda");
+            return Some(lambda_receiver(origin));
         }
         let source_name = ir
             .fn_source_names
@@ -609,11 +610,50 @@ mod tests {
             FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
         );
         ir.lambda_own_params_from.insert(function, 0);
+        let origin = |label: Option<&str>| crate::ir::IrLambdaOrigin {
+            identity: 0,
+            lexical_owner: None,
+            enclosing_name: "transform".into(),
+            binding_name: None,
+            ordinal: 0,
+            implementation_name: "transform".into(),
+            implementation_ordinal: 0,
+            receiver_parameter: Some(0),
+            label: label.map(str::to_owned),
+        };
 
+        ir.lambda_origins.insert(function, origin(None));
         assert_eq!(
             function_locals(&ir, function, &[crate::types::Ty::String]),
             Some(vec![Some("<this>".to_string())])
         );
+        ir.lambda_origins.insert(function, origin(Some("build")));
+        assert_eq!(
+            function_locals(&ir, function, &[crate::types::Ty::String]),
+            Some(vec![Some("$this$build".to_string())])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a lambda's extension receiver belongs to a source lambda")]
+    fn a_lambda_receiver_without_a_source_lambda_is_rejected() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "adapter".to_string(),
+            params: vec![crate::types::Ty::String],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::extension_receiver()]),
+        );
+        ir.lambda_own_params_from.insert(function, 0);
+
+        let _ = function_locals(&ir, function, &[crate::types::Ty::String]);
     }
 
     #[test]

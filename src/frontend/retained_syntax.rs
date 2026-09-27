@@ -927,6 +927,8 @@ pub(super) fn compact(file: &mut File) {
     file.lambda_lifting_sites =
         remap_u32_map(std::mem::take(&mut file.lambda_lifting_sites), &expressions);
     file.lambda_labels = remap_u32_map(std::mem::take(&mut file.lambda_labels), &expressions);
+    file.lambda_call_labels =
+        remap_u32_map(std::mem::take(&mut file.lambda_call_labels), &expressions);
     file.base_arg_names = remap_u32_map(std::mem::take(&mut file.base_arg_names), &expressions);
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);
     file.spread_arg_ids = remap_u32_set(std::mem::take(&mut file.spread_arg_ids), &expressions);

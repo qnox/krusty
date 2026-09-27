@@ -196,7 +196,7 @@ mod tests {
                 implementation_name: "nested".into(),
                 implementation_ordinal: 0,
                 receiver_parameter: Some(0),
-                receiver_label: None,
+                label: None,
             },
         );
         let declaration = ir.add_expr(IrExpr::Variable {

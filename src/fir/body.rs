@@ -19,7 +19,7 @@ use crate::kt_string::KtString;
 use crate::types::TypeName;
 
 use super::body_work::BodyWorkItem;
-use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture, FirLambdaForm};
+use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
 use super::header::{
     next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
     FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
@@ -30,6 +30,7 @@ use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
 use super::retained_bodies::InlineBodyStore;
 use super::signature::ResolvedTy;
+use super::source_lambda::FirSourceLambda;
 
 /// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
 /// not decide assignability, boxing, coercion, or smart-cast eligibility again.
@@ -1876,9 +1877,7 @@ pub struct FirBody {
     property_delegate: Option<FirPropertyDelegatePlan>,
     debug_name: Option<Box<str>>,
     vararg_parameter: Option<FirVarargParameter>,
-    source_lambda: Option<FirLambdaForm>,
-    debug_binding_name: Option<Box<str>>,
-    receiver_label: Option<Box<str>>,
+    source_lambda: Option<FirSourceLambda>,
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
@@ -1939,8 +1938,6 @@ impl FirBody {
             debug_name: None,
             vararg_parameter: None,
             source_lambda: None,
-            debug_binding_name: None,
-            receiver_label: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
             source_line_count: 0,
@@ -2023,19 +2020,6 @@ impl FirBody {
             self.receiver_type.replace(receiver).is_none(),
             "a FIR body may publish its receiver type only once"
         );
-    }
-
-    /// The checker-selected label of a receiver lambda's receiver (`this@label`): the literal's
-    /// own label, else the call it is an argument of.
-    pub fn set_receiver_label(&mut self, label: impl Into<Box<str>>) {
-        assert!(
-            self.receiver_label.replace(label.into()).is_none(),
-            "a FIR body may publish its receiver label only once"
-        );
-    }
-
-    pub fn receiver_label(&self) -> Option<&str> {
-        self.receiver_label.as_deref()
     }
 
     pub const fn receiver_type(&self) -> Option<ResolvedTy> {
@@ -2151,20 +2135,15 @@ impl FirBody {
         }
     }
 
-    pub fn mark_source_lambda(&mut self, form: FirLambdaForm, name: Option<impl Into<Box<str>>>) {
+    pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
         assert!(
-            self.source_lambda.replace(form).is_none(),
+            self.source_lambda.replace(lambda).is_none(),
             "a FIR body may be marked as a source lambda only once"
         );
-        self.debug_binding_name = name.map(Into::into);
     }
 
-    pub const fn source_lambda(&self) -> Option<FirLambdaForm> {
-        self.source_lambda
-    }
-
-    pub fn debug_binding_name(&self) -> Option<&str> {
-        self.debug_binding_name.as_deref()
+    pub const fn source_lambda(&self) -> Option<&FirSourceLambda> {
+        self.source_lambda.as_ref()
     }
 
     pub fn set_debug_value_name(&mut self, value: LocalValueId, name: impl Into<Box<str>>) {
@@ -2810,8 +2789,10 @@ impl FirBody {
                 .property_storage_type
                 .map_or(0, |_| std::mem::size_of::<ResolvedTy>())
             + self.debug_name.as_deref().map_or(0, str::len)
-            + self.debug_binding_name.as_deref().map_or(0, str::len)
-            + self.receiver_label.as_deref().map_or(0, str::len)
+            + self
+                .source_lambda
+                .as_ref()
+                .map_or(0, FirSourceLambda::text_bytes)
             + self
                 .debug_value_names
                 .values()

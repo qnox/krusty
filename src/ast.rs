@@ -1672,6 +1672,10 @@ pub struct File {
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
     /// the lambda is unlabelled and keeps the implicit callee-name label.
     pub lambda_labels: std::collections::HashMap<u32, String>,
+    /// kotlinc's implicit label of a lambda literal, keyed by the lambda's `ExprId.0`: the name of
+    /// the innermost call it is written in (`parser::lambda_literals`). Absent for a lambda in a
+    /// scope that names none. An explicit label in `lambda_labels` replaces it.
+    pub lambda_call_labels: std::collections::HashMap<u32, String>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1850,6 +1854,7 @@ impl File {
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();
+        self.lambda_call_labels = Default::default();
         self.destructure_source_props = Default::default();
         self.destructure_entry_types = Default::default();
         self.base_arg_names = Default::default();

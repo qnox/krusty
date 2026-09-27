@@ -70,12 +70,18 @@ impl BodyFirChecker<'_> {
         if let Some(name) = self.body.debug_name() {
             body.set_debug_name(name.to_owned());
         }
-        let form = if self.file.anon_fun_lambdas.contains(&expression.0) {
-            crate::fir::FirLambdaForm::AnonymousFunction
+        let (form, label) = if self.file.anon_fun_lambdas.contains(&expression.0) {
+            (crate::fir::FirLambdaForm::AnonymousFunction, None)
         } else {
-            crate::fir::FirLambdaForm::Literal
+            let label = (self.file.lambda_labels.get(&expression.0))
+                .or_else(|| self.file.lambda_call_labels.get(&expression.0));
+            (crate::fir::FirLambdaForm::Literal, label.cloned())
         };
-        body.mark_source_lambda(form, self.lambda_binding_name.clone());
+        body.mark_source_lambda(crate::fir::FirSourceLambda::new(
+            form,
+            self.lambda_binding_name.clone(),
+            label,
+        ));
         if let Some(site) = self.file.lambda_lifting_sites.get(&expression.0) {
             // A suspend lambda becomes a class of its own rather than a lifted method.
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(
@@ -100,13 +106,6 @@ impl BodyFirChecker<'_> {
         if signature.has_receiver {
             let receiver = self.resolved_type(span, signature.params[context_count])?;
             body.set_receiver_type(receiver);
-            if let Some(ExprLowering::Lambda(crate::resolve::LambdaInfo {
-                receiver_label: Some(label),
-                ..
-            })) = self.info.expr_lowers.get(&expression)
-            {
-                body.set_receiver_label(label.as_str());
-            }
         }
         let return_target = body.add_control_target(FirControlTarget {
             origin: target_origin,

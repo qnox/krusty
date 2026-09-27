@@ -38,6 +38,7 @@ impl Parser<'_> {
     }
 
     fn parse_bp_inner(&mut self, min_bp: u8) -> ExprId {
+        let label_mark = self.lambda_label_mark();
         let mut lhs = self.parse_prefix();
         loop {
             // A newline before `||`/`&&`/`?:` is a line continuation, not a terminator — consume it so
@@ -59,7 +60,8 @@ impl Parser<'_> {
                 self.bump(); // '?'
                 self.bump(); // ':'
                 self.skip_newlines();
-                let rhs = self.parse_bp(8);
+                self.relabel_left_operand(label_mark, None);
+                let rhs = self.with_lambda_label(None, |parser| parser.parse_bp(8));
                 let rspan = self.file.expr_spans[rhs.0 as usize];
                 lhs = self
                     .file
@@ -139,7 +141,9 @@ impl Parser<'_> {
                     }
                     self.bump(); // 'in'
                     self.skip_newlines();
-                    let rstart = self.parse_bp(9); // the range start binds tighter than `in` (and `..`)
+                    self.relabel_left_operand(label_mark, None);
+                    // the range start binds tighter than `in` (and `..`)
+                    let rstart = self.with_lambda_label(None, |parser| parser.parse_bp(9));
                     let kind = if self.eat(TokenKind::DotDot) {
                         Some(RangeKind::Through)
                     } else if self.eat(TokenKind::DotDotLt) {
@@ -155,7 +159,7 @@ impl Parser<'_> {
                     };
                     match kind {
                         Some(kind) => {
-                            let rend = self.parse_bp(9);
+                            let rend = self.with_lambda_label(None, |parser| parser.parse_bp(9));
                             let end = self.file.expr_spans[rend.0 as usize];
                             lhs = self.file.add_expr(
                                 Expr::InRange {
@@ -218,7 +222,8 @@ impl Parser<'_> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     self.bump(); // '..' / '..<'
                     self.skip_newlines();
-                    let hi = self.parse_bp(9);
+                    self.relabel_left_operand(label_mark, None);
+                    let hi = self.with_lambda_label(None, |parser| parser.parse_bp(9));
                     let rspan = self.file.expr_spans[hi.0 as usize];
                     lhs = self.file.add_expr(
                         Expr::RangeTo { lo: lhs, hi, kind },
@@ -242,7 +247,10 @@ impl Parser<'_> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     self.bump(); // infix function name
                     self.skip_newlines();
-                    let rhs = self.parse_bp(9); // operand binds at additive precedence or tighter
+                    self.relabel_left_operand(label_mark, Some(&name));
+                    // operand binds at additive precedence or tighter
+                    let label = Some(name.clone());
+                    let rhs = self.with_lambda_label(label, |parser| parser.parse_bp(9));
                     let rspan = self.file.expr_spans[rhs.0 as usize];
                     let callee = self.file.add_expr(
                         Expr::Member {
@@ -273,7 +281,8 @@ impl Parser<'_> {
             let op_span = self.tok().span;
             self.bump();
             self.skip_newlines();
-            let rhs = self.parse_bp(rbp);
+            self.relabel_left_operand(label_mark, None);
+            let rhs = self.with_lambda_label(None, |parser| parser.parse_bp(rbp));
             let lspan = self.file.expr_spans[lhs.0 as usize];
             let rspan = self.file.expr_spans[rhs.0 as usize];
             lhs = self.file.add_expr(
@@ -577,7 +586,9 @@ impl Parser<'_> {
                     let mut safe_name_spans: Vec<Option<Span>> = Vec::new();
                     let args = if self.at(TokenKind::LParen) {
                         self.bump();
-                        let (args, names, name_spans) = self.parse_call_argument_list();
+                        let label = Some(name.clone());
+                        let (args, names, name_spans) =
+                            self.with_lambda_label(label, Self::parse_call_argument_list);
                         self.expect(TokenKind::RParen, "')'");
                         safe_names = names;
                         safe_name_spans = name_spans;
@@ -748,7 +759,9 @@ impl Parser<'_> {
                 }
                 TokenKind::LParen => {
                     let open_paren = self.bump().span;
-                    let (args, names, name_spans) = self.parse_call_argument_list();
+                    let label = self.lambda_label_of_callee(lhs);
+                    let (args, names, name_spans) =
+                        self.with_lambda_label(Some(label), Self::parse_call_argument_list);
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
@@ -795,7 +808,8 @@ impl Parser<'_> {
                     }
                 }
                 TokenKind::LBrace => {
-                    let lambda = self.parse_lambda();
+                    let label = self.trailing_lambda_label(lhs);
+                    let lambda = self.with_lambda_label(Some(label), Self::parse_lambda);
                     self.record_lambda_labels(lambda, std::mem::take(&mut pending_lambda_labels));
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
