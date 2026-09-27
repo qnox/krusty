@@ -1666,15 +1666,10 @@ impl JvmLibraries {
                     .collect()
             };
             for (m, declaration, constructor_declaration) in declared_methods {
-                if declaration.is_none()
-                    && constructor_declaration.is_none()
-                    && m.is_bridge()
-                    && ci.methods.iter().any(|target| {
-                        !target.is_bridge()
-                            && target.name == m.name
-                            && target.has_same_parameter_descriptor(m)
-                    })
-                {
+                // A Java class's bridges and synthetic accessors are javac ABI, not members: kotlinc's
+                // binary Java class reader drops them, so `Integer.compareTo(Object)` never makes
+                // `Int < Char` applicable ahead of a user `Int.compareTo(Char)` extension.
+                if uses_java_type_semantics && m.is_compiler_generated() {
                     continue;
                 }
                 // Keep every Java declaration that can be accessed outside its declaring class.
