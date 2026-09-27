@@ -71,7 +71,6 @@ fn consuming_lowering_materializes_common_ir_roots() {
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
 
     assert_eq!(lowered.owner, BodyOwnerId::from_raw(7));
-    assert_eq!(lowered.owner, BodyOwnerId::from_raw(7));
     assert_eq!(lowered.roots.as_ref(), &[1, 5]);
     assert!(matches!(ir.expr(2), IrExpr::GetValue(0)));
     assert!(matches!(ir.expr(3), IrExpr::Const(IrConst::Int(2))));
