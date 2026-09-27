@@ -3625,9 +3625,27 @@ fn cross_owner_private_member_calls(
             if !seen.insert(expression) {
                 continue;
             }
-            if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
-                let target_class = &ir.classes[*class as usize];
-                let target = target_class.methods[*index as usize];
+            // Direct member calls carry their class/index. Static value-class members and
+            // property reads carry the exact selected function in `jvm_member_targets`; their
+            // interned owner identifies the source class without rendering or spelling lookup.
+            let target = match ir.expr(expression) {
+                IrExpr::MethodCall { class, index, .. } => {
+                    Some((*class, ir.classes[*class as usize].methods[*index as usize]))
+                }
+                IrExpr::Call {
+                    callee: Callee::Static { owner, .. },
+                    ..
+                }
+                | IrExpr::PropertyRead { owner, .. } => ir
+                    .jvm_member_targets
+                    .get(&expression)
+                    .and_then(|&function| {
+                        ir.class_id_by_name(*owner).map(|class| (class, function))
+                    }),
+                _ => None,
+            };
+            if let Some((class, target)) = target {
+                let target_class = &ir.classes[class as usize];
                 if context.owner != StaticOwner::Class(target_class.fq_name)
                     && (private_interface_bodies_are_members || !target_class.is_interface)
                     && ir.private_methods.contains(&target)
@@ -3695,7 +3713,7 @@ fn emit_pass(
     env.run
         .private_member_access_bridges
         .borrow_mut()
-        .clone_from(&access_bridges::cross_owner_private_member_calls(
+        .clone_from(&cross_owner_private_member_calls(
             ir,
             &contexts,
             opts.jvm_default != JvmDefaultMode::Disable,
@@ -4874,7 +4892,14 @@ fn emit_scheduled_member(
             .borrow()
             .contains(&fid)
         {
-            access_bridges::emit_private_member_access_bridge(ir, fid, fq_name, cw, false);
+            access_bridges::emit_private_member_access_bridge(
+                ir,
+                fid,
+                fq_name,
+                cw,
+                false,
+                c.decl_line,
+            );
         }
         if ir.function_reference_access_bridges.contains(&fid) {
             access_bridges::emit_function_reference_access_bridge(
@@ -9330,6 +9355,17 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Whether code emitted by this source owner reaches a private member of another source class.
+    /// Generated holders have no source owner and therefore always use the declaring class's bridge.
+    fn reaches_through_bridge(&self, owner: TypeName, function: u32) -> bool {
+        self.static_owner != Some(StaticOwner::Class(owner))
+            && self
+                .run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    }
+
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
     /// BRANCHY host `inline fun` body, replacing each zero-arg lambda-parameter `Function0.invoke` site
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
@@ -10980,7 +11016,9 @@ impl<'a> Emitter<'a> {
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
         let direct_field = self.direct_field_access(class, declared, true);
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
@@ -11072,7 +11110,7 @@ impl<'a> Emitter<'a> {
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
             // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
-            if self.reaches_through_bridge(owner, getter) {
+            if self.reaches_through_bridge(class.fq_name, getter) {
                 return Some(access_bridges::private_member_read_access(
                     self.ir, getter, owner,
                 ));
@@ -11132,7 +11170,9 @@ impl<'a> Emitter<'a> {
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
         // accessor and the field itself is unreachable.
-        if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
             let ty = declared
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
@@ -11815,7 +11855,7 @@ impl<'a> Emitter<'a> {
                     // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
                     // interface from another class is not even verifiable.
-                    if self.owner != owner
+                    if self.static_owner != Some(StaticOwner::Class(c.fq_name))
                         && self
                             .run
                             .private_member_access_bridges
@@ -12254,6 +12294,7 @@ impl<'a> Emitter<'a> {
                     descriptor,
                     inline,
                 } => {
+                    let owner_identity = *owner;
                     let (owner, name, descriptor, inline) =
                         (owner.render(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
@@ -12352,7 +12393,9 @@ impl<'a> Emitter<'a> {
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
                     // A private value-class `-impl` another class calls goes through its bridge.
                     let bridged = self.ir.jvm_member_targets.get(&e);
-                    let name = match bridged.filter(|&&f| self.reaches_through_bridge(&owner, f)) {
+                    let name = match bridged
+                        .filter(|&&function| self.reaches_through_bridge(owner_identity, function))
+                    {
                         Some(_) => format!("access${name}"),
                         None => name,
                     };
