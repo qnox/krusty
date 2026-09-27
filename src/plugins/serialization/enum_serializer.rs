@@ -167,6 +167,7 @@ mod tests {
     fn serial_name_selection_uses_the_resolved_annotation_and_named_argument() {
         let mut ir = IrFile::default();
         let mut class = synthetic_class("Status");
+        class.is_enum = true;
         class.enum_entries = vec![entry()];
         class.field_annotations = vec![retained_serial_name("example/SerialName")];
         let class = ir.add_class(class);

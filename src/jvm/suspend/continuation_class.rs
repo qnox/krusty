@@ -297,6 +297,7 @@ pub(super) fn build_continuation_class(
         // not the continuation class's `label: Int` storage field.
         super_ctor_params: vec![continuation_ty()],
         super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+        is_enum: false,
         enum_entries: vec![],
         enum_entry_of: None,
         prop_ref: None,

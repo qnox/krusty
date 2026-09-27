@@ -37,10 +37,7 @@ fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
     ir.classes.iter().any(|class| {
         class.fq_name_matches(owner)
             && !class.is_object
-            && (class.is_open
-                || class.is_abstract
-                || class.is_sealed
-                || !class.enum_entries.is_empty())
+            && (class.is_open || class.is_abstract || class.is_sealed || class.is_enum)
     })
 }
 
