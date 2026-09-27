@@ -11,6 +11,13 @@ pub(super) fn local_variable(
     identity: &IrParameterIdentity,
     function_name: &str,
 ) -> Option<String> {
+    // kotlinc lifts a value a local function captures into a leading parameter named after it,
+    // prefixed with `$`.
+    if let (Some(name), IrParameterRole::CapturedValue { .. }) =
+        (&identity.source_name, identity.role)
+    {
+        return Some(format!("${name}"));
+    }
     if let Some(name) = &identity.source_name {
         return Some(name.clone());
     }

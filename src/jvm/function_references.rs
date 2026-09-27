@@ -171,10 +171,15 @@ fn realize_adapter_reference(
     let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
         adapted_flags(adaptation, reference.declaration_result)
     }) | (i32::from(suspend_conversion) << 1);
+    let capture_fields = local_capture_fields(ir, &reference).unwrap_or_else(|| {
+        (0..reference.captures.len())
+            .map(|index| format!("$captured${index}"))
+            .collect()
+    });
     let reflected = match reference.target {
-        crate::ir::IrCallableReferenceTarget::Module(_)
-        | crate::ir::IrCallableReferenceTarget::Local { .. } => {
-            crate::ir::ReflectedCallable::Source
+        crate::ir::IrCallableReferenceTarget::Module(_) => crate::ir::ReflectedCallable::Source,
+        crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
+            crate::ir::ReflectedCallable::LocalFunction(function)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { .. } => {
             crate::ir::ReflectedCallable::Constructor
@@ -182,6 +187,14 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::External { .. } => {
             crate::ir::ReflectedCallable::Physical
         }
+    };
+    let lifted = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Local { function, .. } => Some(
+            ir.functions
+                .get(function as usize)
+                .ok_or(FunctionReferenceRealizationTarget::Adapter(function))?,
+        ),
+        _ => None,
     };
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
@@ -199,9 +212,14 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
             (Some(classifier), "<init>".to_string(), false, None)
         }
-        crate::ir::IrCallableReferenceTarget::Local { owner, name } => {
-            (owner, name.into(), owner.is_none(), None)
-        }
+        // A local function has no declaration of its own on the JVM: kotlinc reflects it on
+        // `Intrinsics.Kotlin`, not top-level, under the function it was lifted to.
+        crate::ir::IrCallableReferenceTarget::Local { name, .. } => (
+            Some(crate::types::wk::kotlin_intrinsics_reflection_owner()),
+            name.into(),
+            false,
+            None,
+        ),
         crate::ir::IrCallableReferenceTarget::External {
             declaration,
             receiver,
@@ -220,8 +238,13 @@ fn realize_adapter_reference(
         invoke_result = Ty::obj("kotlin/Any");
         target_result = Ty::obj("kotlin/Any");
     }
-    let mut reflection_parameters = reference.declaration_parameters.into_vec();
-    let mut reflection_result = reference.declaration_result;
+    let (mut reflection_parameters, mut reflection_result) = match lifted {
+        Some(lifted) => (lifted.params.clone(), lifted.ret),
+        None => (
+            reference.declaration_parameters.into_vec(),
+            reference.declaration_result,
+        ),
+    };
     if reference.declaration_suspend {
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
@@ -239,6 +262,7 @@ fn realize_adapter_reference(
         bound,
         field_capture_count: u32::try_from(reference.captures.len())
             .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
+        capture_fields,
         arity,
         is_suspend: function_type.suspend,
         declaration_suspend: reference.declaration_suspend,
@@ -326,15 +350,40 @@ fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function
     };
 }
 
-/// Whether a structural reference's adapter can become the carrier's own `invoke`. The remaining
-/// shapes keep the synthesized dispatching `invoke`: `FunctionN` arities past the numbered
-/// interfaces and field captures of a local function.
-fn own_invoke_realizable(ir: &IrFile, reference: &crate::ir::IrCallableReference) -> bool {
-    let Ty::Fun(function_type) = reference.function_type.non_null() else {
-        return false;
+/// kotlinc's fields for the values a local function's reference captures: each is named after the
+/// captured value, as the lifted function's own parameter is. `None` for a capture kotlinc stores
+/// otherwise (a receiver, or a shared mutable cell), which keeps the dispatching `invoke`.
+fn local_capture_fields(
+    ir: &IrFile,
+    reference: &crate::ir::IrCallableReference,
+) -> Option<Vec<String>> {
+    if reference.captures.is_empty() {
+        return Some(Vec::new());
+    }
+    let crate::ir::IrCallableReferenceTarget::Local { function, .. } = reference.target else {
+        return None;
     };
-    reference.captures.is_empty()
-        && function_type.params.len() <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY
+    let identities = ir.function_parameter_identities(function)?;
+    (0..reference.captures.len())
+        .map(|capture| {
+            let ordinal = u32::try_from(capture).ok()?;
+            let identity = identities.get(capture)?;
+            let shared = ir
+                .shared_capture_parameters
+                .contains_key(&(reference.adapter, ordinal));
+            (matches!(
+                identity.role,
+                crate::ir::IrParameterRole::CapturedValue { .. }
+            ) && !shared)
+                .then(|| super::parameter_names::local_variable(identity, ""))
+                .flatten()
+        })
+        .collect()
+}
+
+/// Whether a structural reference's adapter can become the carrier's own `invoke`.
+fn own_invoke_realizable(ir: &IrFile, reference: &crate::ir::IrCallableReference) -> bool {
+    local_capture_fields(ir, reference).is_some()
         && ir
             .functions
             .get(reference.adapter as usize)
@@ -360,11 +409,43 @@ fn realize_own_invoke(
         return;
     };
     let expressions = crate::ir::value_namespace_expressions(ir, body);
-    let receiver_ty = bound.then(|| ir.functions[adapter as usize].params[0]);
-    if let Some(receiver_ty) = receiver_ty {
-        let field = u32::try_from(ir.classes[class as usize].fields.len())
-            .expect("a reference carrier has few fields");
-        // The runtime base class stores the bound receiver; the carrier reads it as its own field.
+    // The adapter takes its captured values first, then the bound receiver, then the function
+    // type's parameters. The carrier keeps each captured value in a field of its own and the bound
+    // receiver in the runtime base class's; its `invoke` takes `this` and the parameters.
+    let capture_fields = ir.classes[class as usize]
+        .func_ref
+        .as_ref()
+        .map(|reference| reference.capture_fields.clone())
+        .unwrap_or_default();
+    let stored = capture_fields.len() + usize::from(bound);
+    let stored_reads = expressions
+        .iter()
+        .filter_map(|&current| match ir.exprs[current as usize] {
+            IrExpr::GetValue(value) if (value as usize) < stored => Some((current, value as usize)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match stored {
+        0 => crate::ir::shift_value_indices(ir, body, 0, 1),
+        1 => {}
+        _ => crate::ir::lower_value_indices(ir, body, stored as u32, stored as u32 - 1),
+    }
+    let mut fields = Vec::with_capacity(stored);
+    for (capture, name) in capture_fields.into_iter().enumerate() {
+        let ty = ir.functions[adapter as usize].params[capture];
+        fields.push((ir.classes[class as usize].fields.len(), None));
+        ir.classes[class as usize].fields.push(crate::ir::IrField {
+            name,
+            ty,
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: crate::ir::IrfFlags::default(),
+        });
+    }
+    if bound {
+        let receiver_ty = ir.functions[adapter as usize].params[stored - 1];
+        fields.push((ir.classes[class as usize].fields.len(), Some(receiver_ty)));
         ir.classes[class as usize].fields.push(crate::ir::IrField {
             name: "receiver".to_string(),
             ty: Ty::nullable(Ty::obj("kotlin/Any")),
@@ -373,27 +454,33 @@ fn realize_own_invoke(
             default: None,
             flags: crate::ir::IrfFlags::default(),
         });
-        for &current in &expressions {
-            if matches!(ir.exprs[current as usize], IrExpr::GetValue(0)) {
-                let this = ir.add_expr(IrExpr::GetValue(0));
-                let stored = ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class,
-                    index: field,
-                });
-                ir.exprs[current as usize] = IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::ImplicitCoercion,
-                    arg: stored,
-                    type_operand: receiver_ty,
-                };
-            }
+    }
+    let mut captured_reads = Vec::new();
+    for (current, value) in stored_reads {
+        let (field, coerced) = fields[value];
+        if coerced.is_none() {
+            captured_reads.push(current);
         }
-    } else {
-        crate::ir::shift_value_indices(ir, body, 0, 1);
+        let this = ir.add_expr(IrExpr::GetValue(0));
+        let read = IrExpr::GetField {
+            receiver: this,
+            class,
+            index: u32::try_from(field).expect("a reference carrier has few fields"),
+        };
+        ir.exprs[current as usize] = match coerced {
+            // The runtime base class stores the bound receiver as an object.
+            Some(receiver_ty) => IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: ir.add_expr(read),
+                type_operand: receiver_ty,
+            },
+            None => read,
+        };
     }
     // kotlinc attributes the whole body to the reference's line, entered where the call's own
-    // operands begin: at each parameter read, or at a constructed object's `new`. Every other node
-    // enters it only at its dispatch, so a bound receiver's read stays ahead of the line.
+    // operands begin: at each parameter or captured value read, or at a constructed object's
+    // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
+    // ahead of the line.
     if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
         // The bridge maps its whole body to the same line.
         ir.fn_decl_lines.insert(adapter, line);
@@ -401,6 +488,7 @@ fn realize_own_invoke(
         for &current in &expressions {
             let marks = match &ir.exprs[current as usize] {
                 IrExpr::GetValue(value) => (1..=parameter_count).contains(value),
+                IrExpr::GetField { .. } => captured_reads.contains(&current),
                 IrExpr::New { .. } => true,
                 _ => false,
             };
@@ -415,9 +503,15 @@ fn realize_own_invoke(
     let parameters = function_type.params.clone();
     // A suspend `invoke` keeps its declared result: the suspend lowering that follows appends the
     // continuation and returns the result as an object, boxed as a coroutine boxes it. An unsigned
-    // result stays its carrier, which the bridge boxes, as a value class does.
+    // result stays its carrier, which the bridge boxes, as a value class does. Past the numbered
+    // interfaces no generic `R` is overridden, so the result stays scalar too.
+    let high_arity = parameters.len() > crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     let result = match function_type.ret {
-        ret if ret.is_jvm_scalar() && !function_type.suspend && !ret.is_unsigned() => {
+        ret if ret.is_jvm_scalar()
+            && !function_type.suspend
+            && !ret.is_unsigned()
+            && !high_arity =>
+        {
             Ty::nullable(ret)
         }
         ret => ret,
@@ -543,29 +637,60 @@ pub(super) fn realize(
 mod tests {
     use super::*;
 
-    fn own_invoke_plan(function_type: Ty, declaration_suspend: bool, captured: bool) -> bool {
+    /// What a reference's single capture is, as the lifted local function declares it.
+    #[derive(Clone, Copy)]
+    enum Capture {
+        None,
+        /// A captured value the lifted function names after its source variable.
+        Named,
+        /// A capture the lifted function records no source identity for.
+        Unnamed,
+    }
+
+    fn own_invoke_plan(function_type: Ty, declaration_suspend: bool, capture: Capture) -> bool {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::UnitInstance);
         let Ty::Fun(signature) = function_type.non_null() else {
             unreachable!("test function type")
         };
+        let mut params = signature.params.clone();
+        if !matches!(capture, Capture::None) {
+            params.insert(0, Ty::String);
+        }
         let adapter = ir.add_fun(crate::ir::IrFunction {
             name: "selected".to_string(),
-            params: signature.params.clone(),
+            params,
             ret: signature.ret,
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        let capture = captured.then(|| ir.add_expr(IrExpr::UnitInstance));
+        if matches!(capture, Capture::Named) {
+            let mut identities = vec![crate::ir::IrParameterIdentity::captured_value(
+                Some("prefix".to_string()),
+                0,
+            )];
+            identities.extend(
+                (0..signature.params.len())
+                    .map(|index| crate::ir::IrParameterIdentity::source(format!("value{index}"))),
+            );
+            ir.fn_params
+                .insert(adapter, crate::ir::FnParamInfo::identities(identities));
+        }
+        let captures = if matches!(capture, Capture::None) {
+            Vec::new()
+        } else {
+            vec![ir.add_expr(IrExpr::UnitInstance)]
+        };
         let reference = crate::ir::IrCallableReference {
             target: crate::ir::IrCallableReferenceTarget::Local {
                 owner: None,
                 name: "selected".into(),
+                function: adapter,
             },
             adapter,
-            captures: capture.into_iter().collect(),
+            captures,
             bound_receiver: None,
             function_type,
             declaration_parameters: signature.params.clone().into_boxed_slice(),
@@ -581,23 +706,31 @@ mod tests {
         let plans = [
             (
                 "ordinary",
-                own_invoke_plan(Ty::fun(vec![Ty::Int], Ty::Int), false, false),
+                own_invoke_plan(Ty::fun(vec![Ty::Int], Ty::Int), false, Capture::None),
             ),
             (
                 "captured",
-                own_invoke_plan(Ty::fun(vec![Ty::String], Ty::String), false, true),
+                own_invoke_plan(Ty::fun(vec![Ty::String], Ty::String), false, Capture::Named),
+            ),
+            (
+                "unnamed capture",
+                own_invoke_plan(
+                    Ty::fun(vec![Ty::String], Ty::String),
+                    false,
+                    Capture::Unnamed,
+                ),
             ),
             (
                 "suspend",
-                own_invoke_plan(Ty::fun_suspend(vec![Ty::Int], Ty::Int), true, false),
+                own_invoke_plan(Ty::fun_suspend(vec![Ty::Int], Ty::Int), true, Capture::None),
             ),
             (
                 "high arity",
-                own_invoke_plan(Ty::fun(vec![Ty::Int; 23], Ty::Int), false, false),
+                own_invoke_plan(Ty::fun(vec![Ty::Int; 23], Ty::Int), false, Capture::None),
             ),
             (
                 "value class",
-                own_invoke_plan(Ty::fun(vec![Ty::UInt], Ty::String), false, false),
+                own_invoke_plan(Ty::fun(vec![Ty::UInt], Ty::String), false, Capture::None),
             ),
         ];
 
@@ -605,9 +738,10 @@ mod tests {
             plans,
             [
                 ("ordinary", true),
-                ("captured", false),
+                ("captured", true),
+                ("unnamed capture", false),
                 ("suspend", true),
-                ("high arity", false),
+                ("high arity", true),
                 ("value class", true),
             ]
         );
