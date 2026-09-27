@@ -14,10 +14,13 @@ mod binding_stability_tests;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+#[cfg(test)]
+mod builtin_operation_tests;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
 mod companion_blocks;
+mod constant_evaluation;
 mod constant_folding;
 mod constructors;
 mod data_classes;
@@ -277,7 +280,7 @@ struct BodyLowering<'a> {
     body: &'a FirBody,
     /// Constant values of this body's operations, folded as kotlinc's `ConstEvaluationLowering`
     /// folds them.
-    constants: crate::fir::ConstantEvaluation,
+    constants: constant_evaluation::ConstantEvaluation,
     index: &'a ResolvedModuleIndex,
     ir: &'a mut IrFile,
     expression_states: Vec<LoweringState>,
@@ -451,7 +454,7 @@ impl<'a> BodyLowering<'a> {
             .and_then(|count| count.checked_add(u32::from(has_extension_receiver)))
             .expect("too many FIR value slots");
         Self {
-            constants: crate::fir::ConstantEvaluation::default(),
+            constants: constant_evaluation::ConstantEvaluation::default(),
             expression_states: vec![LoweringState::Uncomputed; body.expression_count()],
             statement_states: vec![LoweringState::Uncomputed; body.statement_count()],
             body,

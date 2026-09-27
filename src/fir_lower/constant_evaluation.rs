@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Ty;
 
-use super::{
+use crate::fir::{
     FirBinaryOperation, FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversion,
     FirConversionKind, FirExprId, FirExprKind, FirIntrinsic, FirUnaryOperation,
 };
@@ -24,14 +24,14 @@ use super::{
 /// A constant value together with the type it has as a value, before any widening to a nullable
 /// or supertype slot the checker placed it in.
 #[derive(Clone, Debug, PartialEq)]
-pub struct EvaluatedConstant {
-    pub value: FirConstant,
-    pub ty: Ty,
+pub(super) struct EvaluatedConstant {
+    pub(super) value: FirConstant,
+    pub(super) ty: Ty,
 }
 
 /// One argument of a folded string concatenation.
 #[derive(Clone, Debug, PartialEq)]
-pub enum TemplateRun {
+pub(super) enum TemplateRun {
     Constant(FirConstant),
     Part(FirExprId),
 }
@@ -41,14 +41,22 @@ pub enum TemplateRun {
 /// Lowering asks for the value of each operation it reaches, outermost first, so a subtree whose
 /// root is not constant is asked again for each of its operations; the memo keeps that linear.
 #[derive(Default)]
-pub struct ConstantEvaluation {
+pub(super) struct ConstantEvaluation {
     values: HashMap<FirExprId, Option<EvaluatedConstant>>,
+    depth: u32,
 }
+
+/// How many nested evaluations run between checks that the stack can take more.
+const STACK_CHECK_INTERVAL: u32 = 64;
 
 impl ConstantEvaluation {
     /// The constant `expression` evaluates to, when it is an operation kotlinc folds and every
     /// operand is itself constant. A literal is not an operation and yields `None`.
-    pub fn fold(&mut self, body: &FirBody, expression: FirExprId) -> Option<EvaluatedConstant> {
+    pub(super) fn fold(
+        &mut self,
+        body: &FirBody,
+        expression: FirExprId,
+    ) -> Option<EvaluatedConstant> {
         let kind = &body.expr(expression)?.kind;
         let operation = match kind {
             FirExprKind::Unary { .. }
@@ -75,7 +83,11 @@ impl ConstantEvaluation {
     /// A string template's parts with each run of constant parts merged into one `String`
     /// constant, as kotlinc folds a string concatenation whose neighbouring arguments are
     /// constants or operations over constants.
-    pub fn template_runs(&mut self, body: &FirBody, parts: &[FirExprId]) -> Vec<TemplateRun> {
+    pub(super) fn template_runs(
+        &mut self,
+        body: &FirBody,
+        parts: &[FirExprId],
+    ) -> Vec<TemplateRun> {
         let mut runs = Vec::with_capacity(parts.len());
         let mut run: Option<KtStringBuf> = None;
         for &part in parts {
@@ -104,7 +116,18 @@ impl ConstantEvaluation {
         if let Some(known) = self.values.get(&expression) {
             return known.clone();
         }
-        let value = self.compute(body, expression);
+        // Evaluation recurses over an operand chain as deep as the checked nesting, ahead of the
+        // lowering dispatcher's own stack checks, so it grows the stack on the same schedule.
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .expect("constant nesting exceeds u32");
+        let value = if self.depth == 1 || self.depth.is_multiple_of(STACK_CHECK_INTERVAL) {
+            crate::wide_stack::on_wide_stack(|| self.compute(body, expression))
+        } else {
+            self.compute(body, expression)
+        };
+        self.depth -= 1;
         self.values.insert(expression, value.clone());
         value
     }
@@ -505,6 +528,20 @@ fn intrinsic(
                 ty: Ty::Int,
             })
         }
+        // An index outside the string throws at run time, which kotlinc's interpreter leaves to
+        // the call.
+        (FirIntrinsic::StringGet, receiver, [index]) => {
+            let (FirConstant::String(text), FirConstant::Int(index)) =
+                (&receiver.value, &index.value)
+            else {
+                return None;
+            };
+            let unit = text.units().nth(usize::try_from(*index).ok()?)?;
+            Some(EvaluatedConstant {
+                value: FirConstant::Char(unit),
+                ty: Ty::Char,
+            })
+        }
         (FirIntrinsic::StringPlus, receiver, [other]) => {
             let mut text = KtStringBuf::new();
             push_text(&receiver, &mut text)?;
@@ -513,12 +550,15 @@ fn intrinsic(
         }
         (FirIntrinsic::PrimitiveCompare { .. }, receiver, [other]) => {
             // `compareTo` orders a floating pair totally (`-0.0 < 0.0`, NaN above everything),
-            // unlike the relational operators.
-            let order = match (number(&receiver)?, number(other)?) {
-                (Number::Integral(lhs), Number::Integral(rhs)) => lhs.cmp(&rhs),
-                (Number::Float(lhs), Number::Float(rhs)) => lhs.total_cmp_kotlin(rhs),
-                (Number::Double(lhs), Number::Double(rhs)) => lhs.total_cmp_kotlin(rhs),
-                _ => return None,
+            // unlike the relational operators, and `false` below `true`.
+            let order = match (&receiver.value, &other.value) {
+                (FirConstant::Boolean(lhs), FirConstant::Boolean(rhs)) => lhs.cmp(rhs),
+                _ => match (number(&receiver)?, number(other)?) {
+                    (Number::Integral(lhs), Number::Integral(rhs)) => lhs.cmp(&rhs),
+                    (Number::Float(lhs), Number::Float(rhs)) => lhs.total_cmp_kotlin(rhs),
+                    (Number::Double(lhs), Number::Double(rhs)) => lhs.total_cmp_kotlin(rhs),
+                    _ => return None,
+                },
             };
             Some(EvaluatedConstant {
                 value: FirConstant::Int(order as i64),

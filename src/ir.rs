@@ -39,6 +39,7 @@ mod constants;
 mod constructors;
 mod default_arguments;
 mod expression_provenance;
+mod field_flags;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
@@ -62,6 +63,7 @@ pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
+pub use field_flags::IrfFlags;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
@@ -1202,50 +1204,6 @@ pub struct IrEnumEntry {
 
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
 /// field's type / generic-param name / constant default / finality / visibility can't desync.
-/// Bit-packed boolean flags for an [`IrField`], collapsing `has_default`/`is_final`/`is_private`/
-/// `is_lateinit` into one byte. Read through the `IrField` accessors of the same names; built with the
-/// `with_*` chain. Headroom for four more flags before the byte fills.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IrfFlags(u8);
-
-impl IrfFlags {
-    const HAS_DEFAULT: u8 = 1 << 0;
-    const IS_FINAL: u8 = 1 << 1;
-    const IS_PRIVATE: u8 = 1 << 2;
-    const IS_LATEINIT: u8 = 1 << 3;
-
-    #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u8) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_has_default(self, on: bool) -> Self {
-        self.with(Self::HAS_DEFAULT, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_private(self, on: bool) -> Self {
-        self.with(Self::IS_PRIVATE, on)
-    }
-    #[inline]
-    pub const fn with_is_lateinit(self, on: bool) -> Self {
-        self.with(Self::IS_LATEINIT, on)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct IrField {
     pub name: String,

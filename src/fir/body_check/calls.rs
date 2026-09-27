@@ -83,6 +83,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::ArraySize
         | crate::libraries::CompilerIntrinsic::CharCode
         | crate::libraries::CompilerIntrinsic::StringLength
+        | crate::libraries::CompilerIntrinsic::StringGet
         | crate::libraries::CompilerIntrinsic::StringPlus
         | crate::libraries::CompilerIntrinsic::NullableAnyToString
         | crate::libraries::CompilerIntrinsic::NumericConversion
@@ -2037,11 +2038,13 @@ impl BodyFirChecker<'_> {
             primitive_operation,
             Some(
                 crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::StringGet
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
             )
         ) {
             let expected_arguments = usize::from(
-                primitive_operation == Some(crate::libraries::CompilerIntrinsic::StringPlus),
+                primitive_operation
+                    != Some(crate::libraries::CompilerIntrinsic::NullableAnyToString),
             );
             if arguments.len() != expected_arguments {
                 return Err(self.failure(
@@ -2061,6 +2064,7 @@ impl BodyFirChecker<'_> {
                 target: FirCallTarget::Intrinsic {
                     operation: match primitive_operation.expect("matched intrinsic") {
                         crate::libraries::CompilerIntrinsic::StringPlus => FirIntrinsic::StringPlus,
+                        crate::libraries::CompilerIntrinsic::StringGet => FirIntrinsic::StringGet,
                         crate::libraries::CompilerIntrinsic::NullableAnyToString => {
                             FirIntrinsic::NullableAnyToString
                         }
@@ -2310,13 +2314,24 @@ impl BodyFirChecker<'_> {
                     .flatten()
             });
         if let Some(ResolvedCall::Member(member)) = selected.as_ref() {
-            if member.member.realization
-                == crate::libraries::MemberRealization::Intrinsic(
+            match member.member.realization {
+                crate::libraries::MemberRealization::Intrinsic(
                     crate::libraries::CompilerIntrinsic::PrimitiveCompare,
-                )
-            {
-                let receiver = self.explicit_receiver(receiver)?;
-                return self.primitive_compare_call(expression, receiver, operands, member);
+                ) => {
+                    let receiver = self.explicit_receiver(receiver)?;
+                    return self.primitive_compare_call(expression, receiver, operands, member);
+                }
+                // `"abc"[1]` selects the same `String.get` as `"abc".get(1)` and keeps its
+                // intrinsic identity rather than becoming an ordinary external call.
+                crate::libraries::MemberRealization::Intrinsic(
+                    crate::libraries::CompilerIntrinsic::StringGet,
+                ) => {
+                    let receiver = self.explicit_receiver(receiver)?;
+                    return self.selected_member_call_with_semantics(
+                        expression, operands, member, receiver,
+                    );
+                }
+                _ => {}
             }
         }
         let dispatch_receiver = self.expression(receiver)?;

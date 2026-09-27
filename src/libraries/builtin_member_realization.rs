@@ -422,6 +422,15 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         return MemberRealization::Intrinsic(CompilerIntrinsic::StringPlus);
     }
 
+    if facts.owner.matches("kotlin/String")
+        && facts.name == "get"
+        && facts.is_operator
+        && facts.params == [Ty::Int]
+        && facts.ret == Ty::Char
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::StringGet);
+    }
+
     match range_construction(&facts) {
         Some(realization) => realization,
         None => MemberRealization::Dispatch,

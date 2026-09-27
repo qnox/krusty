@@ -92,6 +92,7 @@ mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_fields;
+mod string_members;
 mod type_operation_emission;
 mod vararg;
 mod when;
@@ -1205,8 +1206,7 @@ fn build_class_metadata(
                     visibility,
                     // A HOISTED companion property still records a (derived) backing field — the field
                     // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
-                    // HAS_CONSTANT flag exactly like an instance-field one. A value folded from an
-                    // operation over constants is not a literal and keeps no flag, as in kotlinc.
+                    // HAS_CONSTANT flag exactly like an instance-field one.
                     has_constant: backing.is_some_and(|(index, field)| {
                         field.is_final() && index >= c.ctor_param_count
                     }) && property
@@ -12416,16 +12416,9 @@ impl<'a> Emitter<'a> {
                         self.emit_value(dispatch_receiver.unwrap(), code);
                         code.arraylength();
                     }
-                    crate::ir::IrIntrinsic::StringGet => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        self.emit_value(args[0], code);
-                        let method = self.cw.methodref("java/lang/String", "charAt", "(I)C");
-                        code.invokevirtual(method, 1, 1);
-                    }
-                    crate::ir::IrIntrinsic::StringLength => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        let method = self.cw.methodref("java/lang/String", "length", "()I");
-                        code.invokevirtual(method, 0, 1);
+                    op @ (crate::ir::IrIntrinsic::StringGet
+                    | crate::ir::IrIntrinsic::StringLength) => {
+                        self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::StringPlus => {
                         // kotlinc flattens a `plus` chain (and any template inside it) into ONE

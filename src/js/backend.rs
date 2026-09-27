@@ -83,6 +83,21 @@ mod tests {
 
     #[test]
     fn js_backend_runs_through_common_compiler_driver() {
+        let (outputs, diags) = compile_js_sources(&[("Main", "fun box(): Int = 1 + 2")]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        // Common lowering folds an operation over constants to its value, as kotlinc does.
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function box() {\n  return 3;\n}\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn js_backend_emits_an_operation_over_a_parameter() {
         let (outputs, diags) = compile_js_sources(&[("Main", "fun box(x: Int): Int = x + 2")]);
 
         assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());

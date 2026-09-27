@@ -886,11 +886,13 @@ impl BodyLowering<'_> {
                 let parts = runs
                     .iter()
                     .map(|run| match run {
-                        crate::fir::TemplateRun::Constant(text) => {
+                        super::constant_evaluation::TemplateRun::Constant(text) => {
                             let text = lower_constant(text, Ty::String, origin)?;
                             Ok(self.ir.add_expr(IrExpr::Const(text)))
                         }
-                        crate::fir::TemplateRun::Part(part) => self.expression(*part),
+                        super::constant_evaluation::TemplateRun::Part(part) => {
+                            self.expression(*part)
+                        }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.ir.add_expr(IrExpr::StringConcat(parts))

@@ -51,11 +51,24 @@ fn builtin_operations_over_constants_fold() {
          \x20   sink(!true)\n\
          \x20   sink(true xor false)\n\
          \x20   sink(3.compareTo(4))\n\
+         \x20   sink(true.compareTo(false))\n\
          }\n\
          fun strings() {\n\
          \x20   sink(\"abc\".length)\n\
          \x20   sink(\"x\".plus(null))\n\
          \x20   sink(\"x\".plus(1 + 2))\n\
+         \x20   sink(\"abc\"[1])\n\
+         \x20   sink(\"abc\".get(0))\n\
+         \x20   sink(\"\\uD83D\\uDE00\"[1])\n\
+         }\n\
+         fun equalities() {\n\
+         \x20   sink(null == null)\n\
+         \x20   sink(\"a\" == null)\n\
+         \x20   sink(null != \"a\")\n\
+         \x20   sink(\"a\" == \"a\")\n\
+         \x20   sink(\"a\" != \"b\")\n\
+         \x20   sink('a' == 'a')\n\
+         \x20   sink(0.0 == -0.0)\n\
          }\n",
     );
 }
@@ -69,6 +82,8 @@ fn operations_kotlinc_cannot_evaluate_stay_operations() {
          \x20   sink(7 / 0)\n\
          \x20   sink(7L % 0L)\n\
          \x20   sink(\"abc\"[5])\n\
+         \x20   sink(\"abc\"[-1])\n\
+         \x20   sink(\"abc\"[x])\n\
          \x20   sink(\"abc\" === \"abc\")\n\
          \x20   sink(x + 1 + 2)\n\
          \x20   sink(1 + 2 + x)\n\
@@ -120,4 +135,42 @@ fn folded_values_are_kotlin_values() {
         common::compile_and_run_box(src, "constant_evaluation", &[common::stdlib_jar()], None)
             .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "0.33333334|1.0E7|1.0E-4|100.0|xtruenull|21");
+}
+
+/// kotlinc's `(exit code, diagnostic lines)` for `src` compiled on its own with the stdlib.
+fn kotlinc_diagnostics(tag: &str, src: &str) -> (i32, Vec<String>) {
+    let root = common::scratch_dir()
+        .expect("a scratch directory is available")
+        .join(format!("constant_evaluation_{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("classes")).expect("create the kotlinc output directory");
+    let source = root.join("Probe.kt");
+    std::fs::write(&source, src).expect("write the probe source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        root.join("classes").to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("the reference kotlinc is provisioned");
+    let lines = stderr
+        .lines()
+        .filter(|line| line.contains("Probe.kt:"))
+        .map(str::to_string)
+        .collect();
+    (code, lines)
+}
+
+#[test]
+fn overflowing_constant_arithmetic_folds_without_a_diagnostic() {
+    let src = "const val WRAPPED = 2147483647 + 1\n\
+               const val LONG_WRAPPED: Long = 9223372036854775807L * 2\n\
+               val shifted = 1 shl 40\n\
+               fun negated(): Int = -(-2147483647 - 1)\n";
+    assert_eq!(kotlinc_diagnostics("overflow", src), (0, Vec::new()));
+    let krusty =
+        common::compile_in_process_diagnostics(src, "Overflow", &[common::stdlib_jar()], None);
+    assert_eq!(krusty, Vec::<String>::new());
+    assert_matches_kotlinc("FoldedOverflow", src);
 }

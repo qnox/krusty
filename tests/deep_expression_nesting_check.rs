@@ -86,6 +86,20 @@ fn deep_left_leaning_boolean_chain_compiles_on_two_mib_stack() {
 }
 
 #[test]
+fn deep_constant_arithmetic_chain_folds_on_two_mib_stack() {
+    // Every operand is a constant, so lowering folds the whole 400-deep chain: the constant
+    // evaluation recurses to the bottom before the lowering dispatcher descends at all.
+    let chain = vec!["1"; 400].join(" + ");
+    let src = format!("fun deep(): Int = {chain}\n");
+    let (es, emitted) = compile_on_regression_stack(src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(
+        emitted,
+        "400-deep constant chain is inside the depth guard and must emit"
+    );
+}
+
+#[test]
 fn deep_inferred_return_chain_preinfers_on_two_mib_stack() {
     // No declared return type → the MODULE-LEVEL pre-inference pass checks the expression body
     // before any per-file check runs, so it recurses just as deep and must survive on the explicit

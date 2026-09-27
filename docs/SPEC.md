@@ -7491,15 +7491,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constant, becomes its value, and a string template's neighbouring constant parts merge into one
   `String` constant (`"a${1}b$x"` is `"a1b" + x`). So `1.toByte()` is `iconst_1`, not
   `iconst_1; i2b`, and `Int.MAX_VALUE - 2` is `ldc 2147483645`. krusty folds the same operations as
-  checked FIR publishes them (`fir::ConstantEvaluation`), while lowering: the checker has already
+  checked FIR publishes them, while common lowering (`fir_lower::constant_evaluation`, private to it): the checker has already
   turned exactly those builtin declarations into typed operations, so evaluation reads only the
   operation and the checked types. Values follow Kotlin: integer arithmetic wraps, a shift distance is
   masked, a floating value converts to an integral type rounding toward zero and saturating (NaN is
   0), relational comparisons and `==` on floating values are IEEE (NaN is unordered, `0.0 == -0.0`),
   and `compareTo` is the total order. What kotlinc's interpreter rejects stays an operation: an
-  integer division or remainder by zero, and a referential `===`. Calls the checker publishes as
-  ordinary library calls (`String.plus`, `String.get`, `toString()`, `floorDiv`, unsigned
-  arithmetic) are not folded yet, nor is an `if`/`when` over constants.
+  integer division or remainder by zero, a referential `===`, and a `String.get` index outside the
+  string. `String.plus` (operator or explicit call) concatenates the argument's `toString()` text and
+  `String.get` answers the UTF-16 unit at the index, so `"abc"[1]` is `bipush 98`; equality with a
+  `null` constant folds too (`"a" == null` is `false`). kotlinc's interpreter also folds the
+  remaining `@IntrinsicConstEvaluation` library calls, which the checker publishes as ordinary calls
+  and krusty does not fold yet: `toString()`, `floorDiv`/`mod`, and unsigned arithmetic and
+  comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
+  An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
 
 ## 8. Success criteria for the PoC

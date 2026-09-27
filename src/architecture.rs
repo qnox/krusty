@@ -420,11 +420,14 @@ mod tests {
             // `wide_stack` is infrastructure, not a semantic dependency: a `stacker` wrapper and
             // the shared nesting bound. Lowering recurses over the checked nesting and must be
             // able to grow the stack to reach that bound, exactly as the checker does.
+            // `kt_string` is Kotlin's `String` value model: folding a constant concatenation
+            // renders values as Kotlin text, as kotlinc's constant evaluation lowering does.
             assert_allowed_crate_modules_in_file(
                 &path,
                 &[
                     "fir",
                     "ir",
+                    "kt_string",
                     "names",
                     "trace",
                     "trace_compiler",
