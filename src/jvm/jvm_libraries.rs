@@ -3516,17 +3516,22 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 
 /// Textual internal name of a namespace probe. Used only when an incomplete catalog must open class
 /// bytes; a complete catalog answers [`JvmLibraries::proven_classifier`] without this spelling.
-fn classifier_spelling(namespace: SymbolNamespace, name: &str) -> String {
-    let namespace_name = namespace.name().render();
+/// Classifier owners use their cached classfile spelling; packages retain their package identity.
+/// Neither path renders the semantic name.
+fn incomplete_classifier_spelling(namespace: SymbolNamespace, name: &str) -> String {
     match namespace {
-        SymbolNamespace::Package(_) => {
-            if namespace_name.is_empty() {
+        SymbolNamespace::Package(package) => {
+            if package == crate::types::TypeName::ROOT {
                 name.to_string()
             } else {
-                format!("{namespace_name}/{name}")
+                format!("{}/{name}", package.jvm_binary_name())
             }
         }
-        SymbolNamespace::Classifier(_) => format!("{namespace_name}${name}"),
+        SymbolNamespace::Classifier(owner) => format!(
+            "{}${}",
+            crate::jvm::names::classfile_internal_name_of(owner),
+            name
+        ),
     }
 }
 
@@ -4410,11 +4415,13 @@ impl JvmLibraries {
     fn proven_classifier(&self, namespace: SymbolNamespace, name: &str) -> Option<TypeName> {
         let tree = self.cp.package_tree();
         if !tree.catalog_complete() {
-            let spelling = classifier_spelling(namespace, name);
-            return self
-                .cp
-                .class_exists(&spelling)
-                .then(|| type_name(&spelling));
+            let spelling = incomplete_classifier_spelling(namespace, name);
+            return self.cp.class_exists(&spelling).then(|| match namespace {
+                SymbolNamespace::Package(package) => crate::types::type_name_child(package, name),
+                SymbolNamespace::Classifier(owner) => {
+                    crate::types::type_name_nested_child(owner, name)
+                }
+            });
         }
         let declared = match namespace {
             SymbolNamespace::Package(package) => tree.contains_exact_class(package, name),
@@ -6128,6 +6135,43 @@ mod tests {
         );
         drop(libraries);
         std::fs::remove_dir_all(directory).expect("remove rank directory");
+    }
+
+    #[test]
+    fn nested_classifier_probe_reads_the_catalog_without_interning_a_miss() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-nested-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(directory.join("probe/nest6044")).expect("create package");
+        let write = |internal: &str| {
+            let bytes =
+                crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object").finish();
+            std::fs::write(directory.join(format!("{internal}.class")), bytes)
+                .expect("write class");
+        };
+        write("probe/nest6044/Outer");
+        write("probe/nest6044/Outer$Inner");
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![directory.clone()]),
+        ));
+        let owner = type_name("probe/nest6044/Outer");
+        let found = libraries.symbols(SymbolNamespace::Classifier(owner), "Inner");
+        assert_eq!(
+            found.classifier_name,
+            Some(type_name("probe/nest6044/Outer$Inner"))
+        );
+        assert!(libraries
+            .symbols(SymbolNamespace::Classifier(owner), "Missing")
+            .is_empty());
+        assert!(crate::types::existing_type_name("probe/nest6044/Outer$Missing").is_none());
+
+        drop(libraries);
+        std::fs::remove_dir_all(directory).expect("remove nested probe directory");
     }
 
     #[test]
