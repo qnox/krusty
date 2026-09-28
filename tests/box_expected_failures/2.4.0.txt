@@ -243,7 +243,6 @@ specialBuiltins/notEmptyMap.kt
 syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
-unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt25784.kt
 unsignedTypes/kt43286.kt
