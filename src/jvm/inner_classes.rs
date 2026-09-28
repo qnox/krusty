@@ -135,8 +135,8 @@ impl InnerClasses {
             // class and records no enclosing scope, while one declared in executable code records
             // the scope it was lowered in. A coroutine state machine is anonymous in
             // `InnerClasses` even though its own IR class is not a source anonymous-object
-            // declaration.
-            let coroutine = is_coroutine_state_machine(class);
+            // declaration, and so is a lambda realized as a class.
+            let coroutine = is_coroutine_state_machine(class) || class.lambda.is_some();
             let local = class.is_local_class && class.enclosure.is_some();
             let name = if local && !coroutine {
                 source_name(

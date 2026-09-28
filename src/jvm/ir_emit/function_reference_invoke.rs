@@ -29,16 +29,30 @@ pub(super) fn reference_constructor_locals(
     locals
 }
 
-/// The erased `FunctionN.invoke(Object…)Object` bridge to a carrier's own specialized `invoke`:
-/// each argument is cast or unboxed to the specialized parameter (a value class through its
-/// `unbox-impl`), and the result is returned as an object (`Unit` for a `void` specialization, a
-/// value class through its `box-impl`). Past the numbered interfaces the arguments arrive as one
-/// array, whose length is checked first. Flagged, lined and tabled as kotlinc's bridge.
+/// What a callable-reference carrier's bridge adapts.
+pub(super) fn reference_invoke_bridge(fr: &crate::ir::FuncRef) -> crate::ir::IrInvokeBridge {
+    crate::ir::IrInvokeBridge {
+        param_tys: fr.param_tys.clone(),
+        ret_ty: fr.ret_ty,
+        unbox_params: fr.unbox_params.clone(),
+        unbox_param_nullable: fr.unbox_param_nullable.clone(),
+        box_ret: fr.box_ret,
+        invoke_renamed: fr.invoke_renamed,
+    }
+}
+
+/// The erased `FunctionN.invoke(Object…)Object` bridge to a class's own specialized `invoke`, a
+/// callable-reference carrier's or a lambda class's: each argument is cast or unboxed to the
+/// specialized parameter (a value class through its `unbox-impl`), and the result is returned as
+/// an object (`Unit` for a `void` specialization, a value class through its `box-impl`). Past the
+/// numbered interfaces the arguments arrive as one array, whose length is checked first. Flagged,
+/// lined and tabled as kotlinc's bridge.
 pub(super) fn emit_reference_invoke_bridge(
     ir: &IrFile,
     cw: &mut ClassWriter,
     class: &str,
-    fr: &crate::ir::FuncRef,
+    bridge: &crate::ir::IrInvokeBridge,
+    suspend: bool,
     invoke: u32,
     arity: u8,
 ) {
@@ -49,7 +63,7 @@ pub(super) fn emit_reference_invoke_bridge(
     let erased = jvm_function_invoke_descriptor(arity);
     // A specialization that already erases to `FunctionN.invoke` is that method; nothing bridges.
     // A renamed one over an `Any`-backed value class keeps the erased descriptor under its own name.
-    if !fr.invoke_renamed && specialized == erased {
+    if !bridge.invoke_renamed && specialized == erased {
         return;
     }
     let high_arity = is_high_arity_function(arity);
@@ -79,16 +93,17 @@ pub(super) fn emit_reference_invoke_bridge(
     code.aload(0);
     for (index, parameter) in parameters.iter().enumerate() {
         load_erased_function_argument(cw, &mut code, high_arity, index);
-        if let Some(value_class) = fr.unbox_params.get(index).copied().flatten() {
+        if let Some(value_class) = bridge.unbox_params.get(index).copied().flatten() {
             emit_value_class_unbox_adapter(
                 cw,
                 &mut code,
                 value_class,
                 *parameter,
-                fr.unbox_param_nullable.get(index).copied().unwrap_or(false),
+                // Recorded beside `unbox_params` by the pass that named the value class.
+                bridge.unbox_param_nullable[index],
             );
         } else if parameter.is_jvm_scalar() {
-            let semantic = fr.param_tys.get(index).copied().unwrap_or(*parameter);
+            let semantic = bridge.param_tys.get(index).copied().unwrap_or(*parameter);
             unbox_prim_from(
                 cw,
                 &mut code,
@@ -111,16 +126,15 @@ pub(super) fn emit_reference_invoke_bridge(
     if matches!(result, Ty::Unit | Ty::Nothing) {
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         code.getstatic(unit, 1);
-    } else if let Some(value_class) = fr.box_ret {
-        let value_class = value_class.render();
-        let box_impl = cw.methodref(
-            &value_class,
-            "box-impl",
-            &format!("({})L{value_class};", type_descriptor(result)),
-        );
-        code.invokestatic(box_impl, slot_words(result) as i32, 1);
+    } else if let Some(value_class) = bridge.box_ret {
+        let nullable = bridge.ret_ty.is_nullable();
+        emit_value_class_box_adapter(cw, &mut code, value_class, result, nullable);
     } else if result.is_jvm_scalar() {
-        box_prim_free(cw, &mut code, semantic_scalar_adapter(fr.ret_ty, result));
+        box_prim_free(
+            cw,
+            &mut code,
+            semantic_scalar_adapter(bridge.ret_ty, result),
+        );
     }
     code.areturn();
     let this_desc = format!("L{class};");
@@ -137,7 +151,7 @@ pub(super) fn emit_reference_invoke_bridge(
         locals.push((
             crate::jvm::parameter_names::reference_invoke_bridge_parameter(
                 index,
-                fr.is_suspend && index + 1 == u16::from(arity),
+                suspend && index + 1 == u16::from(arity),
             ),
             "Ljava/lang/Object;".to_string(),
             index + 1,
