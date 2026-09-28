@@ -73,12 +73,21 @@ fn toolchain_binary() -> PathBuf {
     if profile != "debug" {
         build.args(["--profile", profile]);
     }
-    // The coverage gate exports nightly-only `-Z` rustflags, then runs this binary directly, so
-    // the flags are inherited. `env!("CARGO")` is the toolchain that compiled the test, which is
-    // not that nightly, and rustc rejects the flags while building dependencies. This binary only
-    // prints diagnostics; the instrumented compiler is selected with `KRUSTY_COMPILER`.
-    build.env_remove("RUSTFLAGS");
-    build.env_remove("CARGO_ENCODED_RUSTFLAGS");
+    // The coverage gate sources `cargo llvm-cov show-env`, which exports nightly-only `-Z`
+    // rustflags and sets `RUSTC_WRAPPER` to cargo-llvm-cov. That wrapper injects the same flags
+    // into every rustc, including this build's dependencies. `env!("CARGO")` is the toolchain that
+    // compiled the test, which is not that nightly, and its rustc rejects the flags. This binary
+    // only prints diagnostics; the instrumented compiler is selected with `KRUSTY_COMPILER`.
+    for variable in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        build.env_remove(variable);
+    }
     let status = build
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .status()
