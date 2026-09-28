@@ -7432,10 +7432,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class and casts it to `FunctionN`. A private member of the enclosing class read from the body
   goes through its `access$` accessor, like any nested class's. A captured value class is a field
   and constructor parameter of its carrier type, and never hides the constructor behind the
-  `DefaultConstructorMarker` accessor: only a declared Kotlin parameter does, so the same holds for
-  an anonymous object's or local class's captures. A value class over a primitive or a
-  nullable type keeps the indy lambda. Tests: `tests/value_class_lambda_class_e2e.rs` (each class
-  byte for byte against kotlinc; the whole source at run time).
+  `DefaultConstructorMarker` accessor (see the next entry). A lambda passed to an inline
+  function, a library one included, is spliced and gets no class. A value class over a primitive
+  or a nullable type keeps the indy lambda. Tests: `tests/value_class_lambda_class_e2e.rs` (each
+  class byte for byte against kotlinc; the whole source at run time) and
+  `tests/inline_value_class_lambda_e2e.rs`.
+- **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
+  it from the slots a constructor has when it lowers value classes: declared parameters, an inner
+  class's outer instance (`Z.Inner(y)` of a value class `Z` is `Z$Inner(int, int, DCM)`), and a
+  local class's captured values. An anonymous object's captures and a lambda class's are added
+  after that lowering, as carriers, so `object : R { … }` capturing a value class keeps a plain
+  constructor. Tests: `tests/value_class_hidden_constructor_e2e.rs`. Corpus:
+  `inlineClasses/functionNameMangling/localClassInFunctionWithMangledName`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
