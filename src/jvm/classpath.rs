@@ -11,6 +11,7 @@
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
 mod candidate_union;
+mod ct_sym_index;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
@@ -22,6 +23,9 @@ pub(crate) use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
 
+#[cfg(test)]
+use self::ct_sym_index::build_ct_sym_index;
+use self::ct_sym_index::cached_ct_sym_index;
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
 };
@@ -484,46 +488,6 @@ type JimageEntry = (u64, usize, bool);
 struct JimageIndex {
     names: NameTree,
     by_name: HashMap<NameId, JimageEntry>,
-}
-
-/// Release-filtered view of `ct.sym`: semantic internal name → physical zip entry name. A single
-/// signature entry may serve several releases (`89A/...`); filtering happens while building this
-/// compact index, so ordinary class lookup never needs to understand the archive layout.
-#[derive(Default, Debug)]
-struct CtSymIndex {
-    names: NameTree,
-    by_name: HashMap<NameId, String>,
-}
-
-fn ct_sym_release_symbol(release: u8) -> Option<u8> {
-    match release {
-        8 | 9 => Some(b'0' + release),
-        10..=35 => Some(b'A' + (release - 10)),
-        _ => None,
-    }
-}
-
-fn global_ct_sym_cache() -> &'static std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<CtSymIndex>>>
-{
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<CtSymIndex>>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn cached_ct_sym_index(path: &Path, release: u8) -> Option<std::sync::Arc<CtSymIndex>> {
-    let key = EntryKey {
-        path: path.to_path_buf(),
-        stamp: entry_stamp(path),
-        jdk_release: Some(release),
-    };
-    let mut cache = global_ct_sym_cache().lock().unwrap();
-    if let Some(index) = cache.get(&key) {
-        return Some(index.clone());
-    }
-    let index = std::sync::Arc::new(build_ct_sym_index(path, release)?);
-    cache.insert(key, index.clone());
-    Some(index)
 }
 
 /// Process-global jimage index (name id → file offset/size), keyed by the jimage path. The jimage is
@@ -5735,38 +5699,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
     }
 }
 
-/// Build one release's public-class index from the JDK `ct.sym` central directory. Entries are
-/// classfiles stored with a `.sig` suffix under `<release-set>/<module>/<internal>.sig`; the
-/// release-set contains every release for which those exact bytes apply.
-fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
-    let release = ct_sym_release_symbol(release)?;
-    let file = File::open(path).ok()?;
-    let archive = zip::ZipArchive::new(file).ok()?;
-    let mut index = CtSymIndex::default();
-    for ordinal in 0..archive.len() {
-        let name = archive.name_for_index(ordinal)?;
-        let mut segments = name.splitn(3, '/');
-        let releases = segments.next()?;
-        let _module = segments.next()?;
-        let resource = segments.next()?;
-        if !releases.as_bytes().contains(&release) {
-            continue;
-        }
-        let Some(internal) = resource.strip_suffix(".sig") else {
-            continue;
-        };
-        if internal == "module-info" || internal.ends_with("/module-info") {
-            continue;
-        }
-        let internal = index.names.insert(internal);
-        index
-            .by_name
-            .entry(internal)
-            .or_insert_with(|| name.to_owned());
-    }
-    (!index.by_name.is_empty()).then_some(index)
-}
-
 /// Build the jimage class index: internal name id → [`JimageEntry`] (content offset + on-disk size +
 /// compressed flag) for each `.class` resource, read from the jimage location table directly — the
 /// bootclasspath equivalent of a jar's central directory — so JDK class bytes can be seek-read on demand.
@@ -6443,6 +6375,27 @@ mod fq_tests {
     }
 
     #[test]
+    fn provisioned_java8_ct_sym_indexes_public_classes() {
+        let Some(symbols) = crate::toolchain::jdk_symbols() else {
+            return;
+        };
+        if symbols.file_name().is_none_or(|name| name != "ct.sym") {
+            return;
+        }
+        let index = build_ct_sym_index(&symbols, 8).expect("Java 8 ct.sym index");
+        assert!(
+            index.names.get("java/util/ArrayList").is_some(),
+            "Java 8 ct.sym view indexed {} classes but not java.util.ArrayList",
+            index.by_name.len()
+        );
+        assert!(
+            index.by_name.len() > 1000,
+            "Java 8 ct.sym view collapsed to {} classes",
+            index.by_name.len()
+        );
+    }
+
+    #[test]
     fn ct_sym_classpath_exposes_only_the_selected_release_view() {
         let directory = test_temp_dir("ct-sym-release");
         let symbols = directory.join("ct.sym");
@@ -6450,6 +6403,8 @@ mod fq_tests {
         write_test_archive_entries(
             &symbols,
             &[
+                // Fewer than three segments. The indexer must skip this and keep the rest.
+                ("ignored.sig", &body),
                 ("89A/java.base/transient/Body.sig", &body),
                 ("9/java.base/future/OnlyNine.sig", b"nine"),
                 ("B/java.base/future/OnlyEleven.sig", b"eleven"),
