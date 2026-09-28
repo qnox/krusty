@@ -2302,6 +2302,10 @@ pub struct IrFile {
     /// provider realization and structural expansion, so backends need not reconstruct an inline
     /// call from the resulting block/loop shape.
     pub inline_regions: std::collections::HashSet<ExprId>,
+    /// Blocks that are a callable's own scope: its body block, the source block the body lowers
+    /// from, and any block lowering wraps between them. A value declared in one is in scope until
+    /// the callable ends, as a Kotlin function's own locals are; a nested block's end with it.
+    pub callable_scopes: std::collections::HashSet<ExprId>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
@@ -2885,79 +2889,6 @@ impl IrFile {
             self.method_visibilities.insert(function, visibility);
         }
     }
-
-    pub(crate) fn record_generated_secondary_constructor(
-        &mut self,
-        class: ClassId,
-        role: IrSecondaryConstructorRole,
-        ordinal: u32,
-    ) {
-        let owner = self.classes[class as usize].fq_name_id();
-        assert!(
-            self.generated_secondary_constructors
-                .insert((owner, role), ordinal)
-                .is_none(),
-            "a generated secondary-constructor role has one exact declaration"
-        );
-    }
-
-    pub(crate) fn generated_secondary_constructor(
-        &self,
-        class: ClassId,
-        role: IrSecondaryConstructorRole,
-    ) -> Option<u32> {
-        self.generated_secondary_constructor_by_owner(
-            self.classes[class as usize].fq_name_id(),
-            role,
-        )
-    }
-
-    /// Whether this ordinal is a constructor the compiler GENERATED for `owner`.
-    ///
-    /// Such a constructor records no generic `Signature`: the attribute exists for a source or Java
-    /// caller, and nothing in source can name it.
-    pub(crate) fn is_generated_secondary_constructor(&self, owner: TypeName, ordinal: u32) -> bool {
-        self.generated_secondary_constructors
-            .iter()
-            .any(|((registered_owner, _), registered)| {
-                *registered_owner == owner && *registered == ordinal
-            })
-    }
-
-    pub(crate) fn generated_secondary_constructor_by_owner(
-        &self,
-        owner: TypeName,
-        role: IrSecondaryConstructorRole,
-    ) -> Option<u32> {
-        self.generated_secondary_constructors
-            .get(&(owner, role))
-            .copied()
-    }
-
-    pub(crate) fn record_generated_secondary_constructor_call(
-        &mut self,
-        expression: ExprId,
-        class: ClassId,
-        role: IrSecondaryConstructorRole,
-        ordinal: u32,
-    ) {
-        assert!(
-            self.generated_secondary_constructor_calls
-                .insert(expression, (class, role, ordinal))
-                .is_none(),
-            "a constructor expression has one selected generated declaration"
-        );
-    }
-
-    pub(crate) fn generated_secondary_constructor_call(
-        &self,
-        expression: ExprId,
-    ) -> Option<(ClassId, IrSecondaryConstructorRole, u32)> {
-        self.generated_secondary_constructor_calls
-            .get(&expression)
-            .copied()
-    }
-
     pub(crate) fn record_class_source_qualified_name(
         &mut self,
         class: ClassId,

@@ -5,7 +5,11 @@
 //! defaults, delegation and declaration line, so every phase that needs one of those reads this
 //! declaration rather than reconstructing it from the primary or from a body expression.
 
-use super::{CtorDelegateTarget, DeclarationAnnotations, ExprId, IrGeneratedDeclarationDebug, Ty};
+use super::{
+    ClassId, CtorDelegateTarget, DeclarationAnnotations, ExprId, IrFile,
+    IrGeneratedDeclarationDebug, Ty,
+};
+use crate::types::TypeName;
 
 /// The checker-selected constructor a `super(…)`/`this(…)` delegation reaches, as the declaration
 /// facts a target's constructor ABI depends on. Lowering records them once from the selection; a
@@ -143,4 +147,79 @@ pub struct IrJvmValueClassSecondaryCtor {
 pub struct IrConstructorCapture {
     /// The captured declaration's source name (`a` for a captured `val a`).
     pub source_name: Box<str>,
+}
+
+/// The constructors the compiler generates for a class, by role, and the calls that select one.
+impl IrFile {
+    pub(crate) fn record_generated_secondary_constructor(
+        &mut self,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+        ordinal: u32,
+    ) {
+        let owner = self.classes[class as usize].fq_name_id();
+        assert!(
+            self.generated_secondary_constructors
+                .insert((owner, role), ordinal)
+                .is_none(),
+            "a generated secondary-constructor role has one exact declaration"
+        );
+    }
+
+    pub(crate) fn generated_secondary_constructor(
+        &self,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+    ) -> Option<u32> {
+        self.generated_secondary_constructor_by_owner(
+            self.classes[class as usize].fq_name_id(),
+            role,
+        )
+    }
+
+    /// Whether this ordinal is a constructor the compiler GENERATED for `owner`.
+    ///
+    /// Such a constructor records no generic `Signature`: the attribute exists for a source or Java
+    /// caller, and nothing in source can name it.
+    pub(crate) fn is_generated_secondary_constructor(&self, owner: TypeName, ordinal: u32) -> bool {
+        self.generated_secondary_constructors
+            .iter()
+            .any(|((registered_owner, _), registered)| {
+                *registered_owner == owner && *registered == ordinal
+            })
+    }
+
+    pub(crate) fn generated_secondary_constructor_by_owner(
+        &self,
+        owner: TypeName,
+        role: IrSecondaryConstructorRole,
+    ) -> Option<u32> {
+        self.generated_secondary_constructors
+            .get(&(owner, role))
+            .copied()
+    }
+
+    pub(crate) fn record_generated_secondary_constructor_call(
+        &mut self,
+        expression: ExprId,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+        ordinal: u32,
+    ) {
+        assert!(
+            self.generated_secondary_constructor_calls
+                .insert(expression, (class, role, ordinal))
+                .is_none(),
+            "a constructor expression has one selected generated declaration"
+        );
+    }
+
+    pub(crate) fn generated_secondary_constructor_call(
+        &self,
+        expression: ExprId,
+    ) -> Option<(ClassId, IrSecondaryConstructorRole, u32)> {
+        self.generated_secondary_constructor_calls
+            .get(&expression)
+            .copied()
+    }
 }
