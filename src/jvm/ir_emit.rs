@@ -20,7 +20,7 @@ use crate::jvm::names::{
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
-use field_visibility::{default_accessor_access, is_jvm_field, jvm_field_visibility};
+use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 
 mod access_bridges;
 mod annotation_impl;
@@ -5110,17 +5110,6 @@ fn emit_class(
     for (field_index, field) in field_order {
         let name = &field.name;
         let ty = &field.ty;
-        // Map the field's (platform-neutral) visibility to JVM access flags: a `private` field →
-        // `ACC_PRIVATE` (the default — Kotlin backing fields are private, reached via accessors); a
-        // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
-        // `result`/`label`).
-        //
-        // A `@JvmField` property has no accessor, so the field IS the declaration's visible face and
-        // takes the PROPERTY's declared visibility instead — `protected val` stays `ACC_PROTECTED`,
-        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact). A
-        // `lateinit` field likewise takes its setter's visibility.
-        let jvm_field_visibility = jvm_field_visibility(c, field_index);
-        let private = field.is_private();
         let acc = if is_continuation {
             // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
             // the captured receiver `this$0` is FINAL|SYNTHETIC; `label` and the `L$N` spills are plain.
@@ -5132,9 +5121,7 @@ fn emit_class(
         } else if captured_storage::stores_constructor_prefix(c, field_index) {
             0x1010
         } else {
-            jvm_field_visibility.unwrap_or(if private { 0x0002 } else { 0x0001 })
-                | if field.is_final() { 0x0010 } else { 0 }
-                | if static_storage(ir, c) { 0x0008 } else { 0 }
+            declared_field_access(c, field_index, static_storage(ir, c))
         };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both

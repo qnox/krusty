@@ -473,3 +473,50 @@ fn delegation_keeps_platform_default_methods_inherited() {
         );
     }
 }
+
+const PROPERTY_DELEGATE_SRC: &str = "interface Greeter { fun greet(): String }\n\
+open class Impl(private val text: String) : Greeter { override fun greet() = text }\n\
+class Shared(val greeter: Greeter) : Greeter by greeter\n\
+class Hidden(private val greeter: Greeter) : Greeter by greeter\n\
+class Narrow(val impl: Impl) : Greeter by impl\n\
+class Mutable(var greeter: Greeter) : Greeter by greeter\n\
+class Other(val kept: Greeter, delegate: Greeter) : Greeter by delegate\n\
+fun box(): String =\n\
+    Shared(Impl(\"O\")).greet() + Hidden(Impl(\"K\")).greet() + Narrow(Impl(\"\")).greet() +\n\
+        Mutable(Impl(\"\")).greet() + Other(Impl(\"x\"), Impl(\"\")).greet()\n";
+
+/// The fields a class declares, in classfile order, as `access name descriptor`.
+fn declared_fields(bytes: &[u8]) -> Vec<String> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .expect("class parses")
+        .fields
+        .iter()
+        .map(|field| format!("{:#06x} {} {}", field.access, field.name, field.descriptor))
+        .collect()
+}
+
+/// kotlinc delegates through a primary-constructor `val` property's own backing field and
+/// synthesizes `$$delegate_N` only for any other delegate (a `var` property, a plain parameter).
+#[test]
+fn a_constructor_val_property_delegate_reuses_its_field() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(PROPERTY_DELEGATE_SRC, "DelegPropertyField"),
+        "OK"
+    );
+    let classes = common::expect_classes_with_stdlib(PROPERTY_DELEGATE_SRC, "DelegPropertyField");
+    let reference =
+        common::kotlinc_library(PROPERTY_DELEGATE_SRC).expect("kotlinc compiles the reference");
+    for class in ["Shared", "Hidden", "Narrow", "Mutable", "Other"] {
+        let (_, bytes) = classes
+            .iter()
+            .find(|(name, _)| name == class)
+            .unwrap_or_else(|| panic!("{class} emitted"));
+        let expected = std::fs::read(reference.join(format!("{class}.class")))
+            .unwrap_or_else(|error| panic!("kotlinc emits {class}: {error}"));
+        assert_eq!(
+            declared_fields(bytes),
+            declared_fields(&expected),
+            "{class} declares different fields than kotlinc"
+        );
+    }
+}

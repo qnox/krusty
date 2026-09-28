@@ -14,48 +14,21 @@ use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
 
-/// Whether this class delegates through its own UNDERLYING VALUE rather than through a field of
-/// the delegation's own.
-///
-/// A value class has exactly one field, and `value class IC(val i: I) : I by i` names that very
-/// field as the delegate. Kotlin synthesizes no `$$delegate_0` there — the underlying value IS the
-/// delegate, and every forwarder reads it — and it could not: a second field is not a shape a value
-/// class has. Synthesizing one gave the class two fields, which the native generator refused by
-/// name and the JVM emitter turned into a `putfield` of the wrong type on `constructor-impl`
-/// (`VerifyError: Bad type on operand stack`).
-///
-/// The delegate must be the first CONSTRUCTOR PARAMETER: that is the underlying value. A value
-/// class delegating to something else — a constructor-body initializer, say — is not this shape and
-/// keeps the ordinary field, which will then be refused as it was, rather than being silently
-/// pointed at the wrong storage.
-fn delegates_through_its_underlying_value(
-    index: &ResolvedModuleIndex,
-    declaration: DeclarationId,
-    delegation: &ResolvedInterfaceDelegation,
-) -> bool {
-    index
-        .declaration_header(declaration)
-        .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::VALUE))
-        && matches!(
-            delegation.source,
-            ResolvedInterfaceDelegateSource::ConstructorParameter(0)
-        )
-}
-
-/// Where the value class's single source parameter sits in its constructor, past whatever prefix
-/// captures a local declaration carries.
-fn underlying_parameter_index(
+/// The physical constructor slot of declared primary-constructor parameter `parameter`, past
+/// whatever compiler prefix (local captures) the constructor carries.
+fn declared_parameter_index(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     ir: &IrFile,
     class: crate::ir::ClassId,
+    parameter: u32,
 ) -> Result<usize, FirFileLoweringFailure> {
     let source_parameter_count = primary_constructor_parameter_count(index, declaration)?;
-    ir.classes[class as usize]
-        .ctor_args
-        .len()
+    let arguments = ir.classes[class as usize].ctor_args.len();
+    arguments
         .checked_sub(source_parameter_count)
-        .filter(|prefix| *prefix < ir.classes[class as usize].ctor_args.len())
+        .and_then(|prefix| prefix.checked_add(parameter as usize))
+        .filter(|index| *index < arguments)
         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))
 }
 
@@ -90,10 +63,14 @@ pub(super) fn predeclare_interface_delegation_fields(
             {
                 continue;
             }
-            if delegates_through_its_underlying_value(index, declaration, delegation) {
-                // Nothing is pushed: the class's own underlying field is the delegate. WHICH field
-                // that is cannot be said here — the property's own field does not exist yet — so
-                // the edge is recorded where the constructor's field indices are known, in
+            if matches!(
+                delegation.source,
+                ResolvedInterfaceDelegateSource::ConstructorProperty(_)
+            ) {
+                // Nothing is pushed: kotlinc uses a primary-constructor `val` property's own field
+                // as the delegate (for a value class it is the only field there may be). WHICH field that is
+                // cannot be said here — the property's field does not exist yet — so the edge is
+                // recorded where the constructor's field indices are known, in
                 // `materialize_delegation`.
                 continue;
             }
@@ -102,7 +79,8 @@ pub(super) fn predeclare_interface_delegation_fields(
             ir.classes[class as usize].fields.push(
                 IrField::new(format!("$$delegate_{ordinal}"), delegation.interface.get())
                     .with_is_final(true)
-                    .with_is_private(true),
+                    .with_is_private(true)
+                    .with_compiler_generated(true),
             );
             ir.checked_interface_delegation_fields
                 .insert((declaration, ordinal), field);
@@ -160,10 +138,12 @@ fn materialize_delegation(
         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
     let delegation_ordinal = u32::try_from(delegation_ordinal)
         .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    let field = if delegates_through_its_underlying_value(index, declaration, delegation) {
-        // The underlying value IS the delegate. Its field is the one the class's single
-        // constructor parameter backs, which the constructor pass has by now decided.
-        let parameter_index = underlying_parameter_index(index, declaration, ir, class)?;
+    let field = if let ResolvedInterfaceDelegateSource::ConstructorProperty(parameter) =
+        delegation.source
+    {
+        // The property IS the delegate. Its field is the one its constructor parameter backs,
+        // which the constructor pass has by now decided.
+        let parameter_index = declared_parameter_index(index, declaration, ir, class, parameter)?;
         let field = ir.classes[class as usize].ctor_args[parameter_index]
             .field_index
             .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
@@ -178,23 +158,13 @@ fn materialize_delegation(
     };
     let first_generated = ir.exprs.len();
     match delegation.source {
-        ResolvedInterfaceDelegateSource::ConstructorParameter(_)
-            if delegates_through_its_underlying_value(index, declaration, delegation) =>
-        {
-            // Already the class's own field, already written by the underlying value's property:
-            // a second initializer would be a second write of the same value.
+        ResolvedInterfaceDelegateSource::ConstructorProperty(_) => {
+            // Already the class's own field, already written by the property's parameter: a
+            // second initializer would be a second write of the same value.
         }
         ResolvedInterfaceDelegateSource::ConstructorParameter(parameter) => {
-            let source_parameter_count = primary_constructor_parameter_count(index, declaration)?;
-            let prefix_count = ir.classes[class as usize]
-                .ctor_args
-                .len()
-                .checked_sub(source_parameter_count)
-                .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
-            let parameter_index = prefix_count
-                .checked_add(parameter as usize)
-                .filter(|index| *index < ir.classes[class as usize].ctor_args.len())
-                .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+            let parameter_index =
+                declared_parameter_index(index, declaration, ir, class, parameter)?;
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
             prepend_parameter_initializer(ir, class, field, parameter_index)?;
