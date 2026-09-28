@@ -49,6 +49,19 @@ pub(crate) fn function_interface_internal_name(arity: usize) -> String {
 
 /// The file-facade class internal name for a source file: `Foo.kt` → `FooKt` (package-qualified).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
+    let base = file_facade_segment(file_stem);
+    match package {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), base),
+        _ => base,
+    }
+}
+
+/// The file facade as a [`TypeName`]: `package` plus the facade segment, without rendering `package`.
+pub(super) fn file_facade_name(package: TypeName, file_stem: &str) -> TypeName {
+    crate::types::type_name_child(package, &file_facade_segment(file_stem))
+}
+
+fn file_facade_segment(file_stem: &str) -> String {
     let sanitized: String = file_stem
         .chars()
         .map(|character| {
@@ -73,10 +86,7 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
         None => {}
     }
     base.push_str("Kt");
-    match package {
-        Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), base),
-        _ => base,
-    }
+    base
 }
 
 pub use crate::names::property_getter_name;
@@ -480,7 +490,23 @@ mod tests {
             ("_u", "_uKt"),
         ] {
             assert_eq!(file_class_name(stem, None), facade, "{stem}");
+            assert_eq!(
+                file_facade_name(TypeName::ROOT, stem),
+                crate::types::type_name(facade),
+                "{stem}"
+            );
         }
+    }
+
+    #[test]
+    fn file_facade_name_appends_the_segment_under_the_package_identity() {
+        let package = crate::types::type_name("sample/facades");
+        let facade = file_facade_name(package, "entries");
+        assert_eq!(facade, crate::types::type_name("sample/facades/EntriesKt"));
+        assert_eq!(
+            facade,
+            crate::types::type_name(&file_class_name("entries", Some("sample/facades")))
+        );
     }
 
     #[test]
