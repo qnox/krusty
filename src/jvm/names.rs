@@ -282,17 +282,38 @@ pub(crate) fn reference_array_element(ty: Ty) -> Ty {
 }
 
 /// A JVM method descriptor `(params)ret` from krusty `Ty`s.
+///
+/// Parameter spellings are appended to this one buffer. Building them as their own string would
+/// allocate that text and copy it on every call.
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
-    let mut s = String::from("(");
-    s.push_str(&params_descriptor(params));
-    s.push(')');
-    s.push_str(&type_descriptor(ret));
-    s
+    let ret_spelling = type_descriptor(ret);
+    let mut descriptor =
+        String::with_capacity(type_descriptors_len(params) + 2 + ret_spelling.len());
+    descriptor.push('(');
+    append_type_descriptors(&mut descriptor, params);
+    descriptor.push(')');
+    descriptor.push_str(ret_spelling);
+    descriptor
 }
 
 /// The parameter-only JVM descriptor key used where JVM lowering needs an overload identity.
 pub fn params_descriptor(params: &[Ty]) -> String {
-    params.iter().map(|t| type_descriptor(*t)).collect()
+    let mut descriptor = String::with_capacity(type_descriptors_len(params));
+    append_type_descriptors(&mut descriptor, params);
+    descriptor
+}
+
+fn type_descriptors_len(params: &[Ty]) -> usize {
+    params
+        .iter()
+        .map(|param| type_descriptor(*param).len())
+        .sum()
+}
+
+fn append_type_descriptors(out: &mut String, params: &[Ty]) {
+    for param in params {
+        out.push_str(type_descriptor(*param));
+    }
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
@@ -933,6 +954,28 @@ mod tests {
     #[test]
     fn nothing_uses_the_jvm_void_carrier() {
         assert_eq!(instanceof_internal_name(Ty::Nothing), "java/lang/Void");
+    }
+
+    #[test]
+    fn method_descriptor_appends_parameter_spellings() {
+        assert_eq!(method_descriptor(&[], Ty::Unit), "()V");
+        assert_eq!(
+            method_descriptor(&[Ty::Int, Ty::Long], Ty::Boolean),
+            "(IJ)Z"
+        );
+        let params = [
+            Ty::String,
+            Ty::obj("kotlin/IntArray"),
+            Ty::nullable(Ty::Int),
+        ];
+        assert_eq!(
+            params_descriptor(&params),
+            "Ljava/lang/String;[ILjava/lang/Integer;"
+        );
+        assert_eq!(
+            method_descriptor(&params, Ty::obj("java/lang/Object")),
+            "(Ljava/lang/String;[ILjava/lang/Integer;)Ljava/lang/Object;"
+        );
     }
 
     #[test]
