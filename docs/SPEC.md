@@ -2476,6 +2476,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not yet bind a lambda's `this@label`, so `fun f() = build outerBuild@ { this@outerBuild.g() }`
   still needs a declared result type. Tests: `tests/nested_receiver_lambda_captures_e2e.rs`; box:
   `inference/pcla/issues/kt49160a.kt`.
+- **An anonymous object captures a receiver lambda's receiver under the lambda's label.** In
+  `withOuter(o) outer@{ object { fun read() = this@outer.left() } }` the object's member names the
+  lambda's receiver by its label, as it would in a local class. The capture recorded for that
+  receiver took the rung's binding name `this` as its label, so checking the object's body added a
+  second label rung for the same receiver; the member's `this@outer` then resolved one rung too far
+  out, the use was never counted as a capture and FIR lowering had no receiver to read. A receiver
+  lambda's scope rung now carries its label (`implicit_receiver_lambda_label`), which the capture
+  takes before the binding name. Tests: `tests/nested_receiver_lambda_captures_e2e.rs`; box:
+  `inference/pcla/issues/kt49160b.kt`.
 - **A source extension's signature-stage candidate carries its declared receiver.** The module
   provider keys top-level extensions by the erased receiver classifier, and the candidate it built
   for an implicit return type used that key as the receiver. `Crate<Apple>.label()` and

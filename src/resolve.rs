@@ -46,6 +46,7 @@ use anonymous_object_capture::{
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
 };
+mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
@@ -18300,34 +18301,8 @@ impl<'a> Checker<'a> {
                                     receiver.class_receiver,
                                     identity,
                                 ),
-                                receiver_label: (!receiver.class_receiver)
-                                    .then(|| {
-                                        extension_declaration
-                                            .and_then(|declaration| {
-                                                self.extension_receiver_labels
-                                                    .iter()
-                                                    .rev()
-                                                    .find_map(|(index, candidate)| {
-                                                        (*candidate == declaration).then(|| {
-                                                            self.this_labels
-                                                                .get(*index)
-                                                                .map(|(label, _, _)| label.clone())
-                                                        })
-                                                    })
-                                                    .flatten()
-                                            })
-                                            .or_else(|| {
-                                                scope.implicit_receiver_lambda_label(identity)
-                                            })
-                                            .or_else(|| {
-                                                scope.implicit_receiver_context_name(identity)
-                                            })
-                                            .or_else(|| {
-                                                scope.implicit_receiver_context_label(identity)
-                                            })
-                                            .map(String::into_boxed_str)
-                                    })
-                                    .flatten(),
+                                receiver_label: self
+                                    .anonymous_capture_receiver_label(scope, receiver),
                                 semantic_receiver: Some(semantic_receiver),
                                 receiver_identity: Some(identity),
                             },
