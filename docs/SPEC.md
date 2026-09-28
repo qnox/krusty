@@ -2465,6 +2465,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constraint. With `class B<T> { var p: Int }` and `var B<String>.p`, `build { this.p = 1 }` writes
   the member and does not fix `T = String`. Test: `tests/builder_inference_receivers_e2e.rs`
   (`a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension`).
+- **A local class member's lambda reads the class's captured builder receiver.** In
+  `build outerBuild@ { class L { fun m() { build innerBuild@ { this@outerBuild.f(x) } } } }`
+  (KT-49160) the member's checked body resolves `this@outerBuild` to the receiver the local class
+  captured from the outer lambda, and the call adds its constraint to the outer postponed call, as
+  kotlinc's PCLA session does for declarations inside the lambda. The nested receiver lambda's own
+  receiver is the first rung of its receiver tower, so the captured receiver's coordinate there is
+  the member's coordinate plus the nested body's own receivers; checked FIR shifted it by nothing
+  and found no capture (`nested_class_receivers`). Known gap: the implicit-return-type engine does
+  not yet bind a lambda's `this@label`, so `fun f() = build outerBuild@ { this@outerBuild.g() }`
+  still needs a declared result type. Tests: `tests/nested_receiver_lambda_captures_e2e.rs`; box:
+  `inference/pcla/issues/kt49160a.kt`.
 - **A source extension's signature-stage candidate carries its declared receiver.** The module
   provider keys top-level extensions by the erased receiver classifier, and the candidate it built
   for an implicit return type used that key as the receiver. `Crate<Apple>.label()` and

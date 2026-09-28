@@ -165,7 +165,10 @@ impl BodyFirChecker<'_> {
         let class_values = self.nested_class_values()?;
         let class_capture_values = self.nested_class_capture_values()?;
         let class_delegates = self.nested_class_delegates()?;
-        let class_receivers = self.nested_class_receivers()?;
+        let owned_receiver_count =
+            u32::try_from(context_count + usize::from(info.receiver.is_some()))
+                .expect("too many local-function receiver rungs");
+        let class_receivers = self.nested_class_receivers(owned_receiver_count)?;
         let mut nested = BodyFirChecker {
             file: self.file,
             info: self.info,
@@ -198,10 +201,7 @@ impl BodyFirChecker<'_> {
                 .checked_add(1)
                 .expect("too many nested bodies"),
             expression_depth: 0,
-            owned_receiver_count: u32::try_from(
-                context_count + usize::from(info.receiver.is_some()),
-            )
-            .expect("too many local-function receiver rungs"),
+            owned_receiver_count,
             outer_receiver_frames: std::iter::once(receiver_frame)
                 .chain(self.outer_receiver_frames.iter().cloned())
                 .collect(),

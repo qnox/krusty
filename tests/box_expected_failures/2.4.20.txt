@@ -85,7 +85,6 @@ inference/capturedSelfInsideIntersection.kt
 inference/kt67609.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
-inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
