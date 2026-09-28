@@ -8303,6 +8303,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A call whose checked declaration returns a non-null type (a member returning `Outer`) is boxed
   into a generic slot with a plain `box-impl`, without a null test. Tests:
   `tests/value_class_nested_sole_property_e2e.rs`.
+- **A suspend call to a value-class member keeps its suspend name.** A virtual call whose callee
+  is a suspend function is named by the suspend mangling rule, so a class delegating
+  `suspend fun tag(s: String): Tag` forwards to `tag-vneLvdU`, the name the interface declares,
+  as kotlinc does. Tests: `tests/suspend_value_class_delegation_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

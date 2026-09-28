@@ -1311,6 +1311,8 @@ mod splice_nullable_value_class_lambda_e2e;
 mod suspend_function_boxing_e2e;
 #[path = "suspend_under_try_e2e.rs"]
 mod suspend_under_try_e2e;
+#[path = "suspend_value_class_delegation_e2e.rs"]
+mod suspend_value_class_delegation_e2e;
 #[path = "suspend_value_class_results_e2e.rs"]
 mod suspend_value_class_results_e2e;
 #[path = "unsigned_operations_e2e.rs"]
