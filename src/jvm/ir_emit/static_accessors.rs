@@ -7,6 +7,8 @@
 //! final synthetic` forwarder per target — `access$<name>` for a function, `access$get<X>$p` and
 //! `access$set<X>$p` for a property's field — and every use from another class calls it instead.
 //! A nested class, a callable-reference carrier and a lambda class are all such other classes.
+//! A private member property's field is reached the same way: its class declares
+//! `access$get<X>$p(<owner>)` and `access$set<X>$p(<owner>, value)` for the uses that need them.
 //!
 //! The owner appends its accessors after every declared and lifted member, ahead of `<clinit>`, in
 //! the order the file first uses them. [`plan`] finds those uses once per emission pass; each use
@@ -32,6 +34,10 @@ pub(super) enum StaticAccessor {
     /// `access$<name>(<receiver>, …)`, calling a protected member of a class in another package:
     /// an index into the plan's protected accessors.
     Protected(u32),
+    /// `access$get<X>$p(<owner>)`, reading private member property `property` of class `class`.
+    MemberGetter { class: u32, property: u32 },
+    /// `access$set<X>$p(<owner>, value)`, writing private member property `property` of `class`.
+    MemberSetter { class: u32, property: u32 },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -170,6 +176,7 @@ pub(super) fn plan(
     let walk = Walk {
         ir,
         class_member_fids,
+        property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
         protected: RefCell::default(),
     };
@@ -302,6 +309,50 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
         {
             uses.push(walk.protected_use(0, ProtectedMemberAccessBridge::of_reference(bridge)));
         }
+        // A private member property's carrier reads, and a mutable one writes, through the
+        // owner's field accessors; a property without a field has no such accessor.
+        if let Some(crate::ir::IrLocalPropertyLayout::Member {
+            class: declaring,
+            property,
+            ..
+        }) = realization
+            .member_access_bridge
+            .and_then(|target| ir.local_property_layouts.get(&target))
+            .filter(|layout| {
+                matches!(
+                    layout,
+                    crate::ir::IrLocalPropertyLayout::Member {
+                        backing_field: Some(_),
+                        ..
+                    }
+                )
+            })
+        {
+            let owner = StaticOwner::Class(ir.classes[*declaring as usize].fq_name);
+            let (declaring, property) = (*declaring, *property);
+            uses.push(Use {
+                line: 0,
+                owner,
+                accessor: StaticAccessor::MemberGetter {
+                    class: declaring,
+                    property,
+                },
+            });
+            if class
+                .prop_ref
+                .as_ref()
+                .is_some_and(|reference| reference.mutable)
+            {
+                uses.push(Use {
+                    line: 0,
+                    owner,
+                    accessor: StaticAccessor::MemberSetter {
+                        class: declaring,
+                        property,
+                    },
+                });
+            }
+        }
     }
     uses
 }
@@ -309,6 +360,7 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
 struct Walk<'a> {
     ir: &'a IrFile,
     class_member_fids: &'a HashSet<u32>,
+    property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// The protected member calls emitted outside the class that may make them, by call.
     protected_calls: &'a HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
     /// Each protected-member accessor found, once per owner and signature.
@@ -388,7 +440,10 @@ impl Walk<'_> {
                 StaticAccessor::Function(function) => {
                     routes_through_accessor(ir, context == owner, function)
                 }
-                StaticAccessor::Getter(_) | StaticAccessor::Setter(_) => context != owner,
+                StaticAccessor::Getter(_)
+                | StaticAccessor::Setter(_)
+                | StaticAccessor::MemberGetter { .. }
+                | StaticAccessor::MemberSetter { .. } => context != owner,
                 StaticAccessor::Protected(_) => true,
             };
             if needed {
@@ -421,8 +476,48 @@ impl Walk<'_> {
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index))),
             IrExpr::SetStatic { index, .. } => bridged_storage(self.ir, *index)
                 .map(|storage| (storage.owner, StaticAccessor::Setter(*index))),
+            IrExpr::PropertyRead { .. } => self.private_member_property(expression, true),
+            IrExpr::PropertyWrite { .. } => self.private_member_property(expression, false),
             _ => None,
         }
+    }
+
+    /// The field accessor a read or write of a private member property uses, when common lowering
+    /// marked the property as reached from another class. A read of a property that declares its
+    /// getter calls that getter instead.
+    fn private_member_property(
+        &self,
+        expression: crate::ir::ExprId,
+        read: bool,
+    ) -> Option<(StaticOwner, StaticAccessor)> {
+        let crate::jvm::property_realizations::PropertyRealization::Local(target) =
+            self.property_realizations.get(expression)?
+        else {
+            return None;
+        };
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            property,
+            private: true,
+            ..
+        } = *self.ir.local_property_layouts.get(target)?
+        else {
+            return None;
+        };
+        let owner = &self.ir.classes[class as usize];
+        let declared = owner.properties.get(property as usize)?;
+        if !declared.needs_access_bridge || declared.backing_field.is_none() {
+            return None;
+        }
+        let accessor = if read {
+            if declared.getter.is_some() {
+                return None;
+            }
+            StaticAccessor::MemberGetter { class, property }
+        } else {
+            StaticAccessor::MemberSetter { class, property }
+        };
+        Some((StaticOwner::Class(owner.fq_name), accessor))
     }
 }
 
@@ -454,6 +549,12 @@ pub(super) fn emit(
             StaticAccessor::Function(function) => accessor.function(function, cw),
             StaticAccessor::Getter(index) => accessor.getter(index, cw),
             StaticAccessor::Setter(index) => accessor.setter(index, cw),
+            StaticAccessor::MemberGetter { class, property } => {
+                accessor.member_getter(class, property, cw)
+            }
+            StaticAccessor::MemberSetter { class, property } => {
+                accessor.member_setter(class, property, cw)
+            }
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
                 let owner = bridge.owner.render();
@@ -478,6 +579,98 @@ struct Accessor<'a> {
 }
 
 impl Accessor<'_> {
+    /// `access$get<X>$p`: read the private property's field, or call its declared getter.
+    fn member_getter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
+        let ir = self.ir;
+        let owner = &ir.classes[class as usize];
+        let property = &owner.properties[property as usize];
+        let field = &owner.fields[property
+            .backing_field
+            .expect("a bridged member property has a backing field")
+            as usize];
+        let internal = owner.fq_name.render();
+        let field_ty = jvm_declared_ty(&field.ty);
+        let field_descriptor = type_descriptor(field_ty);
+        let ty = declared_property_accessor_jvm(ir, property, field);
+        let name = format!("access${}$p", property_getter_name(&property.name));
+        let descriptor = format!("(L{internal};){}", type_descriptor(ty));
+        let mut code = CodeBuilder::new(1);
+        code.mark_line(self.declaration_line);
+        code.aload(0);
+        match property.getter.map(|getter| &ir.functions[getter as usize]) {
+            Some(getter) => {
+                let method =
+                    cw.methodref(&internal, &getter.name, &ir_method_desc(&[], &getter.ret));
+                code.invokevirtual(method, 0, slot_words(ty) as i32);
+            }
+            None => {
+                let physical = instance_field_jvm_name(ir, owner, field);
+                let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+                code.getfield(field_ref, slot_words(field_ty) as i32);
+                emit_backing_field_read_adaptation(ir, cw, &mut code, property, field_ty, ty);
+            }
+        }
+        emit_return(ty, &mut code);
+        code.ensure_locals(1);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+        cw.set_method_debug(
+            &name,
+            &descriptor,
+            None,
+            &[("$this".to_string(), format!("L{internal};"), 0)],
+        );
+    }
+
+    /// `access$set<X>$p`: write the private property's field, or call its declared setter.
+    fn member_setter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
+        let ir = self.ir;
+        let owner = &ir.classes[class as usize];
+        let property = &owner.properties[property as usize];
+        let field = &owner.fields[property
+            .backing_field
+            .expect("a bridged member property has a backing field")
+            as usize];
+        let internal = owner.fq_name.render();
+        let field_ty = jvm_declared_ty(&field.ty);
+        let field_descriptor = type_descriptor(field_ty);
+        let ty = declared_property_accessor_jvm(ir, property, field);
+        let name = format!("access${}$p", property_setter_name(&property.name));
+        let descriptor = format!("(L{internal};{})V", type_descriptor(ty));
+        let words = slot_words(ty);
+        let mut code = CodeBuilder::new(1 + words);
+        code.mark_line(self.declaration_line);
+        code.aload(0);
+        load(ty, 1, &mut code);
+        match property.setter.map(|setter| &ir.functions[setter as usize]) {
+            Some(setter) => {
+                let setter_descriptor =
+                    method_descriptor(&[jvm_declared_ty(&setter.params[0])], Ty::Unit);
+                let method = cw.methodref(&internal, &setter.name, &setter_descriptor);
+                code.invokevirtual(method, words as i32, 0);
+            }
+            None => {
+                emit_backing_field_write_adaptation(ir, cw, &mut code, property, ty, field_ty);
+                let physical = instance_field_jvm_name(ir, owner, field);
+                let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+                code.putfield(field_ref, slot_words(field_ty) as i32);
+            }
+        }
+        code.ret_void();
+        code.ensure_locals(1 + words);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+        cw.set_method_debug(
+            &name,
+            &descriptor,
+            None,
+            &[
+                ("$this".to_string(), format!("L{internal};"), 0),
+                ("<set-?>".to_string(), type_descriptor(ty), 1),
+            ],
+        );
+    }
+
     fn getter(&self, index: u32, cw: &mut ClassWriter) {
         let property = &self.ir.statics[index as usize];
         let ty = jvm_declared_ty(&property.ty);

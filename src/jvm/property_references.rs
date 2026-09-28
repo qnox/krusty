@@ -387,6 +387,7 @@ fn classifier_property(
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
+            member_access_bridge: None,
         },
     )
 }
@@ -573,6 +574,7 @@ fn external_property(
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
+            member_access_bridge: None,
         },
     ))
 }
@@ -800,6 +802,7 @@ fn module_property(
             protected_bridge,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
+            member_access_bridge: access_bridge.then_some(target),
         },
     ))
 }
