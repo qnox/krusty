@@ -550,16 +550,21 @@ fn assert_fields_match_kotlinc(src: &str, stem: &str, classes: &[(&str, &str)]) 
     }
 }
 
-const PARENTHESIZED_DELEGATE_SRC: &str = "interface Greeter { fun greet(): String }\n\
-class Impl(private val text: String) : Greeter { override fun greet() = text }\n\
+const PARENTHESIZED_DELEGATE_SRC: &str = "class Mark(val code: Int)\n\
+interface Greeter { fun greet(): Mark }\n\
+class Impl(private val mark: Mark) : Greeter { override fun greet() = mark }\n\
 class Wrapped(val greeter: Greeter) : Greeter by (greeter)\n\
 class Nested(val greeter: Greeter) : Greeter by ((greeter)) {\n\
-    fun extra() = \"\"\n\
+    fun extra() = 1\n\
 }\n\
 class Parameter(greeter: Greeter) : Greeter by (greeter)\n\
-fun box(): String =\n\
-    Wrapped(Impl(\"O\")).greet() + Nested(Impl(\"K\")).greet() + Parameter(Impl(\"\")).greet() +\n\
-        Last(Impl(\"\")).greet()\n\
+fun box(): String {\n\
+    val total = Wrapped(Impl(Mark(1))).greet().code +\n\
+        Nested(Impl(Mark(2))).greet().code +\n\
+        Parameter(Impl(Mark(4))).greet().code +\n\
+        Last(Impl(Mark(8))).greet().code\n\
+    return if (total == 15) \"OK\" else \"FAIL\"\n\
+}\n\
 class Last(val greeter: Greeter) : Greeter by greeter";
 
 /// Parentheses around a delegate name leave it the same delegate: kotlinc still reuses a `val`
