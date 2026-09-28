@@ -21,7 +21,11 @@ pub(super) struct InnerClasses {
 }
 
 impl InnerClasses {
-    pub(super) fn new(ir: &IrFile, facade: &str) -> Self {
+    pub(super) fn new(
+        ir: &IrFile,
+        override_results: &crate::jvm::override_results::OverrideResults,
+        facade: &str,
+    ) -> Self {
         let declared: HashMap<TypeName, &IrClass> = ir
             .classes
             .iter()
@@ -188,7 +192,8 @@ impl InnerClasses {
                     .is_some_and(|scope| !foreign_scope(ir, scope))
             })
             .filter_map(|class| {
-                let (owner, _) = crate::jvm::ir_emit::class_enclosure(ir, class, facade)?;
+                let (owner, _) =
+                    crate::jvm::ir_emit::class_enclosure(ir, override_results, class, facade)?;
                 Some((class.fq_name(), owner))
             })
             .collect();
@@ -323,7 +328,11 @@ mod tests {
         ir.add_class(companion_class);
         ir.add_class(IrClass::synthetic(nested_with_dollars));
 
-        let prepared = InnerClasses::new(&ir, "sample/FacadeKt");
+        let prepared = InnerClasses::new(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "sample/FacadeKt",
+        );
         assert_eq!(
             prepared.specs,
             vec![
@@ -383,7 +392,12 @@ mod tests {
         ir.add_class(member_class);
 
         assert_eq!(
-            InnerClasses::new(&ir, "sample/FacadeKt").specs,
+            InnerClasses::new(
+                &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
+                "sample/FacadeKt",
+            )
+            .specs,
             [
                 InnerClassSpec {
                     inner: "sample/Owner$make$Local".to_string(),
@@ -410,6 +424,10 @@ mod tests {
         local.enclosure = Some(IrEnclosure::File);
         ir.add_class(local);
 
-        InnerClasses::new(&ir, "sample/FacadeKt");
+        InnerClasses::new(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "sample/FacadeKt",
+        );
     }
 }

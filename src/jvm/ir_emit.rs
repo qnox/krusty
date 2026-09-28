@@ -1619,7 +1619,11 @@ pub(crate) fn emit_all_with_checked_classifiers(
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         default_call_operands: facts.default_call_operands,
-        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir, facade),
+        inner_classes: crate::jvm::inner_classes::InnerClasses::new(
+            ir,
+            facts.metadata.override_results,
+            facade,
+        ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
 }
