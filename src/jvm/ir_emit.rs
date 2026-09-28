@@ -45,6 +45,8 @@ mod debug_lines;
 mod declaration_types;
 mod declared_nullability;
 mod delegated_property_array;
+mod field_nullability;
+use field_nullability::{field_nullability_kind, is_nonnull_reference_field, nullability_annotation};
 mod discarding;
 mod enclosure;
 mod enum_entry_subclass;
@@ -401,6 +403,9 @@ impl EmitRun {
 /// records a used lambda / an emit-or-inline bail without an ambient thread-local. Replacing `bodies`
 /// keeps every function's argument count unchanged.
 pub(super) struct EmitEnv<'a> {
+    /// The file facade class's identity; the `facade` spelling threaded beside it is its class-file
+    /// name.
+    facade_class: TypeName,
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
@@ -766,70 +771,6 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .take(c.ctor_param_count as usize)
         .map(|f| crate::jvm::names::type_descriptor(f.ty))
         .collect()
-}
-
-/// The TYPE PARAMETER a field is declared as (`class Pair<A, B>(val a: A)` → `a` is `A`), or `None` when
-/// the field has a type of its own. `field_signatures` already tracks these — it is what drives their
-/// `Signature` attribute. Callers ask so they can consult that parameter's BOUND: the erased descriptor
-/// says nothing about whether the field can hold null.
-fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> Option<&'a str> {
-    ir.field_signatures(fq_name)
-        .and_then(|signatures| {
-            signatures
-                .iter()
-                .find(|(name, _)| name == field)
-                .map(|(_, parameter)| parameter.as_str())
-        })
-        .or_else(|| {
-            let class = ir.class_id_by_name(crate::types::type_name(fq_name))?;
-            ir.classes[class as usize]
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == field)
-                .and_then(|candidate| candidate.type_param.as_deref())
-        })
-}
-
-/// kotlinc's nullability classification for a class field / primary-constructor parameter: `0` = no
-/// annotation (a primitive, or a type parameter that admits null), `1` = a non-null reference
-/// (`@NotNull`, plus an `Intrinsics.checkNotNullParameter` guard wherever one applies), `2` = a nullable
-/// reference (`@Nullable`, never guarded).
-///
-/// A field declared as a TYPE PARAMETER answers from that parameter's BOUND, not from the erased
-/// descriptor: `<T : Cargo>`/`<T : Any>` cannot hold null and is `@NotNull`, while an unbounded `<T>`
-/// (= `Any?`) or a `<T : Cargo?>` is left UNANNOTATED — kotlinc does not mark it `@Nullable`.
-///
-/// One predicate for the pool seeder, the field/accessor/parameter annotations, the `var` setter guard,
-/// and the constructor's `LineNumberTable` start pc, because those must agree: classify a field as
-/// guarded in one and unguarded in another and the line entry lands at the wrong offset.
-fn field_nullability_kind(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> u8 {
-    let d = crate::jvm::names::type_descriptor(t);
-    if !(d.starts_with('L') || d.starts_with('[')) {
-        return 0;
-    }
-    if matches!(t, Ty::PlatformNullable(_)) {
-        0
-    } else if let Some(parameter) = type_parameter_field_name(ir, fq_name, name) {
-        u8::from(!ir.class_type_param_admits_null(fq_name, parameter))
-    } else if matches!(t, Ty::Nullable(_)) {
-        2
-    } else {
-        1
-    }
-}
-
-/// The annotation descriptor a [`field_nullability_kind`] selects: `@NotNull`, `@Nullable` or none.
-pub(super) fn nullability_annotation(kind: u8) -> Option<&'static str> {
-    match kind {
-        1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-        2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-        _ => None,
-    }
-}
-
-/// Whether a field/constructor parameter is a NON-NULL reference — [`field_nullability_kind`] `== 1`.
-fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> bool {
-    field_nullability_kind(ir, fq_name, name, t) == 1
 }
 
 /// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
@@ -3367,13 +3308,14 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
 
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
-    facade: &str,
+    (facade_class, facade): (TypeName, &str),
     bodies: &dyn MethodBodies,
     facts: CheckedEmitFacts<'_>,
     opts: &EmitOptions,
     run: &EmitRun,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let env = EmitEnv {
+        facade_class,
         bodies,
         run,
         continuation_metadata: facts.metadata.continuations,
@@ -4907,7 +4849,7 @@ fn emit_class(
     }
     // `$$delegatedProperties` follows it; a singleton's follows its INSTANCE, below.
     if !static_storage(ir, c) {
-        delegated_property_array::declare(env, &fq_name, &mut cw);
+        delegated_property_array::declare(env, c.fq_name, &mut cw);
     }
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
@@ -6376,12 +6318,13 @@ fn emit_enum_class(
     // The `Companion` field LEADS the field table, but kotlinc interns its name and descriptor at
     // the field VISIT — late, not here. Emitting it eagerly put those strings at the head of the
     // constant pool and reordered nearly all of it.
-    delegated_property_array::declare(env, &fq, &mut cw);
     if let Some(companion) = c.companion_class {
         let desc = format!("L{};", companion.render());
         let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
+    // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
+    delegated_property_array::declare(env, c.fq_name, &mut cw);
     // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
     // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
     // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
@@ -6853,7 +6796,7 @@ fn emit_enum_class(
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
         let mut clinit = CodeBuilder::new(0);
-        e.emit_delegated_property_array(env, &fq, &mut clinit);
+        e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
         // Consecutive enum entries on one source line share one LNT entry.
         for (i, entry) in c.enum_entries.iter().enumerate() {
@@ -11919,7 +11862,9 @@ impl<'a> Emitter<'a> {
                         // The selected declaration already owns fallback legality. `MustInline`
                         // includes both inaccessible `@InlineOnly` bodies and metadata-declared
                         // reified functions; a substitution map is only a specialization operand.
-                        if inline.must_inline() {
+                        // An operand elided because the body never reads it needs the splice too.
+                        let elided = args.iter().any(|&arg| self.ir.is_unread_inline_operand(arg));
+                        if inline.must_inline() || elided {
                             crate::trace_compiler!(
                                 "emit",
                                 "inline splice failed for {owner}.{name}{descriptor}"
@@ -14506,7 +14451,7 @@ mod invariant_tests {
         let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
         emit_all_with_checked_classifiers(
             ir,
-            facade,
+            (crate::types::type_name(facade), facade),
             &NoBodies,
             CheckedEmitFacts {
                 metadata: EmitMetadata {

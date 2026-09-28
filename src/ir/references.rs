@@ -251,29 +251,3 @@ impl PropRef {
         })
     }
 }
-
-impl IrFile {
-    /// Whether `expression` is the reflected property a delegated-property operator receives, as
-    /// passed: the reference itself, or it adapted to the operator's declared parameter.
-    pub fn is_delegated_property_operand(&self, expression: ExprId) -> bool {
-        match self.expr(expression) {
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
-            IrExpr::LocalPropertyReference { .. } => true,
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => self.is_delegated_property_operand(*arg),
-            _ => false,
-        }
-    }
-
-    /// Pass `null` in place of a delegated-property operand, adaptations included, so no reflected
-    /// value is left behind for a backend to materialize.
-    pub fn elide_delegated_property_operand(&mut self, expression: ExprId) {
-        if let IrExpr::TypeOp { arg, .. } = *self.expr(expression) {
-            self.elide_delegated_property_operand(arg);
-        }
-        self.exprs[expression as usize] = IrExpr::Const(IrConst::Null);
-    }
-}

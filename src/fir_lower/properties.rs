@@ -760,6 +760,7 @@ fn materialize_top_level_property(
             setter,
             receiver: extension_receiver,
             context_parameters,
+            delegate: None,
         },
     );
     Ok(())
@@ -1294,6 +1295,11 @@ pub(super) fn add_accessor_function(
     // CHECKED types differ — so the accessor carries one adaptation node and never one wrapping
     // another. Whether the node costs an unbox, a `checkcast` or no instruction at all is the
     // backend's to decide from the physical types.
+    // A getter returns at the line its value is stated on: after an inlined call there, the return
+    // marks that line again, as kotlinc's does.
+    let line = returns_value
+        .then(|| ir.expr_source_lines.get(&value).copied())
+        .flatten();
     let crosses_boundary = match result {
         AccessorResult::Delegated(checked) => returns_value && checked != ret,
         AccessorResult::AsDeclared => false,
@@ -1308,6 +1314,9 @@ pub(super) fn add_accessor_function(
         value
     };
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
+    if let Some(line) = line {
+        ir.expr_source_lines.insert(returned, line);
+    }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],

@@ -7835,6 +7835,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
+- **Delegated property references (kotlinc's `PropertyReferenceLowering`).** The `KProperty` a
+  class's, object's or file facade's delegated-property operators receive live in one
+  `$$delegatedProperties` array per class: a leading `static final synthetic` field (after an enum's
+  or class's `Companion`), filled first in `<clinit>` in declaration order and read as
+  `$$delegatedProperties[i]`. An inline operator that never reads its property, parameter null
+  checks aside, is passed `null` and the property takes no slot. Common lowering only records which
+  operands a same-module expansion never reads; the JVM realization elides them, and for a
+  dependency's operator reads its bytecode. A dependency operator that is not `@InlineOnly` or
+  reified must then be spliced: falling back to a real call is refused, since the call would check
+  the `null`. A top-level delegated property's metadata sets `IS_DELEGATED`, marks both accessors
+  not default (`<set-?>` for the setter's value) and names its `x$delegate` field explicitly. A
+  delegated getter states its operator call at the property's line, which an inlined operator's
+  lines map against. (`tests/delegated_properties_array_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

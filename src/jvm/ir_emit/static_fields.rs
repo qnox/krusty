@@ -70,10 +70,10 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         .filter(|(_, property)| property.is_facade_owned())
         .map(|(index, property)| (index as u32, property))
         .collect();
-    if facade_statics.is_empty() && !delegated_property_array::exists(env, facade) {
+    if facade_statics.is_empty() && !delegated_property_array::exists(env, env.facade_class) {
         return;
     }
-    delegated_property_array::declare(env, facade, cw);
+    delegated_property_array::declare(env, env.facade_class, cw);
     for &(static_index, s) in &facade_statics {
         // kotlinc: `const val` → `static final` at the DECLARATION's visibility; a plain `val` →
         // `private static final`; a `var` → `private static` (mutated through the synthesized
@@ -145,7 +145,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     if !facade_statics
         .iter()
         .any(|(_, property)| clinit_initializer(ir, property).is_some())
-        && !delegated_property_array::exists(env, facade)
+        && !delegated_property_array::exists(env, env.facade_class)
     {
         return;
     }
@@ -164,7 +164,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .filter_map(|(_, property)| property.init),
     );
     let mut code = CodeBuilder::new(0);
-    e.emit_delegated_property_array(env, facade, &mut code);
+    e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
@@ -531,7 +531,7 @@ pub(super) fn emit_class_static_initializer(
         .collect();
     if c.companion_class.is_some()
         || !clinit_statics.is_empty()
-        || delegated_property_array::exists(env, fq_name)
+        || delegated_property_array::exists(env, c.fq_name)
     {
         // kotlinc visits `<clinit>` (name + descriptor) before its body's companion
         // construction and hoisted-initializer constants.
@@ -548,7 +548,7 @@ pub(super) fn emit_class_static_initializer(
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
         let mut clinit = CodeBuilder::new(0);
-        e.emit_delegated_property_array(env, fq_name, &mut clinit);
+        e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
         // kotlinc's `<clinit>` LineNumberTable: one entry per hoisted-property store, at the
         // store's pc, mapping to the property's declaration line in the COMPANION source. The

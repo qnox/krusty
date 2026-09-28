@@ -219,7 +219,7 @@ pub(crate) fn reads_local(callee: &MethodNode, slot: u16) -> bool {
 }
 
 /// Whether `callee` loads local `slot` at all, its parameter null checks included.
-pub(crate) fn loads_local(callee: &MethodNode, slot: u16) -> bool {
+fn loads_local(callee: &MethodNode, slot: u16) -> bool {
     let loads = callee.instructions().any(|instruction| {
         matches!(instruction, Insn::Var { op: 0x15..=0x19, slot: read } if *read == slot)
     });

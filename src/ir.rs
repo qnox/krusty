@@ -43,6 +43,10 @@ mod expression_provenance;
 mod field_flags;
 mod function_scope;
 mod inline_copies;
+mod suspension_points;
+pub use suspension_points::{
+    IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
+};
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
@@ -401,6 +405,8 @@ pub enum IrLocalPropertyLayout {
         setter: Option<FunId>,
         receiver: Option<Ty>,
         context_parameters: Vec<Ty>,
+        /// Index into `statics` of a delegated property's delegate.
+        delegate: Option<u32>,
     },
     Member {
         class: ClassId,
@@ -464,42 +470,6 @@ pub enum IrCheckedConstructorTarget {
 pub struct IrExternalConstructorTarget {
     pub declaration: crate::fir::ExternalCallableId,
     pub descriptor: Option<String>,
-}
-
-/// Representation selected for a value-class result crossing a coroutine suspension boundary.
-/// A carrier that cannot preserve the value class's null semantics in an erased `Object` is wrapped;
-/// a directly representable carrier crosses unchanged. This is produced by a target value-class pass
-/// and consumed by its coroutine pass, after common lowering has finished.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrValueClassSuspendResult {
-    Boxed { classifier: TypeName, carrier: Ty },
-    Carrier(Ty),
-}
-
-impl IrValueClassSuspendResult {
-    /// Type physically present in the continuation's erased result slot before the already-lowered
-    /// call-site representation wrapper consumes it.
-    pub fn boundary_ty(self) -> Ty {
-        match self {
-            Self::Boxed { classifier, .. } => Ty::obj_name(classifier),
-            Self::Carrier(carrier) => carrier,
-        }
-    }
-}
-
-/// Semantic behavior of one non-call coroutine suspension point retained through common IR.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrIntrinsicSuspensionKind {
-    /// Invoke the block with the current continuation directly.
-    Unintercepted,
-    /// Invoke the block with Kotlin's one-shot safe, intercepted continuation.
-    Safe,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IrIntrinsicSuspensionPoint {
-    pub result: Ty,
-    pub kind: IrIntrinsicSuspensionKind,
 }
 
 impl IrExternalConstructorTarget {
@@ -2137,8 +2107,8 @@ pub struct IrFile {
     /// Sparse inline origin for debug-visible local declarations. Source spelling remains in
     /// `value_names`; target-specific decoration is deliberately deferred to the backend.
     debug_local_provenance: std::collections::HashMap<ExprId, IrDebugLocalProvenance>,
-    /// Expressions copied from an inline function's own body into a call site; see `inline_copies`.
-    inline_copies: std::collections::HashSet<ExprId>,
+    /// What same-module inline expansions copied and left unread; see `inline_copies`.
+    inline_expansions: inline_copies::InlineExpansions,
     /// Lifted lambda implementation id → stable source origin and lexical binding context.
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by

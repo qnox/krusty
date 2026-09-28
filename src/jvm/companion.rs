@@ -455,7 +455,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         });
 
         let mut initializer = candidate.initializer;
-        if crate::ir::reads_value(ir, initializer, 0) {
+        if crate::ir::read_values(ir, initializer).contains(&0) {
             let outer = ir.classes[candidate.outer as usize].fq_name;
             let companion = ir.classes[candidate.companion as usize].fq_name;
             let singleton = ir.add_expr(IrExpr::ExternalStaticInstance {

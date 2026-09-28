@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 
 use crate::fir::PropertyId;
-use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrIntrinsic};
+use crate::ir::{
+    Callee, ExprId, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
+};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::method_node::MethodNode;
 use crate::types::{Ty, TypeName};
@@ -63,12 +65,18 @@ pub(super) struct DelegatedOperand {
 /// Pass `null` for a delegated reference whose inline operator never reads it, as kotlinc does
 /// (`PropertyReferenceLowering.visitCall`): such a property takes no slot.
 ///
-/// Common lowering already did this for the operator calls it inlined. This covers a dependency's
-/// inline operator, judged by its bytecode. kotlinc always inlines, so it ignores the operator's own
-/// null check of the parameter; here a callee with a legal call fallback may still be called, so
-/// only one that must be inlined may null-check the parameter it is given `null` for. A
-/// current-module operator kept as a call can fall back the same way, and keeps its slot.
+/// A current-module operator common lowering expanded records the operands its body never read.
+/// A dependency's inline operator is judged by its bytecode. kotlinc always inlines, so it ignores
+/// the operator's own null check of the parameter; here a callee with a legal call fallback may
+/// still be called, so only one that must be inlined may null-check the parameter it is given
+/// `null` for. A current-module operator kept as a call can fall back the same way, and keeps its
+/// slot.
 pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
+    for raw in 0..ir.exprs.len() as ExprId {
+        if ir.is_unread_inline_operand(raw) && is_delegated_operand(ir, raw) {
+            elide(ir, raw);
+        }
+    }
     for raw in 0..ir.exprs.len() {
         let IrExpr::Call {
             callee:
@@ -84,34 +92,56 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
         else {
             continue;
         };
-        if !inline.can_inline()
-            || !args
-                .iter()
-                .any(|&arg| ir.is_delegated_property_operand(arg))
-        {
+        if !inline.can_inline() || !args.iter().any(|&arg| is_delegated_operand(ir, arg)) {
             continue;
         }
         let unread = dependency_unread_arguments(
             bodies,
             (&owner.render(), name, descriptor),
-            (dispatch_receiver.is_some(), inline.must_inline()),
+            dispatch_receiver.is_some(),
             args,
         );
         for argument in unread {
-            if ir.is_delegated_property_operand(argument) {
-                ir.elide_delegated_property_operand(argument);
+            if is_delegated_operand(ir, argument) {
+                ir.mark_unread_inline_operand(argument);
+                elide(ir, argument);
             }
         }
     }
 }
 
-/// The arguments of a dependency's inline function `owner.name descriptor` its body never reads:
-/// null checks aside when it `must_inline`, which removes them. An instance method's receiver takes
-/// local 0 ahead of the descriptor's parameters.
+/// Whether `expression` is the reflected property a delegated-property operator receives, as
+/// passed: the reference itself, or it adapted to the operator's declared parameter.
+fn is_delegated_operand(ir: &IrFile, expression: ExprId) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
+        IrExpr::LocalPropertyReference { .. } => true,
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } => is_delegated_operand(ir, *arg),
+        _ => false,
+    }
+}
+
+/// Pass `null` in place of a delegated-property operand, adaptations included, so no reflected
+/// value is left behind to materialize.
+fn elide(ir: &mut IrFile, expression: ExprId) {
+    if let IrExpr::TypeOp { arg, .. } = *ir.expr(expression) {
+        elide(ir, arg);
+    }
+    ir.exprs[expression as usize] = IrExpr::Const(IrConst::Null);
+}
+
+/// The arguments of a dependency's inline function `owner.name descriptor` its body never reads,
+/// null checks aside: inlining removes them, as kotlinc's does. The emitter must then splice the
+/// call, since a real call would check the `null` passed instead. An instance method's receiver
+/// takes local 0 ahead of the descriptor's parameters.
 fn dependency_unread_arguments(
     bodies: &dyn MethodBodies,
     (owner, name, descriptor): (&str, &str, &str),
-    (instance, must_inline): (bool, bool),
+    instance: bool,
     args: &[ExprId],
 ) -> Vec<ExprId> {
     let Some(body) = bodies.body(owner, name, descriptor) else {
@@ -124,13 +154,9 @@ fn dependency_unread_arguments(
         return Vec::new();
     };
     let receiver = u16::from(instance);
-    let reads = |slot: u16| match must_inline {
-        true => crate::jvm::inliner::reads_local(&callee, slot + receiver),
-        false => crate::jvm::inliner::loads_local(&callee, slot + receiver),
-    };
     args.iter()
         .zip(slots)
-        .filter(|&(_, slot)| !reads(slot))
+        .filter(|&(_, slot)| !crate::jvm::inliner::reads_local(&callee, slot + receiver))
         .map(|(&arg, _)| arg)
         .collect()
 }
@@ -140,7 +166,7 @@ fn dependency_unread_arguments(
 pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> DelegatedPropertyArrays {
     let operands: Vec<_> = operands
         .into_iter()
-        .filter(|operand| ir.is_delegated_property_operand(operand.operand))
+        .filter(|operand| is_delegated_operand(ir, operand.operand))
         .collect();
     // Owners in first-operand order, so the element expressions are allocated deterministically;
     // each property once, however many operands read it.

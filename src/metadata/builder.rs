@@ -652,6 +652,9 @@ pub struct PropMeta {
     pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
+    /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
+    /// kotlinc records explicitly after the accessors' signatures.
+    pub delegate_field: Option<(String, String)>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -881,7 +884,16 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     } else {
         0
     };
-    let pflags = (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit | companion_bit;
+    let delegated_bit = if m.modifiers.delegated {
+        property_flags::IS_DELEGATED
+    } else {
+        0
+    };
+    let pflags = (base & !property_flags::VISIBILITY_MASK)
+        | (vis << 1)
+        | const_bit
+        | companion_bit
+        | delegated_bit;
     // protobuf omits an optional field at its declared default — a plain `public val` with a
     // non-constant initializer records NO flags word, exactly like a class property.
     if pflags != property_flags::DEFAULT {
@@ -893,23 +905,32 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     if let Some(setter_flags) = words.setter {
         p.field_varint(8, setter_flags); // Property.setter_flags = 8
     }
-    let mut jvm = Pb::new();
-    // `field` (empty → derived) only when a backing field EXISTS: a computed or extension property
-    // has none, and kotlinc omits the entry rather than recording an empty one.
-    if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
-    }
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
-    if !m.is_const {
-        if let Some((gn, gd)) = &m.getter {
-            let getter = jvm_method_sig(st, gn, gd);
-            jvm.field_message(3, &getter);
-        }
-        if let Some((sn, sd)) = &m.setter {
-            let setter = jvm_method_sig(st, sn, sd);
-            jvm.field_message(4, &setter);
-        }
+    let (getter, setter) = if m.is_const {
+        (None, None)
+    } else {
+        let getter = m.getter.as_ref().map(|(gn, gd)| jvm_method_sig(st, gn, gd));
+        let setter = m.setter.as_ref().map(|(sn, sd)| jvm_method_sig(st, sn, sd));
+        (getter, setter)
+    };
+    let mut jvm = Pb::new();
+    // A delegated property names its delegate field explicitly, interned after the accessors.
+    // Otherwise `field` (empty → derived) only when a backing field EXISTS: a computed or extension
+    // property has none, and kotlinc omits the entry rather than recording an empty one.
+    if let Some((name, descriptor)) = &m.delegate_field {
+        let mut field = Pb::new();
+        field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
+        field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        jvm.field_message(1, &field);
+    } else if m.has_backing_field {
+        jvm.field_message(1, &Pb::new());
+    }
+    if let Some(getter) = &getter {
+        jvm.field_message(3, getter);
+    }
+    if let Some(setter) = &setter {
+        jvm.field_message(4, setter);
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
     p
@@ -1087,6 +1108,7 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                delegate_field: None,
                 decl_order: 0,
             }
         }
@@ -1141,6 +1163,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                delegate_field: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1198,6 +1221,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                delegate_field: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1254,6 +1278,7 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                delegate_field: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1303,6 +1328,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                delegate_field: None,
                 decl_order: 0,
             }],
             &[],

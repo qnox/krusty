@@ -850,9 +850,12 @@ impl JvmBackend {
             bridge_returns: &pass_facts.bridge_return_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
         };
+        // The facade's identity, interned from the name the file's stem and package give it, as
+        // `module_calls::facade_for` interns it for the declarations it owns.
+        let facade_class = crate::types::type_name(&facade_name);
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
-            &facade_name,
+            (facade_class, &facade_name),
             &*self.cp,
             crate::jvm::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
@@ -1275,6 +1278,7 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
+                delegate_field: delegate_field(ir, declaration),
             }
         })
         .collect::<Vec<_>>();
@@ -1298,6 +1302,26 @@ pub fn facade_package_metadata_from_ir(
         module_name,
         param_assertions,
     )
+}
+
+/// The physical name and descriptor of the static field holding a delegated package property's
+/// delegate.
+fn delegate_field(
+    ir: &crate::ir::IrFile,
+    declaration: &crate::ir::IrPackageProperty,
+) -> Option<(String, String)> {
+    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+        delegate: Some(storage),
+        ..
+    }) = ir.local_property_layouts.get(&declaration.property)
+    else {
+        return None;
+    };
+    let field = &ir.statics[*storage as usize];
+    Some((
+        ir.static_field_jvm_name(*storage).to_string(),
+        crate::jvm::names::type_descriptor(field.ty),
+    ))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,

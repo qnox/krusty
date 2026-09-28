@@ -130,6 +130,7 @@ pub(super) fn materialize_top_level_delegate(
             (property_reference, property_reference_ty),
         ],
     )?;
+    at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -202,6 +203,7 @@ pub(super) fn materialize_top_level_delegate(
             setter,
             receiver: extension_receiver,
             context_parameters: Vec::new(),
+            delegate: Some(delegate_static),
         },
     );
     stamp_generated_property_nodes(ir, first_generated, cause);
@@ -316,6 +318,7 @@ pub(super) fn materialize_member_delegate(
             (property_reference, property_reference_ty),
         ],
     )?;
+    at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -545,6 +548,7 @@ pub(super) fn materialize_member_extension_delegate(
             (property_reference, property_reference_ty),
         ],
     )?;
+    at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -723,6 +727,14 @@ fn push_delegate_static(
 /// reports it: the external arms have no callable identity to name, and `property`
 /// is not a spare sentinel — it is whichever declaration was allocated first, so a failure here used
 /// to be attributed to an unrelated one.
+/// kotlinc states a delegated getter's convention call at the property's line, the call site an
+/// inlined operator's lines are mapped against.
+fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
+    if line != 0 {
+        ir.expr_source_lines.insert(call, line);
+    }
+}
+
 fn delegated_call(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,

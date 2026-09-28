@@ -43,7 +43,7 @@ pub(super) fn emit(
         None,
         nullability,
     );
-    delegated_property_array::declare(env, fq_name, cw);
+    delegated_property_array::declare(env, c.fq_name, cw);
 
     // Backing fields follow INSTANCE in the field table.
     for (field_index, field) in c.fields.iter().enumerate() {
@@ -83,7 +83,7 @@ pub(super) fn emit(
             .chain(init_body),
     );
     let mut clinit = CodeBuilder::new(0);
-    emitter.emit_delegated_property_array(env, fq_name, &mut clinit);
+    emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
     let ci = emitter.cw.class_ref(fq_name);
     let init = emitter.cw.methodref(fq_name, "<init>", "()V");
     let fref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
