@@ -318,6 +318,64 @@ fn declaration_parameters_with_receiver(function: &crate::libraries::FunctionInf
     parameters
 }
 
+/// A dependency declaration's own parameters (its extension receiver in place) and result, before
+/// any substitution, as the provider that assigned `identity` normalized it: the declaration's
+/// value-class spelling, else its generic signature, else the shape the provider published. A
+/// declaration found through an applied supertype (`Echo<String>.echo: String`) still answers with
+/// its own (`Echo<T>.echo: T`).
+pub(super) fn dependency_declaration_signature(
+    source: &dyn SymbolSource,
+    identity: crate::fir::ExternalCallableId,
+) -> (Box<[Ty]>, Ty) {
+    let realization = source
+        .external_callable(identity)
+        .expect("the provider that assigned a dependency identity answers for it");
+    let callable = &realization.callable;
+    let parameters = callable
+        .declared_params
+        .clone()
+        .or_else(|| {
+            callable.generic_sig.as_ref().map(|signature| {
+                if realization.kind == crate::libraries::ExternalCallableKind::Extension {
+                    signature.parameters_with_receiver(callable.context_count)
+                } else {
+                    signature.params.clone().into_boxed_slice()
+                }
+            })
+        })
+        .unwrap_or_else(|| callable.params.clone().into_boxed_slice());
+    let result = callable
+        .declared_ret
+        .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
+        .unwrap_or(callable.ret);
+    (parameters, result)
+}
+
+/// The overridden declaration's own parameters and result, before any substitution. A backend
+/// erases these for the supertype side of a bridge without reopening the declaration's provider.
+fn overridden_declaration_signature(
+    source: &dyn SymbolSource,
+    declared: &FunctionInfo,
+    overridden: ResolvedFunctionOverrideTarget,
+) -> (Box<[ResolvedTy]>, ResolvedTy) {
+    let (parameters, result) = match overridden {
+        ResolvedFunctionOverrideTarget::Module(_) => (
+            declaration_parameters_with_receiver(declared).into_boxed_slice(),
+            declared.ret.apply(declared.callable.ret),
+        ),
+        ResolvedFunctionOverrideTarget::External(identity) => {
+            dependency_declaration_signature(source, identity)
+        }
+    };
+    (
+        resolved_types(
+            parameters.iter().copied(),
+            "overridden function declaration parameters",
+        ),
+        resolved_ty(result, "overridden function result"),
+    )
+}
+
 fn applied_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
     declaration_parameters_with_receiver(function)
 }
@@ -469,7 +527,9 @@ fn publish_inherited_interface_function_plans(
                 else {
                     continue;
                 };
-                let declared_parameters = declaration_parameters_with_receiver(declared);
+                let (declared_parameters, declared_result) =
+                    overridden_declaration_signature(source, declared, overridden);
+                let declared_parameter_count = declared_parameters.len();
                 let implementation_parameters =
                     declaration_parameters_with_receiver(implementation_declared);
                 overrides.push(ResolvedFunctionOverride {
@@ -479,14 +539,8 @@ fn publish_inherited_interface_function_plans(
                     overridden_owner: supertype.classifier,
                     overridden_is_interface: true,
                     name: name.clone().into_boxed_str(),
-                    declared_parameters: resolved_types(
-                        declared_parameters.iter().copied(),
-                        "inherited interface declaration parameters",
-                    ),
-                    declared_result: resolved_ty(
-                        declared.ret.apply(declared.callable.ret),
-                        "inherited interface result",
-                    ),
+                    declared_parameters,
+                    declared_result,
                     applied_parameters: resolved_types(
                         applied_parameters.iter().copied(),
                         "applied inherited interface parameters",
@@ -507,7 +561,7 @@ fn publish_inherited_interface_function_plans(
                         index,
                         overridden,
                         declared,
-                        declared_parameters.len(),
+                        declared_parameter_count,
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -979,7 +1033,9 @@ fn append_function_override_edges(
             {
                 continue;
             }
-            let declared_parameters = declaration_parameters_with_receiver(declared);
+            let (declared_parameters, declared_result) =
+                overridden_declaration_signature(source, declared, overridden);
+            let declared_parameter_count = declared_parameters.len();
             overrides.push(ResolvedFunctionOverride {
                 implementation: ResolvedFunctionOverrideTarget::Module(implementation.callable),
                 implementation_owner,
@@ -987,14 +1043,8 @@ fn append_function_override_edges(
                 overridden_owner: supertype.classifier,
                 overridden_is_interface,
                 name: name.into(),
-                declared_parameters: resolved_types(
-                    declared_parameters.iter().copied(),
-                    "overridden function declaration parameters",
-                ),
-                declared_result: resolved_ty(
-                    declared.ret.apply(declared.callable.ret),
-                    "overridden function result",
-                ),
+                declared_parameters,
+                declared_result,
                 applied_parameters: resolved_types(
                     applied_parameters.iter().copied(),
                     "applied overridden function parameters",
@@ -1016,7 +1066,7 @@ fn append_function_override_edges(
                     index,
                     overridden,
                     declared,
-                    declared_parameters.len(),
+                    declared_parameter_count,
                 ),
                 implementation_result: resolved_ty(
                     implementation.result,

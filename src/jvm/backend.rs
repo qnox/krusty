@@ -45,9 +45,11 @@ pub(crate) struct BackendPassFacts {
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
-    bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
     function_argument_arrays: crate::jvm::function_argument_arrays::FunctionArgumentArrays,
+    /// The overrides whose primitive result is realized as its wrapper.
+    override_results: crate::jvm::override_results::OverrideResults,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -169,7 +171,14 @@ fn run_backend_passes_after_plugins(
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    crate::jvm::bridges::derive_bridges(ir, classpath, &mut facts.function_argument_arrays)?;
+    // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
+    facts.override_results = crate::jvm::override_results::box_primitive_override_results(ir);
+    crate::jvm::bridges::derive_bridges(
+        ir,
+        classpath,
+        &facts.override_results,
+        &mut facts.function_argument_arrays,
+    )?;
     apply_collection_bridge_barriers(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
@@ -180,7 +189,8 @@ fn run_backend_passes_after_plugins(
         classifiers,
         module_value_classes,
         module_readable_value_classes,
-        &mut facts.bridge_return_adaptations,
+        &mut facts.bridge_adaptations,
+        &mut facts.override_results,
         &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
@@ -212,13 +222,14 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::Suspend);
     }
+    crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
-    crate::jvm::lifted_names::realize(ir);
+    crate::jvm::lifted_names::realize(ir, &facts.override_results);
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
@@ -847,8 +858,9 @@ impl JvmBackend {
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
             suspended_result_returns: &pass_facts.suspended_result_returns,
-            bridge_returns: &pass_facts.bridge_return_adaptations,
+            bridge_adaptations: &pass_facts.bridge_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
+            override_results: &pass_facts.override_results,
         };
         // The facade's identity, interned from the name the file's stem and package give it, as
         // `module_calls::facade_for` interns it for the declarations it owns.
@@ -1610,6 +1622,10 @@ mod tests {
             (
                 "lower_suspend(",
                 &["src/jvm/suspend.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "finalize_suspend_bridges(",
+                &["src/jvm/suspend/cps_bridges.rs", "src/jvm/backend.rs"],
             ),
             (
                 "mark_must_inline_lambdas(",

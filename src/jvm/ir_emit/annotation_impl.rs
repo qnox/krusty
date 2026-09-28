@@ -50,8 +50,8 @@ pub(super) fn emit_annotation_impl_class(
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
-    let (owner, method) =
-        super::class_enclosure(ir, c, facade).expect("an annotation implementation has an owner");
+    let (owner, method) = super::class_enclosure(ir, env.override_results, c, facade)
+        .expect("an annotation implementation has an owner");
     assert!(
         method.is_none(),
         "an annotation implementation is enclosed by its owner as a whole"

@@ -645,6 +645,43 @@ fn sam_argument_retains_the_selected_interface_method_shape() {
     assert!(!sam.nullable);
 }
 
+/// The selected method's slot carries the declarations it overrides: a primitive result over a
+/// non-primitive one is published on the conversion, and a primitive result over nothing is not.
+#[test]
+fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
+    let overrides = |source: &str| {
+        let (body, _) = checked_function_body(source, "make");
+        let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("call").kind else {
+            panic!("SAM argument must belong to the checked source call")
+        };
+        let FirCallArgument::Expression {
+            conversion:
+                Some(FirConversion {
+                    kind: FirConversionKind::Sam(sam),
+                    ..
+                }),
+            ..
+        } = call.arguments[0]
+        else {
+            panic!("selected SAM conversion must be explicit in FIR")
+        };
+        let sam = body.sam_conversion(sam).expect("body-local SAM target");
+        assert_eq!(sam.result.get(), Ty::Int);
+        sam.overrides_non_primitive_result
+    };
+    assert!(overrides(
+        "interface Base { fun f(): Any }\n\
+         fun interface Child : Base { override fun f(): Int }\n\
+         fun consume(child: Child): Int = 0\n\
+         fun make(): Int = consume { 1 }\n",
+    ));
+    assert!(!overrides(
+        "fun interface Child { fun f(): Int }\n\
+         fun consume(child: Child): Int = 0\n\
+         fun make(): Int = consume { 1 }\n",
+    ));
+}
+
 #[test]
 fn generic_sam_accepts_the_same_nullable_lexical_type_parameter_result() {
     let (body, _) = checked_function_body(

@@ -67,6 +67,7 @@ pub(super) fn realize_safe_coroutine_points(ir: &mut IrFile) {
                 descriptor: "()Ljava/lang/Object;".to_string(),
                 params: None,
                 interface: false,
+                module_target: None,
             },
             dispatch_receiver: Some(safe_for_result),
             args: Vec::new(),

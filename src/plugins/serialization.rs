@@ -368,6 +368,7 @@ fn call_generated_serializer(
                     descriptor: String::new(),
                     params: Some((params, ret)),
                     interface: false,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(receiver),
                 args,
@@ -386,6 +387,7 @@ fn call_generated_serializer(
                     descriptor: String::new(),
                     params: Some((params, ret)),
                     interface: false,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(receiver),
                 args,
@@ -455,6 +457,7 @@ fn call_external_companion_serializer(
             descriptor: String::new(),
             params: Some((params, ret)),
             interface: false,
+            module_target: None,
         },
         dispatch_receiver: Some(receiver),
         args,
@@ -618,6 +621,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 descriptor: descriptor.to_string(),
                 params: None,
                 interface: false,
+                module_target: None,
             },
             dispatch_receiver: Some(recv),
             args: vec![ser, arg],
@@ -693,6 +697,7 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
         descriptor: descriptor.to_string(),
         params: None,
         interface: true,
+        module_target: None,
     }
 }
 
@@ -991,6 +996,7 @@ impl SerializationPlugin {
                 descriptor: String::new(),
                 params: Some((vec![], class_ty("kotlin/Any"))),
                 interface: true,
+                module_target: None,
             },
             dispatch_receiver: Some(acc_call),
             args: vec![],
@@ -1586,8 +1592,6 @@ impl IrPlugin for SerializationPlugin {
                     type_safe_barrier: false,
                     special: false,
                     target_name: None,
-                    box_ret: None,
-                    unbox_params: Vec::new(),
                 },
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
@@ -1605,8 +1609,6 @@ impl IrPlugin for SerializationPlugin {
                     type_safe_barrier: false,
                     special: false,
                     target_name: None,
-                    box_ret: None,
-                    unbox_params: Vec::new(),
                 },
             ];
             let serializer_identity = ser.fq_name_id();
@@ -1727,6 +1729,7 @@ impl IrPlugin for SerializationPlugin {
                             descriptor: "(Ljava/lang/String;Z)V".to_string(),
                             params: None,
                             interface: false,
+                            module_target: None,
                         },
                         dispatch_receiver: Some(d),
                         args: vec![nm, opt],
@@ -2056,6 +2059,7 @@ impl IrPlugin for SerializationPlugin {
                                 descriptor: format!("(){getter_desc}"),
                                 params: None,
                                 interface: false,
+                                module_target: None,
                             },
                             dispatch_receiver: Some(vrecv),
                             args: vec![],

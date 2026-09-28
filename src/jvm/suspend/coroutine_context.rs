@@ -32,6 +32,7 @@ pub(super) fn realize_coroutine_context(ir: &mut IrFile, e: ExprId, continuation
                 descriptor: "()Lkotlin/coroutines/CoroutineContext;".to_string(),
                 params: None,
                 interface: true,
+                module_target: None,
             },
             dispatch_receiver: Some(context_receiver),
             args: Vec::new(),

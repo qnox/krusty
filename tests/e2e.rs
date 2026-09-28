@@ -553,6 +553,8 @@ mod delegated_prop_e2e;
 mod delegated_properties_array_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
+#[path = "dependency_override_signature_e2e.rs"]
+mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
@@ -1107,6 +1109,8 @@ mod local_fun_default_args_e2e;
 mod local_fun_overload_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "local_override_boxed_result_e2e.rs"]
+mod local_override_boxed_result_e2e;
 #[path = "local_shadows_receiver_member_e2e.rs"]
 mod local_shadows_receiver_member_e2e;
 #[path = "local_superclass_capture_e2e.rs"]
@@ -1219,6 +1223,8 @@ mod missing_return_check_e2e;
 mod mixed_numeric_comparison_e2e;
 #[path = "module_extension_signature_result_e2e.rs"]
 mod module_extension_signature_result_e2e;
+#[path = "module_override_boxed_result_e2e.rs"]
+mod module_override_boxed_result_e2e;
 #[path = "mpp_expect_actual_e2e.rs"]
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
@@ -1253,6 +1259,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_entry_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
 mod value_class_nothing_override_bridges_e2e;
+#[path = "value_class_nullable_bridge_e2e.rs"]
+mod value_class_nullable_bridge_e2e;
 #[path = "value_class_nullable_function_result_e2e.rs"]
 mod value_class_nullable_function_result_e2e;
 #[path = "value_class_object_carrier_generic_result_e2e.rs"]

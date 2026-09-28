@@ -1,4 +1,4 @@
-//! Expression identity relocation when value-class lowering inserts a representation wrapper.
+//! Expression identity relocation when a JVM representation pass inserts a wrapper around a call.
 //!
 //! The wrapper keeps the source expression identity, while the cloned inner node becomes the call
 //! operation consumed by later JVM passes. Representation context is valid on both nodes; facts
