@@ -97,22 +97,16 @@ pub(super) fn nests_lifted_functions(ir: &IrFile, body: ExprId) -> bool {
         })
 }
 
-/// Whether `node` is an argument of a call an inline splice expands, which consumes the lambda's
-/// body in place of its value.
+/// Whether `node` is an argument of a call to an inline declaration, whose splice consumes the
+/// lambda's body in place of its value.
 fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
     ir.exprs.iter().enumerate().any(|(call, expression)| {
-        let IrExpr::Call { callee, args, .. } = expression else {
+        let IrExpr::Call { args, .. } = expression else {
             return false;
         };
-        let inline = matches!(
-            callee,
-            crate::ir::Callee::Static {
-                inline: crate::libraries::InlineKind::MustInline,
-                ..
-            }
-        ) || u32::try_from(call)
-            .is_ok_and(|call| ir.module_inline_calls.contains(&call));
-        inline && args.contains(&node)
+        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
+        (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))
+            && args.contains(&node)
     })
 }
 
