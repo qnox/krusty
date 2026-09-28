@@ -13236,6 +13236,10 @@ struct ScopedProperty {
     owner_storage_ty: Option<Ty>,
     is_var: bool,
     owner: TypeName,
+    /// Exact implicit-receiver rung whose member family contributed this property. A property
+    /// inherited by the current subclass and the same declaration reached through an enclosing
+    /// base-typed receiver have the same owner and type but different runtime identities.
+    dispatch_receiver_identity: Option<(usize, usize)>,
     class_storage: Option<u32>,
     enum_entry_property: Option<u32>,
     source_member: Option<crate::libraries::SourceMember>,
@@ -14131,10 +14135,22 @@ impl<'a> Checker<'a> {
             // active checker. Retry only the inherited MEMBER facet through that semantic edge;
             // extension rungs remain selected against the original receiver below.
             for supertype in self.body_local_supertypes(receiver) {
-                if let Ok(Some(selection @ PropertyReadSelection::Member(_))) =
-                    self.select_property_read(scope, supertype, name)
-                {
-                    return Ok(Some(selection));
+                if let Ok(Some(selection)) = self.select_property_read(scope, supertype, name) {
+                    let private = match &selection {
+                        PropertyReadSelection::Member(member) => {
+                            member.access.is_some_and(|(visibility, _)| {
+                                !crate::symbol_resolver::member_is_inheritable(visibility)
+                            })
+                        }
+                        PropertyReadSelection::MemberExtension(_)
+                        | PropertyReadSelection::Extension(_) => false,
+                    };
+                    if private {
+                        continue;
+                    }
+                    if matches!(selection, PropertyReadSelection::Member(_)) {
+                        return Ok(Some(selection));
+                    }
                 }
             }
             match self.member_extension_property(scope, receiver, name) {
@@ -14465,13 +14481,21 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         name: &str,
     ) -> Option<&CheckedLocalProperty> {
-        std::iter::once(receiver.non_null())
-            .chain(self.body_local_supertypes(receiver))
-            .filter_map(Ty::kotlin_class_internal)
-            .find_map(|owner| {
-                self.checked_local_properties
-                    .get(&(owner, name.to_string()))
+        std::iter::once((receiver.non_null(), false))
+            .chain(
+                self.body_local_supertypes(receiver)
+                    .into_iter()
+                    .map(|supertype| (supertype, true)),
+            )
+            .filter_map(|(candidate, inherited)| {
+                let owner = candidate.kotlin_class_internal()?;
+                let property = self
+                    .checked_local_properties
+                    .get(&(owner, name.to_string()))?;
+                (!inherited || crate::symbol_resolver::member_is_inheritable(property.visibility))
+                    .then_some(property)
             })
+            .next()
     }
 
     fn remove_checked_source_member_result(
@@ -17366,6 +17390,12 @@ impl<'a> Checker<'a> {
         if members.is_empty() {
             for supertype in self.body_local_supertypes(receiver) {
                 let inherited = module_members(supertype);
+                let inherited = inherited
+                    .into_iter()
+                    .filter(|member| {
+                        crate::symbol_resolver::member_is_inheritable(member.visibility)
+                    })
+                    .collect::<Vec<_>>();
                 if !inherited.is_empty() {
                     member_receiver = supertype;
                     members = inherited;
@@ -49015,6 +49045,7 @@ impl<'a> Checker<'a> {
             is_var,
             owner,
             None,
+            None,
         );
     }
 
@@ -49040,6 +49071,7 @@ impl<'a> Checker<'a> {
             is_var,
             owner,
             Some(sibling),
+            None,
         );
     }
 
@@ -49051,21 +49083,30 @@ impl<'a> Checker<'a> {
         is_var: bool,
         owner: TypeName,
         enum_entry_property: Option<u32>,
+        selected_receiver_identity: Option<(usize, usize)>,
     ) {
         let implicit_receivers = self.implicit_receivers(scope);
-        let receiver_identity = enum_entry_property
-            .and_then(|_| owner.nested_owner())
-            .and_then(|enum_owner| {
-                implicit_receivers.iter().copied().find(|receiver| {
-                    receiver.extension_receiver.is_none()
-                        && receiver.ty.obj_internal() == Some(enum_owner)
-                })
+        let receiver_identity = selected_receiver_identity
+            .or_else(|| {
+                enum_entry_property
+                    .and_then(|_| owner.nested_owner())
+                    .and_then(|enum_owner| {
+                        implicit_receivers.iter().copied().find(|receiver| {
+                            receiver.extension_receiver.is_none()
+                                && receiver.ty.obj_internal() == Some(enum_owner)
+                        })
+                    })
+                    .map(|receiver| receiver.identity)
             })
             .or_else(|| {
-                implicit_receivers.iter().copied().find(|receiver| {
-                    receiver.extension_receiver.is_none()
-                        && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                })
+                implicit_receivers
+                    .iter()
+                    .copied()
+                    .find(|receiver| {
+                        receiver.extension_receiver.is_none()
+                            && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
+                    })
+                    .map(|receiver| receiver.identity)
             })
             // Some declaration-only class scopes are built before the enclosing `inner` receiver
             // labels are installed. They still need the binding for header/initializer checking;
@@ -49076,8 +49117,8 @@ impl<'a> Checker<'a> {
                     .iter()
                     .copied()
                     .find(|receiver| receiver.extension_receiver.is_none())
+                    .map(|receiver| receiver.identity)
             })
-            .map(|receiver| receiver.identity)
             .expect("a dispatch property is declared only inside its classifier receiver scope");
         self.declare_with_origin(
             scope,
@@ -49151,6 +49192,7 @@ impl<'a> Checker<'a> {
             is_var,
             property.owner,
             property.enum_entry_property,
+            property.dispatch_receiver_identity,
         );
     }
 
@@ -49493,6 +49535,7 @@ impl<'a> Checker<'a> {
                 owner_storage_ty: None,
                 is_var: property.is_var,
                 owner: entry_owner,
+                dispatch_receiver_identity: None,
                 class_storage: None,
                 enum_entry_property: Some(field as u32),
                 source_member: None,
@@ -49703,6 +49746,8 @@ impl<'a> Checker<'a> {
             checker: &Checker<'_>,
             source: &dyn SymbolSource,
             applied: Ty,
+            dispatch_receiver_identity: Option<(usize, usize)>,
+            inherited: bool,
             seen: &mut std::collections::HashSet<TypeName>,
             properties: &mut Vec<ScopedProperty>,
         ) {
@@ -49729,7 +49774,15 @@ impl<'a> Checker<'a> {
                 && checker.resolved_body_local_supertypes.contains_key(&owner);
             if deferred_body_local {
                 for parent in checker.body_local_supertypes(applied) {
-                    collect(checker, source, parent, seen, properties);
+                    collect(
+                        checker,
+                        source,
+                        parent,
+                        dispatch_receiver_identity,
+                        true,
+                        seen,
+                        properties,
+                    );
                 }
                 return;
             }
@@ -49747,13 +49800,23 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>(),
             );
             for parent in crate::symbol_resolver::direct_supertypes(source, applied) {
-                collect(checker, source, parent, seen, properties);
+                collect(
+                    checker,
+                    source,
+                    parent,
+                    dispatch_receiver_identity,
+                    true,
+                    seen,
+                    properties,
+                );
             }
             let bindings = crate::symbol_resolver::classifier_bindings(&classifier, applied);
             for callables in classifier.declared_callables.values() {
                 for property in callables.properties().iter().filter(|property| {
                     property.kind == crate::libraries::PropKind::Member
                         && property.context_count == 0
+                        && (!inherited
+                            || crate::symbol_resolver::member_is_inheritable(property.visibility))
                         && checker.member_accessible(property.visibility, property.owner)
                 }) {
                     let ty = crate::symbol_resolver::specialize_signature_output_type(
@@ -49799,6 +49862,7 @@ impl<'a> Checker<'a> {
                         owner_storage_ty,
                         is_var: property.setter.is_some(),
                         owner: property.owner,
+                        dispatch_receiver_identity,
                         class_storage: None,
                         enum_entry_property: None,
                         source_member: property.source_member,
@@ -49815,16 +49879,20 @@ impl<'a> Checker<'a> {
         }
 
         let mut properties = Vec::new();
-        let applied = self
-            .implicit_receiver_types(scope)
+        let selected_receiver = self
+            .implicit_receivers(scope)
             .into_iter()
-            .find(|receiver| receiver.obj_internal() == Some(owner))
+            .find(|receiver| receiver.ty.obj_internal() == Some(owner));
+        let applied = selected_receiver
+            .map(|receiver| receiver.ty)
             .unwrap_or_else(|| Ty::obj_name(owner));
         let source = self.fed_source();
         collect(
             self,
             &source,
             applied,
+            selected_receiver.map(|receiver| receiver.identity),
+            false,
             &mut std::collections::HashSet::new(),
             &mut properties,
         );
@@ -56823,6 +56891,11 @@ impl<'a> Checker<'a> {
                             owner_storage_ty: None,
                             is_var: property.is_var,
                             owner,
+                            dispatch_receiver_identity: self
+                                .implicit_receivers(property_scope)
+                                .into_iter()
+                                .find(|receiver| receiver.ty.obj_internal() == Some(owner))
+                                .map(|receiver| receiver.identity),
                             class_storage: None,
                             enum_entry_property: None,
                             source_member: Some(source_member),
@@ -57459,6 +57532,7 @@ impl<'a> Checker<'a> {
                             owner_storage_ty: None,
                             is_var: bp.is_var,
                             owner,
+                            dispatch_receiver_identity: None,
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
                             source_member: None,

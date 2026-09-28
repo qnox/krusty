@@ -79,3 +79,19 @@ fn anonymous_subclass_reads_enclosing_private_property() {
 fun box(): String = X(\"OK\").foo()\n";
     common::expect_box_ok_with_stdlib(SRC, "kt3684");
 }
+
+/// The corresponding non-private declaration is inherited by the anonymous subclass. Its current
+/// receiver must win over the same declaration reached through the enclosing `X` receiver.
+#[test]
+fn anonymous_subclass_reads_inherited_property_on_current_receiver() {
+    const SRC: &str = "open class OuterValue(val value: String) {\n\
+    fun result(): String {\n\
+        val actual = object : OuterValue(\"inner\") {\n\
+            fun read(): String = value\n\
+        }.read()\n\
+        return if (actual == \"inner\") \"OK\" else actual\n\
+    }\n\
+}\n\
+fun box(): String = OuterValue(\"outer\").result()\n";
+    common::expect_box_ok_with_stdlib(SRC, "anonymousInheritedProperty");
+}

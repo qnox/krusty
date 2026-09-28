@@ -97,12 +97,6 @@ impl<'a> Checker<'a> {
         if !self.member_accessible(vis, owner) {
             return false;
         }
-        if vis == Visibility::Private {
-            // Private members are not inherited. Lexical nesting can see them on the declaring
-            // instance (`object : X("inner") { fun print() = n }` reads the outer `X`), not on a
-            // subclass receiver that happens to be nested inside that class.
-            return receiver.non_null().obj_internal() == Some(owner);
-        }
         vis != Visibility::Protected
             || self
                 .lexical_source_class_names()
