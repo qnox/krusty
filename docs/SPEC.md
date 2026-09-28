@@ -7558,6 +7558,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Sum.f$default(Sum, long, int, Object)`, so the receiver is `B.box-impl`, as kotlinc does. The
   default provider's declaring class decides: a value class's own member keeps its carrier. Tests:
   `tests/value_class_interface_default_receiver_e2e.rs`.
+- **A `try` has its branches' value-class representation.** Like a `when`, a `try` is the
+  representation of its first value-class branch (the body, then each handler). A body that cannot
+  complete (`try { fail() } catch (e: Throwable) { Outcome(Failure(e)) }`) leaves the handler's
+  carrier as the `try`'s value, so coercing the `try` to `Outcome` casts and unboxes nothing.
+  Tests: `tests/value_class_try_value_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
