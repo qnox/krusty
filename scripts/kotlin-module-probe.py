@@ -41,8 +41,9 @@ OWNED_FLAGS = {
     "-module-name",
     "-jdk-home",
     "-jvm-target",
+    "-Xfriend-paths",
 }
-OWNED_PREFIXES = ("-Xfriend-paths=",)
+OWNED_PREFIXES = tuple(f"{flag}=" for flag in OWNED_FLAGS)
 
 
 def project_path(module_id: str) -> str:
@@ -105,8 +106,12 @@ def forwarded_args(kotlinc_args: list[str]) -> list[str]:
 def has_stdlib_jar(entries: list[str]) -> bool:
     for entry in entries:
         name = Path(entry).name
-        if name.startswith("kotlin-stdlib") and name.endswith(".jar"):
+        if name == "kotlin-stdlib.jar":
             return True
+        if name.startswith("kotlin-stdlib-") and name.endswith(".jar"):
+            version = name[len("kotlin-stdlib-") : -len(".jar")]
+            if version[:1].isdigit():
+                return True
     return False
 
 
@@ -152,7 +157,7 @@ def plan_module(
     if friends:
         krusty_cmd.append("-Xfriend-paths=" + classpath_join(friends))
     jvm_target = module.get("jvm_target")
-    if jvm_target and "-jvm-target" not in args:
+    if jvm_target:
         krusty_cmd += ["-jvm-target", str(jvm_target)]
     krusty_cmd += forwarded_args(args)
     krusty_cmd += [str(path) for path in kotlin]
@@ -246,6 +251,15 @@ def self_test() -> None:
                 "/ignored",
                 "-classpath",
                 "/also-ignored",
+                "-d=/ignored-equals",
+                "-classpath=/also-ignored-equals",
+                "-module-name=ignored",
+                "-jdk-home=/ignored-jdk",
+                "-jvm-target",
+                "17",
+                "-jvm-target=11",
+                "-Xfriend-paths",
+                "/ignored-friend",
                 "-Xfriend-paths=/elsewhere",
             ],
             "source_roots": [
@@ -301,6 +315,7 @@ def self_test() -> None:
         assert command[:4] == ["krusty", "-d", str(root / "out" / "classes"), "-module-name"]
         assert "-jdk-home" in command and "/jdk" in command
         assert "-jvm-target" in command and "21" in command
+        assert command.count("-jvm-target") == 1
         assert "-Xcontext-parameters" in command
         assert "-Xexplicit-backing-fields" in command
         assert "-Xname-based-destructuring=complete" in command
@@ -308,6 +323,12 @@ def self_test() -> None:
         assert "-opt-in=kotlin.RequiresOptIn" in command
         assert "/ignored" not in command
         assert "/also-ignored" not in command
+        assert not any("ignored-equals" in token for token in command)
+        assert "-module-name=ignored" not in command
+        assert "-jdk-home=/ignored-jdk" not in command
+        assert "-jvm-target=11" not in command
+        assert "17" not in command
+        assert "/ignored-friend" not in command
         assert "-Xfriend-paths=/elsewhere" not in command
         friend = next(token for token in command if token.startswith("-Xfriend-paths="))
         assert str(root / "out" / "common") in friend
@@ -323,6 +344,12 @@ def self_test() -> None:
         assert planned["javac"][0] == "javac"
         assert str(root / "out" / "classes") in planned["javac"]
         assert str(source / "Util.java") in planned["javac"]
+
+        assert has_stdlib_jar([str(root / "kotlin-stdlib.jar")])
+        assert has_stdlib_jar([str(root / "kotlin-stdlib-2.4.20.jar")])
+        assert not has_stdlib_jar([str(root / "kotlin-stdlib-jdk8.jar")])
+        assert not has_stdlib_jar([str(root / "kotlin-stdlib-common-2.4.20.jar")])
+        assert not has_stdlib_jar([str(root / "2.4.20.jar")])
 
         already = plan_module(
             {
