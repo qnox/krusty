@@ -24,7 +24,7 @@ use crate::ir::{
 };
 use crate::types::{Ty, TypeName};
 
-use super::generics::declaration_type_parameters;
+use super::generics::{attach_accessor_type_parameters, declaration_type_parameters};
 use super::properties::{
     add_accessor_function, record_accessor_visibilities, set_accessor_parameter_identities,
     setter_visibility, stamp_generated_property_nodes, AccessorResult,
@@ -382,11 +382,13 @@ pub(super) fn materialize_member_delegate(
     if let Some(setter) = setter {
         ir.classes[class_id as usize].methods.push(setter);
     }
+    let type_params = declaration_type_parameters(index, property.declaration);
     for function in std::iter::once(getter).chain(setter) {
         ir.fn_source_order.insert(function, source_order);
         if property.flags.has(DeclarationFlags::OPEN) {
             ir.open_methods.insert(function);
         }
+        attach_accessor_type_parameters(ir, function, &type_params);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
@@ -395,6 +397,7 @@ pub(super) fn materialize_member_delegate(
         source_order,
         decl_line: 0,
         ty: property.ty,
+        type_params,
         visibility: property.visibility,
         return_value_status: index.property_return_value_status(property_id),
         annotations: Box::new([]),

@@ -13,6 +13,28 @@ pub(super) fn declaration_type_parameters(
         .collect()
 }
 
+/// Record a property's own type parameters on one accessor. Class type parameters stay on the
+/// class; these are the declaration's (`var <X, Y> ctx: Map<X, Y>`).
+pub(super) fn attach_accessor_type_parameters(
+    ir: &mut IrFile,
+    function: u32,
+    type_params: &[IrTypeParameter],
+) {
+    if type_params.is_empty() {
+        return;
+    }
+    let signature = &ir.functions[function as usize];
+    ir.signatures.insert(
+        function,
+        IrGenericSig {
+            type_params: type_params.to_vec(),
+            params: signature.params.clone(),
+            ret: Some(signature.ret),
+            supers: Vec::new(),
+        },
+    );
+}
+
 /// The declarations of the type parameters `function_type` names, then of those their bounds
 /// name, in first-use order.
 pub(super) fn named_type_parameters(

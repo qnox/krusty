@@ -1540,6 +1540,7 @@ impl IrPlugin for SerializationPlugin {
                 source_order: descriptor_order,
                 decl_line: 0,
                 ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                type_params: Vec::new(),
                 visibility: crate::types::Visibility::Public,
                 return_value_status: Default::default(),
                 annotations: Box::new([]),

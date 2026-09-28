@@ -447,6 +447,7 @@ fn materialize_delegation(
                     source_order: u32::MAX,
                     decl_line: 0,
                     ty,
+                    type_params,
                     visibility: crate::types::Visibility::Public,
                     return_value_status: Default::default(),
                     annotations: Box::new([]),

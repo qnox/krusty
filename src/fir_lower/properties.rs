@@ -10,7 +10,8 @@ use crate::ir::{
 use crate::types::{Ty, TypeName};
 
 use super::{
-    constructors::classifier_type_parameter_ordinal, generics::declaration_type_parameters,
+    constructors::classifier_type_parameter_ordinal,
+    generics::{attach_accessor_type_parameters, declaration_type_parameters},
     lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext,
 };
 
@@ -1138,6 +1139,8 @@ fn materialize_member_property(
         // downstream, so this does not need to decide genericity itself.
         ir.member_semantic_sigs
             .insert(getter, (context_parameters.clone(), property.ty));
+        let type_params = declaration_type_parameters(index, property.declaration);
+        attach_accessor_type_parameters(ir, getter, &type_params);
         if property.flags.has(DeclarationFlags::MUTABLE) {
             let setter = add_abstract_accessor_function(
                 ir,
@@ -1165,6 +1168,7 @@ fn materialize_member_property(
                     Ty::Unit,
                 ),
             );
+            attach_accessor_type_parameters(ir, setter, &type_params);
         }
     }
     let setter = property.setter.map(|body| {
@@ -1212,6 +1216,10 @@ fn materialize_member_property(
         ir.open_methods
             .extend(getter.iter().chain(setter.iter()).copied());
     }
+    let type_params = declaration_type_parameters(index, property.declaration);
+    for function in getter.iter().chain(setter.iter()).copied() {
+        attach_accessor_type_parameters(ir, function, &type_params);
+    }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
@@ -1219,6 +1227,7 @@ fn materialize_member_property(
         source_order,
         decl_line: 0,
         ty: property.ty,
+        type_params,
         visibility: property.visibility,
         return_value_status: index.property_return_value_status(property_id),
         annotations: index

@@ -55,7 +55,8 @@ pub struct PropMeta {
     /// without it a consumer sees an ordinary member property that does not exist. `None` for an
     /// ordinary member.
     pub receiver: Option<Ty>,
-    /// Type parameters declared by this property (member extension properties may be generic).
+    /// Type parameters this property declares, whether it is an ordinary member or a member
+    /// extension (`var <X, Y> ctx`, `val <T> T.id`).
     pub type_params: Vec<crate::ir::IrTypeParameter>,
     /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
