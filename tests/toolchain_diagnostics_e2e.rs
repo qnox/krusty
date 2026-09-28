@@ -73,6 +73,12 @@ fn toolchain_binary() -> PathBuf {
     if profile != "debug" {
         build.args(["--profile", profile]);
     }
+    // The coverage gate exports nightly-only `-Z` rustflags, then runs this binary directly, so
+    // the flags are inherited. `env!("CARGO")` is the toolchain that compiled the test, which is
+    // not that nightly, and rustc rejects the flags while building dependencies. This binary only
+    // prints diagnostics; the instrumented compiler is selected with `KRUSTY_COMPILER`.
+    build.env_remove("RUSTFLAGS");
+    build.env_remove("CARGO_ENCODED_RUSTFLAGS");
     let status = build
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .status()
