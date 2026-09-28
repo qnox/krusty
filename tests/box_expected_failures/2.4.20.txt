@@ -8,7 +8,6 @@ annotations/instances/arraysAndKClass.kt
 annotations/instances/enumAndKClass.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-argumentOrder/defaults.kt
 basics/k42000_1.kt
 basics/k42000_crossmodule.kt
 binaryOp/eqNullableDoublesWithTP.kt

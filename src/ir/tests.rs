@@ -392,6 +392,67 @@ fn toplevel_default_stub_safe_accepts_a_lambda_capturing_only_parameters() {
 }
 
 #[test]
+fn toplevel_default_stub_safe_accepts_an_invoked_lambda_and_rejects_a_spilled_capture() {
+    // `x: Int = { 1 }()` — the default is an invocation of a non-capturing lambda. The stub
+    // builds the closure and calls it; nothing outside the parameter frame is read.
+    let mut f = IrFile::default();
+    let fid = add_toplevel_fn(&mut f, "foo", Ty::Int);
+    let lam = f.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![],
+        sam: None,
+        inline_body: None,
+    });
+    let invoke = f.add_expr(IrExpr::InvokeFunction {
+        func: lam,
+        args: vec![],
+        params: vec![],
+        ret: Ty::Int,
+    });
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(invoke)]),
+    );
+    assert!(toplevel_default_stub_safe(&f, fid));
+
+    // The same invocation capturing a spilled temp is still outside the stub frame.
+    let mut g = IrFile::default();
+    let gid = add_toplevel_fn(&mut g, "bar", Ty::Int);
+    let cap = g.add_expr(IrExpr::GetValue(7));
+    let captured = g.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![cap],
+        sam: None,
+        inline_body: None,
+    });
+    let bad_invoke = g.add_expr(IrExpr::InvokeFunction {
+        func: captured,
+        args: vec![],
+        params: vec![],
+        ret: Ty::Int,
+    });
+    g.fn_params.insert(
+        gid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(bad_invoke)]),
+    );
+    assert!(!toplevel_default_stub_safe(&g, gid));
+
+    let mut h = IrFile::default();
+    let hid = add_toplevel_fn(&mut h, "cell", Ty::Int);
+    let boxed = h.add_expr(IrExpr::RefNew {
+        elem: Ty::Int,
+        init: None,
+    });
+    h.fn_params.insert(
+        hid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(boxed)]),
+    );
+    assert!(!toplevel_default_stub_safe(&h, hid));
+}
+
+#[test]
 fn toplevel_default_stub_safe_rejects_a_lambda_capturing_a_spilled_temp() {
     // A capture beyond the parameter range (a spilled temp / enclosing local) is not in scope in
     // the static stub frame — rejected.
