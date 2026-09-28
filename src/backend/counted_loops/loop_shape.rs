@@ -28,7 +28,7 @@ impl Realizer<'_> {
         let steps_first = self.style == CounterLoopStyle::JavaLike && !can_overflow && !java_like;
         let separate_loop_variable = steps_first || is_unsigned(ty);
         let mut statements = header.prelude.clone();
-        let first = self.element_representation(header.first.value, ty);
+        let first = self.element_value(header.first.value, ty);
         let (induction, induction_declaration) = if separate_loop_variable {
             let slot = self.allocate_temporary();
             let declaration = self.add(IrExpr::Variable {
@@ -43,11 +43,13 @@ impl Realizer<'_> {
                 self.loop_variable_declaration(variable, variable_name.as_deref(), ty, first);
             (variable, declaration)
         };
-        // The loop reads an unsigned `last` through a representation coercion, so kotlinc copies
-        // anything but a constant.
+        // The loop reads an unsigned `last` through a representation coercion, and a `Char` one
+        // held as an `Int` through its narrowing, so kotlinc copies anything but a constant.
+        let last = self.element_value(header.last.value, ty);
         let last_operand = Operand {
-            value: self.element_representation(header.last.value, ty),
+            value: last,
             can_change: header.last.can_change
+                || (ty == Ty::Char && last != header.last.value)
                 || (is_unsigned(ty) && constant_value(self.ir, header.last.value).is_none()),
         };
         let mut last_statements = Vec::new();

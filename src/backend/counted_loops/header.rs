@@ -487,8 +487,16 @@ impl Realizer<'_> {
             let first = self.as_step_type(first, nested.ty, element_ty);
             let last = self.as_step_type(last, nested.ty, element_ty);
             let element = self.runtime_call(last_element, vec![first, last, final_step.value]);
-            let element = self.as_step_type(element, element_ty, nested.ty);
-            self.in_representation(element);
+            let element = if nested.ty == Ty::Char {
+                // kotlinc keeps a `Char` progression's recomputed `last` as the `Int` the call
+                // returns; whoever reads it as a `Char` converts it there.
+                self.in_step_type(element);
+                element
+            } else {
+                let element = self.as_step_type(element, element_ty, nested.ty);
+                self.in_representation(element);
+                element
+            };
             Operand {
                 value: element,
                 can_change: true,
@@ -517,7 +525,7 @@ impl Realizer<'_> {
 
     /// `asStepType`/`asElementType`: the coercion between a `Char` element and its `Int` step.
     fn as_step_type(&mut self, value: ExprId, from: Ty, to: Ty) -> ExprId {
-        if from == to {
+        if from == to || (from == Ty::Char && self.is_in_step_type(value)) {
             value
         } else {
             self.range_bound(value, to)

@@ -186,6 +186,12 @@ impl Realizer<'_> {
         if !operand.can_change {
             return (None, operand.value);
         }
+        // kotlinc's temporary takes the type of what it stores.
+        let ty = if ty == Ty::Char && self.is_in_step_type(operand.value) {
+            Ty::Int
+        } else {
+            ty
+        };
         let slot = self.allocate_temporary();
         let declaration = self.add(IrExpr::Variable {
             index: slot,
@@ -267,6 +273,25 @@ impl Realizer<'_> {
         });
         self.inlined_calls.push(converted);
         converted
+    }
+
+    /// A `Char` bound the header holds as the `Int` it was computed in (`asElementType`): the
+    /// loop's own variables narrow it where they are declared.
+    fn element_value(&mut self, value: ExprId, ty: Ty) -> ExprId {
+        if ty == Ty::Char && self.is_in_step_type(value) {
+            self.range_bound(value, ty)
+        } else {
+            self.element_representation(value, ty)
+        }
+    }
+
+    /// Record that a `Char` bound is held as the `Int` it was computed in.
+    fn in_step_type(&mut self, value: ExprId) {
+        self.represented.push(value);
+    }
+
+    fn is_in_step_type(&self, value: ExprId) -> bool {
+        self.represented.contains(&value)
     }
 
     /// Mark `call` as one kotlinc inlines, where the target realizes those as such.

@@ -179,6 +179,46 @@ fn reversed_progressions_swap_their_bounds() {
     );
 }
 
+/// `getProgressionLastElement` returns an `Int`, and a `Char` progression keeps the `last` it
+/// recomputes as that `Int`: a temporary holding it is an `Int`, and a read narrows it to a `Char`
+/// only where the loop declares its own variables.
+#[test]
+fn stepped_char_progressions_keep_their_last_element_an_int() {
+    assert_identical(
+        "SteppedCharProgressions",
+        "fun twoSteps(): Int { var t = 0; for (x in 'g' downTo 'a' step 3 step 2) t += x - 'a'; return t }\n\
+         fun thenUnitStep(): Int { var t = 0; for (x in 'a'..'j' step 3 step 1) t += x - 'a'; return t }\n\
+         fun thenReversed(): Int { var t = 0; for (x in ('a'..'j' step 2).reversed()) t += x - 'a'; return t }\n\
+         fun reversedBetween(): Int { var t = 0; for (x in ('a'..'j' step 2).reversed() step 3) t += x - 'a'; return t }\n\
+         fun reversedFirst(): Int { var t = 0; for (x in ('a'..'j').reversed() step 2) t += x - 'a'; return t }\n\
+         fun value(p: CharProgression, s: Int): Int { var t = 0; for (x in p step 2 step s) t += x - 'a'; return t }\n",
+    );
+}
+
+/// The same loops still visit the elements Kotlin requires.
+#[test]
+fn stepped_char_progressions_still_iterate_correctly() {
+    let src = "fun box(): String {\n\
+               \x20   var chars = \"\"\n\
+               \x20   for (c in 'g' downTo 'a' step 3 step 2) chars += c\n\
+               \x20   chars += ' '\n\
+               \x20   for (c in 'a'..'j' step 3 step 1) chars += c\n\
+               \x20   chars += ' '\n\
+               \x20   for (c in ('a'..'j' step 2).reversed() step 3) chars += c\n\
+               \x20   chars += ' '\n\
+               \x20   for (c in ('a'..'j').reversed() step 2) chars += c\n\
+               \x20   return chars\n\
+               }\n";
+    let actual = common::compile_and_run_box(
+        src,
+        "stepped_char_progressions",
+        &[common::stdlib_jar()],
+        None,
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
+    assert_eq!(actual, "geca abcdefghij ifc jhfdb");
+}
+
 /// A non-positive step throws before the loop runs, and the bounds are still evaluated in source
 /// order once each.
 #[test]
