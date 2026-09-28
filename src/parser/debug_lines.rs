@@ -83,6 +83,17 @@ pub(super) fn attach(file: &mut File, src: &str) {
         .iter()
         .map(|&span| span_line_at(span, span.lo))
         .collect();
+    // A destructured lambda parameter's `val (a, b) = <parameter>` is generated from the parameter
+    // itself: neither the statement nor the parameter read it destructures starts a line.
+    for &statement in &file.lambda_parameter_destructures {
+        file.stmt_lines[statement.0 as usize] = 0;
+        if let crate::ast::Stmt::Destructure { init, .. } = file.stmt(statement) {
+            let init = init.0 as usize;
+            file.expr_lines[init] = 0;
+            file.expr_source_lines[init] = 0;
+            file.expr_end_lines[init] = 0;
+        }
+    }
     // An assignment's accessor line. A call anchors on its selector name; a WRITE anchors the same
     // way, on the member it assigns, so `b\n    .value =\n    x` puts the setter dispatch on the
     // `.value` line rather than on the receiver's.

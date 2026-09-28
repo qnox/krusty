@@ -425,6 +425,12 @@ pub(super) fn function_assertions(
                     IrParameterRole::ExtensionReceiver if replaced => {
                         function_local_variable(ir, function, identity)
                     }
+                    // A lambda's guard quotes its receiver's local name, `$this$<label>`.
+                    IrParameterRole::ExtensionReceiver => ir
+                        .lambda_origins
+                        .get(&function)
+                        .map(lambda_receiver)
+                        .or_else(|| assertion(identity)),
                     _ => assertion(identity),
                 })
             })
@@ -625,6 +631,7 @@ mod tests {
             implementation_ordinal: 0,
             receiver_parameter: Some(0),
             label: label.map(str::to_owned),
+            form: crate::ir::IrLambdaForm::Literal,
         };
 
         ir.lambda_origins.insert(function, origin(None));

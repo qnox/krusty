@@ -1,7 +1,7 @@
 //! JVM debug tables for declared and explicitly published generated functions.
 
 use super::{jvm_declared_ty, jvm_function_params, method_descriptor, slot_words};
-use crate::ir::IrFile;
+use crate::ir::{IrFile, IrParameterRole};
 use crate::jvm::classfile::ClassWriter;
 
 /// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a declared method. Source methods
@@ -112,4 +112,21 @@ fn aload_len(slot: u16) -> u16 {
     } else {
         4
     }
+}
+
+/// The line a lambda implementation marks right after its parameter guards: its body's line,
+/// kotlinc's shape even for an empty body (whose emission marks no line of its own). A
+/// destructured parameter's component reads come first and carry no line, so there the body's own
+/// statements, or its fall-through return, give the first line instead.
+pub(super) fn lambda_entry_line(ir: &IrFile, fid: u32) -> Option<u32> {
+    let destructures = ir
+        .function_parameter_identities(fid)
+        .is_some_and(|identities| {
+            identities
+                .iter()
+                .any(|identity| identity.role == IrParameterRole::DestructuredValue)
+        });
+    (!destructures)
+        .then(|| ir.fn_decl_lines.get(&fid).copied())
+        .flatten()
 }

@@ -7956,12 +7956,12 @@ fn emit_method_inner_with_holder(
             }
         }
     }
-    // A LAMBDA IMPL's LineNumberTable starts at the post-guard pc, mapped to the body's line —
-    // kotlinc's shape even for an empty body (whose emission marks no line of its own).
-    if lambda_impl {
-        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
-            code.mark_line(line);
-        }
+    // A LAMBDA IMPL's LineNumberTable starts at the post-guard pc, mapped to the body's line.
+    if let Some(line) = lambda_impl
+        .then(|| function_debug::lambda_entry_line(ir, fid))
+        .flatten()
+    {
+        code.mark_line(line);
     }
     // kotlinc opens every EMITTED `inline fun` body with an inline-depth marker: `iconst_0;
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
@@ -12486,8 +12486,8 @@ impl<'a> Emitter<'a> {
                     self.emit_when(e, branches, false, code);
                 }
             }
-            // Block in value position: run its statements for effect, leave the trailing value on the
-            // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
+            // Block in value position: statements for effect, the trailing value left on the stack,
+            // block-locals scoped (the slot map restored) unless it is a callable's own scope.
             IrExpr::Block { stmts, value } => {
                 self.link_safe_call_chain(e, code);
                 let enclosing_statement_line = self.statement_line;
@@ -12496,11 +12496,9 @@ impl<'a> Emitter<'a> {
                 let mut dead = false;
                 for s in stmts {
                     self.mark_statement_line(*s, code);
-                    // A statement nets zero on the operand stack (its value is stored/discarded). Reset
-                    // the tracked height to that baseline afterward: raw spliced control flow is opaque
-                    // to the builder's linear counter and can leave `cur_stack` drifted above the real,
-                    // verified-balanced height. Later emission still relies on accurate physical stack
-                    // accounting even though final-body analysis owns verifier frames.
+                    // A statement nets zero on the operand stack. Reset the tracked height to that
+                    // baseline afterward: raw spliced control flow is opaque to the builder's linear
+                    // counter and can leave `cur_stack` drifted above the real, verified height.
                     let base = code.stack_height();
                     self.emit(*s, code);
                     if self.discarding_diverges(*s) {
@@ -12515,7 +12513,9 @@ impl<'a> Emitter<'a> {
                         self.emit_value(*v, code);
                     }
                 }
-                self.close_scope_locals(code);
+                if !self.ir.callable_scopes.contains(&e) {
+                    self.close_scope_locals(code);
+                }
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
                 self.statement_line = enclosing_statement_line;
