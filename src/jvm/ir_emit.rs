@@ -13283,8 +13283,15 @@ impl<'a> Emitter<'a> {
             .iter()
             .map(|&p| type_descriptor(self.value_ty(p)))
             .collect();
-        // kotlinc interns the recipe (the bootstrap's static argument) BEFORE the bootstrap method
-        // handle, so intern in that order to match its constant-pool layout.
+        // kotlinc interns constants in instruction order: the operands' entries first, then the
+        // call site's, with the recipe (the bootstrap's static argument) before the bootstrap
+        // method handle.
+        let mut arg_words = 0i32;
+        for &p in &arg_parts {
+            let ty = self.value_ty(p);
+            self.emit_value(p, code);
+            arg_words += slot_words(ty) as i32;
+        }
         let recipe_const = self.cw.const_string_kt(&recipe);
         let mh = self.cw.method_handle_static(
             "java/lang/invoke/StringConcatFactory",
@@ -13298,12 +13305,6 @@ impl<'a> Emitter<'a> {
             "makeConcatWithConstants",
             &format!("({arg_descs})Ljava/lang/String;"),
         );
-        let mut arg_words = 0i32;
-        for &p in &arg_parts {
-            let ty = self.value_ty(p);
-            self.emit_value(p, code);
-            arg_words += slot_words(ty) as i32;
-        }
         code.invokedynamic(indy, arg_words, 1);
         true
     }
