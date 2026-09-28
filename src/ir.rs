@@ -2365,6 +2365,9 @@ pub struct IrFile {
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
+    /// Lambda implementations `LambdaMetafactory` cannot adapt that the JVM lambda-class pass left
+    /// unrealized. Emitting one as an `invokedynamic` is an error, never a fallback.
+    pub(crate) jvm_unrealized_lambda_classes: std::collections::HashSet<u32>,
     /// JVM value-class member implementations whose leading physical carrier parameter realizes a
     /// source dispatch receiver and therefore carries no nullability annotation.
     pub(crate) jvm_value_class_receiver_impls: std::collections::HashSet<u32>,

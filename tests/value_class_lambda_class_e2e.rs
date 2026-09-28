@@ -82,3 +82,51 @@ fn a_lambda_class_reads_its_owners_private_property_through_an_accessor() {
 fn lambda_classes_run() {
     common::expect_box_ok_with_stdlib(SRC, "ValueClassLambdaClass");
 }
+
+/// A lambda passed to an inline function's `noinline` parameter is a value the function receives,
+/// not a body it splices. Whether a lambda argument is spliced is known only once calls are
+/// realized, after lambda classes are, so this step does not realize its class yet; the backend
+/// reports it rather than emitting an `invokedynamic` that cannot link.
+#[test]
+fn a_noinline_argument_of_an_inline_call_is_reported_not_left_to_indy() {
+    let src = "@JvmInline value class Tag(val name: String)\n\
+        inline fun later(noinline f: (Tag) -> String, t: Tag): String = keep(f)(t)\n\
+        fun keep(f: (Tag) -> String): (Tag) -> String = f\n\
+        fun box(): String = later({ it.name }, Tag(\"OK\"))\n";
+    let diagnostics = common::compile_in_process_diagnostics(
+        src,
+        "NoinlineLambdaClass",
+        &[common::stdlib_jar()],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        [
+            "internal error: lambda box$lambda$0 needs the class kotlinc writes when \
+          LambdaMetafactory cannot adapt its signature, and its shape is not realized as one yet"
+        ]
+    );
+}
+
+/// A lambda the metafactory cannot adapt whose body declares a local function would need that
+/// function moved into its class, which is not realized yet. The backend reports it rather than
+/// emitting an `invokedynamic` that cannot link.
+#[test]
+fn a_lambda_class_nesting_a_local_function_is_reported_not_left_to_indy() {
+    let src = "@JvmInline value class Tag(val name: String)\n\
+        fun label(f: (Tag) -> String, t: Tag): String = f(t)\n\
+        fun box(): String = label({ fun twice(s: String) = s + s; twice(it.name) }, Tag(\"O\"))\n";
+    let diagnostics = common::compile_in_process_diagnostics(
+        src,
+        "NestedLambdaClass",
+        &[common::stdlib_jar()],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        [
+            "internal error: lambda box$lambda$0 needs the class kotlinc writes when \
+          LambdaMetafactory cannot adapt its signature, and its shape is not realized as one yet"
+        ]
+    );
+}

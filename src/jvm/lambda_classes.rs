@@ -119,6 +119,9 @@ struct Capture {
 }
 
 /// Realize every lambda whose function type `LambdaMetafactory` cannot adapt as a class of its own.
+/// A lambda of a shape this step does not realize is recorded instead, so emitting it as an
+/// `invokedynamic`, which cannot link, is an error rather than a silent fallback. A lambda an inline
+/// call's splice consumes is recorded too: the splice emits no value for it.
 pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::ClassifierFactSource) {
     let lambdas = ir
         .exprs
@@ -131,10 +134,14 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         })
         .collect::<Vec<_>>();
     for fid in lambdas {
-        let Some(site) = site(ir, fid) else {
+        let values = reachable_lambdas(ir, fid);
+        let Some(function_type) = values
+            .first()
+            .and_then(|node| ir.logical_types.get(node).copied())
+        else {
             continue;
         };
-        let Ty::Fun(signature) = site.function_type.non_null() else {
+        let Ty::Fun(signature) = function_type.non_null() else {
             continue;
         };
         if signature.suspend
@@ -146,17 +153,29 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         {
             continue;
         }
-        let Some(body) = ir.functions[fid as usize].body else {
-            continue;
-        };
-        if nests_lifted_functions(ir, body) {
-            continue;
+        match class_shape(ir, fid) {
+            Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
+            Err(shape) => {
+                crate::trace_compiler!(
+                    "value_classes",
+                    "lambda fid={fid} needs a class but is left unrealized: {shape}"
+                );
+                ir.jvm_unrealized_lambda_classes.insert(fid);
+            }
         }
-        let Some(captures) = captures(ir, fid, body, &site) else {
-            continue;
-        };
-        realize_class(ir, fid, body, &site, signature, &captures);
     }
+}
+
+/// The site, body and captures of a lambda this step realizes as a class, or the shape that keeps
+/// it from doing so.
+fn class_shape(ir: &IrFile, fid: FunId) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
+    let site = site(ir, fid).ok_or("no single named value outside an inline call")?;
+    let body = ir.functions[fid as usize].body.ok_or("no body")?;
+    if nests_lifted_functions(ir, body) {
+        return Err("its body declares a lambda or local function");
+    }
+    let captures = captures(ir, fid, body, &site).ok_or("a capture has no field identity")?;
+    Ok((site, body, captures))
 }
 
 /// Whether `ty`, a parameter or the result of a lambda's function type, is one `LambdaMetafactory`

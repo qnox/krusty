@@ -11434,6 +11434,12 @@ impl<'a> Emitter<'a> {
                 let boxed_sam_result = sam.as_ref().is_some_and(boxes_sam_result);
                 let lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
                 if lambda_mode == LambdaMode::Indy {
+                    if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
+                        // The class is discarded; a placeholder keeps its frames computable.
+                        self.run
+                            .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
+                        return code.aconst_null();
+                    }
                     self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
                 }
                 let f = &self.ir.functions[*impl_fn as usize];

@@ -166,3 +166,13 @@ struct Capture<'a> {
     signature: Option<String>,
     parameter_signature: Option<String>,
 }
+
+/// The error for a lambda `LambdaMetafactory` cannot adapt that reaches emission as an
+/// `invokedynamic`: the lambda-class pass did not realize its shape, and the indy would fail to link.
+pub(super) fn unrealized(ir: &IrFile, lambda: u32) -> String {
+    format!(
+        "internal error: lambda {} needs the class kotlinc writes when LambdaMetafactory cannot \
+         adapt its signature, and its shape is not realized as one yet",
+        ir.functions[lambda as usize].name
+    )
+}
