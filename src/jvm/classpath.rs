@@ -4047,8 +4047,19 @@ impl Classpath {
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
-        let internal_id = type_name(internal);
-        let key = (internal_id, name.to_string(), descriptor.to_string());
+        self.method_code_name(type_name(internal), name, descriptor)
+    }
+
+    /// [`Self::method_code`] for a classifier that is already interned. The body cache and the
+    /// multifile superclass walk stay on that identity; a classfile spelling is built only when an
+    /// uncached entry has to read bytes.
+    pub fn method_code_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<MethodCode> {
+        let key = (internal, name.to_string(), descriptor.to_string());
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
             if let Some(hit) = self.bodies.borrow_mut().get(&key) {
@@ -4061,16 +4072,21 @@ impl Classpath {
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let mut cur = self.find(internal).and_then(|ci| ci.super_class());
-            while let Some(s) = cur {
-                if s == "java/lang/Object" {
+            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
+            let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
+            while let Some(superclass) = cur {
+                if superclass.matches("java/lang/Object") {
                     break;
                 }
-                if let Some(mc) = self.own_method_code(&s, name, descriptor, catalog_complete) {
-                    code = Some(mc);
+                if let Some(body) =
+                    self.own_method_code(superclass, name, descriptor, catalog_complete)
+                {
+                    code = Some(body);
                     break;
                 }
-                cur = self.find(&s).and_then(|ci| ci.super_class());
+                cur = self
+                    .find_name(superclass)
+                    .and_then(|class| class.super_class);
             }
         }
         if catalog_complete {
@@ -4085,14 +4101,14 @@ impl Classpath {
     /// Overlay classes bypass the global cache (they are per-request, in-memory, and have no entry).
     fn own_method_code(
         &self,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         descriptor: &str,
         catalog_complete: bool,
     ) -> Option<MethodCode> {
-        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
+        let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         let read_once = || {
-            self.class_bytes(internal)
+            self.class_bytes(&internal.render())
                 .and_then(|bytes| ClassBodies::parse(std::sync::Arc::new(bytes)))
                 .and_then(|class| class.method_code(name, descriptor))
         };
@@ -7229,10 +7245,14 @@ mod fq_tests {
             .method_code("shared/Pool", "first", "()I")
             .expect("first body");
         let second = classpath
-            .method_code("shared/Pool", "second", "()I")
+            .method_code_name(type_name("shared/Pool"), "second", "()I")
             .expect("second body");
+        let second_again = classpath
+            .method_code("shared/Pool", "second", "()I")
+            .expect("string lookup agrees with the classifier key");
         assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
         assert_ne!(first.code, second.code);
+        assert_eq!(second.code, second_again.code);
 
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove temp dir");

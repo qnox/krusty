@@ -5058,10 +5058,10 @@ impl JvmLibraries {
                         |_| m.name.as_str(),
                     );
                     if scope_name == name {
-                        let cn_rendered = cn.render();
                         crate::trace_compiler!(
                             "resolve",
-                            "member declaration {cn_rendered}.{} desc={} sig={:?}",
+                            "member declaration {}.{} desc={} sig={:?}",
+                            cn.render(),
                             m.name,
                             m.descriptor,
                             m.signature
