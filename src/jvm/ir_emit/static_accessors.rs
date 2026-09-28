@@ -413,6 +413,7 @@ impl Accessor<'_> {
         let ty = jvm_declared_ty(&property.ty);
         let descriptor = format!("(){}", type_descriptor(ty));
         let name = format!("access${}$p", property_getter_name(&property.name));
+        reserve_signature(cw, &name, &descriptor);
         let mut code = CodeBuilder::new(0);
         code.mark_line(self.declaration_line);
         let field = self.field(index, ty, cw);
@@ -428,6 +429,7 @@ impl Accessor<'_> {
         let ty = jvm_declared_ty(&property.ty);
         let descriptor = format!("({})V", type_descriptor(ty));
         let name = format!("access${}$p", property_setter_name(&property.name));
+        reserve_signature(cw, &name, &descriptor);
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(words);
         code.mark_line(self.declaration_line);
@@ -466,6 +468,7 @@ impl Accessor<'_> {
         if cw.declares_method(&name, &descriptor) {
             return;
         }
+        reserve_signature(cw, &name, &descriptor);
         let words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
         let mut code = CodeBuilder::new(words);
         let mut slot = 0u16;
@@ -491,4 +494,10 @@ impl Accessor<'_> {
         cw.add_method(self.flags, &name, &descriptor, &code);
         cw.set_method_debug(&name, &descriptor, None, &locals);
     }
+}
+
+/// Intern an accessor's name and descriptor before its body, as kotlinc visits a method.
+fn reserve_signature(cw: &mut ClassWriter, name: &str, descriptor: &str) {
+    cw.reserve_method_name(name);
+    cw.reserve_descriptor(descriptor);
 }
