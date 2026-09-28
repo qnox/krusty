@@ -77,3 +77,80 @@ fn an_extension_property_receiver_infers_the_builder_variable() {
     );
     common::expect_box_same_as_kotlinc(EXTENSION_PROPERTY, "BuilderExtensionPropertyRun");
 }
+
+const MEMBER_SHADOWS_EXTENSION_WRITE: &str = "class B<T> { var p: Int = 0 }\n\
+    fun <T> build(block: B<T>.() -> Unit): B<T> {\n\
+    \x20 val b = B<T>()\n\
+    \x20 b.block()\n\
+    \x20 return b\n\
+    }\n\
+    var B<String>.p: Int get() = 0; set(value) {}\n\
+    fun B<Int>.fixInt() {}\n\
+    fun explicitWrite(): B<Int> = build { this.p = 1 }\n\
+    fun implicitWrite(): B<Int> = build { p = 2 }\n\
+    fun explicitRead(): B<Int> = build { this.p }\n\
+    fun postponedWrite(): B<Int> {\n\
+    \x20 val b = build { this.p = 3; fixInt() }\n\
+    \x20 return b\n\
+    }\n\
+    fun box(): String {\n\
+    \x20 if (explicitWrite().p != 1) return \"explicit\"\n\
+    \x20 if (implicitWrite().p != 2) return \"implicit\"\n\
+    \x20 if (explicitRead().p != 0) return \"read\"\n\
+    \x20 if (postponedWrite().p != 3) return \"postponed\"\n\
+    \x20 return \"OK\"\n\
+    }\n";
+
+/// A member property outranks an extension property on the builder receiver. The shadowed
+/// `B<String>.p` is never selected, so it contributes no `T = String` constraint: the expected
+/// `B<Int>`, or the later `fixInt()` while `T` is still postponed, alone fixes `T`, and the write
+/// goes to the member.
+#[test]
+fn a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension() {
+    common::assert_class_code_matches_kotlinc(
+        "BuilderMemberShadowsExtension",
+        MEMBER_SHADOWS_EXTENSION_WRITE,
+        "BuilderMemberShadowsExtensionKt",
+    );
+    common::expect_box_same_as_kotlinc(
+        MEMBER_SHADOWS_EXTENSION_WRITE,
+        "BuilderMemberShadowsExtensionRun",
+    );
+}
+
+const SELECTED_EXTENSION_WRITE: &str = "class B<T>\n\
+    fun <T> build(block: B<T>.() -> Unit): B<T> {\n\
+    \x20 val b = B<T>()\n\
+    \x20 b.block()\n\
+    \x20 return b\n\
+    }\n\
+    var written = -1\n\
+    var B<String>.p: Int get() = written; set(value) { written = value }\n\
+    fun explicitWrite(): B<String> {\n\
+    \x20 val b = build { this.p = 1 }\n\
+    \x20 return b\n\
+    }\n\
+    fun implicitWrite(): B<String> {\n\
+    \x20 val b = build { p = 2 }\n\
+    \x20 return b\n\
+    }\n\
+    fun box(): String {\n\
+    \x20 if (explicitWrite().p != 1) return \"explicit\"\n\
+    \x20 if (implicitWrite().p != 2) return \"implicit\"\n\
+    \x20 return \"OK\"\n\
+    }\n";
+
+/// With no member `p`, the extension on `B<String>` is the selected write target and its
+/// receiver constraint infers `T = String` for the builder call.
+#[test]
+fn a_selected_extension_write_on_the_builder_receiver_infers_the_variable() {
+    common::assert_class_code_matches_kotlinc(
+        "BuilderSelectedExtensionWrite",
+        SELECTED_EXTENSION_WRITE,
+        "BuilderSelectedExtensionWriteKt",
+    );
+    common::expect_box_same_as_kotlinc(
+        SELECTED_EXTENSION_WRITE,
+        "BuilderSelectedExtensionWriteRun",
+    );
+}

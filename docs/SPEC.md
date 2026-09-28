@@ -2450,6 +2450,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`active_postponed_type_variables`, `commit_postponed_property_receiver`). Tests:
   `tests/builder_inference_receivers_e2e.rs`; box: `inference/pcla/.../typeInfoSources/
   ExtensionFunctions.kt`, `ExtensionProperties.kt`.
+  The constraint belongs to the extension's selection, never to its collection: an explicit write
+  `receiver.p = v` selects its target through the scope tower first (member property, member
+  setter, read-only member, member extension, then extension property,
+  `src/resolve/explicit_property_write.rs`), and only the selected extension records the receiver
+  constraint. With `class B<T> { var p: Int }` and `var B<String>.p`, `build { this.p = 1 }` writes
+  the member and does not fix `T = String`. Test: `tests/builder_inference_receivers_e2e.rs`
+  (`a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension`).
 - **A source extension's signature-stage candidate carries its declared receiver.** The module
   provider keys top-level extensions by the erased receiver classifier, and the candidate it built
   for an implicit return type used that key as the receiver. `Crate<Apple>.label()` and
