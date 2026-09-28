@@ -7606,6 +7606,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the signature `constructor-impl(I)I` under the name `<init>`, and the erased `invoke` boxes the
   returned carrier with `Z.box-impl`, as kotlinc does.
   Tests: `tests/value_class_constructor_reference_e2e.rs`.
+- **A bound reference captures a value-class receiver as its box.** The reference class's
+  constructor declares the bound receiver as `Any`, and that declaration is recorded on the
+  construction, so the receiver is boxed (`Tag.box-impl`) even when the value class's carrier is
+  `Any?` and shares the JVM type `Object` with the box.
+  Tests: `tests/value_class_bound_reference_receiver_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

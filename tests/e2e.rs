@@ -1227,6 +1227,8 @@ mod suspend_under_try_e2e;
 mod suspend_value_class_delegation_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
+#[path = "value_class_bound_reference_receiver_e2e.rs"]
+mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
 #[path = "value_class_constructor_bodies_e2e.rs"]
