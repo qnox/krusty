@@ -113,7 +113,7 @@ fn double_type_parameter_equality_uses_the_floating_bound() {
         "fun <A : Double, B : Double?> equal(a: A, b: B): Boolean = a == b\n",
         "equal",
     );
-    let kind = body
+    let kind = &body
         .expr(root_expression(&body))
         .expect("checked equality")
         .kind;
@@ -126,7 +126,7 @@ fn double_type_parameter_equality_uses_the_floating_bound() {
     else {
         panic!("a non-null Double bound against Double? must unbox, found {kind:?}")
     };
-    assert_eq!(operation, FirBinaryOperation::Equal);
+    assert_eq!(*operation, FirBinaryOperation::Equal);
     assert_eq!(primitive_ty.get(), Ty::Double);
     assert!(!nullable_first);
 }
@@ -138,7 +138,7 @@ fn nullable_double_type_parameters_compare_as_nullable_doubles() {
         "fun <A : Double?, B : Double?> equal(a: A, b: B): Boolean = a == b\n",
         "equal",
     );
-    let kind = body
+    let kind = &body
         .expr(root_expression(&body))
         .expect("checked equality")
         .kind;
@@ -163,7 +163,7 @@ fn double_type_parameter_against_any_stays_structural_equality() {
         "fun <A : Double, B : Any> equal(a: A, b: B): Boolean = a == b\n",
         "equal",
     );
-    let kind = body
+    let kind = &body
         .expr(root_expression(&body))
         .expect("checked equality")
         .kind;
