@@ -1052,7 +1052,7 @@ fn unintercepted_coroutine_primitive_is_a_checked_fir_intrinsic() {
     assert!(matches!(
         call.target,
         FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::SuspendCoroutineUninterceptedOrReturn,
+            operation: FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. },
             receiver: None,
             ..
         }

@@ -36,6 +36,18 @@ pub(crate) enum IrDebugLocalProvenance {
     InlineLambdaReceiver {
         implementation: FunId,
     },
+    /// The inline-depth marker an inline function's expansion opens with, after its operands are
+    /// bound. The retained source name is the expanded callable's. It never grows with nesting: a
+    /// debugger reads it as the name of the frame it opens, wherever that frame was cloned to.
+    FunctionFrameMarker,
+    /// The inline-depth marker a spliced lambda body opens with, after its parameters are bound.
+    /// The retained source name is the inline callable the lambda was passed to; `implementation`
+    /// leads to the lambda's [`IrLambdaOrigin`]. `depth` counts the enclosing expansions the
+    /// splice was cloned into, as an ordinary inline value's does.
+    LambdaFrameMarker {
+        implementation: FunId,
+        depth: u32,
+    },
 }
 
 impl IrDebugLocalProvenance {
@@ -50,8 +62,24 @@ impl IrDebugLocalProvenance {
                 role,
                 depth: depth.saturating_add(1),
             },
-            Self::InlineLambdaReceiver { .. } => self,
+            Self::LambdaFrameMarker {
+                implementation,
+                depth,
+            } => Self::LambdaFrameMarker {
+                implementation,
+                depth: depth.saturating_add(1),
+            },
+            Self::InlineLambdaReceiver { .. } | Self::FunctionFrameMarker => self,
         }
+    }
+
+    /// Whether this local is an inline-depth marker: a frame boundary for a debugger, never a
+    /// value any code reads.
+    pub(crate) fn is_inline_marker(self) -> bool {
+        matches!(
+            self,
+            Self::FunctionFrameMarker | Self::LambdaFrameMarker { .. }
+        )
     }
 }
 
@@ -99,6 +127,11 @@ pub struct IrLambdaOrigin {
     pub label: Option<String>,
     /// Which source form the implementation was written in.
     pub form: IrLambdaForm,
+    /// The naming walk's position for the class the lambda WOULD compile to. A lambda spliced into
+    /// an inline call writes no class, but its inline-depth marker is spelled after that class.
+    pub(crate) class_provenance: Option<super::IrLocalClassNameProvenance>,
+    /// The class name a target chose from `class_provenance`.
+    pub(crate) class_name: Option<TypeName>,
 }
 
 /// The source form of a lowered function literal.

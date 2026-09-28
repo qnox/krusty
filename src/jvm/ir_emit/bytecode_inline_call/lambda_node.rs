@@ -512,13 +512,12 @@ impl Emitter<'_> {
         if self.record_locals {
             let end = u16::try_from(scratch.bytes.len())
                 .map_err(|_| "an inline lambda's code is too long")?;
-            if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
-                let marker = crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                    callee,
-                    &self.owner,
-                    &origin.implementation_name,
-                    origin.implementation_ordinal,
-                );
+            if let Some(marker) = crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                self.ir,
+                callee,
+                impl_fn,
+                &self.owner,
+            ) {
                 scratch.add_local_entry(
                     marker_start,
                     Some(end - marker_start),

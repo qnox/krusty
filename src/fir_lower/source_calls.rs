@@ -236,16 +236,23 @@ impl BodyLowering<'_> {
             params: vec![continuation_ty],
             ret: self.ir.functions.get(implementation as usize)?.ret,
         });
-        self.splice_inline_lambda_invocation(invocation)?;
-        let kind = match operation {
+        // The unintercepted primitive is kotlinc's own inline intrinsic: the block it is given
+        // opens a frame named after it. The safe one wraps the block in a stdlib body whose frames
+        // this splice does not reproduce, so it declares none.
+        let (kind, callee) = match operation {
             crate::fir::FirIntrinsic::SuspendCoroutine => {
-                crate::ir::IrIntrinsicSuspensionKind::Safe
+                (crate::ir::IrIntrinsicSuspensionKind::Safe, None)
             }
-            crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn => {
-                crate::ir::IrIntrinsicSuspensionKind::Unintercepted
-            }
+            crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } => (
+                crate::ir::IrIntrinsicSuspensionKind::Unintercepted,
+                Some(&**callee),
+            ),
             _ => return None,
         };
+        self.splice_inline_lambda(
+            invocation,
+            super::inlining::LambdaParameterBinding::Declared { callee },
+        )?;
         self.ir.intrinsic_suspension_points.insert(
             invocation,
             crate::ir::IrIntrinsicSuspensionPoint {

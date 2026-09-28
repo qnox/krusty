@@ -142,20 +142,44 @@ impl Emitter<'_> {
     ) {
         let Some(name) = self
             .record_locals
-            .then(|| super::super::debug_local_names::name(self.ir, declaration))
+            .then(|| {
+                super::super::debug_local_names::declared_name(self.ir, declaration, &self.owner)
+            })
             .flatten()
         else {
             return;
         };
-        if code.bytes.len() <= u16::MAX as usize {
-            self.open_locals.push((
-                self.block_depth,
-                slot,
-                code.bytes.len() as u16,
-                name,
-                local_variable_desc(ty),
-            ));
+        if code.bytes.len() > u16::MAX as usize {
+            return;
         }
+        let provenance = self.ir.debug_local_provenance(declaration);
+        // A spliced lambda's marker precedes, in kotlinc's table, every local its body declares.
+        let table_position = matches!(
+            provenance,
+            Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+        )
+        .then(|| code.local_entry_count());
+        let local = super::block_scope::OpenLocal {
+            depth: self.block_depth,
+            slot,
+            start: code.bytes.len() as u16,
+            name,
+            descriptor: local_variable_desc(ty),
+            table_position,
+        };
+        // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,
+        // which are declared before it in the same block: the inlined body's own table puts its
+        // parameters last.
+        let marker = provenance.is_some_and(crate::ir::IrDebugLocalProvenance::is_inline_marker);
+        let position = if marker {
+            self.open_locals
+                .iter()
+                .position(|open| open.depth >= self.block_depth)
+                .unwrap_or(self.open_locals.len())
+        } else {
+            self.open_locals.len()
+        };
+        self.open_locals.insert(position, local);
     }
 }
 

@@ -6411,8 +6411,8 @@ fn emit_method_inner_with_holder(
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
-        for (_, slot, start, name, desc) in std::mem::take(&mut e.open_locals) {
-            code.add_local_entry(start, None, slot, &name, &desc);
+        for local in std::mem::take(&mut e.open_locals) {
+            local.record(None, &mut code);
         }
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
@@ -7025,8 +7025,8 @@ struct Emitter<'a> {
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
     /// so the pending operand is typed through the branch (matching kotlinc), avoiding the spill-to-temp
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
-    /// Open source locals: `(block_depth, slot, start_pc, name, descriptor)`.
-    open_locals: Vec<(usize, u16, u16, String, String)>,
+    /// Open source locals, in declaration order.
+    open_locals: Vec<block_scope::OpenLocal>,
     /// Current block nesting depth; the function body is depth 1.
     block_depth: usize,
     /// The source line of the statement currently being emitted, when it has one. An operand that
@@ -7373,16 +7373,18 @@ impl<'a> Emitter<'a> {
                     scratch.push_int(0, self.cw);
                     store(Ty::Int, depth_marker, &mut scratch);
                     if self.record_locals {
-                        if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
+                        if let Some(marker) =
+                            crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                                self.ir,
+                                callee,
+                                impl_fn,
+                                &self.owner,
+                            )
+                        {
                             lam_locals_declared.push((
                                 u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
                                 depth_marker,
-                                crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                                    callee,
-                                    &self.owner,
-                                    &origin.implementation_name,
-                                    origin.implementation_ordinal,
-                                ),
+                                marker,
                                 "I".to_string(),
                             ));
                         }
@@ -10493,40 +10495,7 @@ impl<'a> Emitter<'a> {
                     self.emit_when(e, branches, false, code);
                 }
             }
-            // Block in value position: statements for effect, the trailing value left on the stack,
-            // block-locals scoped (the slot map restored) unless it is a callable's own scope.
-            IrExpr::Block { stmts, value } => {
-                self.link_safe_call_chain(e, code);
-                let enclosing_statement_line = self.statement_line;
-                let saved = self.open_slot_scope();
-                self.block_depth += 1;
-                let mut dead = false;
-                for s in stmts {
-                    self.mark_statement_line(*s, code);
-                    // A statement nets zero on the operand stack. Reset the tracked height to that
-                    // baseline afterward: raw spliced control flow is opaque to the builder's linear
-                    // counter and can leave `cur_stack` drifted above the real, verified height.
-                    let base = code.stack_height();
-                    self.emit(*s, code);
-                    if self.discarding_diverges(*s) {
-                        dead = true;
-                        break;
-                    }
-                    code.set_stack(base.max(0) as u16);
-                }
-                if !dead {
-                    if let Some(v) = value {
-                        self.mark_statement_line(*v, code);
-                        self.emit_value(*v, code);
-                    }
-                }
-                if !self.ir.callable_scopes.contains(&e) {
-                    self.close_scope_locals(code, false);
-                }
-                self.block_depth -= 1;
-                self.restore_slot_scope(saved);
-                self.statement_line = enclosing_statement_line;
-            }
+            IrExpr::Block { stmts, value } => self.emit_value_block(e, stmts, *value, code),
             IrExpr::Lambda {
                 impl_fn,
                 arity,
