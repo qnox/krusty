@@ -5439,6 +5439,9 @@ mod descriptor_return_tests {
         assert!(!descriptor_returns_class("()I", class));
         assert!(!descriptor_returns_class("()Lpkg/Other;", class));
         assert!(!descriptor_returns_class("(Lpkg/Foo$Bar;)V", class));
-        assert!(!descriptor_returns_class("(Lpkg/Foo$Bar;)Lpkg/Other;", class));
+        assert!(!descriptor_returns_class(
+            "(Lpkg/Foo$Bar;)Lpkg/Other;",
+            class
+        ));
     }
 }
