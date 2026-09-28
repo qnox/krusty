@@ -139,6 +139,22 @@ impl Emitter<'_> {
                 if words == 0 {
                     return;
                 }
+                // `access$get<X>$p` is a raw field load. A `lateinit` getter is not synthesized for
+                // a private property, so the uninitialized guard has to sit at this read, the same
+                // place a direct field load puts it.
+                if let Some(property) = self.access_bridge_lateinit_name(&owner, &name) {
+                    code.dup();
+                    let initialized = code.new_label();
+                    code.ifnonnull(initialized);
+                    code.push_string(&property, self.cw);
+                    let throw_uninitialized = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "throwUninitializedPropertyAccessException",
+                        "(Ljava/lang/String;)V",
+                    );
+                    code.invokestatic(throw_uninitialized, 1, 0);
+                    self.bind(initialized, code);
+                }
                 ty_from_descriptor_ret(&descriptor)
             }
         };
@@ -183,5 +199,24 @@ impl Emitter<'_> {
             // narrowing to one would `checkcast` to a class the value is not an instance of.
             self.narrow_on_stack(physical, *ty, code);
         }
+    }
+
+    /// Source name of the `lateinit` property `bridge` (`access$get<X>$p`) reads, when that bridge
+    /// is a raw backing-field load rather than a getter.
+    fn access_bridge_lateinit_name(&self, owner: &str, bridge: &str) -> Option<String> {
+        let class = self.ir.classes.iter().find(|class| class.fq_name_matches(owner))?;
+        class.properties.iter().find_map(|property| {
+            let expected = format!(
+                "access${}$p",
+                crate::names::property_getter_name(&property.name)
+            );
+            if expected != bridge {
+                return None;
+            }
+            let field = property
+                .backing_field
+                .and_then(|index| class.fields.get(index as usize))?;
+            field.is_lateinit().then(|| property.name.clone())
+        })
     }
 }

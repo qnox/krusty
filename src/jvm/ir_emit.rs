@@ -9371,18 +9371,21 @@ impl<'a> Emitter<'a> {
             .is_some_and(|f| f.is_lateinit())
     }
 
-    /// Does this property read realize as a DIRECT FIELD load of a `lateinit` backing field — the one
-    /// read shape that emits the guard INLINE rather than hiding it inside a getter body? Mirrors the
-    /// realization [`Self::emit_property_read`] picks through
-    /// [`Self::selected_local_property_read_access`]. Everything past that helper is an external-provider
-    /// property, whose owner is not a class being emitted here.
-    fn lateinit_direct_field_read(&self, owner: &str, name: &str) -> bool {
+    /// Whether this property read emits the uninitialized guard inline. A direct field load does.
+    /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
+    /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
+    fn lateinit_read_guards_inline(&self, owner: &str, name: &str) -> bool {
         use crate::jvm::inline::PropertyAccess;
         let Some(access) = self.selected_local_property_read_access(owner, name) else {
             return false;
         };
-        matches!(&access, PropertyAccess::Field { owner, name, .. }
-            if self.is_lateinit_field(owner, name))
+        match access {
+            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(&owner, &name),
+            PropertyAccess::AccessBridge { owner, name, .. } => {
+                self.access_bridge_lateinit_name(&owner, &name).is_some()
+            }
+            PropertyAccess::Accessor { .. } => false,
+        }
     }
 
     fn emit_physical_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
@@ -11821,7 +11824,7 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
-                    || self.lateinit_direct_field_read(&owner.render(), name)
+                    || self.lateinit_read_guards_inline(&owner.render(), name)
             }
             IrExpr::SetField {
                 receiver, value, ..
