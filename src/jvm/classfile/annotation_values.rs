@@ -1,10 +1,35 @@
 //! The `element_value` encoding of annotations (JVMS §4.7.16.1), interning each constant as it is
 //! written.
 
+use std::borrow::Cow;
+
 use super::{u2, ClassWriter};
 use crate::kt_string::KtString;
+use crate::types::TypeName;
+
+/// The internal name an annotation type contributes to `InnerClasses`, and the `L…;` descriptor
+/// written for it. A name whose classfile spelling is that same identity borrows both; a spelling
+/// that still differs is owned so the descriptor stays the rendered name.
+fn annotation_class_text(name: TypeName) -> (Cow<'static, str>, Cow<'static, str>) {
+    let physical = crate::jvm::names::classfile_internal_name_of(name);
+    if name.matches(physical) {
+        let descriptor = crate::jvm::names::reference_descriptor(physical);
+        (Cow::Borrowed(physical), Cow::Borrowed(descriptor))
+    } else {
+        let rendered = name.render();
+        let descriptor = format!("L{rendered};");
+        (Cow::Owned(rendered), Cow::Owned(descriptor))
+    }
+}
 
 impl ClassWriter {
+    fn record_annotation_class(&mut self, name: TypeName) -> u16 {
+        let (internal, descriptor) = annotation_class_text(name);
+        let utf8 = self.cp.utf8(&descriptor);
+        self.annotation_class_refs.insert(internal.into_owned());
+        utf8
+    }
+
     pub(super) fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
         out.push(b'I');
         let idx = self.cp.integer(v);
@@ -109,20 +134,17 @@ impl ClassWriter {
             },
             AnnoValue::Enum(ty, name) => {
                 out.push(b'e');
-                let ty = ty.render();
                 // An enum value's TYPE is a reference too: kotlinc records an `InnerClasses` entry
                 // for a nested enum used purely as an annotation argument (verified on 2.4.10).
-                self.annotation_class_refs.insert(ty.clone());
-                let ti = self.cp.utf8(&format!("L{ty};"));
+                let ti = self.record_annotation_class(*ty);
                 u2(out, ti);
                 let ni = self.cp.utf8(name);
                 u2(out, ni);
             }
             AnnoValue::Class(internal) => {
                 out.push(b'c');
-                let internal = crate::jvm::jvm_class_map::to_jvm_type_name(*internal).render();
-                self.annotation_class_refs.insert(internal.clone());
-                let ci = self.cp.utf8(&format!("L{internal};"));
+                let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(*internal);
+                let ci = self.record_annotation_class(mapped);
                 u2(out, ci);
             }
             AnnoValue::Annotation(a) => {
@@ -141,9 +163,7 @@ impl ClassWriter {
 
     /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
     pub(super) fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
-        let internal = a.internal.render();
-        self.annotation_class_refs.insert(internal.clone());
-        let ti = self.cp.utf8(&format!("L{internal};"));
+        let ti = self.record_annotation_class(a.internal);
         u2(out, ti);
         u2(out, a.values.len() as u16);
         for (name, v) in &a.values {
@@ -152,4 +172,29 @@ impl ClassWriter {
             self.ev_value(out, v);
         }
     }
+}
+
+#[test]
+fn repeated_annotation_reuses_one_descriptor_slot() {
+    let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
+    let annotation = crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name("kotlin/Metadata"),
+        values: Vec::new(),
+    };
+    let mut out = Vec::new();
+    writer.ev_annotation(&mut out, &annotation);
+    let entries = writer.cp.entries.len();
+    let slot = writer.cp.lookup_utf8("Lkotlin/Metadata;");
+    writer.ev_annotation(&mut out, &annotation);
+    assert_eq!(writer.cp.entries.len(), entries);
+    assert_eq!(writer.cp.lookup_utf8("Lkotlin/Metadata;"), slot);
+    assert!(writer.annotation_class_refs.contains("kotlin/Metadata"));
+}
+
+#[test]
+fn dotted_annotation_name_keeps_its_rendered_descriptor() {
+    let dotted = crate::types::type_name_child(crate::types::type_name("java/util"), "Map.Entry");
+    let (internal, descriptor) = annotation_class_text(dotted);
+    assert_eq!(internal.as_ref(), "java/util/Map.Entry");
+    assert_eq!(descriptor.as_ref(), "Ljava/util/Map.Entry;");
 }
