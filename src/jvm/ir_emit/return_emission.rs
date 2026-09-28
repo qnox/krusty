@@ -55,6 +55,53 @@ impl Emitter<'_> {
     /// `COROUTINE_SUSPENDED` is returned as is (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn`),
     /// and any other result is replaced by `Unit.INSTANCE`, which the caller's `return` then returns.
     fn emit_unit_result_of_forward(&mut self, code: &mut CodeBuilder) {
+        self.emit_suspended_result_return(code);
+        code.pop();
+        let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+    }
+
+    /// A continuation's re-entry of a function whose value-class result crosses as its reference
+    /// carrier: `COROUTINE_SUSPENDED` is returned as is, any other result is the carrier, which
+    /// `checkcast`s and boxes (`dup; ifnull` around `box-impl` for a nullable result), as kotlinc
+    /// boxes the result of `invokeSuspend`.
+    fn emit_boxed_result_of_forward(
+        &mut self,
+        classifier: crate::types::TypeName,
+        carrier: crate::types::Ty,
+        nullable: bool,
+        code: &mut CodeBuilder,
+    ) {
+        self.emit_suspended_result_return(code);
+        let cast = self
+            .cw
+            .class_ref(&crate::jvm::names::instanceof_internal_name(carrier));
+        code.checkcast(cast);
+        let owner = classifier.render();
+        let box_impl = self.cw.methodref(
+            &owner,
+            "box-impl",
+            &format!("({})L{owner};", super::type_descriptor(carrier)),
+        );
+        if !nullable {
+            code.invokestatic(box_impl, 1, 1);
+            return;
+        }
+        let null = code.new_label();
+        let done = code.new_label();
+        code.dup();
+        code.ifnull(null);
+        code.invokestatic(box_impl, 1, 1);
+        code.goto(done);
+        self.bind(null, code);
+        code.pop();
+        code.aconst_null();
+        self.bind(done, code);
+    }
+
+    /// `dup; getCOROUTINE_SUSPENDED; if_acmpne resumed; areturn; resumed:` — a forwarded result
+    /// that is `COROUTINE_SUSPENDED` leaves the method as it is.
+    fn emit_suspended_result_return(&mut self, code: &mut CodeBuilder) {
         let resumed = code.new_label();
         code.dup();
         let suspended = self.cw.methodref(
@@ -66,9 +113,6 @@ impl Emitter<'_> {
         code.if_acmpne(resumed);
         code.areturn();
         self.bind(resumed, code);
-        code.pop();
-        let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
-        code.getstatic(unit, 1);
     }
 
     pub(super) fn emit_return_node(
@@ -112,8 +156,16 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
-        if self.unit_result_tail_forwards.contains(&returned) {
-            self.emit_unit_result_of_forward(code);
+        match self.suspend_result_forwards.get(&returned) {
+            Some(crate::jvm::suspend::ForwardedSuspendResult::Unit) => {
+                self.emit_unit_result_of_forward(code)
+            }
+            Some(&crate::jvm::suspend::ForwardedSuspendResult::ValueClassBox {
+                classifier,
+                carrier,
+                nullable,
+            }) => self.emit_boxed_result_of_forward(classifier, carrier, nullable, code),
+            None => {}
         }
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {

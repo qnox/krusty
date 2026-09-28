@@ -3,8 +3,10 @@
 //! re-enters the function with the continuation.
 
 use super::spill_layout::SpillLayout;
+use super::value_class_resume::ReferenceCarrier;
 use super::{
-    add_static_call, continuation_ty, int_ty, object_ty, zero_value, CONTINUATION_IMPL, I32_MIN,
+    add_static_call, continuation_ty, int_ty, object_ty, zero_value, MachineContext,
+    CONTINUATION_IMPL, I32_MIN,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction,
@@ -17,10 +19,15 @@ pub(super) fn build_continuation_class(
     internal: &str,
     outer_fid: u32,
     layout: &SpillLayout,
-    _param_caps: &[(u32, Ty)],
-    receiver: Option<TypeName>,
+    context: &MachineContext<'_>,
+    owner: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
+    // `owner` is the function's semantic owner. A value-class member is realized static on its
+    // class: it has no receiver to capture and is re-entered on the class, as is a lambda or local
+    // function lifted into a class, which has no semantic owner but that physical one.
+    let receiver = owner.filter(|_| !ir.functions[outer_fid as usize].is_static);
+    let static_owner = owner.or_else(|| ir.class_static_local_functions.get(&outer_fid).copied());
     let class_id = ir.classes.len() as ClassId;
     let layout_fields = layout.fields();
     // result(0), label(1), spill slots(2..), and — for a member — the captured receiver `this$0` last.
@@ -67,11 +74,21 @@ pub(super) fn build_continuation_class(
     let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
     reentry_args.push(this_as_cont);
     let call_outer = match receiver {
-        None => ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(outer_fid),
-            dispatch_receiver: None,
-            args: reentry_args,
-        }),
+        // A static member (a value class's `-impl` realization) is called on its class.
+        None => {
+            let callee = match static_owner {
+                Some(owner) => Callee::ClassStatic {
+                    owner,
+                    function: outer_fid,
+                },
+                None => Callee::Local(outer_fid),
+            };
+            ir.add_expr(IrExpr::Call {
+                callee,
+                dispatch_receiver: None,
+                args: reentry_args,
+            })
+        }
         Some(owner) => {
             let owner_internal = owner.render();
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
@@ -181,6 +198,12 @@ pub(super) fn build_continuation_class(
         }
     };
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
+    // kotlinc boxes the reference carrier `invokeSuspend` re-enters with: the caller it resumes
+    // reads the box.
+    let returned = ir.value_class_suspend_returns.get(&outer_fid).copied();
+    if let Some(carrier) = ReferenceCarrier::of(returned) {
+        context.forwards.borrow_mut().insert(ret, carrier.reentry());
+    }
     let inv_body = ir.add_expr(IrExpr::Block {
         stmts: vec![set_result, set_label, ret],
         value: None,

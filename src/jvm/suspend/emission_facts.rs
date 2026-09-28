@@ -18,6 +18,21 @@ pub struct ContinuationMetadata {
 
 pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
 
-/// JVM return nodes whose forwarded suspend result preserves `COROUTINE_SUSPENDED` but otherwise
-/// becomes `Unit.INSTANCE` for the selected Kotlin target version.
-pub(crate) type UnitResultTailForwards = std::collections::HashSet<crate::ir::ExprId>;
+/// What a JVM `return` makes of the suspend callee's result it forwards. `COROUTINE_SUSPENDED` is
+/// always returned as it is; any other result is adapted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForwardedSuspendResult {
+    /// A forwarded `Unit` function's result becomes `Unit.INSTANCE` (Kotlin 2.4.20).
+    Unit,
+    /// A continuation re-entering a function whose value-class result crosses as its reference
+    /// carrier boxes it: `checkcast` the carrier, then `box-impl`, null-safely when `nullable`.
+    ValueClassBox {
+        classifier: crate::types::TypeName,
+        carrier: crate::types::Ty,
+        nullable: bool,
+    },
+}
+
+/// JVM return nodes whose forwarded suspend result is adapted as [`ForwardedSuspendResult`] says.
+pub(crate) type SuspendResultForwards =
+    std::collections::HashMap<crate::ir::ExprId, ForwardedSuspendResult>;
