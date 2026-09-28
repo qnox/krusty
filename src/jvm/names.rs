@@ -417,6 +417,17 @@ fn primitive_descriptor(tag: u8) -> &'static str {
     }
 }
 
+/// Boxed JVM descriptor of `ty`. A scalar becomes its wrapper (`Int` → `Ljava/lang/Integer;`,
+/// `UInt` → `Lkotlin/UInt;`). Every other type keeps [`type_descriptor`].
+///
+/// The spelling is one [`type_descriptor`] already remembers, so a repeated box does not format.
+pub(crate) fn boxed_descriptor(ty: Ty) -> &'static str {
+    match crate::jvm::jvm_class_map::wrapper_internal(ty.non_null()) {
+        Some(internal) => reference_descriptor(internal),
+        None => type_descriptor(ty),
+    }
+}
+
 /// `Lname;` for an interned classfile internal name. The first use formats it; later uses return
 /// that same spelling.
 fn reference_descriptor(classfile_name: &'static str) -> &'static str {
@@ -821,6 +832,23 @@ mod tests {
     fn unit_array_uses_the_unit_reference_descriptor() {
         let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
         assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
+    }
+
+    #[test]
+    fn boxed_descriptor_reuses_the_type_spelling() {
+        let int = boxed_descriptor(Ty::Int);
+        assert!(std::ptr::eq(int, boxed_descriptor(Ty::nullable(Ty::Int))));
+        assert_eq!(int, "Ljava/lang/Integer;");
+        assert_eq!(boxed_descriptor(Ty::Boolean), "Ljava/lang/Boolean;");
+        assert_eq!(boxed_descriptor(Ty::Char), "Ljava/lang/Character;");
+        let uint = boxed_descriptor(Ty::UInt);
+        assert!(std::ptr::eq(uint, boxed_descriptor(Ty::UInt)));
+        assert_eq!(uint, "Lkotlin/UInt;");
+        assert_eq!(boxed_descriptor(Ty::UByte), "Lkotlin/UByte;");
+        assert!(std::ptr::eq(
+            boxed_descriptor(Ty::String),
+            type_descriptor(Ty::String)
+        ));
     }
 
     #[test]
