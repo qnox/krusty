@@ -1687,10 +1687,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `C$x$2` — where a raw-context counter would number both `$1` and one class file would silently
   overwrite the other (`tests/class_lambda_e2e.rs`, the `Collide` fixture, pinned at runtime). A
   DELEGATED property's initializer is property-scoped the same way (`val z by lazy { … }` →
-  `C$z$…`, impl `z$lambda$0`); one recorded gap: kotlinc numbers that delegate lambda `C$z$2` where
-  krusty emits `C$z$1` — kotlinc's delegate ordinal counts a slot krusty does not model
-  (`tests/class_lambda_e2e.rs::delegated_property_lambda_takes_the_property_name` asserts krusty's
-  deterministic set). The synthetic impl METHOD prefix in
+  `C$z$…`, impl `z$lambda$0`; kotlinc numbers it `C$z$2`,
+  `tests/class_lambda_e2e.rs::delegated_property_lambda_takes_the_property_name`). The synthetic impl METHOD prefix in
   that context is a different name: the PROPERTY name for a property initializer (`h$lambda$0`, and
   same-named declarations share one sequence — `val member` + `fun member` → `member$lambda$0/1`)
   and kotlinc's `_init_` for an `init` block (`_init_$lambda$0`), never whichever function the
@@ -8102,6 +8100,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
   `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
   `tests/module_override_boxed_result_e2e.rs`.
+  mapper boxes a function's primitive result when any declaration it overrides returns something
+  else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is `echo(I)Ljava/lang/Integer;`, and
+  `invoke` of a `() -> Boolean` object is `invoke()Ljava/lang/Boolean;`. Each return boxes, a call
+  through the class (a `super` call too) unboxes with `intValue()`, and the bridge to the erased
+  declaration returns the box without converting it. krusty takes this only for classes declared in
+  executable code (local classes, anonymous objects), whose callers and subclasses are all in the
+  same file; a member other files can see keeps its primitive result until they can see the
+  choice. Tests: `tests/local_override_boxed_result_e2e.rs`.
+- **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
+  `LambdaMetafactoryArguments` rejects a lambda whose function type takes or returns a value class
+  over a non-null, non-primitive underlying type (a reference, `UInt`, or a type parameter bounded
+  by a non-null type): its `invoke` takes the carrier where `FunctionN.invoke` takes the box, and
+  the factory only adapts boxing of primitives. Such a lambda becomes `final class
+  <enclosing>$<name>$1 implements FunctionN<…>` over `Object`, never `kotlin/jvm/internal/Lambda`,
+  and takes no `$lambda$N` number. Its package-private constructor stores each capture in a final
+  synthetic field before calling `Object()`, naming a captured `this` `$receiver`; the lambda body is
+  its specialized `invoke-<hash>`, whose primitive result is boxed and whose `Unit` result is
+  `void`; the erased `invoke(Object)Object` bridge unboxes and boxes the value class, null-safely
+  for `X?`; a captureless one has a static `INSTANCE`. The call site loads `INSTANCE` or constructs
+  the class and casts it to `FunctionN`. A private member of the enclosing class read from the body
+  goes through its `access$` accessor, like any nested class's. A value class over a primitive or a
+  nullable type keeps the indy lambda. Tests: `tests/value_class_lambda_class_e2e.rs` (each class
+  byte for byte against kotlinc; the whole source at run time).
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

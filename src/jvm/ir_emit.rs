@@ -75,6 +75,7 @@ mod inline_call;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
+mod lambda_class;
 mod lambda_class_names;
 mod local_updates;
 mod local_variable_representation;
@@ -104,6 +105,7 @@ mod safe_calls;
 mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
+mod singleton_instance;
 mod singleton_instance_load;
 mod suspend_lambda_class;
 mod value_class_adapters;
@@ -136,6 +138,7 @@ mod type_operation_emission;
 mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
+use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
 
 use super::metadata_flags::{
@@ -1314,27 +1317,6 @@ fn emit_jvm_interface_companion_surface(
             cw.set_last_late_field_annotations(&annotations.annotations);
         }
     }
-}
-
-fn add_singleton_instance_field(cw: &mut ClassWriter, class: &str) {
-    cw.add_field(0x0019, "INSTANCE", &format!("L{class};"));
-}
-
-fn emit_singleton_instance_clinit(cw: &mut ClassWriter, class: &str) {
-    // The method header interns before its code, as a writer visiting the method first does.
-    cw.seed_utf8("<clinit>");
-    cw.seed_utf8("()V");
-    let descriptor = format!("L{class};");
-    let classifier = cw.class_ref(class);
-    let constructor = cw.methodref(class, "<init>", "()V");
-    let field = cw.fieldref(class, "INSTANCE", &descriptor);
-    let mut code = CodeBuilder::new(0);
-    code.new_obj(classifier);
-    code.dup();
-    code.invokespecial(constructor, 0, 0);
-    code.putstatic(field, 1);
-    code.ret_void();
-    finish_code::<0x0008>(cw, "<clinit>", "()V", &mut code, 0);
 }
 
 fn sorted_sealed_subclass_ids(c: &IrClass) -> Vec<TypeName> {
@@ -3003,6 +2985,9 @@ fn emit_class(
     }
     if c.func_ref.is_some() {
         return function_reference_class::emit_func_ref_class(ir, c, facade, env, opts);
+    }
+    if let Some(lambda) = &c.lambda {
+        return lambda_class::emit_lambda_class(ir, c, lambda, facade, env, opts);
     }
     if let Some(lambda) = env.emit_time_machines.suspend_lambda(c.fq_name_id()) {
         return suspend_lambda_class::emit_suspend_lambda_class(ir, c, lambda, facade, env, opts);

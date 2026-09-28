@@ -855,6 +855,11 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
+        // A lambda the metafactory cannot adapt is a class of its own; decided before any lambda
+        // is numbered, as kotlinc numbers only the lambdas it lifts.
+        if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
+            crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers);
+        }
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
