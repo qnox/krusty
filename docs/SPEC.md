@@ -10889,9 +10889,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   integer. Both checked-FIR lowering and the legacy AST bridge attach the same `BottomValue`
   contract. Common IR records only semantic completion; the JVM emitter derives the physical stack
   effect from the actual invocation/assertion it emits, then discards that result mechanically.
+  A property read is that same producer while it is still a checked operation: realization
+  replaces the node in place with the accessor call, whose descriptor returns `java/lang/Void`
+  and therefore one physical word. The completion is attached to the checked read, so a discarded
+  `Nothing` getter terminates the branch instead of leaving that word for the merge. A type
+  parameter substituted to `Nothing` stays the fall-through completion, as a substituted call does.
   Tests: `tests/nothing_call_branch_e2e.rs` covers Boolean, every primitive width, `when`, the
-  reference control, exact kotlinc bytecode parity, and declared/inferred external calls. Unit
-  contracts beside both lowerers verify that neither pipeline can omit the common-IR marker.
+  reference control, exact kotlinc bytecode parity, declared/inferred external calls, and a
+  `Nothing` property getter used as the untaken branch of an assignment
+  (`nothing_property_getter_terminates_the_other_branch`). Unit contracts beside both lowerers
+  verify that neither pipeline can omit the common-IR marker; `a_checked_nothing_property_read_diverges_until_realization`
+  pins the checked property read. Corpus: `controlStructures/returnsNothing/propertyGetter.kt`.
 - **`++p` on a property reads it twice; `p++` reads it once — in statement position too.** Kotlin
   defines `++p` as `p = p.inc()` followed by the VALUE of `p`, which for a property is a fresh read
   through its getter, while `p++` binds the old value to a temporary. For a custom getter the

@@ -113,6 +113,27 @@ fun box(): String {\n\
 }
 
 #[test]
+fn nothing_property_getter_terminates_the_other_branch() {
+    const SRC: &str = "var flag = true\n\
+object Test {\n\
+    val magic: Nothing get() = null!!\n\
+}\n\
+fun box(): String {\n\
+    val a: String\n\
+    if (flag) {\n\
+        a = \"OK\"\n\
+    } else {\n\
+        Test.magic\n\
+    }\n\
+    return a\n\
+}\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "Nothing property getter"),
+        "OK"
+    );
+}
+
+#[test]
 fn nothing_call_in_if_expression_value() {
     const SRC: &str = "fun fail(): Nothing = throw RuntimeException(\"x\")\n\
 fun pick(b: Boolean): String {\n\
