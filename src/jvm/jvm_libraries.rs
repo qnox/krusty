@@ -321,6 +321,19 @@ impl JvmBuiltInsCustomizer {
     }
 }
 
+/// Kotlin's JVM delegation filter, applied at the provider boundary: an implemented Java method
+/// (no Kotlin `@Metadata`, such as a JDK default method or one admitted onto a mapped builtin) and
+/// an implemented builtin mapped to a Java default (`@PlatformDependent`, such as
+/// `Map.getOrDefault`) stay inherited instead of being forwarded to a delegate.
+pub(crate) fn inherited_by_delegation(
+    is_abstract: bool,
+    has_kotlin_metadata: bool,
+    annotations: &[TypeName],
+) -> bool {
+    !is_abstract
+        && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
+}
+
 /// The declaration-level return fact shared by both classpath member construction loops. Keep this
 /// normalization at the metadata boundary: ordinary descriptor members and source-name aliases for
 /// mangled members must not disagree about whether the later value-class representation pass may see
@@ -848,7 +861,7 @@ impl JvmLibraries {
                     infix: meta.is_infix,
                     is_abstract: false,
                     is_final: true,
-                    java_declared: false,
+                    inherited_by_delegation: false,
                     return_value_status: None,
                 },
                 annotations: meta.annotations.clone(),
@@ -912,7 +925,7 @@ impl JvmLibraries {
                 infix: builtin.is_infix,
                 is_abstract: false,
                 is_final: true,
-                java_declared: false,
+                inherited_by_delegation: false,
                 return_value_status: None,
             };
             function.annotations = builtin.annotations;
@@ -1083,7 +1096,7 @@ impl JvmLibraries {
                     infix: function.is_infix(),
                     is_abstract: false,
                     is_final: function.is_final(),
-                    java_declared: false,
+                    inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
                 annotations: function.annotations.clone(),
@@ -1850,7 +1863,11 @@ impl JvmLibraries {
                     declaration.map_or_else(|| m.is_final(), |declaration| declaration.is_final()),
                 );
                 member.set_is_interface(ci.is_interface());
-                member.set_java_declared(!has_kotlin_metadata);
+                member.set_inherited_by_delegation(inherited_by_delegation(
+                    member.is_abstract(),
+                    has_kotlin_metadata,
+                    &member.annotations,
+                ));
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
                         pass_receiver: physical_params.len() == member.params.len() + 1,
@@ -4622,7 +4639,7 @@ impl JvmLibraries {
                         infix: mf.is_infix(),
                         is_abstract: false,
                         is_final: mf.is_final(),
-                        java_declared: false,
+                        inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
                     annotations: mf.annotations.clone(),
@@ -5221,7 +5238,7 @@ impl JvmLibraries {
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
-                                java_declared: m.java_declared(),
+                                inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },
                             annotations: m.annotations.clone(),

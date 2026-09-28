@@ -141,10 +141,10 @@ impl LmFlags {
     const IS_ABSTRACT: u16 = 1 << 5;
     const IS_INFIX: u16 = 1 << 6;
     const IS_FINAL: u16 = 1 << 7;
-    /// The member is declared by a Java class file (one without Kotlin `@Metadata`), including a JDK
-    /// method admitted onto a mapped Kotlin builtin scope. Kotlin semantics expose this origin: a
-    /// non-abstract Java method is never forwarded by interface delegation.
-    const JAVA_DECLARED: u16 = 1 << 8;
+    /// Interface delegation keeps this implemented member's inherited body instead of forwarding it
+    /// to the delegate. Providers decide this at their boundary; see
+    /// [`LibraryMember::inherited_by_delegation`].
+    const INHERITED_BY_DELEGATION: u16 = 1 << 8;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -193,8 +193,8 @@ impl LmFlags {
         self.with(Self::IS_INFIX, on)
     }
     #[inline]
-    pub const fn with_java_declared(self, on: bool) -> Self {
-        self.with(Self::JAVA_DECLARED, on)
+    pub const fn with_inherited_by_delegation(self, on: bool) -> Self {
+        self.with(Self::INHERITED_BY_DELEGATION, on)
     }
 }
 
@@ -836,11 +836,13 @@ impl LibraryMember {
     pub fn set_is_final(&mut self, on: bool) {
         self.flags = self.flags.with_is_final(on);
     }
-    pub fn java_declared(&self) -> bool {
-        self.flags.has(LmFlags::JAVA_DECLARED)
+    /// A class delegating an interface that declares this member does not forward it: the
+    /// member's own implementation stays inherited.
+    pub fn inherited_by_delegation(&self) -> bool {
+        self.flags.has(LmFlags::INHERITED_BY_DELEGATION)
     }
-    pub fn set_java_declared(&mut self, on: bool) {
-        self.flags = self.flags.with_java_declared(on);
+    pub fn set_inherited_by_delegation(&mut self, on: bool) {
+        self.flags = self.flags.with_inherited_by_delegation(on);
     }
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
@@ -2183,7 +2185,7 @@ impl FunctionInfo {
         candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.is_final = member.is_final();
-        candidate.flags.java_declared = member.java_declared();
+        candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
         candidate.flags.return_value_status = member.return_value_status;
         candidate.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
@@ -2334,8 +2336,8 @@ pub struct FnFlags {
     /// The declaration cannot be overridden. This is source modality, independent of a target's
     /// physical access flags.
     pub is_final: bool,
-    /// Declared by a Java class file rather than by Kotlin. See [`LibraryMember::java_declared`].
-    pub java_declared: bool,
+    /// See [`LibraryMember::inherited_by_delegation`].
+    pub inherited_by_delegation: bool,
     /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:
     /// its status is derived from its override edges after they are frozen.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,
