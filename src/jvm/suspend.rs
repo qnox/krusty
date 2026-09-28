@@ -245,10 +245,10 @@ pub(crate) fn lower_suspend(
                 bytecode_machine::Routed::NotEligible => {}
             }
         }
-        let forward = body
-            .and_then(|b| tail_forward(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets));
-        // kotlinc's transformer builds the machine of the shapes it takes from the finished bytecode.
-        if let (None, Some(b)) = (forward.as_ref(), body) {
+        // kotlinc's transformer builds the machine of the shapes it takes from the finished
+        // bytecode, a tail-call forward included: it returns early for one, after boxing through
+        // the coroutine helpers.
+        if let Some(b) = body {
             let route = bytecode_machine::Route {
                 facade,
                 suspend_set: &suspend_set,
@@ -263,6 +263,8 @@ pub(crate) fn lower_suspend(
                 bytecode_machine::Routed::NotEligible => {}
             }
         }
+        let forward = body
+            .and_then(|b| tail_forward(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets));
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
         // rewrites descendants in place and installs each suspension temp in the current parent's
         // prelude, so every non-forward body that can reach a suspension must own one node per use.
