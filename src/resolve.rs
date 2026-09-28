@@ -13846,7 +13846,9 @@ impl<'a> Checker<'a> {
                 });
             }
         }
-        let maximal = maximal_member_extensions(self, &plans, |plan| plan.priority);
+        let maximal = member_extension_selection::maximal_member_extensions(self, &plans, |plan| {
+            plan.priority
+        });
         maximal
             .into_iter()
             .max_by_key(|index| plans[*index].score)
@@ -36619,79 +36621,6 @@ fn member_extension_receiver_domain(
     crate::symbol_resolver::ty_subst(receiver, &bindings)
 }
 
-fn maximal_member_extensions<T>(
-    oracle: &dyn crate::assignable::TypeOracle,
-    candidates: &[T],
-    priority: impl Fn(&T) -> MemberExtensionPriority,
-) -> Vec<usize> {
-    let Some(nearest_dispatch) = candidates
-        .iter()
-        .map(|candidate| priority(candidate).dispatch_rank)
-        .min()
-    else {
-        return Vec::new();
-    };
-    candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidate)| priority(candidate).dispatch_rank == nearest_dispatch)
-        .filter_map(|(index, candidate)| {
-            let candidate = priority(candidate);
-            let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
-                if index == other_index {
-                    return false;
-                }
-                let other = priority(other);
-                if other.dispatch_rank != nearest_dispatch {
-                    return false;
-                }
-                // Among receivers applicable to this same call-site type, a concrete receiver
-                // is more specific than one whose shape had to infer a method parameter. This
-                // also covers invariant nested shapes (`Box<String>` versus `Box<T>`): comparing
-                // their instantiated `Box<String>`/`Box<Any>` views as ordinary subtypes loses
-                // the declaration-level genericity that Kotlin's specificity rule uses.
-                if candidate.generic_receiver != other.generic_receiver {
-                    return candidate.generic_receiver && !other.generic_receiver;
-                }
-                let other_is_subtype = crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    oracle,
-                    other.receiver_domain,
-                    candidate.receiver_domain,
-                );
-                let candidate_is_subtype = crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    oracle,
-                    candidate.receiver_domain,
-                    other.receiver_domain,
-                );
-                if candidate.receiver_domain == other.receiver_domain
-                    || (other_is_subtype && candidate_is_subtype)
-                {
-                    let other_owner_is_subtype = crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        oracle,
-                        Ty::obj_name(other.owner),
-                        Ty::obj_name(candidate.owner),
-                    );
-                    let candidate_owner_is_subtype = crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        oracle,
-                        Ty::obj_name(candidate.owner),
-                        Ty::obj_name(other.owner),
-                    );
-                    if other_owner_is_subtype != candidate_owner_is_subtype {
-                        return other_owner_is_subtype;
-                    }
-                    return other.dispatch_depth < candidate.dispatch_depth;
-                }
-                other_is_subtype && !candidate_is_subtype
-            });
-            (!dominated).then_some(index)
-        })
-        .collect()
-}
-
 /// Select a member-extension property against an explicit receiver tower. The tower and the
 /// context-argument resolver are the only things a scope was ever supplying here, so both are
 /// parameters: the checker passes its scope's, signature evaluation passes the declaration's.
@@ -36890,7 +36819,10 @@ fn member_extension_property(
             }
         }
     }
-    let maximal = maximal_member_extensions(oracle, &candidates, |candidate| candidate.0);
+    let maximal =
+        member_extension_selection::maximal_member_extensions(oracle, &candidates, |candidate| {
+            candidate.0
+        });
     match maximal.as_slice() {
         [index] => Ok(Some(candidates[*index].1.clone())),
         [] => Ok(None),
@@ -36906,7 +36838,10 @@ impl<'a> Checker<'a> {
     ) -> Vec<MemberExtensionFunctionShape> {
         member_extension_function_shapes_in(
             &self.fed_source(),
-            &self.implicit_receivers(scope),
+            &member_extension_selection::ordinary_dispatch_first(
+                scope,
+                self.implicit_receivers(scope),
+            ),
             extension_receiver,
             name,
         )
@@ -36973,7 +36908,9 @@ pub(crate) fn member_extension_function_with(
     }
     member_extension_selection::retain_selected(&mut candidates, selection);
     let mut maximal =
-        maximal_member_extensions(oracle, &candidates, |candidate| candidate.priority);
+        member_extension_selection::maximal_member_extensions(oracle, &candidates, |candidate| {
+            candidate.priority
+        });
     if maximal.is_empty() {
         return MemberExtensionFunctionSelection::None(excluded);
     }
@@ -41746,7 +41683,10 @@ impl<'a> Checker<'a> {
         member_extension_property(
             &self.fed_source(),
             self,
-            &self.implicit_receivers(scope),
+            &member_extension_selection::ordinary_dispatch_first(
+                scope,
+                self.implicit_receivers(scope),
+            ),
             &|parameters| {
                 self.select_context_arguments_with_types(scope, parameters)
                     .ok()
@@ -74798,11 +74738,13 @@ impl<'a> Checker<'a> {
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+        let receivers =
+            member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         let args = call.args;
         member_extension_function_with(
             &self.fed_source(),
             self,
-            receivers,
+            &receivers,
             self.file.explicit_context_arguments,
             &|parameters| self.select_context_arguments_with_types(scope, parameters),
             &|source| self.file.is_spread_arg(args[source]),

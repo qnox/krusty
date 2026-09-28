@@ -85,6 +85,92 @@ pub(super) fn retain_selected(
     }
 }
 
+/// Member-extension dispatch prefers an ordinary implicit receiver over a context-parameter
+/// receiver. Both groups keep nearest-first order, and a context receiver stays eligible when no
+/// ordinary receiver declares the member.
+pub(super) fn ordinary_dispatch_first(
+    scope: &super::CheckerScope<'_>,
+    mut receivers: Vec<ImplicitReceiver>,
+) -> Vec<ImplicitReceiver> {
+    receivers.sort_by_key(|receiver| {
+        u8::from(scope.implicit_receiver_context(receiver.identity).is_some())
+    });
+    receivers
+}
+
+pub(super) fn maximal_member_extensions<T>(
+    oracle: &dyn crate::assignable::TypeOracle,
+    candidates: &[T],
+    priority: impl Fn(&T) -> MemberExtensionPriority,
+) -> Vec<usize> {
+    let Some(nearest_dispatch) = candidates
+        .iter()
+        .map(|candidate| priority(candidate).dispatch_rank)
+        .min()
+    else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| priority(candidate).dispatch_rank == nearest_dispatch)
+        .filter_map(|(index, candidate)| {
+            let candidate = priority(candidate);
+            let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+                if index == other_index {
+                    return false;
+                }
+                let other = priority(other);
+                if other.dispatch_rank != nearest_dispatch {
+                    return false;
+                }
+                // Among receivers applicable to this same call-site type, a concrete receiver
+                // is more specific than one whose shape had to infer a method parameter. This
+                // also covers invariant nested shapes (`Box<String>` versus `Box<T>`): comparing
+                // their instantiated `Box<String>`/`Box<Any>` views as ordinary subtypes loses
+                // the declaration-level genericity that Kotlin's specificity rule uses.
+                if candidate.generic_receiver != other.generic_receiver {
+                    return candidate.generic_receiver && !other.generic_receiver;
+                }
+                let other_is_subtype = crate::assignable::is_assignable(
+                    &crate::assignable::TyCtx::new(),
+                    oracle,
+                    other.receiver_domain,
+                    candidate.receiver_domain,
+                );
+                let candidate_is_subtype = crate::assignable::is_assignable(
+                    &crate::assignable::TyCtx::new(),
+                    oracle,
+                    candidate.receiver_domain,
+                    other.receiver_domain,
+                );
+                if candidate.receiver_domain == other.receiver_domain
+                    || (other_is_subtype && candidate_is_subtype)
+                {
+                    let other_owner_is_subtype = crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        oracle,
+                        Ty::obj_name(other.owner),
+                        Ty::obj_name(candidate.owner),
+                    );
+                    let candidate_owner_is_subtype = crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        oracle,
+                        Ty::obj_name(candidate.owner),
+                        Ty::obj_name(other.owner),
+                    );
+                    if other_owner_is_subtype != candidate_owner_is_subtype {
+                        return other_owner_is_subtype;
+                    }
+                    return other.dispatch_depth < candidate.dispatch_depth;
+                }
+                other_is_subtype && !candidate_is_subtype
+            });
+            (!dominated).then_some(index)
+        })
+        .collect()
+}
+
 pub(super) fn candidate(
     shape: &MemberExtensionFunctionShape,
     instantiated: InstantiatedMemberExtension,

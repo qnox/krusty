@@ -958,3 +958,64 @@ fn contextual_class_constructors_forward_the_same_context_prefix() {
     "#;
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
+
+#[test]
+fn same_type_context_dispatch_and_extension_stay_distinct() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        fun <A, R> context(context: A, block: context(A) () -> R): R = block(context)
+        class A(val a: String = "d ") {
+            context(a: A)
+            fun A.funMember(): String = a.a + this@A.a + this.a
+            context(a: A)
+            val A.propertyMember: String
+                get() = a.a + this@A.a + this.a
+            fun simpleUsageInsideClass(): String = funMember() + propertyMember
+            fun usageWithThisInsideClass(): String = this.funMember() + this.propertyMember
+            fun usageWithExtensionInsideClass(): String = A("e ").funMember() + A("e ").propertyMember
+            fun usageWithContextAndExtensionInsideClass(): String {
+                var temp = ""
+                context(A("c ")) {
+                    @Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER")
+                    temp = A("e ").funMember() + A("e ").propertyMember
+                }
+                return temp
+            }
+        }
+        fun simpleUsageOutsideClass(): String = with(A("d ")) { funMember() + propertyMember }
+        fun usageWithExtensionOutsideClass(): String = with(A("d ")) {
+            A("e ").funMember() + A("e ").propertyMember
+        }
+        fun usageWithExtensionAndContextOutsideClass(): String {
+            var temp = ""
+            with(A("d ")) {
+                context(A("c ")) {
+                    temp = (@Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER") A("e ").funMember()) + (@Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER") A("e ").propertyMember)
+                }
+            }
+            return temp
+        }
+        fun box(): String {
+            val parts = listOf(
+                A().simpleUsageInsideClass(),
+                A().usageWithThisInsideClass(),
+                A().usageWithExtensionInsideClass(),
+                A().usageWithContextAndExtensionInsideClass(),
+                simpleUsageOutsideClass(),
+                usageWithExtensionOutsideClass(),
+                usageWithExtensionAndContextOutsideClass(),
+            )
+            val expected = listOf(
+                "d d d d d d ",
+                "d d d d d d ",
+                "d d e d d e ",
+                "c d e c d e ",
+                "d d d d d d ",
+                "d d e d d e ",
+                "c d e c d e ",
+            )
+            return if (parts == expected) "OK" else parts.joinToString("|")
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
