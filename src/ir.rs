@@ -32,6 +32,7 @@ pub enum IrNodeOrigin {
 }
 
 mod bindings;
+mod body_scopes;
 mod bottom_values;
 mod bridges;
 mod catches;
@@ -2163,6 +2164,7 @@ pub struct IrFile {
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.
     generated_lines: debug_lines::GeneratedLineMarks,
+    body_scopes: body_scopes::BodyScopes,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,

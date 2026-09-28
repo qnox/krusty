@@ -216,3 +216,17 @@ fn catch_parameter_is_recorded() {
     };
     assert_lvt_entry(&text, "failure", "Ljava/lang/Exception;");
 }
+
+/// A local at the top of a body stays in scope through the return that follows the body: a
+/// lambda's implicit result, a Unit body whose last value is discarded, and a local declared after
+/// a nested block all end with the method, as kotlinc's `IrBlockBody` scope does.
+#[test]
+fn body_locals_stay_in_scope_through_the_implicit_return() {
+    let src = "fun use(f: () -> Int): Int = f()\n\
+         fun plain(p: Int): Int { val g = p + 1; return g + 2 }\n\
+         fun expr(p: Int): Int = use { val g = p + 1; g + 2 }\n\
+         fun ret(p: Int): Int = use { val g = p + 1; return@use g + 2 }\n\
+         fun unit(p: Int) { val g = p + 1; use { g } }\n\
+         fun lam(p: Int): Int = use l@{ if (p > 0) { val h = p; return@l h }; val g = p + 1; g }\n";
+    common::assert_classes_identical_to_kotlinc("BodyLocals", src, &["BodyLocalsKt"]);
+}

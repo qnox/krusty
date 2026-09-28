@@ -99,7 +99,7 @@ impl Emitter<'_> {
             }
             let _ = self.emit_cond_branch(cond, start, true, code);
             if let Some(saved) = retained_body_scope {
-                self.close_scope_locals(code);
+                self.close_scope_locals(body, code);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
             }

@@ -757,6 +757,12 @@ fn finish_callable_body(
     if unit_as_value {
         inline_returns::materialize_unit_callable_returns(ir, &roots);
     }
+    // A body written as one block keeps its locals in scope through the return added after it.
+    if let [root] = roots[..] {
+        if matches!(ir.expr(root), IrExpr::Block { .. }) {
+            ir.mark_body_scope(root);
+        }
+    }
     let body = if !implicit_return {
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,

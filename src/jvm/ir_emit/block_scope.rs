@@ -56,9 +56,10 @@ impl Emitter<'_> {
         }
     }
 
-    /// Close source-local debug ranges declared in the current nested block.
-    pub(super) fn close_scope_locals(&mut self, code: &mut CodeBuilder) {
-        if self.block_depth <= 1 {
+    /// Close source-local debug ranges declared in the current nested block `block`. A callable's
+    /// body block leaves them to the method's end, past the return that follows it.
+    pub(super) fn close_scope_locals(&mut self, block: u32, code: &mut CodeBuilder) {
+        if self.block_depth <= 1 || self.ir.is_body_scope(block) {
             return;
         }
         let end = code.bytes.len().min(u16::MAX as usize) as u16;

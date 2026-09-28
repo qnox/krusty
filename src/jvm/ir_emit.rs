@@ -10137,7 +10137,7 @@ impl<'a> Emitter<'a> {
                 let saved = self.open_slot_scope();
                 let terminal_target = self.terminal_statement_target.take();
                 self.emit_open_block(stmts, value, terminal_target, code);
-                self.close_scope_locals(code);
+                self.close_scope_locals(e, code);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
             }
@@ -12821,7 +12821,7 @@ impl<'a> Emitter<'a> {
                         self.emit_value(*v, code);
                     }
                 }
-                self.close_scope_locals(code);
+                self.close_scope_locals(e, code);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
                 self.statement_line = enclosing_statement_line;
