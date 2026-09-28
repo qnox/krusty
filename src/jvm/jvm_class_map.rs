@@ -833,17 +833,6 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
         .map_or(internal, |(_, id)| *id)
 }
 
-/// JVM name of a Kotlin mapped builtin (`kotlin/Any` → `java/lang/Object`). The JVM face of the
-/// same group, and a primitive wrapper, are not part of this direction.
-pub(crate) fn kotlin_builtin_jvm_name(internal: TypeName) -> Option<&'static str> {
-    let ids = builtin_ids();
-    if !ids.erasure_group.contains_key(&internal) {
-        return None;
-    }
-    let (jvm, jvm_id) = *ids.jvm_builtin.get(&internal)?;
-    (jvm_id != internal).then_some(jvm)
-}
-
 /// Whether [`to_jvm_internal`] would rewrite this classifier. Classpath loading asks once per
 /// class; erasure-table identity and the function-classifier family answer it without rendering.
 pub(super) fn maps_to_distinct_jvm_internal(internal: TypeName) -> bool {
@@ -854,6 +843,17 @@ pub(super) fn maps_to_distinct_jvm_internal(internal: TypeName) -> bool {
         Some(function) => function.is_reflective() || !function.is_suspend(),
         None => false,
     }
+}
+
+/// A signed primitive classifier in either spelling (`kotlin/Int`, `java/lang/Integer`). Unsigned
+/// inline classes are their own wrappers and are not boxed JVM primitives.
+pub(super) fn is_boxed_primitive_classifier(internal: TypeName) -> bool {
+    let ids = builtin_ids();
+    ids.wrapper_prim.contains_key(&internal)
+        || ids
+            .prim_wrapper
+            .get(&internal)
+            .is_some_and(|wrapper| !internal.matches(wrapper))
 }
 
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from a classpath signature to
@@ -884,10 +884,10 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_kotlin_collection_type_name, is_mapped_collection_face,
+        is_boxed_primitive_classifier, is_kotlin_collection_type_name, is_mapped_collection_face,
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
-        jvm_to_kotlin_builtin_metadata_name, kotlin_builtin_jvm_name, kotlin_builtin_to_jvm,
-        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
+        jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
+        mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
         maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_internal,
         to_jvm_type_name, to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
     };
@@ -1074,11 +1074,40 @@ mod tests {
                 to_jvm_internal(name) != name,
                 "{name}"
             );
-            assert_eq!(
-                kotlin_builtin_jvm_name(type_name(name)),
-                kotlin_builtin_to_jvm(name),
-                "{name}"
-            );
+        }
+    }
+
+    #[test]
+    fn boxed_primitives_are_the_signed_kotlin_and_jvm_names() {
+        for name in [
+            "kotlin/Int",
+            "kotlin/Long",
+            "kotlin/Short",
+            "kotlin/Byte",
+            "kotlin/Char",
+            "kotlin/Boolean",
+            "kotlin/Float",
+            "kotlin/Double",
+            "java/lang/Integer",
+            "java/lang/Long",
+            "java/lang/Short",
+            "java/lang/Byte",
+            "java/lang/Character",
+            "java/lang/Boolean",
+            "java/lang/Float",
+            "java/lang/Double",
+        ] {
+            assert!(is_boxed_primitive_classifier(type_name(name)), "{name}");
+        }
+        for name in [
+            "kotlin/UInt",
+            "kotlin/UByte",
+            "kotlin/String",
+            "java/lang/String",
+            "kotlin/Any",
+            "demo/Foo",
+        ] {
+            assert!(!is_boxed_primitive_classifier(type_name(name)), "{name}");
         }
     }
 

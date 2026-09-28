@@ -4342,33 +4342,11 @@ fn reference_needs_checkcast(t: &Ty) -> bool {
         Ty::Nullable(inner) => t.nullable_primitive().is_some() || reference_needs_checkcast(inner),
         Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
         Ty::String => true,
-        Ty::Obj(i, _) => !i.matches("kotlin/Any") && !is_boxed_primitive_internal(&i.render()),
+        Ty::Obj(i, _) => {
+            !i.matches("kotlin/Any") && !super::jvm_class_map::is_boxed_primitive_classifier(i)
+        }
         _ => false,
     }
-}
-
-/// A boxed-primitive object internal name (`kotlin/Int`, `java/lang/Integer`, …) — one whose
-/// `ImplicitCoercion` unboxes to a JVM primitive rather than acting as a reference.
-fn is_boxed_primitive_internal(internal: &str) -> bool {
-    matches!(
-        internal,
-        "kotlin/Int"
-            | "kotlin/Long"
-            | "kotlin/Short"
-            | "kotlin/Byte"
-            | "kotlin/Char"
-            | "kotlin/Boolean"
-            | "kotlin/Float"
-            | "kotlin/Double"
-            | "java/lang/Integer"
-            | "java/lang/Long"
-            | "java/lang/Short"
-            | "java/lang/Byte"
-            | "java/lang/Character"
-            | "java/lang/Boolean"
-            | "java/lang/Float"
-            | "java/lang/Double"
-    )
 }
 
 /// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind
