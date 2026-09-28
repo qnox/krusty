@@ -368,7 +368,7 @@ fn resolved_compact_jvm_name(
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TopLevelFunctionConflictKey {
-    package: String,
+    package: TypeName,
     receiver: Option<Ty>,
     name: String,
     params: Vec<Ty>,
@@ -432,7 +432,7 @@ impl TopLevelFunctionConflictKey {
             None => None,
         };
         Some(Self {
-            package: signature.package.clone(),
+            package: signature.package,
             receiver,
             name,
             params: params.iter().copied().map(normalize).collect(),
@@ -1209,8 +1209,8 @@ pub struct Signature {
     pub source_member: Option<crate::libraries::SourceMember>,
     /// Declared extension receiver before lookup-key erasure.
     pub source_receiver: Option<Ty>,
-    /// Declaring package in internal slash form (`pkg/sub`) for source top-level declarations.
-    pub package: String,
+    /// Declaring package of a source top-level declaration. The root is the default package.
+    pub package: TypeName,
     /// The function's decoded `contract { … }`, when it declares one. Filled by the checker
     /// (which confirms the intrinsic identity) after checking, so cross-file call sites and the
     /// `@Metadata` emitter see the same effects the checker's call-site application uses.
@@ -1420,7 +1420,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
         source_file,
         source_member: None,
         source_receiver: function.receiver,
-        package: String::new(),
+        package: TypeName::ROOT,
         contract: None,
         plugin_expression: function.callable.plugin_expression,
     }
@@ -1453,7 +1453,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     .any(|signature| {
                         level
                             .iter()
-                            .any(|candidate| candidate.matches(&signature.package))
+                            .any(|candidate| *candidate == signature.package)
                     })
             })
         });
@@ -1467,7 +1467,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     if let Some(explicit) = scope.explicit_owner(name) {
                         return match explicit {
                             crate::symbol_source::SymbolNamespace::Package(package) => {
-                                package.matches(&signature.package)
+                                package == signature.package
                             }
                             crate::symbol_source::SymbolNamespace::Classifier(_) => false,
                         };
@@ -1475,13 +1475,13 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     selected_import_level.is_some_and(|level| {
                         scope.levels()[level]
                             .iter()
-                            .any(|candidate| candidate.matches(&signature.package))
+                            .any(|candidate| *candidate == signature.package)
                     })
                 }) || (import_scope.is_none()
                     && packages.is_some_and(|packages| {
                         packages
                             .iter()
-                            .any(|package| package.matches(&signature.package))
+                            .any(|package| *package == signature.package)
                     }))
                     || (import_scope.is_none() && packages.is_none())
             })
@@ -3232,7 +3232,7 @@ pub struct ExtPropSig {
     pub context_params: Vec<Ty>,
     pub accepts_nullable_receiver: bool,
     pub source: (u32, u32),
-    pub package: String,
+    pub package: TypeName,
     pub visibility: Visibility,
     /// Resolved declaration annotation identities. These are semantic header metadata; Pass 2
     /// must not recover them from the original annotation syntax or source coordinates.
@@ -3311,7 +3311,7 @@ pub struct SourcePropertySig {
     pub context_param_names: Vec<String>,
     /// Typed identities parallel to `context_params`, captured while source syntax is live.
     pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub package: String,
+    pub package: TypeName,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
     pub setter_parameter_name: Option<String>,
@@ -26526,7 +26526,7 @@ impl<'a> Checker<'a> {
             source_file: None,
             source_member: None,
             source_receiver: receiver,
-            package: String::new(),
+            package: TypeName::ROOT,
             contract: None,
             plugin_expression: None,
         };
@@ -74586,7 +74586,7 @@ impl<'a> Checker<'a> {
             source_file: None,
             source_member: member.source_member,
             source_receiver: Some(receiver_ty),
-            package: String::new(),
+            package: TypeName::ROOT,
             contract: None,
             plugin_expression: member.plugin_expression,
         };
