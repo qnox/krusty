@@ -8155,6 +8155,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after that lowering, as carriers, so `object : R { … }` capturing a value class keeps a plain
   constructor. Tests: `tests/value_class_hidden_constructor_e2e.rs`. Corpus:
   `inlineClasses/functionNameMangling/localClassInFunctionWithMangledName`.
+- **An inner class holds its outer value class as the carrier.** `this$0` of `Z.Inner` for a value
+  class `Z(val x: Int)` is `final int this$0`, and a read of the outer instance inside the inner
+  class loads that field as `getfield this$0:I`; a read of `x` is the carrier itself. krusty read
+  the field as `LZ;` and failed with `NoSuchFieldError`. Tests:
+  `tests/value_class_hidden_constructor_e2e.rs`. Corpus: `inlineClasses/kt27705`, `kt27706` and
+  their `Generic` forms, `fullValueClasses/inner`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

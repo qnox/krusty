@@ -155,6 +155,13 @@ pub(crate) fn type_operation_internal_name(
     }
 }
 
+/// The JVM type an instance of `classifier` is held as in its own right: a value class the JVM
+/// boxes is held as its carrier (an inner class's outer instance of `Z(val x: Int)` is an `int`),
+/// any other class as a reference to it.
+pub(crate) fn instance_representation(ir: &IrFile, classifier: TypeName) -> Ty {
+    boxed_value_class_carrier(ir, classifier).unwrap_or_else(|| Ty::obj_name(classifier))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

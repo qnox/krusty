@@ -71,7 +71,6 @@ fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
 fullValueClasses/initializationOrderWithAbstractProperty.kt
-fullValueClasses/inner.kt
 fullValueClasses/interopWithInlineClasses.kt
 fullValueClasses/kt70461.kt
 fullValueClasses/lateinit.kt
@@ -130,10 +129,6 @@ inlineClasses/kt25771.kt
 inlineClasses/kt27096_enum.kt
 inlineClasses/kt27096_functional.kt
 inlineClasses/kt27096_reference.kt
-inlineClasses/kt27705.kt
-inlineClasses/kt27705Generic.kt
-inlineClasses/kt27706.kt
-inlineClasses/kt27706Generic.kt
 inlineClasses/kt57973.kt
 inlineClasses/result/directCall2.kt
 inlineClasses/resultRunCatchingOrElse.kt
