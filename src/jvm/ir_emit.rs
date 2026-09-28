@@ -2301,7 +2301,7 @@ fn emit_pass(
         let cm = class_meta(&fq_name);
         let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         out.push((
-            fq_name,
+            fq_name.to_owned(),
             emit_class(ir, c, facade, env, opts, cm.as_ref(), &mut extra),
         ));
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
@@ -3356,15 +3356,12 @@ fn emit_class(
         }
     }
     let transformed = env.run.transformed_coroutine(&fq_name);
-    let transformed_metadata = env
-        .continuation_metadata
-        .get(&fq_name)
-        .and_then(|metadata| {
-            transformed_suspensions::continuation_metadata(metadata, transformed.as_ref()?)
-        });
+    let transformed_metadata = env.continuation_metadata.get(fq_name).and_then(|metadata| {
+        transformed_suspensions::continuation_metadata(metadata, transformed.as_ref()?)
+    });
     let continuation_metadata = transformed_metadata
         .as_ref()
-        .or(env.continuation_metadata.get(&fq_name));
+        .or(env.continuation_metadata.get(fq_name));
     if let Some(metadata) = continuation_metadata {
         cw.set_enclosing_method(
             &metadata.enclosing_class,
@@ -4771,7 +4768,7 @@ fn emit_interface_class(
         let holder = format!("{fq_name}$DefaultImpls");
         di.add_inner_class(crate::jvm::classfile::InnerClassSpec {
             inner: holder.clone(),
-            outer: Some(fq_name.clone()),
+            outer: Some(fq_name.to_owned()),
             name: Some("DefaultImpls".to_string()),
             access: 0x0019, // PUBLIC | STATIC | FINAL
         });
@@ -4805,7 +4802,7 @@ fn emit_interface_class(
         cw.seed_class(&holder);
         cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
             inner: holder,
-            outer: Some(fq_name.clone()),
+            outer: Some(fq_name.to_owned()),
             name: Some("DefaultImpls".to_string()),
             access: 0x0019,
         });
@@ -5407,7 +5404,7 @@ fn emit_enum_class(
             let new_class = entry
                 .subclass
                 .map(TypeName::render)
-                .unwrap_or_else(|| fq.clone());
+                .unwrap_or_else(|| fq.to_owned());
             let cls = e.cw.class_ref(&new_class);
             clinit.new_obj(cls);
             clinit.dup();
@@ -9877,9 +9874,9 @@ impl<'a> Emitter<'a> {
                     let (stub_owner, stub_on_interface) =
                         if is_iface && self.jvm_default == JvmDefaultMode::Disable {
                             holder = format!("{owner}$DefaultImpls");
-                            (&holder, false)
+                            (holder.as_str(), false)
                         } else {
-                            (&owner, is_iface)
+                            (owner, is_iface)
                         };
                     let m = if stub_on_interface {
                         self.cw
@@ -11255,7 +11252,7 @@ impl<'a> Emitter<'a> {
                 let impl_class = self.ir.classes.iter().find(|c| c.methods.contains(impl_fn));
                 let impl_owner_is_interface = impl_class.is_some_and(|c| c.is_interface);
                 let impl_owner = impl_class
-                    .map(|c| c.fq_name())
+                    .map(|c| c.fq_name().to_owned())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
                     let (internal, identity) =
