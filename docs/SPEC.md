@@ -7410,14 +7410,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
   `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
   `tests/module_override_boxed_result_e2e.rs`.
-  mapper boxes a function's primitive result when any declaration it overrides returns something
-  else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is `echo(I)Ljava/lang/Integer;`, and
-  `invoke` of a `() -> Boolean` object is `invoke()Ljava/lang/Boolean;`. Each return boxes, a call
-  through the class (a `super` call too) unboxes with `intValue()`, and the bridge to the erased
-  declaration returns the box without converting it. krusty takes this only for classes declared in
-  executable code (local classes, anonymous objects), whose callers and subclasses are all in the
-  same file; a member other files can see keeps its primitive result until they can see the
-  choice. Tests: `tests/local_override_boxed_result_e2e.rs`.
 - **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
   `LambdaMetafactoryArguments` rejects a lambda whose function type takes or returns a value class
   over a non-null, non-primitive underlying type (a reference, `UInt`, or a type parameter bounded
@@ -7434,8 +7426,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and constructor parameter of its carrier type, and never hides the constructor behind the
   `DefaultConstructorMarker` accessor (see the next entry). A lambda passed to an inline
   function, a library one included, is spliced and gets no class. A value class over a primitive
-  or a nullable type keeps the indy lambda. Tests: `tests/value_class_lambda_class_e2e.rs` (each
-  class byte for byte against kotlinc; the whole source at run time) and
+  or a nullable type keeps the indy lambda; a type parameter is nullable when a bound is, or when it
+  has none, and a dependency's value class reads that from its metadata's type-parameter bounds
+  (`Wrap<T>(val a: T)` keeps indy). Three shapes are not realized as the class yet: a body that
+  declares a lambda or local function, whose lifted function kotlinc moves into the class; a lambda
+  passed to an inline function's `noinline` parameter, which only call realization tells apart from
+  a spliced one; and a `crossinline` lambda an inline function's anonymous object captures, which
+  kotlinc inlines into the object it regenerates per call site. Each is a compile error naming the
+  lambda, never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
+  against kotlinc; the whole source at run time; the exact error for both unrealized shapes) and
   `tests/inline_value_class_lambda_e2e.rs`.
 - **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
   it from the slots a constructor has when it lowers value classes: declared parameters, an inner
