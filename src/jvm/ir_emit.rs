@@ -11229,7 +11229,7 @@ impl<'a> Emitter<'a> {
                         let inst_desc =
                             format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
                         (
-                            iface,
+                            iface.to_owned(),
                             "invoke".to_string(),
                             jvm_function_invoke_descriptor(*arity),
                             inst_desc,
@@ -12438,7 +12438,7 @@ fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
 }
 
-fn jvm_function_interface(arity: u8) -> String {
+fn jvm_function_interface(arity: u8) -> &'static str {
     crate::jvm::names::function_interface_internal_name(usize::from(arity))
 }
 
