@@ -1,5 +1,7 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
+use std::borrow::Cow;
+
 use crate::types::{InternalName, Ty, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
@@ -103,13 +105,14 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
 /// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
 /// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
 ///
-/// The mapping reads only whether the name is interned, and an interned name stays interned, so the
-/// physical name of a name interned before it is mapped is remembered per thread.
-pub fn classfile_internal_name(internal: &str) -> String {
+/// A name already in the type tree borrows its interned spelling. An unknown spelling is owned so a
+/// probe that misses does not stay in the interner.
+pub fn classfile_internal_name(internal: &str) -> Cow<'static, str> {
     if let Some(identity) = crate::types::existing_type_name(internal) {
-        return classfile_internal_name_of(identity).to_string();
+        Cow::Borrowed(classfile_internal_name_of(identity))
+    } else {
+        Cow::Owned(physical_classfile_name(internal))
     }
-    physical_classfile_name(internal)
 }
 
 /// Physical JVM classfile name of an interned classifier. The spelling is retained once per
@@ -738,9 +741,13 @@ mod tests {
             let physical = classfile_internal_name_of(identity);
             assert_eq!(
                 physical,
-                classfile_internal_name(&identity.render()).as_str(),
+                classfile_internal_name(&identity.render()).as_ref(),
                 "{spelling}"
             );
+            assert!(std::ptr::eq(
+                physical,
+                classfile_internal_name(spelling).as_ref()
+            ));
             assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));
         }
     }
