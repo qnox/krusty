@@ -799,6 +799,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   byte-divergent), and the file is written UNCONDITIONALLY: kotlinc emits it with an empty parts
   list for a class-only module, so omitting it diverged the artifact set. Byte-identical against
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
+- **A companion property that keeps its field still names that field after plainer siblings are
+  hoisted.** A plain companion property moves its backing field to the outer class, and the
+  companion's field table is compacted. A property with a custom accessor stays, and every index
+  that names its field — the declaration, a delegate field, and the common-IR property layout —
+  moves with the compaction. A `var` that only customizes its setter therefore still gets its
+  default getter, reading the same field the setter writes. Test:
+  `tests/companion_custom_accessor_field_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,
   measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property

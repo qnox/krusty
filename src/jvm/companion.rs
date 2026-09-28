@@ -384,6 +384,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             _ => {}
         }
     }
+    retarget_surviving_field_indices(ir, &remaps);
 
     // Build the companion's ordinary accessor declarations over the selected static realization.
     // A `@JvmField` property gets NONE: the public owner field is its entire JVM surface.
@@ -492,4 +493,38 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             property.setter = setter;
         }
     }
+}
+
+/// A property that stays on the companion still names its field after plainer siblings are removed.
+///
+/// Hoisting deletes those siblings' fields and compacts the table. Expression field operations are
+/// retargeted with the table; the declaration's own field index is a separate identity and moves
+/// with them. A `var` that only customizes its setter synthesizes its default getter from that
+/// index, so the getter still addresses the field the setter writes.
+fn retarget_surviving_field_indices(
+    ir: &mut IrFile,
+    remaps: &HashMap<ClassId, Vec<Option<u32>>>,
+) {
+    for (&class, remap) in remaps {
+        for property in &mut ir.classes[class as usize].properties {
+            property.backing_field = retarget_field_index(remap, property.backing_field);
+            property.delegate_field = retarget_field_index(remap, property.delegate_field);
+        }
+    }
+    for layout in ir.local_property_layouts.values_mut() {
+        if let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            backing_field,
+            ..
+        } = layout
+        {
+            if let Some(remap) = remaps.get(class) {
+                *backing_field = retarget_field_index(remap, *backing_field);
+            }
+        }
+    }
+}
+
+fn retarget_field_index(remap: &[Option<u32>], index: Option<u32>) -> Option<u32> {
+    index.and_then(|index| remap[index as usize])
 }
