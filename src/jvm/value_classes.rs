@@ -4713,6 +4713,19 @@ fn prop_access(
     }
 }
 
+/// Whether a JVM method descriptor's return type is the classfile form of `class`.
+/// `()Lpkg/Foo;` and `[Lpkg/Foo;` both end in that spelling; the comparison uses the interned
+/// identity instead of rendering it.
+fn descriptor_returns_class(descriptor: &str, class: TypeName) -> bool {
+    let Some(internal) = descriptor.strip_suffix(';') else {
+        return false;
+    };
+    let Some(at) = internal.rfind('L') else {
+        return false;
+    };
+    class.matches(&internal[at + 1..])
+}
+
 impl ReprCtx<'_> {
     /// Whether the expr at `id` produces a BOXED value-class `x` object: a `box-impl` result, a call whose
     /// return type is `X` (a nullable-over-primitive value class stays boxed), or a `!!`/identity over one.
@@ -4727,7 +4740,6 @@ impl ReprCtx<'_> {
             physical,
             ..
         } = *self;
-        let x_rendered = x.render();
         let is_x = |t: &Ty| t.non_null().obj_internal().is_some_and(|n| n == x);
         if physical.get(&id).is_some_and(is_x) {
             return true;
@@ -4789,7 +4801,7 @@ impl ReprCtx<'_> {
             IrExpr::Call {
                 callee: Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. },
                 ..
-            } => descriptor.ends_with(&format!("L{x_rendered};")),
+            } => descriptor_returns_class(descriptor, x),
             // A stdlib reference-array element read yields a boxed element.
             IrExpr::Call {
                 callee:
@@ -5412,4 +5424,21 @@ fn collect_reachable_scoped(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<Ex
     crate::ir::for_each_child(exprs, root, &mut |c| {
         collect_reachable_scoped(exprs, c, out)
     });
+}
+
+#[cfg(test)]
+mod descriptor_return_tests {
+    use super::descriptor_returns_class;
+    use crate::types::type_name;
+
+    #[test]
+    fn descriptor_return_matches_the_interned_class_without_rendering() {
+        let class = type_name("pkg/Foo$Bar");
+        assert!(descriptor_returns_class("()Lpkg/Foo$Bar;", class));
+        assert!(descriptor_returns_class("()[Lpkg/Foo$Bar;", class));
+        assert!(!descriptor_returns_class("()I", class));
+        assert!(!descriptor_returns_class("()Lpkg/Other;", class));
+        assert!(!descriptor_returns_class("(Lpkg/Foo$Bar;)V", class));
+        assert!(!descriptor_returns_class("(Lpkg/Foo$Bar;)Lpkg/Other;", class));
+    }
 }
