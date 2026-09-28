@@ -632,13 +632,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "krusty-kotlin"
-version = "0.0.1"
-dependencies = [
- "krusty-build",
-]
-
-[[package]]
 name = "krusty-lsp"
 version = "0.0.1"
 dependencies = [
@@ -652,6 +645,13 @@ dependencies = [
  "sha2",
  "url",
  "zip",
+]
+
+[[package]]
+name = "krusty-toolchain"
+version = "0.0.1"
+dependencies = [
+ "krusty-build",
 ]
 
 [[package]]

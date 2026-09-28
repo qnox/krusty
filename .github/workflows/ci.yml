@@ -421,7 +421,7 @@ jobs:
       - name: package toolchain CLI
         id: kotlin_pkg
         shell: bash
-        run: echo "path=$(just package "${{ matrix.target.triple }}" krusty-kotlin)" >> "$GITHUB_OUTPUT"
+        run: echo "path=$(just package "${{ matrix.target.triple }}" krusty-toolchain)" >> "$GITHUB_OUTPUT"
       - name: package language server
         id: lsp_pkg
         shell: bash

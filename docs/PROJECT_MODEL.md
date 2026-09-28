@@ -21,18 +21,18 @@ main output as a friend path for Kotlin `internal` visibility.
 The analysis worker currently consumes the union of all module classpaths. A successful model change
 restarts the worker and reanalyzes open documents.
 
-## `krusty-kotlin build`
+## `krusty-toolchain build`
 
-`krusty-kotlin build` compiles Kotlin Toolchain JVM projects. The executable is named like
-`krusty-lsp`, not `kotlin`: the upstream driver is `kotlin` only because its compiler is `kotlinc`,
-and the krusty compiler is `krusty`. The command is not a subcommand of that compiler. A directory
-containing `project.yaml`, or a single `module.yaml` that no parent `project.yaml` includes, is the
-project. `jvm/app` and `jvm/lib` modules are compiled by spawning `krusty`. `//` dependencies become
-module edges; an `exported` dependency is visible to dependents, and a `runtime-only` dependency is
-not on the compile classpath. Maven coordinates, version catalogs, `settings`, and non-JVM product
-types fail the command.
+`krusty-toolchain build` compiles Kotlin Toolchain JVM projects. The executable is named for the
+toolchain, like `krusty-lsp` is named for the protocol. `krusty` is already the Kotlin compiler, so
+the driver is not `krusty-kotlin` or the upstream `kotlin` command. It is not a subcommand of the
+compiler. A directory containing `project.yaml`, or a single `module.yaml` that no parent
+`project.yaml` includes, is the project. `jvm/app` and `jvm/lib` modules are compiled by spawning
+`krusty`. `//` dependencies become module edges; an `exported` dependency is visible to dependents,
+and a `runtime-only` dependency is not on the compile classpath. Maven coordinates, version
+catalogs, `settings`, and non-JVM product types fail the command.
 
-Gradle and `.iml` detection in the language server is unchanged. `krusty-kotlin build` only recognizes
+Gradle and `.iml` detection in the language server is unchanged. `krusty-toolchain build` only recognizes
 those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,
 and a toolchain file in the same directory wins over a Gradle marker. A nested Gradle directory
 still wins over a parent toolchain project.

@@ -1,8 +1,8 @@
 [package]
-name = "krusty-kotlin"
+name = "krusty-toolchain"
 version = "0.0.1"
 edition = "2021"
-description = "Kotlin Toolchain command line. krusty-kotlin build compiles JVM projects with the krusty compiler."
+description = "Kotlin Toolchain command line. krusty-toolchain build compiles JVM projects with the krusty compiler."
 license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
 
@@ -10,5 +10,5 @@ repository = "https://github.com/qnox/krusty"
 krusty-build = { path = "../krusty-build" }
 
 [[bin]]
-name = "krusty-kotlin"
+name = "krusty-toolchain"
 path = "src/main.rs"
