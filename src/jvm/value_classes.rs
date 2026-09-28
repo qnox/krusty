@@ -1947,8 +1947,8 @@ pub(crate) fn lower_value_classes(
     // those constructor edges here, using the same pre-erasure target types as the generic `New` handling
     // in step 5. This is classifier- and origin-neutral; anonymous captures are one producer of the shape,
     // but ordinary local/nested constructions obey the same representation rule.
-    // Filled when step 5 applies each `BoxOp::Unbox`; the representation queries of the later tail
-    // rewrites read it.
+    // Filled by each sole-property read of a nested value class's carrier and when step 5 applies
+    // each `BoxOp::Unbox`; the representation queries of the later tail rewrites read it.
     let mut carrier_unboxes = CarrierUnboxes::new();
     let mut value_member_constructor_ops: Vec<(ExprId, BoxOp)> = Vec::new();
     for &id in &targets {
@@ -2536,6 +2536,9 @@ pub(crate) fn lower_value_classes(
             }) => {
                 sole_property_coercions.insert(id);
                 ir.logical_types.insert(id, result);
+                if let Repr::Unboxed(nested) = repr_of_ty(&result, &under) {
+                    carrier_unboxes.insert(id, nested);
+                }
                 ir.physical_types.insert(
                     id,
                     under
@@ -3007,6 +3010,14 @@ pub(crate) fn lower_value_classes(
                         retarget.push((id, erase(&under[&target], &under)));
                         continue;
                     }
+                }
+                // A sole-property read of a nested value class (`ic.s` for `IC(val s: I0)`) is that
+                // class's carrier, which the receiver's carrier already is.
+                if let (true, Target::UnboxedX(nested)) = (
+                    sole_property_coercions.contains(&id),
+                    target(type_operand, &under),
+                ) {
+                    retarget.push((id, erase(&under[&nested], &under)));
                 }
                 // The sole-field coercion (`w.v` → `ImplicitCoercion(<w>, U)`) over a BOXED receiver
                 // (`w!!` of a boxed `W?` shared cell): unbox the receiver first — otherwise the
@@ -4180,8 +4191,13 @@ impl ReprCtx<'_> {
         )
     }
 
+    /// A selected call is non-null when its checked declaration returns a non-null type.
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
+            || matches!(
+                self.types.declared_result(id, self.under),
+                Some(Ty::Obj(..))
+            )
     }
 
     /// Non-null value-class identity whose checked value is carried unboxed. Generated local reads
