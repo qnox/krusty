@@ -11,15 +11,18 @@ pub(super) fn emit(
     fq_name: &str,
     cw: &mut ClassWriter,
 ) {
-    let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
+    let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
-        .filter(|(_, property)| {
-            property.owner_matches(fq_name)
-                && !(property.is_const && static_fields::const_value_idx_peek(ir, property.init))
+        .filter(|(_, property)| property.owner_matches(fq_name))
+        .filter_map(|(index, property)| {
+            Some((
+                index as u32,
+                property,
+                static_fields::clinit_initializer(ir, property)?,
+            ))
         })
-        .map(|(index, property)| (index as u32, property))
         .collect();
 
     // An interface's companion self-hosts its singleton; a plain object publishes INSTANCE.
@@ -75,7 +78,7 @@ pub(super) fn emit(
         Ty::Unit,
         clinit_statics
             .iter()
-            .map(|(_, property)| property.init)
+            .map(|&(_, _, init)| init)
             .chain(init_body),
     );
     let mut clinit = CodeBuilder::new(0);
@@ -88,9 +91,9 @@ pub(super) fn emit(
     // independently request placement after them; generated provenance alone does not imply order.
     let (after_source, before_source): (Vec<_>, Vec<_>) = clinit_statics
         .iter()
-        .partition(|(index, _)| ir.static_initializer_is_after_source(*index));
-    for (index, _) in &before_source {
-        emitter.emit_static_initializer_store(fq_name, *index, &mut clinit);
+        .partition(|(index, _, _)| ir.static_initializer_is_after_source(*index));
+    for &(index, _, init) in &before_source {
+        emitter.emit_static_initializer_store(fq_name, index, init, &mut clinit);
     }
 
     let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
@@ -142,13 +145,13 @@ pub(super) fn emit(
         }
     }
 
-    for (index, property) in &after_source {
+    for &(index, property, init) in &after_source {
         if property.line != 0
             && clinit_line_entries.last().map(|&(_, line)| line) != Some(property.line)
         {
             clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
         }
-        emitter.emit_static_initializer_store(fq_name, *index, &mut clinit);
+        emitter.emit_static_initializer_store(fq_name, index, init, &mut clinit);
     }
 
     let clinit_max = emitter.frame.max();

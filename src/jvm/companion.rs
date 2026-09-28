@@ -255,7 +255,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         ir.statics.push(IrStatic {
             name: candidate.name.clone(),
             ty: candidate.ty,
-            init: candidate.initializer,
+            init: Some(candidate.initializer),
             is_var: candidate.is_var,
             is_const: false,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
@@ -489,7 +489,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 value: Some(initializer),
             });
         }
-        ir.statics[static_index as usize].init = initializer;
+        ir.statics[static_index as usize].init = Some(initializer);
 
         let class = &mut ir.classes[candidate.companion as usize];
         let property_accessors = accessors.map(|(getter, setter)| {

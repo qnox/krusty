@@ -565,10 +565,8 @@ fn materialize_top_level_property(
             ));
         }
         let init = match property.initializer {
-            Some(initializer) => initializer,
-            None if property.flags.has(DeclarationFlags::LATEINIT) => {
-                ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null))
-            }
+            Some(initializer) => Some(initializer),
+            None if property.flags.has(DeclarationFlags::LATEINIT) => None,
             None => {
                 return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
                     property.declaration,
@@ -935,7 +933,7 @@ fn materialize_member_property(
         ir.statics.push(IrStatic {
             name: property.name,
             ty: property.ty,
-            init: initializer,
+            init: Some(initializer),
             is_var: false,
             is_const: true,
             owner: Some(owner),

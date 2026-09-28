@@ -1481,7 +1481,7 @@ mod tests {
         ir.statics.push(crate::ir::IrStatic {
             name: "topLevel".to_string(),
             ty: Ty::Int,
-            init,
+            init: Some(init),
             is_var: true,
             is_const: false,
             owner: None,
