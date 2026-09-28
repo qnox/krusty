@@ -116,16 +116,17 @@ pub(super) fn bounds(
     bounds
         .into_iter()
         .map(|bound| {
-            let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                table
-                    .classes
-                    .get(&owner)
-                    .is_some_and(|classifier| classifier.is_interface())
-                    || table
-                        .libraries
-                        .classifier(owner)
+            let is_interface =
+                crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                    table
+                        .classes
+                        .get(&owner)
                         .is_some_and(|classifier| classifier.is_interface())
-            });
+                        || table
+                            .libraries
+                            .classifier(owner)
+                            .is_some_and(|classifier| classifier.is_interface())
+                });
             (bound, is_interface)
         })
         .collect()

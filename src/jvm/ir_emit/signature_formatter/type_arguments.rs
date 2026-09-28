@@ -42,7 +42,8 @@ impl JvmSignatureFormatter<'_> {
             argument => {
                 let mut signature = String::new();
                 if wildcards.writes_declaration_site()
-                    && !self.wildcard_is_redundant(declaration, argument)?
+                    && !(wildcards.drops_redundant()
+                        && self.wildcard_is_redundant(declaration, argument)?)
                 {
                     match declaration {
                         TypeVariance::In => signature.push('-'),

@@ -6290,6 +6290,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
   `::labelled_return_leaves_the_lambda_not_the_function`,
   `::inline_local_labeled_return`.
+- **A value whose type parameter is bounded by a function type can be invoked.** `t(5)` on
+  `t: T` with `T : (Int) -> Int` (or `where T : (Int) -> Int`) is the invoke convention over the
+  bound, exactly as on a `(Int) -> Int` value, and kotlinc calls the erased `Function1.invoke`. The
+  call-claiming check consulted only a function type itself and declared `invoke` members, so the
+  call reported "unresolved reference 't'". The bound is an interface bound (`T::…Function1…`) and,
+  like every type-parameter bound, is signed with all declaration-site wildcards. Bounds are
+  followed through other type parameters (`<U : (Int) -> Int, T : U>`), and a function bound that is
+  not the first one (`where T : Base, T : (Int) -> Int`) is the checked receiver view of the call,
+  so kotlinc's `checkcast Function1` precedes the invoke. A formal bounded by another formal is
+  signed with only its written bound, in the interface-bound position (`T::TU;`). A value that may
+  be null, whether its type is nullable or it is a type parameter whose every bound admits null, is
+  rejected with kotlinc's "reference has a nullable type '…'. Use explicit '?.invoke' to make a
+  function-like call instead."; one non-null bound makes the value non-null, and a smart cast lifts
+  it (a null check on a stable `val`, or a `val`'s initializing assignment in `init`, which is a
+  stable write that narrows later reads through the same receiver). Type parameters in
+  diagnostics name their owner with its written bounds and variance (`T (of fun <A, T : ((Int) ->
+  A)?> f)`, `X (of class Box<out X, in Y : Number>)`). Tests: `tests/type_parameter_invoke_e2e.rs`,
+  `tests/generic_argument_wildcards_e2e.rs`, `tests/tparam_bounded_by_tparam_e2e.rs`.
 - **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
   `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
   arguments were typed with no expectation, so `it` came out as the erased upper bound and the call

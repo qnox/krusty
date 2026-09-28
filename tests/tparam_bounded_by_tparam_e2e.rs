@@ -217,3 +217,16 @@ fn the_bounded_formal_carries_the_receivers_value_at_runtime() {
         "TparamBoundedByTparam",
     );
 }
+
+/// A formal bounded by another formal is signed with only the bound written on it, as a type
+/// variable in the interface-bound position whatever that formal's own bound is (`T::TU;`).
+#[test]
+fn a_formal_bounded_by_another_formal_is_signed_like_kotlinc() {
+    const SRC: &str = "open class Base\n\
+interface Face\n\
+fun <U : Base, T : U> classBound(t: T) {}\n\
+fun <U : Face, T : U> interfaceBound(t: T) {}\n";
+    common::byte_diff_against_kotlinc("TypeVariableBounds", SRC, "TypeVariableBoundsKt")
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{diff}"));
+}
