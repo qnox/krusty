@@ -1583,7 +1583,7 @@ impl FirExprKind {
                     + object
                         .captures
                         .iter()
-                        .map(|capture| capture.name.len() + capture.source.storage_payload_bytes())
+                        .map(FirLocalClassCapture::storage_payload_bytes)
                         .sum::<usize>()
                     + object.delegate_arguments.len()
                         * std::mem::size_of::<FirInterfaceDelegateArgument>()
@@ -2779,9 +2779,7 @@ impl FirBody {
                         captures.len() * std::mem::size_of::<FirLocalClassCapture>()
                             + captures
                                 .iter()
-                                .map(|capture| {
-                                    capture.name.len() + capture.source.storage_payload_bytes()
-                                })
+                                .map(FirLocalClassCapture::storage_payload_bytes)
                                 .sum::<usize>()
                     }
                     FirStatementKind::ConstructorDelegation(call) => call.storage_payload_bytes(),

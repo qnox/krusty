@@ -202,6 +202,23 @@ impl CodeBuilder {
         }
     }
 
+    /// Withdraw a line marked at the current offset, which no instruction occupies yet: the code
+    /// about to begin there has no source position, as kotlinc builds an implicit context argument,
+    /// so the line in effect stays the earlier one until something that has a position marks it.
+    /// A retained entry is kept, since it records an inline call site rather than a start.
+    pub(crate) fn withdraw_line(&mut self) {
+        let pc = self.bytes.len();
+        let retained = self.retained_line_mark == Some(self.line_marks.len().wrapping_sub(1));
+        if !retained
+            && self
+                .line_marks
+                .last()
+                .is_some_and(|(lpc, _)| *lpc as usize == pc)
+        {
+            self.line_marks.pop();
+        }
+    }
+
     /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
@@ -318,6 +335,20 @@ mod tests {
             "one entry at the second offset: the later mark replaces the earlier one, because \
              nothing was retained there. Naming the offset gave `[(0, 7), (1, 8), (1, 9)]`"
         );
+    }
+
+    /// A line marked where positionless code begins is withdrawn, so the line in effect is the
+    /// earlier one and the next mark of the withdrawn line is written where it truly begins.
+    #[test]
+    fn a_withdrawn_mark_leaves_the_earlier_line_in_effect() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(11);
+        advance(&mut code);
+        code.mark_line(12);
+        code.withdraw_line();
+        advance(&mut code);
+        code.mark_line(12);
+        assert_eq!(code.line_marks(), [(0, 11), (2, 12)]);
     }
 
     /// Retention names an entry, so it expires on its own once the pc moves past it — an ordinary

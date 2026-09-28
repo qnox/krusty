@@ -1056,6 +1056,7 @@ impl BodyFirChecker<'_> {
                 shared_cell: capture.shared_cell,
                 capture_identity,
                 source,
+                receiver: capture.receiver.clone(),
             });
         }
         if !context.values.is_empty()

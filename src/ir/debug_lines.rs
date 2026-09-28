@@ -2,7 +2,7 @@
 //! start. Common lowering records the semantic fact once; a backend asks where the line belongs
 //! instead of inferring it from a synthetic origin or expression shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{ExprId, IrFile};
 
@@ -21,6 +21,9 @@ pub(super) struct GeneratedLineMarks {
     /// position of their own, so nothing marks the line at its start (a callable-reference
     /// carrier's `invoke`, whose stored receiver is read ahead of the call's line).
     dispatches: HashMap<ExprId, u32>,
+    /// Expressions kotlinc builds without source offsets (an implicit context argument): no line
+    /// begins at them, so a line marked where one starts has not begun yet.
+    positionless: HashSet<ExprId>,
 }
 
 impl IrFile {
@@ -58,6 +61,14 @@ impl IrFile {
         self.generated_lines.dispatches.get(&call).copied()
     }
 
+    pub(crate) fn mark_positionless(&mut self, expression: ExprId) {
+        self.generated_lines.positionless.insert(expression);
+    }
+
+    pub(crate) fn is_positionless(&self, expression: ExprId) -> bool {
+        self.generated_lines.positionless.contains(&expression)
+    }
+
     /// Carry `source`'s generated line marks over to its copy `target`.
     pub(super) fn copy_generated_line_marks(&mut self, source: ExprId, target: ExprId) {
         let marks = &mut self.generated_lines;
@@ -69,6 +80,9 @@ impl IrFile {
         }
         if let Some(&line) = marks.fallthrough_returns.get(&source) {
             marks.fallthrough_returns.insert(target, line);
+        }
+        if marks.positionless.contains(&source) {
+            marks.positionless.insert(target);
         }
     }
 }

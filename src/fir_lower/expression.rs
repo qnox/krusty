@@ -1467,6 +1467,9 @@ impl BodyLowering<'_> {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
         let debug = self.body.expression_debug_lines(expression_id);
+        if debug.positionless {
+            self.ir.mark_positionless(lowered);
+        }
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
             for raw in first_generated..self.ir.exprs.len() {

@@ -228,6 +228,7 @@ impl Checker<'_> {
                         storage_ty: binding.delegate_storage_ty,
                         source: AnonymousObjectCaptureSource::LexicalValue,
                         receiver_label: None,
+                        receiver: None,
                         lexical_shadow_depth,
                         capture_dependency: None,
                     },

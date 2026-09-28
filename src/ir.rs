@@ -68,8 +68,9 @@ pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
-pub use constructors::{IrConstructorAccess, IrConstructorCapture, IrConstructorTarget};
-pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use constructors::{IrCapturedReceiver, IrConstructorCapture, IrJvmValueClassSecondaryCtor};
+pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
@@ -1235,9 +1236,8 @@ pub struct IrCtorArg {
     /// (f4) so a consumer admits element-form/omitted arguments instead of demanding a literal array.
     pub is_vararg: bool,
     pub type_param: Option<u32>,
-    /// `Some(name)` when the backend should guard this parameter with a non-null assertion
-    /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a
-    /// primitive, nullable, or class-type-parameter param, and for the synthetic inner `this$0`.
+    /// `Some(name)` for a non-null reference param the backend guards at `<init>` entry; `None` for a
+    /// primitive, nullable or type-parameter param and for synthetic ones (`this$0`, captures).
     pub check: Option<String>,
     /// The captured value a local or anonymous class's synthetic constructor prefix carries.
     pub capture: Option<IrConstructorCapture>,

@@ -500,6 +500,9 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         argument: &ResolvedContextArgument,
     ) -> Result<FirReceiver, BodyCheckFailure> {
+        let origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::ContextArgument);
         let value = match argument {
             ResolvedContextArgument::Binding { name, shadow_depth } => {
                 let (enclosing_depth, binding) = self
@@ -521,13 +524,13 @@ impl BodyFirChecker<'_> {
                     FirExprKind::ValueRead(binding.value)
                 };
                 self.body.add_expr(FirExpr {
-                    origin: cause,
+                    origin,
                     ty: binding.ty,
                     kind,
                 })
             }
             ResolvedContextArgument::ImplicitReceiver(selection) => {
-                self.materialize_implicit_receiver(cause, span, selection)?
+                self.materialize_implicit_receiver(origin, span, selection)?
                     .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?
                     .value
             }

@@ -4917,6 +4917,10 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
         .expect("selected suspend member call");
     assert_eq!(
         body.expression_debug_lines(call),
-        FirExpressionDebugLines { source: 5, end: 8 }
+        FirExpressionDebugLines {
+            source: 5,
+            end: 8,
+            positionless: false
+        }
     );
 }
