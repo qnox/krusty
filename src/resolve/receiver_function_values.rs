@@ -26,6 +26,7 @@ impl Checker<'_> {
                             receiver_identity,
                             declared_ty,
                             enum_entry_property,
+                            owner_storage,
                         } => {
                             let receivers = self.implicit_receivers(scope);
                             let recorded_is_owner = receivers.iter().any(|receiver| {
@@ -52,6 +53,7 @@ impl Checker<'_> {
                                 receiver_identity,
                                 declared_ty,
                                 enum_entry_property,
+                                owner_storage,
                             }
                         }
                         origin => origin,
@@ -79,6 +81,7 @@ impl Checker<'_> {
                             receiver_identity: receiver.identity,
                             declared_ty: property.ty,
                             enum_entry_property: property.enum_entry_property,
+                            owner_storage: false,
                         },
                     )),
                     _ => None,
