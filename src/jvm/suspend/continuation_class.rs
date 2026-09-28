@@ -172,6 +172,7 @@ pub(super) fn build_continuation_class(
                         descriptor,
                         params: None,
                         interface,
+                        module_target: None,
                     },
                     dispatch_receiver: Some(recv),
                     args: reentry_args,

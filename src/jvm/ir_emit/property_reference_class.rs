@@ -693,7 +693,7 @@ fn property_reference_writer(
 ) -> ClassWriter {
     let mut cw = new_writer(&c.fq_name(), &c.superclass(), opts);
     cw.set_access(0x1000 | 0x0010 | 0x0020); // SYNTHETIC | FINAL | SUPER
-    if let Some((owner, method)) = class_enclosure(ir, c, facade) {
+    if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),

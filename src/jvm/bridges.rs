@@ -21,7 +21,7 @@ use crate::types::{stored_value_ty, Ty};
 pub(super) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
-    boxed_results: &crate::jvm::override_results::BoxedResults,
+    override_results: &crate::jvm::override_results::OverrideResults,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes and declaration-owned enum-entry subclasses only. Lambdas and
@@ -33,7 +33,7 @@ pub(super) fn derive_bridges(
         }
         let first = ir.classes[cid].bridges.len();
         let mut order = Vec::new();
-        superclass_method_bridges(ir, cid, classpath, boxed_results, &mut order)?;
+        superclass_method_bridges(ir, cid, classpath, override_results, &mut order)?;
         property_bridges(ir, cid, classpath, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
@@ -149,7 +149,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
-    boxed_results: &crate::jvm::override_results::BoxedResults,
+    override_results: &crate::jvm::override_results::OverrideResults,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
@@ -172,7 +172,10 @@ fn superclass_method_bridges(
         // An overridden declaration whose primitive result is realized as its wrapper is reached
         // through that wrapper.
         if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {
-            if boxed_results.boxes(ir, callable) {
+            if override_results
+                .boxed_callable_result(ir, callable)
+                .is_some()
+            {
                 declared_result = Ty::nullable(declared_result);
             }
         }
@@ -184,9 +187,19 @@ fn superclass_method_bridges(
         let concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());
-        let concrete_ret = own_fid
-            .map(|function| ir.functions[function as usize].ret)
-            .unwrap_or(edge.implementation_result);
+        // The implementation's JVM result: the wrapper where its primitive result is boxed, as it
+        // is for an implementation inherited from another file's declaration.
+        let concrete_ret = match (own_fid, edge.implementation) {
+            (Some(function), _) => override_results.physical_result(ir, function),
+            (None, crate::fir::ResolvedFunctionOverrideTarget::Module(callable))
+                if override_results
+                    .boxed_callable_result(ir, callable)
+                    .is_some() =>
+            {
+                Ty::nullable(edge.implementation_result)
+            }
+            (None, _) => edge.implementation_result,
+        };
         let own_params = concrete_params
             .iter()
             .copied()

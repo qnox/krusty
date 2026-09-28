@@ -65,8 +65,16 @@ impl Emitter<'_> {
                 (source, source)
             }
             IrTypeOp::ImplicitCoercion => {
-                let arg = self.unboxed_reference_source(arg, type_operand);
-                self.emit_type_op_operand(arg, code)
+                match reference_target
+                    .then(|| self.emit_boxed_call_reference(arg, code))
+                    .flatten()
+                {
+                    Some(wrapper) => (wrapper, wrapper),
+                    None => {
+                        let arg = self.unboxed_reference_source(arg, type_operand);
+                        self.emit_type_op_operand(arg, code)
+                    }
+                }
             }
             _ => self.emit_type_op_operand(arg, code),
         };

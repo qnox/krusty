@@ -18,6 +18,8 @@ pub struct IrSamTarget {
     pub context_count: u32,
     pub has_receiver: bool,
     pub suspend: bool,
+    /// The method's primitive result replaces a non-primitive result it overrides.
+    pub overrides_non_primitive_result: bool,
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,

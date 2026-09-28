@@ -10,7 +10,8 @@ use super::{
     emit_value_class_unbox_adapter, finish_code, finish_code_sig, ir_ty_to_jvm, jvm_declared_ty,
     jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
     method_descriptor, slot_words, throw_assertion_error, type_descriptor, unbox_prim_from,
-    verif_for_jvm_free, ClassWriter, CodeBuilder, EmitRun, JvmSignatureFormatter, VerifType,
+    verif_for_jvm_free, ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter,
+    VerifType,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -150,15 +151,9 @@ pub(super) fn emit_bridges(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
-    adaptations: &crate::jvm::bridge_adaptations::BridgeAdaptations,
-    run: &EmitRun,
+    env: &EmitEnv,
 ) {
-    let class = ClassBridges {
-        ir,
-        class: c,
-        adaptations,
-        run,
-    };
+    let class = ClassBridges::new(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -173,7 +168,20 @@ struct ClassBridges<'a> {
     ir: &'a IrFile,
     class: &'a crate::ir::IrClass,
     adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
+    override_results: &'a crate::jvm::override_results::OverrideResults,
     run: &'a EmitRun,
+}
+
+impl<'a> ClassBridges<'a> {
+    fn new(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &EmitEnv<'a>) -> Self {
+        Self {
+            ir,
+            class,
+            adaptations: env.bridge_adaptations,
+            override_results: env.override_results,
+            run: env.run,
+        }
+    }
 }
 
 /// Emit one bridge: see [`emit_bridges`].
@@ -188,6 +196,7 @@ fn emit_bridge(
         ir,
         class: c,
         adaptations,
+        override_results,
         run,
     } = *class;
     let adapter = adaptations.get(
@@ -215,7 +224,7 @@ fn emit_bridge(
     // The target is a declaration, so its result is spelled as declared (`Nothing?` is `Void`).
     let tr = static_target.map_or_else(
         || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
-        |(_, function)| jvm_declared_ty(&function.ret),
+        |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
     );
     let erased_desc = method_descriptor(&ep, er);
     // A bridge whose (name, descriptor) already names a REAL method on this class would be a
@@ -599,8 +608,7 @@ pub(super) fn emit_value_class_interface_entries(
     cw: &mut ClassWriter,
     member: u32,
     formatter: &JvmSignatureFormatter<'_>,
-    adaptations: &crate::jvm::bridge_adaptations::BridgeAdaptations,
-    run: &EmitRun,
+    env: &EmitEnv,
 ) {
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry
@@ -610,12 +618,7 @@ pub(super) fn emit_value_class_interface_entries(
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         let header = EntryHeader::of(ir, formatter, member, &descriptor);
-        let class = ClassBridges {
-            ir,
-            class: c,
-            adaptations,
-            run,
-        };
+        let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
     }

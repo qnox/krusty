@@ -159,6 +159,7 @@ impl SerializeBody<'_> {
                         descriptor: format!("(){descriptor}"),
                         params: None,
                         interface: false,
+                        module_target: None,
                     },
                     dispatch_receiver: Some(receiver),
                     args: vec![],
