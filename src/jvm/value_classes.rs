@@ -719,10 +719,8 @@ pub(crate) fn lower_value_classes(
     // such a param slot as the BOXED value class so the body unboxes it at each value-class member call —
     // matching kotlinc, which unboxes the incoming box before use. (Only the repr analysis sees this; the
     // emitted method signature is unchanged.)
-    // A GENERIC value class (`IC<T>`, its field typed by a type parameter → `Object`) has representation
-    // krusty can't box-mark at a generic-override param without a stack-type conflict (its box/unbox differ
-    // from a concrete-underlying value class). Leave such a param unmarked. A NON-generic value class marks
-    // fine.
+    // A GENERIC value class (`IC<T>`, its field typed by a type parameter) is left unmarked: its box
+    // and unbox differ from a concrete-underlying one's, which krusty can't mark without a conflict.
     let generic_vcs: std::collections::HashSet<TypeName> = ir
         .classes
         .iter()
@@ -731,6 +729,7 @@ pub(crate) fn lower_value_classes(
         .collect();
     let inline_own_parameters = inline_body_slots::own_parameters(ir);
     let mut slot_types = slot_types;
+    let mut boxed_generic_overrides = HashSet::new();
     for c in &ir.classes {
         for b in &c.bridges {
             // A VALUE-CLASS-returning override is MANGLED with fully UNBOXED params — kotlinc keeps it
@@ -787,11 +786,11 @@ pub(crate) fn lower_value_classes(
                         .obj_internal()
                         .is_some_and(|n| n.matches("kotlin/Any") || n.matches("java/lang/Object"));
                     if under.contains_key(&x) && supertype_generic && !generic_vcs.contains(&x) {
-                        // Mark BOXED in both the body's slot repr AND the call-boundary target
-                        // (`orig_params`), so a CALLER boxes its arg into this generic-`Object` slot and the
-                        // BODY unboxes it — the param is a boxed position at every boundary, consistently.
+                        // Mark BOXED in the body's slot repr AND the call-boundary target, so a
+                        // CALLER boxes into this generic slot and the BODY unboxes it.
                         let boxed = Ty::nullable(Ty::obj_name(x));
                         slot_types[fid as usize].insert(base + i as u32, boxed);
+                        boxed_generic_overrides.insert(fid);
                         if let Some(p) =
                             orig_params.get_mut(fid as usize).and_then(|v| v.get_mut(i))
                         {
@@ -803,6 +802,7 @@ pub(crate) fn lower_value_classes(
         }
     }
 
+    call_arguments::record_method_parameters(ir, &boxed_generic_overrides, &orig_params);
     // 1. Erase signatures + drop null-checks on params that erased to a non-reference. `box-impl`
     //    returns the boxed `X` (the one position not erased).
     let is_vc_ty = |t: &Ty| {
@@ -1046,12 +1046,13 @@ pub(crate) fn lower_value_classes(
                 // than [`is_ref`]: an ordinary type parameter is a generic reference boundary, but
                 // a value-class carrier can temporarily retain `TyParam<T : Int>` here and is emitted
                 // as the primitive bound (`I`). The guard must agree with that final physical slot.
-                // A lowered member's checks start after its carrier; `orig_params` has none.
+                // A lowered member's checks start after its carrier; `orig_params` has none. A
+                // parameter holding its box (a generic override's) is marked nullable there.
                 let source_index =
                     k.checked_sub(usize::from(lowered_value_members.contains(&(fid as u32))));
                 let under_nullable = source_index
                     .and_then(|index| orig_params[fid].get(index))
-                    .is_some_and(|t| vc_underlying_nullable(t, &under));
+                    .is_some_and(|t| vc_underlying_nullable(&t.non_null(), &under));
                 let physical_is_ref = f
                     .params
                     .get(k)
