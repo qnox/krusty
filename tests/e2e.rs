@@ -2096,6 +2096,8 @@ mod type_param_vararg_check_e2e;
 mod type_parameter_invoke_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]
 mod type_parameter_nullability_e2e;
+#[path = "type_use_annotation_metadata_e2e.rs"]
+mod type_use_annotation_metadata_e2e;
 #[path = "typealias_abbreviated_type_e2e.rs"]
 mod typealias_abbreviated_type_e2e;
 #[path = "typealias_constructor_inference_e2e.rs"]

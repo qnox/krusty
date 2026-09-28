@@ -95,3 +95,21 @@ impl Checker<'_> {
             .insert((annotation.span.lo, annotation.span.hi), applied);
     }
 }
+
+/// The retention of an annotation classifier: the module's own normalized fact for a source
+/// declaration, otherwise the provider's declared policy. `None` for a policy this compiler does not
+/// know, which makes the application unsupported rather than silently retained.
+pub(super) fn annotation_retention(
+    module_retention: Option<crate::types::AnnotationRetention>,
+    classifier: &crate::libraries::LibraryType,
+) -> Option<crate::types::AnnotationRetention> {
+    module_retention.or_else(|| {
+        Some(match classifier.retention.as_deref() {
+            Some("SOURCE") => crate::types::AnnotationRetention::Source,
+            Some("BINARY" | "CLASS") => crate::types::AnnotationRetention::Binary,
+            Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
+            None => crate::types::AnnotationRetention::Default,
+            Some(_) => return None,
+        })
+    })
+}

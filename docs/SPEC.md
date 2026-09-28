@@ -7388,6 +7388,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   different. See `docs/METADATA_NOTES.md` for the wire rules and interning order.
   Tests: `tests/typealias_abbreviated_type_e2e.rs`.
 
+- **A type-use annotation is recorded on its type occurrence in `@Metadata`.** kotlinc writes every
+  annotation applied to a declared type occurrence whose retention is not `SOURCE` as
+  `Type.annotation` (extension field 100) on that occurrence's `Type`, at any depth and in source
+  order: `fun f(x: @Mark Item)`, `Holder<@Mark Item>`, `@Mark Item?`, `@Mark (Item) -> Unit`,
+  a supertype `class D : @Mark Base()`, and the box corpus's `checkExactType(value: @Exact T)`.
+  Retention alone decides: `@UnsafeVariance` (declared `SOURCE`) is not recorded, while
+  `@JvmSuppressWildcards` and `@kotlin.internal.Exact` are. The annotation's descriptor is interned
+  in `d2`, so a missing record also leaves the constant pool one entry short. The identity is the
+  one Pass 1 bound to the annotation reference; the record travels on the declared type's spelling
+  (`Spelled::annotations`) like an alias abbreviation. An application written WITH arguments
+  (`@Bin(3) Item`) is left out until the metadata writer encodes annotation argument values, since
+  a record without them would name a different annotation. `@NoInfer` is no longer special-cased:
+  it is one more recorded type-use annotation.
+  Tests: `tests/type_use_annotation_metadata_e2e.rs`.
+
 - **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`
   name the same declaration and must resolve identically. A dotted spelling reaches name resolution
   intact — the parse seam expands only what it can match — and qualified resolution answers it with

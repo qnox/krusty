@@ -23,6 +23,18 @@ impl Parser<'_> {
 
     /// Consume one annotation and retain its complete classifier reference plus arguments. `None` for
     /// a use-site `@file:`/`@get:` target, which does not apply to the declaration/type parameter itself.
+    /// Keep a type-use annotation's non-empty argument list, keyed by the annotation's span.
+    pub(super) fn record_type_annotation_arguments(
+        &mut self,
+        annotation: Span,
+        arguments: Vec<ExprId>,
+    ) {
+        if !arguments.is_empty() {
+            let key = (annotation.lo, annotation.hi);
+            self.file.type_annotation_arguments.insert(key, arguments);
+        }
+    }
+
     pub(super) fn parse_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...

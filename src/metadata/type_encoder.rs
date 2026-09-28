@@ -579,6 +579,7 @@ fn encode_type_with_parameter(
                     message.field_varint(9, strings.local(source_name) as u64);
                 }
             }
+            add_type_annotations(&mut message, strings, spelled);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
@@ -599,14 +600,17 @@ fn encode_type_with_parameter(
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
+            add_type_annotations(&mut message, strings, spelled);
         }
         Ty::Unit => {
             encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            add_type_annotations(&mut message, strings, spelled);
         }
         Ty::Nothing => {
             encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            add_type_annotations(&mut message, strings, spelled);
         }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
@@ -648,6 +652,7 @@ fn encode_type_with_parameter(
             if signature.has_receiver {
                 add_extension_function_annotation(&mut message, strings);
             }
+            add_type_annotations(&mut message, strings, spelled);
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
@@ -817,6 +822,14 @@ pub(crate) fn encode_annotation(strings: &mut StringTable, classifier: TypeName)
     let mut annotation = Pb::new();
     annotation.field_varint(1, strings.class_id(classifier) as u64);
     annotation
+}
+
+/// Append the source annotations `@Metadata` records on this type occurrence as `Type.annotation`
+/// (extension field 100), in source order. See [`Spelled::annotations`].
+fn add_type_annotations(message: &mut Pb, strings: &mut StringTable, spelled: &Spelled) {
+    for &annotation in &spelled.annotations {
+        message.field_message(100, &encode_annotation(strings, annotation));
+    }
 }
 
 pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable) {
