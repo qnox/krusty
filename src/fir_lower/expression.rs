@@ -168,10 +168,15 @@ impl BodyLowering<'_> {
                 classifier,
                 ordinal: _,
                 name,
-            } => self.ir.add_expr(IrExpr::EnumEntry {
-                classifier: *classifier,
-                name: name.clone(),
-            }),
+            } => {
+                let classifier = *classifier;
+                let name = name.clone();
+                if let Some(instance) = self.same_enum_entry_instance(classifier, &name, origin)? {
+                    instance
+                } else {
+                    self.ir.add_expr(IrExpr::EnumEntry { classifier, name })
+                }
+            }
             FirExprKind::ClassifierPropertyRead { owner, property } => match property {
                 crate::fir::FirClassifierProperty::EnumEntries => {
                     self.ir.add_expr(IrExpr::EnumEntries { classifier: *owner })

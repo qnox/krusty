@@ -29,6 +29,7 @@ mod data_classes;
 mod delegated_properties;
 #[cfg(test)]
 mod entry_point_tests;
+mod enum_entry_instance;
 mod erased_parameters;
 mod error;
 mod expression;
