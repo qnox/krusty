@@ -9530,7 +9530,18 @@ impl<'a> Emitter<'a> {
                 let jt = jvm_declared_ty(&fty);
                 let owner = c.fq_name();
                 let is_lateinit = c.fields[*index as usize].is_lateinit();
-                if static_storage(self.ir, c) {
+                if let Some(method) = static_accessors::cross_class_backing_field_method(
+                    self.cw,
+                    self.ir,
+                    &self.facade,
+                    self.static_owner,
+                    *class,
+                    *index,
+                    false,
+                ) {
+                    self.emit_value(*receiver, code);
+                    code.invokestatic(method, 1, slot_words(jt) as i32);
+                } else if static_storage(self.ir, c) {
                     // A static-storage object field: no instance operand. The receiver is `this`
                     // (or the INSTANCE read) — evaluate it only if it could have effects.
                     if !matches!(self.ir.expr(*receiver), crate::ir::IrExpr::GetValue(_)) {

@@ -3485,9 +3485,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `field` keyword inside the accessor reaches the field. An accessor nested inside another
   accessor binds `field` to its own property (`override val your = "K" get() = field` reads `your`,
   not the outer property the object was created in). A `field` use that is not itself in an
-  accessor still means the enclosing accessor's property. Tests:
+  accessor still means the enclosing accessor's property. When that use is in an anonymous object,
+  local class, or lambda, it is code of that other JVM class. The backing field is private, and
+  calling the property getter or setter from there re-enters the accessor that contains the use.
+  The nested class calls the owner's `access$get<X>$p` / `access$set<X>$p`, and that accessor reads
+  or writes the field directly. Those methods are distinct from `access$get<X>` /
+  `access$set<X>`, which a private property-reference carrier uses to call source-declared
+  accessors; both pairs can coexist for one property. A top-level property's accessor is a static
+  method of the file facade; a member property's takes the instance. Tests:
   `tests/backing_field_accessor_e2e.rs`
-  (`an_inner_accessor_reads_its_own_backing_field`).
+  (`an_inner_accessor_reads_its_own_backing_field`,
+  `a_nested_object_reads_the_enclosing_top_level_backing_field`,
+  `a_nested_object_reads_the_enclosing_instance_backing_field`,
+  `a_local_class_in_a_setter_writes_the_backing_field`).
 
 - **Top-level property with a backing field + custom accessor.** `val x = "OK" get() = field`,
   `var v = 0 set(value) { field = value }` at file scope. The backing field is a facade STATIC
