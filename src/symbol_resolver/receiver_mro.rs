@@ -288,7 +288,7 @@ impl ReceiverMro {
         }
         // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included
         // — at lowest precedence.
-        want.is_some_and(|n| n.matches("kotlin/Any"))
+        want.is_some_and(|name| crate::types::same(name, crate::types::wk::any()))
             .then_some((u32::MAX - 1, self.recv))
     }
 
