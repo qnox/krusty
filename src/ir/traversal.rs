@@ -502,3 +502,16 @@ fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(
     let mut visited = std::collections::HashSet::new();
     shift(ir, e, threshold, map, &mut visited);
 }
+
+/// The values a `when` or a `try` selects its own value from: each branch's result, or the `try`
+/// body's and then each handler's. Any other expression selects none.
+pub fn selected_values(expr: &IrExpr) -> impl Iterator<Item = ExprId> + '_ {
+    let (branches, body, catches): (&[_], _, &[_]) = match expr {
+        IrExpr::When { branches } => (branches, None, &[]),
+        IrExpr::Try { body, catches, .. } => (&[], Some(*body), catches),
+        _ => (&[], None, &[]),
+    };
+    let branches = branches.iter().map(|(_, value)| *value);
+    let handlers = catches.iter().map(|catch| catch.body);
+    branches.chain(body).chain(handlers)
+}
