@@ -93,7 +93,6 @@ inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric2.kt
 inlineClasses/callableReferences/inlineClassPrimaryConstructor.kt
 inlineClasses/callableReferences/inlineClassPrimaryConstructorGeneric.kt
-inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric.kt
 inlineClasses/equalityForIndyLambdaParameter.kt
 inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
@@ -104,7 +103,6 @@ inlineClasses/kt25771.kt
 inlineClasses/kt57973.kt
 inlineClasses/result/directCall2.kt
 inlineClasses/resultRunCatchingOrElse.kt
-inlineClasses/secondaryConstructorsWithBody.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt

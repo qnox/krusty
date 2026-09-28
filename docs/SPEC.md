@@ -8186,6 +8186,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   box's physical type on the unboxed result, so the return unboxed the carrier again and the class
   failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
+- **A value class's constructors build the value in a temporary.** The static `constructor-impl`
+  that runs a value class's `init` block first stores its parameter in an unnamed temporary typed
+  as the value class; `this` and the class's property in the block read it, a `this` passed as a
+  reference is boxed with `box-impl`, and the temporary is returned. A secondary constructor's
+  delegated value is the same kind of temporary. A class or lambda declared in a constructor is
+  enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
+  `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
+  `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
