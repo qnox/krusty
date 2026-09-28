@@ -179,7 +179,7 @@ pub(super) fn emit_enum_entry_subclass(
     // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
     // (for example `apply(Object)` forwarding to `apply(String)`).
-    emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    emit_bridges(ir, c, &mut cw, env);
     if let Some(m) = opts
         .emit_class_metadata
         .then(|| build_class_metadata(ir, c, opts))

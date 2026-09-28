@@ -388,6 +388,16 @@ impl<'a> JvmSignatureFormatter<'a> {
         self.ty_at(ty, Wildcards::Declared)
     }
 
+    /// A class header's supertype. A function-type supertype is written as its runtime function
+    /// interface (`FunctionN<R>` past 22 parameters, a continuation-taking `Function{N+1}` for a
+    /// suspend one), exactly as the same function type is in any other position.
+    pub(super) fn supertype(&self, ty: &Ty) -> Option<String> {
+        if let Ty::Fun(function) = ty {
+            return self.function_ty(function, Wildcards::Supertype);
+        }
+        self.ty_at(ty, Wildcards::Supertype)
+    }
+
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
         if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = ty {
             return self.ty_at(inner, wildcards);

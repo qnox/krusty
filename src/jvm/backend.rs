@@ -46,6 +46,8 @@ pub(crate) struct BackendPassFacts {
     unit_result_tail_forwards: crate::jvm::suspend::UnitResultTailForwards,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    /// The bridges that take `FunctionN.invoke`'s packed argument array.
+    function_argument_arrays: crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -167,7 +169,7 @@ fn run_backend_passes_after_plugins(
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    crate::jvm::bridges::derive_bridges(ir, classpath)?;
+    crate::jvm::bridges::derive_bridges(ir, classpath, &mut facts.function_argument_arrays)?;
     apply_collection_bridge_barriers(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
@@ -846,6 +848,7 @@ impl JvmBackend {
             emit_time_machines: &pass_facts.emit_time_machines,
             unit_result_tail_forwards: &pass_facts.unit_result_tail_forwards,
             bridge_returns: &pass_facts.bridge_return_adaptations,
+            function_argument_arrays: &pass_facts.function_argument_arrays,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,

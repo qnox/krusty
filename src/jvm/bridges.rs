@@ -18,9 +18,10 @@ use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
-pub fn derive_bridges(
+pub(crate) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes and declaration-owned enum-entry subclasses only. Lambdas and
@@ -32,7 +33,7 @@ pub fn derive_bridges(
         }
         let first = ir.classes[cid].bridges.len();
         let mut order = Vec::new();
-        superclass_method_bridges(ir, cid, classpath, &mut order)?;
+        superclass_method_bridges(ir, cid, classpath, argument_arrays, &mut order)?;
         property_bridges(ir, cid, classpath, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
@@ -133,6 +134,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
@@ -161,7 +163,7 @@ fn superclass_method_bridges(
         // says `Echo<T>.echo: T`. Only then apply JVM bridge erasure. Using the physical descriptor
         // here is too early: it would manufacture a bridge for semantic value-class parameters such
         // as `Continuation.resumeWith(Result<T>)` before the value-class pass realizes their carrier.
-        let (base_params, base_ret) = match edge.overridden {
+        let (mut base_params, mut base_ret) = match edge.overridden {
             crate::fir::ResolvedFunctionOverrideTarget::Module(_) => (
                 edge.declared_parameters
                     .iter()
@@ -201,12 +203,34 @@ fn superclass_method_bridges(
                 )
             }
         };
-        let concrete_params = own_fid
+        let mut concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());
-        let concrete_ret = own_fid
+        let mut concrete_ret = own_fid
             .map(|function| ir.functions[function as usize].ret)
             .unwrap_or(edge.implementation_result);
+        let mut parameter_identities = edge.implementation_parameter_identities.clone();
+        let suspend_function_supertype =
+            crate::libraries::function_classifiers::classifier(edge.overridden_owner)
+                .is_some_and(|function| function.is_suspend() && !function.is_reflective());
+        if suspend_function_supertype {
+            // `SuspendFunctionN.invoke` is realized as `Function{N+1}.invoke`, whose continuation is
+            // the ordinary type parameter `P{N+1}`: its erased descriptor takes `Object` where the
+            // CPS override takes `Continuation`, so the bridge always exists and is built here in
+            // its final CPS form (kotlinc's `invoke(Object)Object` casting to `Continuation`).
+            base_params.push(Ty::nullable(Ty::obj("kotlin/Any")));
+            base_ret = Ty::nullable(Ty::obj("kotlin/Any"));
+            concrete_params.push(Ty::obj("kotlin/coroutines/Continuation"));
+            concrete_ret = base_ret;
+            parameter_identities.push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
+        }
+        let packed_arguments =
+            crate::libraries::function_classifiers::classifier(edge.overridden_owner)
+                .is_some_and(|function| !function.is_reflective())
+                && crate::jvm::names::uses_function_n(base_params.len());
+        if packed_arguments {
+            base_params = vec![Ty::array(Ty::nullable(Ty::obj("kotlin/Any")))];
+        }
         let own_params = concrete_params
             .iter()
             .copied()
@@ -278,7 +302,9 @@ fn superclass_method_bridges(
         // value-class-mangled target still needs a bridge. Record it in declared form here so the
         // value-class pass can apply its one canonical mangle/box/unbox realization; the suspend pass
         // later converts both bridge sides to the CPS descriptor.
-        if edge.suspend || own_fid.is_some_and(|function| ir.suspend_funs.contains(&function)) {
+        if !suspend_function_supertype
+            && (edge.suspend || own_fid.is_some_and(|function| ir.suspend_funs.contains(&function)))
+        {
             let vc_ret = own_ret
                 .non_null()
                 .obj_internal()
@@ -295,8 +321,7 @@ fn superclass_method_bridges(
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);
-        let parameter_identities = edge.implementation_parameter_identities.clone();
-        if parameter_identities.len() != base_params.len() {
+        if parameter_identities.len() != concrete_params.len() {
             return Err(SkipReason::Bridges);
         }
         order.push(
@@ -321,6 +346,11 @@ fn superclass_method_bridges(
             box_ret: None,
             unbox_params: Vec::new(),
         });
+        if packed_arguments {
+            let class = &ir.classes[cid];
+            let bridge = class.bridges.last().expect("the bridge just pushed");
+            argument_arrays.record(class.fq_name_id(), bridge);
+        }
     }
     Ok(())
 }

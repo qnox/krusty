@@ -1015,6 +1015,39 @@ fn append_function_override_edges(
     }
 }
 
+/// The hierarchy an `invoke` override is matched against. A function-type supertype
+/// (`class C : suspend (A) -> R`) stays a callable shape in the published hierarchy; its `invoke`
+/// is declared by the function classifier the shape is an instance of, so that classifier joins the
+/// walk one rung below the classifier that declares the supertype.
+fn with_function_supertypes(
+    source: &dyn SymbolSource,
+    hierarchy: &[crate::fir::ResolvedAppliedClassifier],
+) -> Vec<crate::fir::ResolvedAppliedClassifier> {
+    let mut extended = hierarchy.to_vec();
+    for entry in hierarchy {
+        let Some(declaring) = source.classifier(entry.classifier) else {
+            continue;
+        };
+        let bindings = crate::symbol_resolver::classifier_bindings(&declaring, entry.applied.get());
+        for signature in &declaring.callable_signatures {
+            let applied = crate::types::ty_subst_applied_arguments(*signature, &bindings);
+            let view = crate::libraries::function_classifiers::supertype_classifier(applied);
+            let Some(classifier) = view.obj_internal() else {
+                continue;
+            };
+            if extended.iter().any(|known| known.classifier == classifier) {
+                continue;
+            }
+            extended.push(crate::fir::ResolvedAppliedClassifier {
+                classifier,
+                applied: ResolvedTy::new(view).expect("a finalized function supertype is resolved"),
+                depth: entry.depth + 1,
+            });
+        }
+    }
+    extended
+}
+
 fn function_override_plans(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
@@ -1225,7 +1258,8 @@ pub(crate) fn publish_checked_local_override_plans(
                     return None;
                 }
                 let implementation_owner = index.classifier_header(classifier)?.classifier;
-                let hierarchy = index.classifier_hierarchy(classifier)?.to_vec();
+                let hierarchy =
+                    with_function_supertypes(&source, index.classifier_hierarchy(classifier)?);
                 let mut properties = Vec::new();
                 let mut property_seen = HashSet::new();
                 let mut functions = Vec::new();
@@ -1541,10 +1575,10 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
                 })
             })
             .map(|(classifier, class)| {
-                let hierarchy = index
-                    .classifier_hierarchy(classifier)
-                    .unwrap_or_default()
-                    .to_vec();
+                let hierarchy = with_function_supertypes(
+                    &source,
+                    index.classifier_hierarchy(classifier).unwrap_or_default(),
+                );
                 (
                     classifier,
                     property_override_plans(index, &source, class, &hierarchy),

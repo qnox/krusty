@@ -58,23 +58,7 @@ pub(super) fn emit_reference_invoke_bridge(
     cw.seed_utf8(&erased);
     let mut code = CodeBuilder::new(1 + erased_words);
     if high_arity {
-        let counted = code.new_label();
-        code.aload(1);
-        code.arraylength();
-        code.push_int(i32::from(arity), cw);
-        code.if_icmpeq(counted);
-        let exception = cw.class_ref("java/lang/IllegalArgumentException");
-        code.new_obj(exception);
-        code.dup();
-        code.push_string(&format!("Expected {arity} arguments"), cw);
-        let constructor = cw.methodref(
-            "java/lang/IllegalArgumentException",
-            "<init>",
-            "(Ljava/lang/String;)V",
-        );
-        code.invokespecial(constructor, 1, 0);
-        code.athrow();
-        code.bind(counted);
+        check_argument_count(cw, &mut code, usize::from(arity));
     }
     code.aload(0);
     for (index, parameter) in parameters.iter().enumerate() {
@@ -153,6 +137,31 @@ pub(super) fn emit_reference_invoke_bridge(
         .copied()
         .filter(|&line| line != 0);
     cw.set_method_debug("invoke", &erased, line.map(|line| (0, line)), &locals);
+}
+
+/// `FunctionN.invoke(Object[])`'s guard: an argument array of any other length than `arity`
+/// throws `IllegalArgumentException("Expected <arity> arguments")`.
+pub(super) fn check_argument_count(cw: &mut ClassWriter, code: &mut CodeBuilder, arity: usize) {
+    let counted = code.new_label();
+    code.aload(1);
+    code.arraylength();
+    code.push_int(
+        i32::try_from(arity).expect("function arity fits an int"),
+        cw,
+    );
+    code.if_icmpeq(counted);
+    let exception = cw.class_ref("java/lang/IllegalArgumentException");
+    code.new_obj(exception);
+    code.dup();
+    code.push_string(&format!("Expected {arity} arguments"), cw);
+    let constructor = cw.methodref(
+        "java/lang/IllegalArgumentException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+    );
+    code.invokespecial(constructor, 1, 0);
+    code.athrow();
+    code.bind(counted);
 }
 
 pub(super) fn load_erased_function_argument(

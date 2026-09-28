@@ -120,7 +120,10 @@ pub(super) fn attach_classifier_generic_facts(
         .superclass
         .into_iter()
         .chain(header.interfaces.iter().copied())
-        .any(|supertype| !supertype.get().type_args().is_empty());
+        .any(|supertype| {
+            // A function-type supertype is written as its parameterized function interface.
+            matches!(supertype.get(), Ty::Fun(_)) || !supertype.get().type_args().is_empty()
+        });
     if own_parameters.is_empty() && !has_parameterized_supertype {
         return;
     }

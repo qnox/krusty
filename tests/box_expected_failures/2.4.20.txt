@@ -82,9 +82,6 @@ coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
-coroutines/suspendFunctionAsSupertype.kt
-coroutines/suspendFunctionAsSupertypeCall.kt
-coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
@@ -143,7 +140,6 @@ funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/defaultsWithVarArg2.kt
-functions/bigArity/subclass.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
