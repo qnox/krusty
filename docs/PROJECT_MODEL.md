@@ -23,23 +23,39 @@ restarts the worker and reanalyzes open documents.
 
 ## `krusty-toolchain build`
 
-`krusty-toolchain build` compiles Kotlin Toolchain JVM projects. The executable is named for the
-toolchain, like `krusty-lsp` is named for the protocol. `krusty` is already the Kotlin compiler, so
-the driver is not `krusty-kotlin` or the upstream `kotlin` command. It is not a subcommand of the
-compiler. A directory containing `project.yaml`, or a single `module.yaml` that no parent
-`project.yaml` includes, is the project. `jvm/app` and `jvm/lib` modules are compiled by spawning
-`krusty`. A source error is printed as the compiler printed it, so the diagnostic is the same
-`file:line:column: error: message` kotlinc reports for that source. `//` dependencies become module
-edges; an `exported` dependency is visible to dependents, and a `runtime-only` dependency is not on
-the compile classpath. A `$libs` reference is read from `libs.versions.toml` or
-`gradle/libs.versions.toml` and replaced with its Maven coordinate. Fetching that coordinate still
-fails the command, as do other Maven coordinates, toolchain catalogs, `settings`, and non-JVM
-product types.
+`krusty-toolchain build` compiles JVM projects. The executable is named for the toolchain, like
+`krusty-lsp` is named for the protocol. `krusty` is already the Kotlin compiler, so the driver is
+not `krusty-kotlin` or the upstream `kotlin` command. It is not a subcommand of the compiler. A
+source error is printed as the compiler printed it, so the diagnostic is the same
+`file:line:column: error: message` kotlinc reports for that source.
 
-Gradle and `.iml` detection in the language server is unchanged. `krusty-toolchain build` only recognizes
-those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,
-and a toolchain file in the same directory wins over a Gradle marker. A nested Gradle directory
-still wins over a parent toolchain project.
+A directory containing `project.yaml`, or a single `module.yaml` that no parent `project.yaml`
+includes, is a Kotlin Toolchain project. Those files are read directly. `jvm/app` and `jvm/lib`
+modules are compiled by spawning `krusty`. `//` dependencies become module edges; an `exported`
+dependency is visible to dependents, and a `runtime-only` dependency is not on the compile
+classpath. A `$libs` reference is read from `libs.versions.toml` or `gradle/libs.versions.toml`
+and replaced with its Maven coordinate. A `group:artifact:version` coordinate, including one
+reached through `$libs`, is resolved by running Maven (`mvnw` when the project has a wrapper,
+otherwise `mvn`). The command writes a small POM for that one coordinate and reads the classpath
+file from `dependency:build-classpath`. Library POMs and Gradle module metadata are not parsed.
+`runtime-only` coordinates are not resolved onto the compile classpath. Jars from an `exported`
+coordinate are visible to compile dependents. `bom:`, Swift packages, `settings`, and non-JVM
+product types are refused.
+
+A Gradle build is compiled by running Gradle (`gradlew` when the wrapper is present, otherwise
+`gradle`) with an init script. The script asks Gradle for source sets, JVM Kotlin compilations,
+and Android variants, and prints a line protocol. Build scripts are not parsed. A Maven build is
+compiled by running Maven. `help:evaluate` reports the module list, packaging, source roots, and
+output directories; `dependency:build-classpath` reports compile and test classpaths. POM XML is
+not parsed. Source roots are the directories the tool reports.
+
+A toolchain file in the same directory wins over Gradle or Maven. A nested Gradle or Maven
+directory wins over a parent toolchain project. Gradle wins over Maven in the same directory. A
+JetBrains `.iml` model is recognized and refused. Language-server detection is unchanged.
+
+A module with Java sources is still refused by the driver, because krusty has no Java frontend.
+Resource directories that contain files are recorded, and the driver refuses them until it copies
+resources into the output.
 
 ## Detection
 

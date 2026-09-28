@@ -1,10 +1,9 @@
 //! Which project a `krusty-toolchain build` invocation is standing in.
 //!
-//! The Kotlin Toolchain layout (`module.yaml` / `project.yaml`) is the project `krusty-toolchain build`
-//! compiles. A `project.yaml` owns every `module.yaml` beneath it, matching the toolchain rule that
-//! a module file included by a parent project is not its own project. Gradle and a JetBrains `.iml`
-//! model are recognized so they are not read as that layout; compiling them stays with their own
-//! project-model extensions.
+//! A `project.yaml` owns every `module.yaml` beneath it. Gradle and Maven are located by their
+//! markers and then compiled by running those tools; the marker file is not read. A JetBrains
+//! `.iml` model is recognized so it is not mistaken for a toolchain project, and compiling it
+//! stays with that project-model extension.
 
 use std::path::{Path, PathBuf};
 
@@ -19,10 +18,13 @@ const GRADLE_MARKERS: &[&str] = &[
     "gradlew.bat",
 ];
 
+const MAVEN_MARKERS: &[&str] = &["pom.xml", "mvnw", "mvnw.cmd"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ProjectKind {
     Toolchain(PathBuf),
     Gradle(PathBuf),
+    Maven(PathBuf),
     Jps(PathBuf),
 }
 
@@ -43,13 +45,11 @@ pub(super) fn discover(start: &Path) -> Option<ProjectKind> {
             }
             continue;
         }
-        if project.is_none()
-            && module.is_none()
-            && GRADLE_MARKERS
-                .iter()
-                .any(|marker| directory.join(marker).is_file())
-        {
+        if project.is_none() && module.is_none() && has_marker(directory, GRADLE_MARKERS) {
             return Some(ProjectKind::Gradle(directory.to_path_buf()));
+        }
+        if project.is_none() && module.is_none() && has_marker(directory, MAVEN_MARKERS) {
+            return Some(ProjectKind::Maven(directory.to_path_buf()));
         }
         if jps.is_none() && directory.join(".idea").join("modules.xml").is_file() {
             jps = Some(ProjectKind::Jps(directory.to_path_buf()));
@@ -61,18 +61,16 @@ pub(super) fn discover(start: &Path) -> Option<ProjectKind> {
         .or(jps)
 }
 
-pub(super) fn extension_message(kind: &ProjectKind) -> Option<String> {
-    match kind {
-        ProjectKind::Toolchain(_) => None,
-        ProjectKind::Gradle(root) => Some(format!(
-            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-             {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
-            root.display()
-        )),
-        ProjectKind::Jps(root) => Some(format!(
-            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-             {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
-            root.display()
-        )),
-    }
+pub(super) fn jps_message(root: &Path) -> String {
+    format!(
+        "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+         {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
+        root.display()
+    )
+}
+
+fn has_marker(directory: &Path, markers: &[&str]) -> bool {
+    markers
+        .iter()
+        .any(|marker| directory.join(marker).is_file())
 }

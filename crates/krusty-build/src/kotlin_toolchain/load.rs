@@ -1,8 +1,8 @@
-//! Load a Kotlin Toolchain project into build modules and compile it.
+//! Load a project into build modules and compile it.
 //!
-//! `krusty-toolchain build` is the toolchain command this loads for JVM modules. The loader reads
-//! `module.yaml` and `project.yaml` directly and compiles by spawning the `krusty` compiler. It
-//! does not consult Gradle or `.iml` metadata.
+//! `krusty-toolchain build` reads `module.yaml` and `project.yaml` directly. A Gradle or Maven
+//! project is loaded by running that tool and consuming the model it prints. The compiler is the
+//! separate `krusty` executable.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -15,6 +15,8 @@ use crate::store::ArtifactStore;
 
 use super::catalog::Catalog;
 use super::discover::{self, ProjectKind};
+use super::maven_model::MavenResolver;
+use super::tool::{self, ToolRunner};
 use super::yaml::{self, Yaml};
 
 /// Arguments of `krusty-toolchain build`, after the `build` subcommand has been taken off `argv`.
@@ -40,30 +42,52 @@ pub struct LoadedProject {
 /// Distribution jars are not added here. [`execute`] attaches them before compiling, so a test can
 /// assert the graph the project file itself describes.
 pub fn load(command: &BuildCommand) -> Result<LoadedProject, String> {
+    load_using(command, &tool::ProcessRunner)
+}
+
+pub(super) fn load_using(
+    command: &BuildCommand,
+    runner: &dyn ToolRunner,
+) -> Result<LoadedProject, String> {
     validate_flags(command)?;
     let start = absolute(&command.directory)?;
     let kind = discover::discover(&start).ok_or_else(|| {
         format!(
-            "no Kotlin Toolchain project found at {} or its parents (looked for module.yaml or project.yaml)",
+            "no Kotlin Toolchain, Gradle, or Maven project found at {} or its parents (looked for module.yaml, project.yaml, a Gradle build, or pom.xml)",
             start.display()
         )
     })?;
-    if let Some(message) = discover::extension_message(&kind) {
-        return Err(message);
+    match kind {
+        ProjectKind::Jps(root) => Err(discover::jps_message(&root)),
+        ProjectKind::Gradle(root) => {
+            super::gradle_model::load_project(&root, &command.modules, runner)
+        }
+        ProjectKind::Maven(root) => {
+            super::maven_model::load_project(&root, &command.modules, runner)
+        }
+        ProjectKind::Toolchain(root) => load_toolchain(&root, command, runner),
     }
-    let ProjectKind::Toolchain(root) = kind else {
-        return Err("internal: toolchain discovery returned no project".to_string());
-    };
-    let declared = read_project(&root)?;
+}
+
+fn load_toolchain(
+    root: &Path,
+    command: &BuildCommand,
+    runner: &dyn ToolRunner,
+) -> Result<LoadedProject, String> {
+    let declared = read_project(root)?;
     let selection = select(&declared, &command.modules)?;
-    let modules = compilation_units(&root, &declared, &selection)?;
+    let mut resolver = MavenResolver::new(runner, root);
+    let modules = compilation_units(root, &declared, &selection, &mut resolver)?;
     if modules.is_empty() {
         return Err(format!(
             "{} has no Kotlin sources to compile",
             root.display()
         ));
     }
-    Ok(LoadedProject { root, modules })
+    Ok(LoadedProject {
+        root: root.to_path_buf(),
+        modules,
+    })
 }
 
 /// Compile the project `command` describes.
@@ -189,8 +213,14 @@ enum Scope {
 }
 
 #[derive(Clone, Debug)]
+enum DepTarget {
+    Module(usize),
+    Maven(String),
+}
+
+#[derive(Clone, Debug)]
 struct Dep {
-    target: usize,
+    target: DepTarget,
     exported: bool,
     scope: Scope,
 }
@@ -311,6 +341,7 @@ struct DepSpec {
     notation: String,
     exported: bool,
     scope: Scope,
+    maven: bool,
 }
 
 fn parse_module_file(
@@ -506,17 +537,26 @@ fn dep_spec(
             file = file.display()
         ));
     }
-    if !notation.starts_with("//") && !notation.starts_with('.') {
-        return Err(format!(
-            "{file}: dependency '{notation}' is an external library; krusty-toolchain build does not resolve Maven coordinates yet",
-            file = file.display()
-        ));
+    if notation.starts_with("//") || notation.starts_with('.') {
+        return Ok(DepSpec {
+            notation: notation.to_string(),
+            exported,
+            scope,
+            maven: false,
+        });
     }
-    Ok(DepSpec {
-        notation: notation.to_string(),
-        exported,
-        scope,
-    })
+    if super::maven_model::is_maven_coordinate(notation) {
+        return Ok(DepSpec {
+            notation: notation.to_string(),
+            exported,
+            scope,
+            maven: true,
+        });
+    }
+    Err(format!(
+        "{file}: dependency '{notation}' is not a Maven coordinate",
+        file = file.display()
+    ))
 }
 
 fn resolve_deps(
@@ -528,6 +568,14 @@ fn resolve_deps(
 ) -> Result<Vec<Dep>, String> {
     let mut deps = Vec::new();
     for spec in specs {
+        if spec.maven {
+            deps.push(Dep {
+                target: DepTarget::Maven(spec.notation.clone()),
+                exported: spec.exported,
+                scope: spec.scope,
+            });
+            continue;
+        }
         let relative = module_reference(root, directory, &spec.notation)
             .map_err(|message| format!("{}: {message}", file.display()))?;
         let Some(target) = index_of(&relative) else {
@@ -538,12 +586,19 @@ fn resolve_deps(
             ));
         };
         deps.push(Dep {
-            target,
+            target: DepTarget::Module(target),
             exported: spec.exported,
             scope: spec.scope,
         });
     }
     Ok(deps)
+}
+
+fn module_index(dep: &Dep) -> Option<usize> {
+    match dep.target {
+        DepTarget::Module(index) => Some(index),
+        DepTarget::Maven(_) => None,
+    }
 }
 
 fn module_reference(root: &Path, from: &Path, notation: &str) -> Result<String, String> {
@@ -732,6 +787,32 @@ fn classify(file: &Path, roots: &[PathBuf], resources: &[PathBuf]) -> Result<Sou
     Ok(files)
 }
 
+pub(super) struct FoundSources {
+    pub roots: Vec<PathBuf>,
+    pub java: Vec<PathBuf>,
+    pub has_kotlin: bool,
+}
+
+pub(super) fn scan_compilation_roots(
+    label: &Path,
+    roots: &[PathBuf],
+) -> Result<FoundSources, String> {
+    let mut files = SourceFiles::default();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        files.roots.push(root.clone());
+        scan_tree(label, root, &mut files)?;
+    }
+    files.java.sort();
+    Ok(FoundSources {
+        roots: files.roots,
+        java: files.java,
+        has_kotlin: files.has_kotlin,
+    })
+}
+
 fn scan_tree(file: &Path, directory: &Path, files: &mut SourceFiles) -> Result<(), String> {
     let entries = std::fs::read_dir(directory).map_err(|error| {
         format!(
@@ -821,13 +902,17 @@ fn select(declared: &[Declared], names: &[String]) -> Result<Selection, String> 
         }
         for dependency in &declared[index].dependencies {
             if dependency.scope != Scope::RuntimeOnly {
-                queue.push_back(dependency.target);
+                if let Some(target) = module_index(dependency) {
+                    queue.push_back(target);
+                }
             }
         }
         if direct.contains(&index) {
             for dependency in &declared[index].test_dependencies {
                 if dependency.scope != Scope::RuntimeOnly {
-                    queue.push_back(dependency.target);
+                    if let Some(target) = module_index(dependency) {
+                        queue.push_back(target);
+                    }
                 }
             }
         }
@@ -839,6 +924,7 @@ fn compilation_units(
     root: &Path,
     declared: &[Declared],
     selection: &Selection,
+    resolver: &mut MavenResolver<'_>,
 ) -> Result<Vec<Module>, String> {
     let mut units = Vec::new();
     for (index, module) in declared.iter().enumerate() {
@@ -854,7 +940,7 @@ fn compilation_units(
             ));
         }
         if module.main.compiles() {
-            units.push(unit(root, declared, index, false)?);
+            units.push(unit(root, declared, index, false, resolver)?);
         } else if declared.iter().enumerate().any(|(other, candidate)| {
             selection.included.contains(&other)
                 && other != index
@@ -867,24 +953,26 @@ fn compilation_units(
             ));
         }
         if selected && module.test.compiles() {
-            units.push(unit(root, declared, index, true)?);
+            units.push(unit(root, declared, index, true, resolver)?);
         }
     }
     Ok(units)
 }
 
 fn depends_on_for_compile(module: &Declared, target: usize) -> bool {
-    module
-        .dependencies
-        .iter()
-        .any(|dependency| dependency.target == target && dependency.scope != Scope::RuntimeOnly)
-        || module
-            .test_dependencies
-            .iter()
-            .any(|dependency| dependency.target == target && dependency.scope != Scope::RuntimeOnly)
+    let points_at = |dependency: &Dep| {
+        module_index(dependency) == Some(target) && dependency.scope != Scope::RuntimeOnly
+    };
+    module.dependencies.iter().any(points_at) || module.test_dependencies.iter().any(points_at)
 }
 
-fn unit(root: &Path, declared: &[Declared], index: usize, test: bool) -> Result<Module, String> {
+fn unit(
+    root: &Path,
+    declared: &[Declared],
+    index: usize,
+    test: bool,
+    resolver: &mut MavenResolver<'_>,
+) -> Result<Module, String> {
     let module = &declared[index];
     let sources = if test { &module.test } else { &module.main };
     let suffix = if test { "test" } else { "main" };
@@ -931,7 +1019,58 @@ fn unit(root: &Path, declared: &[Declared], index: usize, test: bool) -> Result<
     } else {
         closure(&name, declared, &declared[index].dependencies)?
     };
+    attach_maven_jars(
+        &mut built,
+        declared,
+        &declared[index].dependencies,
+        resolver,
+    )?;
+    if test {
+        attach_maven_jars(
+            &mut built,
+            declared,
+            &declared[index].test_dependencies,
+            resolver,
+        )?;
+    }
     Ok(built)
+}
+
+fn attach_maven_jars(
+    built: &mut Module,
+    declared: &[Declared],
+    edges: &[Dep],
+    resolver: &mut MavenResolver<'_>,
+) -> Result<(), String> {
+    for edge in edges {
+        if edge.scope == Scope::RuntimeOnly {
+            continue;
+        }
+        if let DepTarget::Maven(coordinate) = &edge.target {
+            for jar in resolver.jars(coordinate)? {
+                push_jar(&mut built.classpath, &jar);
+            }
+        }
+    }
+    for id in built.depends_on.clone() {
+        let Some(name) = id.as_str().strip_suffix(":main") else {
+            continue;
+        };
+        let Some(module) = declared.iter().find(|module| module.display_name == name) else {
+            continue;
+        };
+        for edge in &module.dependencies {
+            if !edge.exported || edge.scope == Scope::RuntimeOnly {
+                continue;
+            }
+            if let DepTarget::Maven(coordinate) = &edge.target {
+                for jar in resolver.jars(coordinate)? {
+                    push_jar(&mut built.classpath, &jar);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn closure(owner: &str, declared: &[Declared], edges: &[Dep]) -> Result<Vec<ModuleId>, String> {
@@ -940,7 +1079,9 @@ fn closure(owner: &str, declared: &[Declared], edges: &[Dep]) -> Result<Vec<Modu
     let mut queue = VecDeque::new();
     for edge in edges {
         if edge.scope != Scope::RuntimeOnly {
-            queue.push_back(edge.target);
+            if let Some(target) = module_index(edge) {
+                queue.push_back(target);
+            }
         }
     }
     while let Some(target) = queue.pop_front() {
@@ -957,7 +1098,9 @@ fn closure(owner: &str, declared: &[Declared], edges: &[Dep]) -> Result<Vec<Modu
         ids.push(ModuleId::new(format!("{}:main", module.display_name)));
         for child in &module.dependencies {
             if child.exported && child.scope != Scope::RuntimeOnly {
-                queue.push_back(child.target);
+                if let Some(target) = module_index(child) {
+                    queue.push_back(target);
+                }
             }
         }
     }
@@ -975,6 +1118,81 @@ fn output_path(root: &Path, name: &str, test: bool) -> PathBuf {
     root.join("build/krusty/modules")
         .join(name)
         .join(if test { "test-classes" } else { "classes" })
+}
+
+pub(super) fn select_reported(
+    modules: Vec<Module>,
+    names: &[String],
+) -> Result<Vec<Module>, String> {
+    if names.is_empty() {
+        return Ok(modules);
+    }
+    let mut wanted = BTreeSet::new();
+    for name in names {
+        let hits: Vec<usize> = modules
+            .iter()
+            .enumerate()
+            .filter(|(_, module)| module_matches(module, name))
+            .map(|(index, _)| index)
+            .collect();
+        if hits.is_empty() {
+            let mut available = Vec::new();
+            for module in &modules {
+                available.push(module.display_name.clone());
+                if let Some(id) = &module.id {
+                    if id.as_str() != module.display_name {
+                        available.push(id.as_str().to_string());
+                    }
+                }
+            }
+            available.sort();
+            available.dedup();
+            return Err(format!(
+                "no module named '{name}'.\nAvailable modules:\n{}",
+                available
+                    .iter()
+                    .map(|module| format!("- {module}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        wanted.extend(hits);
+    }
+    let mut included = wanted.clone();
+    let mut queue: VecDeque<usize> = wanted.into_iter().collect();
+    while let Some(index) = queue.pop_front() {
+        for dependency in &modules[index].depends_on {
+            let Some(dep_index) = modules.iter().position(|module| {
+                module
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == dependency.as_str())
+            }) else {
+                return Err(format!(
+                    "module '{}' depends on '{}', which is not part of this build",
+                    modules[index]
+                        .id
+                        .as_ref()
+                        .map(ModuleId::as_str)
+                        .unwrap_or(""),
+                    dependency.as_str()
+                ));
+            };
+            if included.insert(dep_index) {
+                queue.push_back(dep_index);
+            }
+        }
+    }
+    Ok(modules
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| included.contains(index))
+        .map(|(_, module)| module)
+        .collect())
+}
+
+fn module_matches(module: &Module, name: &str) -> bool {
+    module.display_name == name || module.id.as_ref().is_some_and(|id| id.as_str() == name)
 }
 
 fn read_yaml(path: &Path) -> Result<Yaml, String> {
@@ -1016,6 +1234,9 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod coverage;
+
+#[cfg(test)]
+mod external_tools;
 
 #[cfg(test)]
 mod tests {
@@ -1225,22 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn external_libraries_settings_and_non_jvm_products_are_rejected() {
-        let external = Temp::new("external");
-        external.write(
-            "module.yaml",
-            "product: jvm/app\ndependencies:\n  - io.ktor:ktor-client-java:2.3.0\n",
-        );
-        external.write("src/main.kt", "fun main() {}\n");
-        let error = load(&command(&external.0)).unwrap_err();
-        assert_eq!(
-            error,
-            format!(
-                "{}: dependency 'io.ktor:ktor-client-java:2.3.0' is an external library; krusty-toolchain build does not resolve Maven coordinates yet",
-                external.0.join("module.yaml").display()
-            )
-        );
-
+    fn settings_and_non_jvm_products_are_rejected() {
         let settings = Temp::new("settings");
         settings.write(
             "module.yaml",
@@ -1284,18 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn gradle_and_iml_projects_stay_extensions() {
-        let gradle = Temp::new("gradle");
-        gradle.write("build.gradle.kts", "");
-        assert_eq!(
-            load(&command(&gradle.0)).unwrap_err(),
-            format!(
-                "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-                 {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
-                gradle.0.display()
-            )
-        );
-
+    fn an_iml_project_stays_an_extension() {
         let idea = Temp::new("idea");
         idea.write(".idea/modules.xml", "<project/>");
         assert_eq!(
@@ -1320,16 +1515,35 @@ mod tests {
         nested.write("project.yaml", "modules:\n  - app\n");
         nested.write("app/module.yaml", "product: jvm/app\n");
         nested.write("app/src/main.kt", "fun main() {}\n");
-        nested.write("app/sample/build.gradle.kts", "");
+        nested.write("app/sample/build.gradle.kts", "??? not groovy\n");
         let sample = nested.0.join("app/sample");
-        assert_eq!(
-            load(&command(&sample)).unwrap_err(),
-            format!(
-                "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-                 {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
-                sample.display()
-            )
-        );
+        let source = sample.join("custom-src");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("Main.kt"), "fun main() {}\n").expect("source");
+        let loaded = load_using(
+            &command(&sample),
+            &crate::kotlin_toolchain::tool::FnRunner(
+                |invocation: &crate::kotlin_toolchain::tool::ToolCommand| {
+                    assert_eq!(invocation.directory, sample);
+                    assert!(invocation
+                        .args
+                        .iter()
+                        .any(|arg| arg == "krustyToolchainModel"));
+                    Ok(crate::kotlin_toolchain::tool::ToolOutput {
+                        status: 0,
+                        stdout: format!(
+                            "KRUSTY\t:main\tsample\t{}\t0\nSRC\t:main\t{}\n",
+                            sample.display(),
+                            source.display()
+                        ),
+                        stderr: String::new(),
+                    })
+                },
+            ),
+        )
+        .expect("nested gradle");
+        assert_eq!(loaded.root, sample);
+        assert_eq!(loaded.modules[0].source_roots[0].path, source);
 
         let inside = nested.0.join("app/src");
         let loaded = load(&command(&inside)).expect("parent toolchain");
