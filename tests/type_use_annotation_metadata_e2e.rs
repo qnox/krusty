@@ -9,12 +9,8 @@ use super::common;
 
 fn assert_identical(stem: &str, src: &str, class_internal: &str) {
     let classpath = [common::stdlib_jar()];
-    let Some(result) =
-        common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
-    else {
-        eprintln!("skip ({stem}: provisioned kotlinc unavailable)");
-        return;
-    };
+    let result = common::metadata_diff_against_kotlinc_cp(stem, src, class_internal, &classpath)
+        .expect("reference kotlinc is provisioned");
     result.unwrap_or_else(|diff| panic!("{diff}"));
 }
 

@@ -64,25 +64,12 @@ pub(in crate::resolve) fn collect_declared_spellings(
     for (file_index, file) in files.iter().enumerate() {
         let file_index = file_index as u32;
         let names = &file_class_names[file_index as usize];
-        let annotations = recorded_type_annotations(
-            table,
-            file_index,
-            file.type_annotations
-                .iter()
-                .map(|(&occurrence, annotations)| {
-                    let annotations = annotations.iter().map(|annotation| {
-                        let key = (annotation.span.lo, annotation.span.hi);
-                        (
-                            annotation.span,
-                            file.type_annotation_arguments.contains_key(&key),
-                        )
-                    });
-                    (occurrence, annotations.collect())
-                }),
-        );
+        // Type-use annotations are recorded by the compact declaration path only; this
+        // retained-AST collector serves builds without compact headers and does not carry them.
+        let no_annotations = crate::spelling::RecordedTypeAnnotations::default();
         let spellings = crate::spelling::SourceSpellings {
             aliases: &file.alias_spellings,
-            annotations: &annotations,
+            annotations: &no_annotations,
         };
         for &d in &file.decls {
             match file.decl(d) {
@@ -345,37 +332,6 @@ pub(in crate::resolve) fn base_class_type_ref(
         fun_params: Vec::new(),
         fun_context_count: 0,
     }
-}
-
-/// The annotations `@Metadata` records on each annotated type occurrence of one file: of the
-/// annotations written on the occurrence (`(span, has_arguments)`, in source order), those Pass 1
-/// bound to a classifier whose retention is not `SOURCE`. See [`Spelled::annotations`].
-pub(in crate::resolve) fn recorded_type_annotations(
-    table: &SymbolTable,
-    file: u32,
-    occurrences: impl Iterator<Item = (u32, Vec<(Span, bool)>)>,
-) -> crate::spelling::RecordedTypeAnnotations {
-    let mut recorded = crate::spelling::RecordedTypeAnnotations::default();
-    for (occurrence, annotations) in occurrences {
-        let identities = annotations
-            .into_iter()
-            .filter(|&(_, has_arguments)| !has_arguments)
-            .filter_map(|(span, _)| {
-                let name = String::new();
-                table.resolved_annotation(file, &AnnotationRef { name, span })
-            })
-            .filter(|&identity| {
-                let retention = table.annotation_retention(identity).or_else(|| {
-                    let classifier = table.libraries.classifier(identity)?;
-                    super::super::annotation_applications::annotation_retention(None, &classifier)
-                });
-                retention
-                    .is_some_and(|retention| retention != crate::types::AnnotationRetention::Source)
-            })
-            .collect();
-        recorded.record(occurrence, identities);
-    }
-    recorded
 }
 
 /// A name-only type-parameter scope: [`spelling_of_ref`] asks a `TParams` exactly one question —

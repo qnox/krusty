@@ -5,8 +5,9 @@
 //! production signature collection never reopens `File::alias_spellings` or walks declarations by
 //! parser coordinates.
 
-use super::super::signature_collection::recorded_type_annotations;
-use super::super::{spelling_of_ref_with, spelling_scope, ClassNames, SymbolTable, TParams};
+use super::super::{
+    spelling_of_ref_with, spelling_scope, AnnotationRef, ClassNames, Span, SymbolTable, TParams,
+};
 use crate::fir::{
     DeclarationId, DeclarationKind, HeaderDeclarationKind, HeaderTypeBoundRange, HeaderTypeId,
     HeaderTypeParameterRange, StreamedHeaderModule,
@@ -19,6 +20,37 @@ struct SpellingContext {
     expansions:
         std::collections::HashMap<crate::types::TypeName, (Spelled, Vec<String>, crate::types::Ty)>,
     annotations: std::collections::HashMap<crate::fir::SourceFileId, RecordedTypeAnnotations>,
+}
+
+/// The annotations `@Metadata` records on each annotated type occurrence of one file: of the
+/// annotations written on the occurrence (`(span, has_arguments)`, in source order), those Pass 1
+/// bound to a classifier whose retention is not `SOURCE`. See [`Spelled::annotations`].
+fn recorded_type_annotations(
+    table: &SymbolTable,
+    file: u32,
+    occurrences: impl Iterator<Item = (u32, Vec<(Span, bool)>)>,
+) -> crate::spelling::RecordedTypeAnnotations {
+    let mut recorded = crate::spelling::RecordedTypeAnnotations::default();
+    for (occurrence, annotations) in occurrences {
+        let identities = annotations
+            .into_iter()
+            .filter(|&(_, has_arguments)| !has_arguments)
+            .filter_map(|(span, _)| {
+                let name = String::new();
+                table.resolved_annotation(file, &AnnotationRef { name, span })
+            })
+            .filter(|&identity| {
+                let retention = table.annotation_retention(identity).or_else(|| {
+                    let classifier = table.libraries.classifier(identity)?;
+                    super::super::annotation_applications::annotation_retention(None, &classifier)
+                });
+                retention
+                    .is_some_and(|retention| retention != crate::types::AnnotationRetention::Source)
+            })
+            .collect();
+        recorded.record(occurrence, identities);
+    }
+    recorded
 }
 
 fn type_parameter_names(
