@@ -49053,6 +49053,19 @@ impl<'a> Checker<'a> {
         enum_entry_property: Option<u32>,
         selected_receiver_identity: Option<(usize, usize)>,
     ) {
+        // A function local or parameter keeps the unqualified name inside every classifier
+        // nested in that function, including the classifier's own property and its getter.
+        // `fun plus(head: T) = object { val head get() = head }` reads the parameter
+        // (`objects/flist.kt`); installing this property would hide it and the getter would
+        // call itself. `this.name` is a member access and still reads the property. An
+        // enclosing class member is not a local, so a nested constructor `val` still shadows
+        // it.
+        if self
+            .lookup(scope, name)
+            .is_some_and(|local| matches!(local.origin, ReceiverFnValueOrigin::Local))
+        {
+            return;
+        }
         let implicit_receivers = self.implicit_receivers(scope);
         let receiver_identity = selected_receiver_identity
             .or_else(|| {
@@ -49366,9 +49379,10 @@ impl<'a> Checker<'a> {
             .any(|property| property == name))
     }
 
-    /// Bind the lexical capture selected for one property's own initializer. That initializer is
-    /// the sole class-body region where an enclosing value with the same spelling outranks the
-    /// property being initialized; accessors and sibling member bodies retain the property rung.
+    /// Bind the lexical capture selected for one property's own initializer, so `val x = x`
+    /// reads the enclosing value's storage. A function local already owns that unqualified name
+    /// in every nested body (`declare_dispatch_property_with_provenance`); this binding is the
+    /// reified field the initializer reads.
     fn declare_property_initializer_class_storage_capture(
         &mut self,
         scope: &CheckerScope<'_>,

@@ -531,10 +531,9 @@ impl<'p, B> Scope<'p, B> {
         })
     }
 
-    /// A binding introduced by THIS scope only. The caller walks `ancestors` itself, because an
-    /// unqualified name must consult each rung's MEMBERS between rungs — an inner class's members
-    /// shadow an enclosing function's locals, so lookup cannot be "all bindings, then all
-    /// receivers".
+    /// A binding introduced by THIS scope only. The caller walks `ancestors` itself. A function
+    /// local outranks a same-named member of a classifier nested inside that function, and
+    /// implicit receivers are consulted separately from these bindings.
     pub(crate) fn own_binding(&self, name: &str, ns: Ns) -> Option<B>
     where
         B: Clone,

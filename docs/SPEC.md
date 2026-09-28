@@ -6699,6 +6699,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_type_parameter_does_not_leak_to_the_next_declaration`,
   `a_reified_mark_does_not_leak_to_the_next_declaration`), `src/resolve/scope.rs` unit tests.
 
+- **An enclosing function local keeps its unqualified name inside a nested classifier.** A local
+  class, an anonymous object, and a member of either all read the parameter or local, not their
+  own property of the same spelling. `fun f(x: Int) { class C { val x = 2; fun g() = x } }` makes
+  `g()` return `f`'s `x`; `val y = x` in that class also reads `f`'s `x`; `object { val head get()
+  = head }` inside `fun plus(head: T)` reads the parameter (`objects/flist.kt`). `this.x` is still
+  the property. A block local inside the nested classifier is nearer and wins. A constructor
+  property with no enclosing local still shadows the enclosing class (`class L(val tag: String)`
+  inside `Outer.tag` reads `L`'s `tag`). A smart cast of the outer local applies in the nested
+  body. Verified against kotlinc 2.4.20. The property is not installed as a lexical value binding
+  when that local is already visible, so flow and capture keep following the local.
+  Tests: `tests/local_class_scope_e2e.rs`
+  (`an_anonymous_object_getter_reads_the_enclosing_parameter`,
+  `a_local_class_member_reads_the_enclosing_parameter`,
+  `a_nested_classifier_assignment_writes_the_enclosing_local`,
+  `an_outer_smart_cast_applies_inside_a_nested_classifier`).
+
 - **A local class is checked in the scope it was written in, and captures an enclosing VALUE only
   through a constructor parameter it does not have yet.** The class is hoisted to a top-level
   `Decl::Class` for signature collection and lowering, but the checker enters it from its

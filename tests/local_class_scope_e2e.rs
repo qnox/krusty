@@ -84,6 +84,144 @@ fn a_local_class_property_shadows_an_enclosing_member_of_the_same_name() {
     assert_eq!(run(SRC).expect("own property shadows the outer one"), "OK");
 }
 
+/// kotlinc 2.4.20: the getter reads the parameter, so `plus("OK").head` is `"OK"`.
+///
+/// The property stays reachable as a member. Binding the getter's unqualified name to the
+/// property calls the getter forever (`objects/flist.kt`).
+#[test]
+fn an_anonymous_object_getter_reads_the_enclosing_parameter() {
+    const SRC: &str = "abstract class F<T> {\n\
+        \x20   abstract val head: T\n\
+        \x20   fun plus(head: T): F<T> = object : F<T>() {\n\
+        \x20       override val head: T get() = head\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val seed = object : F<String>() { override val head get() = \"no\" }\n\
+        \x20   return seed.plus(\"OK\").head\n\
+        }\n";
+    assert_eq!(run(SRC).expect("getter reads the parameter"), "OK");
+}
+
+/// kotlinc 2.4.20: `objects/flist.kt` prints `OK`. Each `plus` stores its parameter.
+#[test]
+fn functional_list_plus_reads_the_element_parameter() {
+    const SRC: &str = r#"
+public abstract class FList<T>() {
+    public abstract val head: T
+    public abstract val tail: FList<T>
+    public abstract val empty: Boolean
+
+    companion object {
+        val emptyFList = object: FList<Any>() {
+            public override val head: Any
+                get() = throw UnsupportedOperationException();
+
+            public override val tail: FList<Any>
+                get() = this
+
+            public override val empty: Boolean
+                get() = true
+        }
+    }
+
+    operator fun plus(head: T): FList<T> = object : FList<T>() {
+        override public val head: T
+            get() = head
+
+        override public val empty: Boolean
+            get() = false
+
+        override public val tail: FList<T>
+            get() = this@FList
+    }
+}
+
+public fun <T> emptyFList(): FList<T> = FList.emptyFList as FList<T>
+
+public fun <T> FList<T>.reverse(where: FList<T> = emptyFList<T>()) : FList<T> =
+        if(empty) where else tail.reverse(where + head)
+
+operator fun <T> FList<T>.iterator(): Iterator<T> = object: Iterator<T> {
+    private var cur: FList<T> = this@iterator
+
+    override public fun next(): T {
+        val res = cur.head
+        cur = cur.tail
+        return res
+    }
+    override public fun hasNext(): Boolean = !cur.empty
+}
+
+fun box() : String {
+  var r = ""
+  for(s in (emptyFList<String>() + "O" + "K").reverse()) {
+    r += s
+  }
+  return r
+}
+"#;
+    assert_eq!(run(SRC).expect("flist concatenates O and K"), "OK");
+}
+
+/// kotlinc 2.4.20: `f(8)` is `"8/2/8/2"`.
+///
+/// Unqualified reads, including a sibling initializer, see the parameter. `this.x` and an
+/// external read see the property.
+#[test]
+fn a_local_class_member_reads_the_enclosing_parameter() {
+    const SRC: &str = "fun f(x: Int): String {\n\
+        \x20   class C {\n\
+        \x20       val x = 2\n\
+        \x20       val y = x\n\
+        \x20       fun g() = x\n\
+        \x20       fun h() = this.x\n\
+        \x20   }\n\
+        \x20   val c = C()\n\
+        \x20   return \"${c.g()}/${c.h()}/${c.y}/${c.x}\"\n\
+        }\n\
+        fun box(): String = if (f(8) == \"8/2/8/2\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("parameter outranks the property"), "OK");
+}
+
+/// kotlinc 2.4.20: `f(8)` is `"4/0/4"`. The assignment and the read both target the function
+/// `var`, and the object's own `var` stays 0.
+#[test]
+fn a_nested_classifier_assignment_writes_the_enclosing_local() {
+    const SRC: &str = "fun f(x: Int): String {\n\
+        \x20   var x = x\n\
+        \x20   val o = object {\n\
+        \x20       var x = 0\n\
+        \x20       fun g(): Int {\n\
+        \x20           x = 4\n\
+        \x20           return x\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   x = 5\n\
+        \x20   return \"${o.g()}/${o.x}/$x\"\n\
+        }\n\
+        fun box(): String = if (f(8) == \"4/0/4\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("assignment targets the local"), "OK");
+}
+
+/// kotlinc 2.4.20: the outer `if (x != null)` smart cast still types the read inside the object.
+#[test]
+fn an_outer_smart_cast_applies_inside_a_nested_classifier() {
+    const SRC: &str = "fun f(): String {\n\
+        \x20   var x: String? = \"OK\"\n\
+        \x20   if (x != null) {\n\
+        \x20       val o = object {\n\
+        \x20           val x = 1\n\
+        \x20           fun g(): String = x\n\
+        \x20       }\n\
+        \x20       return o.g()\n\
+        \x20   }\n\
+        \x20   return \"FAIL\"\n\
+        }\n\
+        fun box(): String = f()\n";
+    assert_eq!(run(SRC).expect("outer smart cast reaches the object"), "OK");
+}
+
 /// kotlinc: accepted.
 ///
 /// The local class reads a local of the enclosing function. The lexical scope is what resolves it;
