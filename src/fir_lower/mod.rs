@@ -22,6 +22,8 @@ mod classifier_references;
 mod companion_blocks;
 mod constant_evaluation;
 mod constant_folding;
+#[cfg(test)]
+mod construction_target_tests;
 mod constructors;
 mod data_classes;
 mod delegated_properties;

@@ -4863,3 +4863,17 @@ regress.
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
+
+## The selected constructor on a construction  ✅
+
+Every checked construction of a module class records the constructor the checker selected
+(`IrFile::construction_targets`, keyed by the `IrExpr::New`): its place among the class's
+constructors, 0 for the primary and `n` for `secondary_ctors[n - 1]`, taken from the selected
+declaration's stable anchor, plus who may call it. Ordinary calls and constructor-reference adapters
+both go through it, so a backend need not choose a constructor by comparing parameter types. The
+tests pin the record, not a backend's use of it (`src/fir_lower/construction_target_tests.rs`). Their
+fixture declares every class it uses: a primary and two secondary constructors, where arguments that
+fit both the primary and a secondary select the primary, constructed with and without defaulted
+arguments and through a constructor reference. Constructions the compiler synthesizes for a class
+with no constructor to choose (an anonymous object, a data class's `copy`, an annotation instance,
+plugin-generated serializers) record no selection.
