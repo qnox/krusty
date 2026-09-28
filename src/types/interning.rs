@@ -9,7 +9,7 @@
 use crate::name_tree::{FxBuildHasher, FxHasher};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 const SHARD_COUNT: usize = 64;
 
@@ -51,6 +51,17 @@ impl<T: ?Sized + Eq + Hash + 'static> ShardedInterner<T> {
         values.insert(stored);
         stored
     }
+}
+
+/// Intern a repeated textual key that is not a classifier identity.
+///
+/// JVM method names and descriptors are probed on every inline-body lookup. A hit returns the
+/// existing spelling; only the first occurrence allocates. Classifier paths stay in the name tree,
+/// and type-parameter identities stay in [`super::intern`].
+pub(crate) fn intern_text(value: &str) -> &'static str {
+    static TEXT: OnceLock<ShardedInterner<str>> = OnceLock::new();
+    TEXT.get_or_init(ShardedInterner::default)
+        .intern_ref_with(value, |value| Box::leak(value.to_owned().into_boxed_str()))
 }
 
 impl<T: Eq + Hash + 'static> ShardedInterner<T> {
@@ -98,6 +109,14 @@ mod tests {
         });
 
         assert!(pointers.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn repeated_text_shares_one_spelling() {
+        let first = super::intern_text("answer");
+        let second = super::intern_text(&"answer".to_string());
+        assert!(std::ptr::eq(first, second));
+        assert!(!std::ptr::eq(first, super::intern_text("other")));
     }
 
     #[test]

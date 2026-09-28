@@ -28,7 +28,8 @@ use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
 };
 use self::method_body_cache::{
-    global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
+    global_entry_body_cache, global_entry_class_bodies_cache, method_body_key, BodyCache,
+    ClassBodiesCache, MethodBodyKey,
 };
 use self::value_class_erasure::{
     metadata_value_class_underlying, value_class_param_types, value_class_return_type,
@@ -1776,8 +1777,9 @@ pub struct Classpath {
     /// process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
     /// Cache of lazily-read method bodies (`(internal-name, name, descriptor) → MethodCode`), so the inline
-    /// expander reads each inline function's body once even when it's called many times.
-    bodies: RefCell<crate::lru::LruCache<(TypeName, String, String), Option<MethodCode>>>,
+    /// expander reads each inline function's body once even when it's called many times. Name and
+    /// descriptor are interned spellings, so a hit does not allocate the key.
+    bodies: RefCell<crate::lru::LruCache<MethodBodyKey, Option<MethodCode>>>,
     /// Memoized inline-body plans (`(owner, source name, body descriptor) → plan`). A plan is decoded
     /// purely from the owner's compiled bytecode, so it is stable for the classpath this instance
     /// snapshots — but every candidate overload the provider builds asks for one, which without this
@@ -4088,7 +4090,7 @@ impl Classpath {
         name: &str,
         descriptor: &str,
     ) -> Option<MethodCode> {
-        let key = (internal, name.to_string(), descriptor.to_string());
+        let key = method_body_key(internal, name, descriptor);
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
             if let Some(hit) = self.bodies.borrow_mut().get(&key) {
@@ -4155,7 +4157,7 @@ impl Classpath {
         let Some((entry_index, global)) = global else {
             return read_once();
         };
-        let key = (internal_id, name.to_string(), descriptor.to_string());
+        let key = method_body_key(internal_id, name, descriptor);
         if let Some(hit) = global.read().unwrap().get(&key) {
             return hit.clone();
         }
@@ -7368,11 +7370,7 @@ mod fq_tests {
                 .is_none(),
             "a failed read reports no body to THIS instance"
         );
-        let key = (
-            type_name("transient/Body"),
-            "answer".to_string(),
-            "()I".to_string(),
-        );
+        let key = method_body_key(type_name("transient/Body"), "answer", "()I");
         assert!(
             !global_entry_body_cache(&classpath.cache_key[0])
                 .read()
@@ -7446,6 +7444,24 @@ mod fq_tests {
         assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
         assert_ne!(first.code, second.code);
         assert_eq!(second.code, second_again.code);
+        let via_identity = crate::jvm::inline::MethodBodies::body_name(
+            &classpath,
+            type_name("shared/Pool"),
+            "second",
+            "()I",
+        )
+        .expect("an interned owner reads the same body");
+        assert_eq!(via_identity.code, second.code);
+        let key = method_body_key(type_name("shared/Pool"), "second", "()I");
+        assert!(std::ptr::eq(key.1, crate::types::intern_text("second")));
+        assert!(std::ptr::eq(key.2, crate::types::intern_text("()I")));
+        assert!(
+            global_entry_body_cache(&classpath.cache_key[0])
+                .read()
+                .unwrap()
+                .contains_key(&key),
+            "a successful read is stored under the interned spelling"
+        );
 
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove temp dir");

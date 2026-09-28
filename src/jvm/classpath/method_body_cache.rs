@@ -11,7 +11,19 @@ use std::collections::HashMap;
 ///
 /// Only facts derived from one entry's bytes belong here. Composition-dependent records embed
 /// shadowable classpath facts and must remain scoped to the complete [`super::Classpath`].
-type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
+///
+/// The name and descriptor are interned spellings, so a cache hit does not allocate a key.
+pub(super) type MethodBodyKey = (TypeName, &'static str, &'static str);
+
+pub(super) fn method_body_key(owner: TypeName, name: &str, descriptor: &str) -> MethodBodyKey {
+    (
+        owner,
+        crate::types::intern_text(name),
+        crate::types::intern_text(descriptor),
+    )
+}
+
+type BodyMap = HashMap<MethodBodyKey, Option<MethodCode>>;
 pub(super) type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
 
 pub(super) fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
