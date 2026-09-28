@@ -2357,10 +2357,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .iter()
                 .any(Option::is_some)
                 .then_some(argument_names.as_slice());
-            let spread = arguments
-                .iter()
-                .map(|argument| argument.spread)
-                .collect::<Vec<_>>();
             for dispatch_receiver in self.signature_dispatch_receivers(scope) {
                 let selected = self.signature_member_extension_call(
                     scope,
@@ -2368,9 +2364,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     dispatch_receiver,
                     spelling,
                     super::lookups::SignatureMemberExtensionArguments {
-                        types: &argument_types,
+                        arguments: &argument_kinds,
                         names: argument_names,
-                        spread: &spread,
                         explicit_type_arguments: &resolved_type_arguments,
                         trailing_lambda,
                     },
@@ -4810,9 +4805,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .iter()
                     .any(Option::is_some)
                     .then_some(argument_names.as_slice());
-                let spread = arguments
+                let argument_kinds = arguments
                     .iter()
-                    .map(|argument| argument.spread)
+                    .map(Self::call_argument_kind)
                     .collect::<Vec<_>>();
                 for dispatch_receiver in self.signature_dispatch_receivers(scope) {
                     let selected = self.signature_member_extension_call(
@@ -4821,9 +4816,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         dispatch_receiver,
                         spelling,
                         super::lookups::SignatureMemberExtensionArguments {
-                            types: &ordinary_argument_types,
+                            arguments: &argument_kinds,
                             names: argument_names,
-                            spread: &spread,
                             explicit_type_arguments: &type_arguments,
                             trailing_lambda,
                         },
@@ -5345,10 +5339,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
         }
 
-        let argument_types = arguments
-            .iter()
-            .map(|argument| argument.ty.get())
-            .collect::<Vec<_>>();
         let argument_names = arguments
             .iter()
             .map(|argument| argument.name.map(str::to_owned))
@@ -5357,9 +5347,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .iter()
             .any(Option::is_some)
             .then_some(argument_names.as_slice());
-        let spread = arguments
+        let argument_kinds = arguments
             .iter()
-            .map(|argument| argument.spread)
+            .map(Self::call_argument_kind)
             .collect::<Vec<_>>();
         for dispatch in self.signature_dispatch_receivers(scope) {
             let selected = self.signature_member_extension_call(
@@ -5368,9 +5358,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 dispatch,
                 "invoke",
                 super::lookups::SignatureMemberExtensionArguments {
-                    types: &argument_types,
+                    arguments: &argument_kinds,
                     names: argument_names,
-                    spread: &spread,
                     ..Default::default()
                 },
                 None,

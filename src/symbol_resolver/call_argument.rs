@@ -1,4 +1,4 @@
-use crate::libraries::GenericSig;
+use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -74,6 +74,29 @@ impl CallArgKind {
             Self::CallableReference { function, .. } => Some(*function),
             kind => matches!(kind.ty(), Ty::Fun(_)).then(|| kind.ty()),
         }
+    }
+
+    /// Whether this argument can be passed to a parameter of type `parameter` when overload
+    /// applicability is decided: an omitted default always, an unchecked lambda literal when the
+    /// parameter can host a function value, a function-shaped argument by SAM conversion, and
+    /// otherwise the argument's type for that parameter (an integer literal adapts) by
+    /// assignability.
+    pub(crate) fn fits_parameter(
+        &self,
+        lib: &dyn SemanticPlatform,
+        src: &dyn SymbolSource,
+        parameter: Ty,
+    ) -> bool {
+        if self.is_omitted_default() {
+            return true;
+        }
+        if self.is_lambda_literal() && self.ty() == Ty::Error {
+            return super::untyped_lambda_pertinent(lib, src, parameter);
+        }
+        let function = self.function_type().unwrap_or_else(|| self.ty());
+        let sam = (self.is_lambda_literal() || self.function_type().is_some())
+            && super::sam_arg_matches(lib, src, parameter, function);
+        sam || super::arg_fits_source(lib, src, &parameter, &self.type_for(parameter))
     }
 
     pub(crate) fn type_for(&self, parameter: Ty) -> Ty {

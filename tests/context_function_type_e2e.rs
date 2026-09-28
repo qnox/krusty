@@ -448,3 +448,26 @@ fun box(): String = with(Prefix(\"wrong\")) {\n\
 }\n";
     common::expect_front_end_ok_files_with_stdlib(&[SRC], "ImplicitContextExtensionLambda");
 }
+
+/// A function type may carry both context parameters and an extension receiver,
+/// `context(C) R.(V) -> T`, and its receiver may be a parenthesized type (`(String).() -> T`). Its
+/// parameters are laid out `[C, R, V]`. Invoked with the context omitted, the context argument and
+/// the implicit receiver both come from the scope, so one implicit value may supply both; an
+/// anonymous extension function with a context parameter has exactly this type.
+const CONTEXT_EXTENSION_SOURCE: &str = "// LANGUAGE: +ContextParameters\n\
+    fun <T, R> within(value: T, block: T.() -> R): R = value.block()\n\
+    fun sameArgument(a: context(String) (String).() -> String): String = within(\"OK\") { a() }\n\
+    fun explicitReceiver(a: context(String) String.(Int) -> String): String =\n\
+    \x20   within(\"O\") { \"K\".a(1) }\n\
+    fun box(): String {\n\
+    \x20   val y = context(p: String) fun String.() = p\n\
+    \x20   val z = context(p: String) fun String.(i: Int) = p + this\n\
+    \x20   if (sameArgument(y) != \"OK\") return \"fail\"\n\
+    \x20   return explicitReceiver(z)\n\
+    }\n";
+
+#[test]
+fn a_context_receiver_function_value_takes_its_context_and_receiver_from_scope() {
+    common::assert_accepted_like_kotlinc(CONTEXT_EXTENSION_SOURCE);
+    common::expect_box_same_as_kotlinc(CONTEXT_EXTENSION_SOURCE, "ContextExtensionFunctionTypeRun");
+}

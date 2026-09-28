@@ -33,6 +33,7 @@ mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod anonymous_extension_functions;
 mod anonymous_object_capture;
 pub use anonymous_object_capture::{AnonymousObjectCapture, AnonymousObjectCaptureSource};
 mod applied_hierarchy;
@@ -47,6 +48,7 @@ mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
+mod callable_reference_lhs;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_field_order;
@@ -99,7 +101,9 @@ mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
+mod receiver_function_values;
 mod receiver_uses;
+mod reflection_locals;
 mod resolved_type_occurrences;
 mod safe_call_flow;
 mod sam_constructors;
@@ -11816,7 +11820,9 @@ pub enum ExprLowering {
     /// Invocation of a receiver-function value selected after ordinary member resolution.
     ReceiverFnInvoke {
         name: String,
+        /// The complete function-type parameters, `[context…, receiver, value…]`.
         params: Vec<Ty>,
+        context_count: usize,
         ret: Ty,
         origin: ReceiverFnValueOrigin,
         /// Parser-local expression carrying the selected property read when the function value
@@ -15384,192 +15390,6 @@ impl<'a> Checker<'a> {
                 },
             )
             .is_some()
-    }
-
-    /// Resolve the classifier chain forming a callable-reference LHS and preserve the applied type
-    /// at every nested edge. Unlike the general qualifier probe, this understands `::` as an inner
-    /// classifier separator, but only while the enclosing callable-reference/class-literal syntax
-    /// owns the interpretation.
-    fn callable_ref_lhs_classifier_type(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        diagnostic_site: ExprId,
-    ) -> Result<Option<(TypeName, Ty)>, QualifierError> {
-        let mut segments = Vec::new();
-        callable_ref_lhs_classifier_segments(self.file, expression, &mut segments)?;
-        let Some((root_expression, root_name)) = segments.first() else {
-            return Err(QualifierError::NotANameChain { expression });
-        };
-        if self.qualifier_root_is_value(scope, root_name) {
-            return Ok(None);
-        }
-
-        let mut prefix = match self.select_classifier(scope, root_name) {
-            InheritedNestedClassifier::Found(classifier) => {
-                ResolvedQualifier::Classifier(classifier)
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                return Err(QualifierError::AmbiguousRoot {
-                    expression: Some(*root_expression),
-                    name: root_name.clone(),
-                });
-            }
-            InheritedNestedClassifier::NotFound => {
-                if let Some(classifier) = self.scoped_source_alias_classifier(scope, root_name) {
-                    ResolvedQualifier::Classifier(classifier)
-                } else if self.fed_source().package_exists(TypeName::ROOT, root_name) {
-                    ResolvedQualifier::Package(crate::types::type_name_child(
-                        TypeName::ROOT,
-                        root_name,
-                    ))
-                } else {
-                    return Err(QualifierError::UnresolvedSegment {
-                        expression: Some(*root_expression),
-                        name: root_name.clone(),
-                    });
-                }
-            }
-        };
-
-        let mut applied_parent = match prefix {
-            ResolvedQualifier::Classifier(internal) => Some(self.applied_callable_ref_classifier(
-                scope,
-                *root_expression,
-                diagnostic_site,
-                internal,
-                None,
-            )),
-            ResolvedQualifier::Package(_) | ResolvedQualifier::Value => None,
-        };
-
-        for (segment_expression, segment) in segments.iter().skip(1) {
-            prefix = match prefix {
-                ResolvedQualifier::Value => return Ok(None),
-                ResolvedQualifier::Package(package) => {
-                    if let Some(classifier) = classifier_identity(
-                        &self.fed_source(),
-                        crate::symbol_source::SymbolNamespace::Package(package),
-                        segment,
-                    ) {
-                        ResolvedQualifier::Classifier(classifier)
-                    } else if self.fed_source().package_exists(package, segment) {
-                        ResolvedQualifier::Package(crate::types::type_name_child(package, segment))
-                    } else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    }
-                }
-                ResolvedQualifier::Classifier(owner) => {
-                    let Some(classifier) = classifier_identity(
-                        &self.fed_source(),
-                        crate::symbol_source::SymbolNamespace::Classifier(owner),
-                        segment,
-                    ) else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    };
-                    ResolvedQualifier::Classifier(classifier)
-                }
-            };
-            applied_parent = match prefix {
-                ResolvedQualifier::Classifier(internal) => {
-                    Some(self.applied_callable_ref_classifier(
-                        scope,
-                        *segment_expression,
-                        diagnostic_site,
-                        internal,
-                        applied_parent,
-                    ))
-                }
-                ResolvedQualifier::Package(_) | ResolvedQualifier::Value => None,
-            };
-        }
-
-        match (prefix, applied_parent) {
-            (ResolvedQualifier::Classifier(internal), Some(applied)) => {
-                Ok(Some((internal, applied)))
-            }
-            (ResolvedQualifier::Package(_), _) => Err(QualifierError::UnresolvedSegment {
-                expression: Some(expression),
-                name: segments
-                    .last()
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_default(),
-            }),
-            (ResolvedQualifier::Value, _) => Ok(None),
-            (ResolvedQualifier::Classifier(_), None) => unreachable!("classifier has applied type"),
-        }
-    }
-
-    fn applied_callable_ref_classifier(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        segment_expression: ExprId,
-        diagnostic_site: ExprId,
-        internal: TypeName,
-        bound_outer: Option<Ty>,
-    ) -> Ty {
-        let arguments = self
-            .file
-            .call_type_args
-            .get(&segment_expression.0)
-            .cloned()
-            .unwrap_or_default();
-        let applied = if arguments.is_empty() {
-            Ty::obj_name(internal)
-        } else {
-            self.classifier_type_with_arguments(scope, internal, &arguments)
-        };
-        if applied == Ty::Error {
-            return Ty::Error;
-        }
-        let Some(classifier) = self.resolver().classifier(internal) else {
-            return applied;
-        };
-        if classifier.own_type_parameter_count == classifier.type_params().len() {
-            return applied;
-        }
-
-        // A raw inner classifier token/reference (`Outer.Inner::class`) names classifier identity;
-        // it does not construct `Inner` and therefore needs neither an enclosing value nor applied
-        // outer arguments. Preserve the raw type when every segment is unapplied. An applied parent
-        // (`Outer<T>.Inner::class`) still supplies exact captures through the path below.
-        if arguments.is_empty() && bound_outer.is_some_and(|outer| outer.type_args().is_empty()) {
-            return applied;
-        }
-
-        // `classifier_type_with_arguments` fills captured positions with declaration formals for an
-        // unqualified type use. A callable-reference LHS has the actual applied parent in hand, so
-        // retain only this segment's own arguments and bind captures from that parent (or from the
-        // lexical scope for a root inner/local classifier).
-        let own_count = classifier.own_type_parameter_count;
-        let own_arguments = applied
-            .type_args()
-            .iter()
-            .copied()
-            .take(own_count)
-            .collect::<Vec<_>>();
-        let own_instance = if own_arguments.is_empty() {
-            Ty::obj_name(internal)
-        } else {
-            Ty::obj_args_name(internal, &own_arguments)
-        };
-        crate::trace_compiler!(
-            "constructor_ref",
-            "applied callable-reference classifier={internal:?} segment={segment_expression:?} applied={applied:?} own_instance={own_instance:?} bound_outer={bound_outer:?}",
-        );
-        self.attach_captured_classifier_arguments(
-            scope,
-            diagnostic_site,
-            internal,
-            own_instance,
-            bound_outer,
-        )
     }
 
     fn qualifier(
@@ -21699,17 +21519,17 @@ impl<'a> Checker<'a> {
                             return None;
                         }
                         if signature.has_receiver {
-                            let (receiver, parameters) = Self::receiver_function_parts(signature)?;
-                            return (parameters.len() == args.len()
+                            let parts = Self::receiver_function_parts(signature)?;
+                            return (self.receiver_function_context_available(scope, &parts)
                                 && self
                                     .receiver_function_implicit_receiver(
                                         scope,
-                                        receiver,
-                                        parameters.len(),
+                                        parts.receiver,
+                                        parts.values.len(),
                                         args.len(),
                                     )
                                     .is_some())
-                            .then(|| parameters.to_vec());
+                            .then(|| parts.values.to_vec());
                         }
                         let context_count = signature.context_count.min(signature.params.len());
                         let parameters = &signature.params[context_count..];
@@ -24909,24 +24729,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether `e` is an UNBOUND callable reference — `::foo`, or `Type::member` on a classifier name
-    /// (as opposed to `value::member`, which captures a receiver).
-    fn unbound_callable_reference(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
-        let Expr::CallableRef { receiver, name } = self.file.expr(e) else {
-            return false;
-        };
-        if name == "class" {
-            return false;
-        }
-        match receiver {
-            None => true,
-            Some(receiver) => match self.file.expr(*receiver) {
-                Expr::Name(n) => self.class_literal_unbound_ty(scope, e, n).is_some(),
-                _ => false,
-            },
-        }
-    }
-
     fn stmt_local(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -25040,19 +24842,8 @@ impl<'a> Checker<'a> {
         } else {
             bind
         };
-        // An UNANNOTATED local bound to an UNBOUND callable reference takes kotlinc's INFERRED type,
-        // which is the reflection one (`val f = A::b` is a `KFunction`, not a plain function type) — that is
-        // why `f.returnType` resolves on it.
-        //
-        // UNBOUND only, because that is the set krusty realizes as a real Kotlin reference object
-        // (`FunctionReferenceImpl`, hence a `KFunction`). A BOUND reference on a value receiver
-        // (`E.A::foo`) can still lower to an `invokedynamic` lambda, which implements `Function{N}` and
-        // nothing else; typing its binding as a `KFunction` would `ClassCastException` on the first
-        // store. Widening those needs the backend to realize EVERY reference as a reference class.
-        let bound_ty = if declared.is_none() && self.unbound_callable_reference(scope, init) {
-            self.libraries
-                .function_reference_type(bound_ty)
-                .unwrap_or(bound_ty)
+        let bound_ty = if declared.is_none() {
+            self.callable_reference_local_ty(init, bound_ty)
         } else {
             bound_ty
         };
@@ -50123,226 +49914,8 @@ impl<'a> Checker<'a> {
         Some((semantic, local.origin))
     }
 
-    fn receiver_function_value(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<(&'static crate::types::FnSig, ReceiverFnValueOrigin)> {
-        if let Some((semantic, origin)) = self.local_callable_type(scope, name) {
-            return match semantic {
-                Ty::Fun(signature) if signature.has_receiver => {
-                    let origin = match origin {
-                        ReceiverFnValueOrigin::DispatchProperty {
-                            owner,
-                            receiver_identity,
-                            declared_ty,
-                            enum_entry_property,
-                        } => {
-                            let receivers = self.implicit_receivers(scope);
-                            let recorded_is_owner = receivers.iter().any(|receiver| {
-                                receiver.identity == receiver_identity
-                                    && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                            });
-                            let receiver_identity = if recorded_is_owner {
-                                receiver_identity
-                            } else {
-                                receivers
-                                    .into_iter()
-                                    .find(|receiver| {
-                                        receiver.extension_receiver.is_none()
-                                            && self.receiver_is_assignable(
-                                                receiver.ty,
-                                                Ty::obj_name(owner),
-                                            )
-                                    })
-                                    .map(|receiver| receiver.identity)
-                                    .unwrap_or(receiver_identity)
-                            };
-                            ReceiverFnValueOrigin::DispatchProperty {
-                                owner,
-                                receiver_identity,
-                                declared_ty,
-                                enum_entry_property,
-                            }
-                        }
-                        origin => origin,
-                    };
-                    Some((signature, origin))
-                }
-                _ => None,
-            };
-        }
-        for receiver in self.implicit_receivers(scope) {
-            let Some(owner) = receiver.ty.obj_internal() else {
-                continue;
-            };
-            if let Some(property) = self
-                .scoped_properties(scope, owner)
-                .into_iter()
-                .rev()
-                .find(|property| property.name == name)
-            {
-                return match property.ty {
-                    Ty::Fun(signature) if signature.has_receiver => Some((
-                        signature,
-                        ReceiverFnValueOrigin::DispatchProperty {
-                            owner: property.owner,
-                            receiver_identity: receiver.identity,
-                            declared_ty: property.ty,
-                            enum_entry_property: property.enum_entry_property,
-                        },
-                    )),
-                    _ => None,
-                };
-            }
-        }
-        match self.select_top_level_property(scope, name) {
-            TopLevelPropertySelection::Selected(property) if matches!(property.property.ty, Ty::Fun(signature) if signature.has_receiver) =>
-            {
-                let Ty::Fun(signature) = property.property.ty else {
-                    unreachable!("guard selected a function-typed property")
-                };
-                Some((signature, ReceiverFnValueOrigin::TopLevelProperty))
-            }
-            _ => None,
-        }
-    }
-
-    fn receiver_function_parts(
-        signature: &'static crate::types::FnSig,
-    ) -> Option<(Ty, &'static [Ty])> {
-        if !signature.has_receiver || signature.context_count != 0 {
-            return None;
-        }
-        let (&receiver, params) = signature.params.split_first()?;
-        Some((receiver, params))
-    }
-
-    fn receiver_function_member_call_params(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver_ty: Ty,
-        name: &str,
-        argument_count: usize,
-    ) -> Option<Vec<Ty>> {
-        let (signature, _) = self.receiver_function_value(scope, name)?;
-        let (expected_receiver, params) = Self::receiver_function_parts(signature)?;
-        if !self.receiver_is_assignable(receiver_ty, expected_receiver) {
-            return None;
-        }
-        let params = params.to_vec();
-        (params.len() == argument_count).then_some(params)
-    }
-
     fn receiver_is_assignable(&self, actual: Ty, expected: Ty) -> bool {
         crate::assignable::is_assignable(&crate::assignable::TyCtx::new(), self, actual, expected)
-    }
-
-    fn receiver_function_implicit_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        expected: Ty,
-        value_parameter_count: usize,
-        actual_argument_count: usize,
-    ) -> Option<ImplicitReceiver> {
-        if value_parameter_count != actual_argument_count {
-            return None;
-        }
-        self.implicit_receivers(scope)
-            .into_iter()
-            .find(|actual| self.receiver_is_assignable(actual.ty, expected))
-    }
-
-    /// Commit invocation of a value whose function type has an extension receiver. The caller chooses
-    /// only whether source syntax supplied that receiver explicitly; argument validation and lowering
-    /// use one path for locals, properties, callable-reference locals, and safe calls.
-    fn record_receiver_function_invoke(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        name: &str,
-        signature: &'static crate::types::FnSig,
-        origin: ReceiverFnValueOrigin,
-        explicit_receiver: Option<Ty>,
-    ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let (expected_receiver, params) = Self::receiver_function_parts(signature)?;
-        if params.len() != arg_tys.len() {
-            return None;
-        }
-        let implicit_receiver = match explicit_receiver {
-            Some(actual) => {
-                if !self.receiver_is_assignable(actual, expected_receiver) {
-                    return None;
-                }
-                None
-            }
-            None => Some(self.receiver_function_implicit_receiver(
-                scope,
-                expected_receiver,
-                params.len(),
-                arg_tys.len(),
-            )?),
-        };
-        let property_callee = match origin {
-            ReceiverFnValueOrigin::TopLevelProperty => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                let TopLevelPropertySelection::Selected(access) =
-                    self.select_top_level_property(scope, name)
-                else {
-                    return None;
-                };
-                self.set(*callee, access.property.ty);
-                self.expr_lowers
-                    .insert(*callee, ExprLowering::TopLevelPropertyGet(access));
-                Some(*callee)
-            }
-            ReceiverFnValueOrigin::DispatchProperty {
-                receiver_identity, ..
-            } => {
-                let Expr::Call { callee, .. } = self.file.expr(call) else {
-                    return None;
-                };
-                let receiver = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    .find(|receiver| receiver.identity == receiver_identity)?;
-                let selection = self
-                    .select_property_read(scope, receiver.ty, name)
-                    .ok()
-                    .flatten()?;
-                let property_ty = self.record_property_read(scope, Some(*callee), selection);
-                self.set(*callee, property_ty);
-                self.mark_implicit_receiver_selection(*callee, receiver);
-                Some(*callee)
-            }
-            ReceiverFnValueOrigin::Local
-            | ReceiverFnValueOrigin::ClassStorage(_)
-            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. } => None,
-        };
-        self.expect_call_args(scope, params, false, args, arg_tys);
-        if let Some(receiver) = implicit_receiver {
-            self.mark_implicit_receiver_selection(call, receiver);
-        }
-        self.expr_lowers.insert(
-            call,
-            ExprLowering::ReceiverFnInvoke {
-                name: name.to_string(),
-                params: signature.params.clone(),
-                ret: signature.ret,
-                origin,
-                property_callee,
-                implicit_receiver: implicit_receiver.map(|receiver| receiver.ty),
-                suspend: signature.suspend,
-            },
-        );
-        Some(signature.ret)
     }
 
     fn lookup(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Local> {
@@ -62831,14 +62404,14 @@ impl<'a> Checker<'a> {
                 (signature.params.len() == args.len())
                     .then(|| signature.params.clone())
                     .or_else(|| {
-                        Self::receiver_function_parts(signature).and_then(|(receiver, params)| {
+                        Self::receiver_function_parts(signature).and_then(|parts| {
                             self.receiver_function_implicit_receiver(
                                 scope,
-                                receiver,
-                                params.len(),
+                                parts.receiver,
+                                parts.values.len(),
                                 args.len(),
                             )
-                            .map(|_| params.to_vec())
+                            .map(|_| parts.values.to_vec())
                         })
                     })
             }
@@ -64956,40 +64529,13 @@ impl<'a> Checker<'a> {
         implicit_label: Option<&str>,
     ) -> Ty {
         let t = {
-            // An anonymous extension function declares its receiver in its own syntax. Feed that
-            // declaration into the ordinary receiver-lambda checker: it owns implicit `this`, member
-            // lookup, the function-type receiver bit, and lowerer's receiver binding metadata.
+            // An anonymous extension function declares its receiver in its own syntax.
             if let Some(receiver_ref) = self.file.anon_fun_receivers.get(&e.0).cloned() {
-                let receiver = self.type_ref_ty(scope, &receiver_ref);
-                let declared = self
-                    .file
-                    .lambda_param_types
-                    .get(&e.0)
-                    .cloned()
-                    .unwrap_or_default();
-                let value_types = declared
-                    .iter()
-                    .map(|parameter| {
-                        parameter
-                            .as_ref()
-                            .map(|ty| self.type_ref_ty(scope, ty))
-                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                    })
-                    .collect::<Vec<_>>();
-                return self.check_lambda_with_implicit_receivers_and_return_labeled(
+                return self.check_anonymous_extension_function(
                     scope,
                     e,
-                    LambdaShape {
-                        context_types: &[],
-                        extension_receiver: Some(receiver),
-                        value_types: &value_types,
-                    },
+                    &receiver_ref,
                     implicit_label,
-                    LambdaCheckMode {
-                        suspend: false,
-                        coerce_return_to_unit: false,
-                        expected_return: None,
-                    },
                 );
             }
             // An EXPECTED function type propagated in from a typed context binds the lambda's
@@ -69392,7 +68938,9 @@ impl<'a> Checker<'a> {
         if self.reject_inaccessible_associated_reference(expression, internal, name) {
             return UnboundRefSelection::Selected(Ty::Error);
         }
-        if self.classifier_is_object(internal) {
+        // Type arguments make the LHS a type, never the object's value: `Alias<Any>::foo` is unbound.
+        let type_lhs = self.has_type_arguments(receiver);
+        if self.classifier_is_object(internal) && !type_lhs {
             return match self.nested_constructor_reference(
                 scope,
                 expression,
@@ -69484,6 +69032,7 @@ impl<'a> Checker<'a> {
                 });
                 if applicable {
                     let singleton_binding = classifier_receiver
+                        .filter(|_| !type_lhs)
                         .and_then(|receiver| {
                             self.classifier_singleton_value(internal)
                                 .filter(|singleton| Ty::obj_name(singleton.classifier) == receiver)

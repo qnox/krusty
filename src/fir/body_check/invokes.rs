@@ -102,6 +102,7 @@ impl BodyFirChecker<'_> {
         let Some(ExprLowering::ReceiverFnInvoke {
             name,
             params,
+            context_count,
             ret,
             origin,
             property_callee,
@@ -114,7 +115,7 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedCallShape,
             ));
         };
-        if params.len() != arguments.len() + 1
+        if params.len() != context_count + 1 + arguments.len()
             || explicit_receiver.is_some() == implicit_receiver.is_some()
         {
             return Err(self.failure(
@@ -127,7 +128,7 @@ impl BodyFirChecker<'_> {
             self.file
                 .expr_span(expression)
                 .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
-            Ty::fun_with_shape(params.clone(), ret, 0, true, suspend),
+            Ty::fun_with_shape(params.clone(), ret, context_count, true, suspend),
         )?;
         let callee = match origin {
             ReceiverFnValueOrigin::Local => {
@@ -195,15 +196,28 @@ impl BodyFirChecker<'_> {
                 )
             })?,
         };
-        let receiver_conversion =
-            self.receiver_conversion(expression, origin_id, receiver, params.first().copied())?;
+        // `[context…, receiver, value…]`: the context arguments were selected by the checker, and
+        // argument indices count from the receiver.
+        let (context_params, receiver_and_values) = params.split_at(context_count);
+        let context_arguments = self.function_context_arguments(expression, context_params)?;
+        let receiver_conversion = self.receiver_conversion(
+            expression,
+            origin_id,
+            receiver,
+            receiver_and_values.first().copied(),
+        )?;
         let mut checked_arguments = vec![FirCallArgument::Expression {
             parameter: 0,
             value: receiver.value,
             conversion: receiver_conversion,
         }];
-        checked_arguments
-            .extend(self.call_arguments_from(expression, arguments, &params, 1, None)?);
+        checked_arguments.extend(self.call_arguments_from(
+            expression,
+            arguments,
+            receiver_and_values,
+            1,
+            None,
+        )?);
         let parameter_types = params
             .iter()
             .copied()
@@ -218,7 +232,7 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(FirExprKind::FunctionInvoke {
             callee,
-            context_arguments: Box::new([]),
+            context_arguments,
             arguments: checked_arguments.into_boxed_slice(),
             parameter_types: parameter_types.into_boxed_slice(),
             result: self.resolved_type(

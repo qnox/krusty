@@ -1,0 +1,5 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_context_receiver_function_value_takes_its_context_and_receiver_from_scope]
+2.4.0..2.4.20:

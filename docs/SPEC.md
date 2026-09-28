@@ -3667,8 +3667,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Recorded gaps the same ledgers make visible, all outside this boundary and none affecting the
   adaptation instructions: a `var`'s delegate `KProperty` is a `PropertyReference*Impl` where
-  kotlinc uses `MutablePropertyReference*Impl`; a member-extension delegate's reference names the
-  EXTENSION receiver's class where kotlinc names the owner; the reference's signature string omits
+  kotlinc uses `MutablePropertyReference*Impl`; the reference's signature string omits
   a value class accessor's mangled name and carries the boxed return (`getId()LId;` where kotlinc
   writes `getId-eEFUqEU()I`); and a non-null reference setter parameter is not
   `checkNotNullParameter`-checked.
@@ -3678,6 +3677,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   both value-class carrier kinds; each either RUN or pinned instruction-for-instruction against
   kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
   The lowering lives in `src/fir_lower/delegated_properties.rs`.
+
+- **Signature inference selects a member extension by its arguments' types.** A declaration whose
+  result type is inferred (`fun viaLong() = 1L.pick(2L)`) and a delegated property whose type comes
+  from its `getValue` select member extensions while signatures are still being solved. That
+  selection mapped arguments to parameters by count and name only, so `Long.pick(slot: IntArray)`
+  and `Long.pick(slot: Long)` were always ambiguous. Each argument must now fit the parameter it
+  maps to under the same per-argument rule ordinary candidate selection uses
+  (`CallArgKind::fits_parameter`: an integer literal adapts to `Long`, an unchecked lambda needs a
+  parameter that can host a function, a vararg takes its element unless spread). When no `getValue`
+  applies, the signature phase names the same candidate families as the body check — every rung
+  since Kotlin 2.4.20, the earliest non-empty one before — so the two reports collapse into one.
+  Tests: `tests/member_extension_function_e2e.rs`
+  (`member_extension_overloads_differing_in_a_value_parameter_type_are_selected_by_it`),
+  `tests/delegate_scalar_boundary_e2e.rs`
+  (`inferred_delegate_failure_reports_the_earliest_candidate_family`). Corpus:
+  `delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt`.
+
+- **A delegate's `KProperty` is owned by the property's container.** kotlinc passes the class a
+  member (extension or not) is declared in, or the file facade of a top-level property, as the
+  owner of the `PropertyReferenceNImpl` it hands to `getValue`/`setValue`. An extension receiver's
+  classifier is not a container: naming it both disagreed with kotlinc and, for a receiver with no
+  class of its own (`val IntArray.second by …`), loaded `kotlin/IntArray` and failed with
+  `NoClassDefFoundError`. Tests: `tests/delegated_prop_e2e.rs`
+  (`a_delegated_extension_property_reference_is_owned_by_its_container`).
 
 - **A delegate convention resolves `kotlin.reflect.KProperty`; it does not assume it.** The operand
   type the `getValue`/`setValue` lookup passes is obtained from the symbol source that answers
@@ -9745,6 +9768,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
   corpus `reflection/functions/typeParameterInReturnType.kt`.
 
+- **A typealias applied to type arguments on a callable-reference LHS is a type.** kotlinc reads
+  `Alias<Int>::label` as a type LHS even when the alias expands to an `object`, so the reference is
+  unbound (`(Registry) -> String`), while the bare `Alias::label` stays bound to the object's value.
+  The arguments substitute through the alias exactly as in a type position (`Keyed<String>::value` on
+  `typealias Keyed<V> = Tagged<String, V>` reads `Tagged<String, String>`); they never attach to the
+  expanded classifier directly. Whether an unannotated local takes the reflection type is read from the
+  checker's recorded binding, not from re-resolving the receiver's spelling. Test:
+  `callable_ref_e2e::an_applied_typealias_lhs_is_a_type_even_for_an_object`, corpus
+  `callableReference/callableReferenceOnObjectTypealias.kt`.
+
 - **A reference to a dependency's target is not re-mangled, and a generic function's metadata names its
   type-parameter return.** Two emit bugs that only a reflection READ can catch. (1) The value-class
   mangle was applied to a function reference's recorded name even when the target came from a
@@ -10744,6 +10777,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   than rejecting the shape, because it hands the lambda its own receiver as a value parameter and one
   parameter too many.
   Tests: `tests/context_function_type_e2e.rs`.
+
+- **A context function type's extension receiver is any type, and invoking it takes the context
+  and the receiver from scope independently.** kotlinc's grammar is `context(C…) receiverType '.'
+  (params) -> T`, so the receiver may be parenthesized: `context(String) (String).() -> String`
+  parses to `[String, String] -> String` with one context and a receiver. Called as `a()` or
+  `r.a(v)`, the omitted context arguments are selected as for any context call and the extension
+  receiver is the implicit receiver (or the explicit one); one implicit value may supply both, as in
+  `with("OK") { a() }`. The FunctionN invoke passes `(contexts…, receiver, values…)`. An anonymous
+  extension function `context(p: String) fun String.() = p` has that same type: its named context
+  parameters lead, then its receiver.
+  Tests: `tests/context_function_type_e2e.rs`
+  (`a_context_receiver_function_value_takes_its_context_and_receiver_from_scope`).
+  Corpus: `contextParameters/sameArgForContextAndExtension.kt`.
 
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local

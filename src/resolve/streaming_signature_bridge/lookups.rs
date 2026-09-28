@@ -844,9 +844,8 @@ impl ProductionSignatureSemantics<'_> {
         selection: super::super::MemberExtensionSelection,
     ) -> SignatureMemberExtensionCallSelection {
         let SignatureMemberExtensionArguments {
-            types: arguments,
+            arguments: argument_kinds,
             names,
-            spread,
             explicit_type_arguments,
             trailing_lambda,
         } = call;
@@ -867,6 +866,10 @@ impl ProductionSignatureSemantics<'_> {
         // The shared selector uses expression IDs only to preserve source argument mapping. Compact
         // signature evaluation has no AST IDs, so supply dense transient ordinals; no callback below
         // dereferences them and none escape this call.
+        let arguments = argument_kinds
+            .iter()
+            .map(crate::symbol_resolver::CallArgKind::ty)
+            .collect::<Vec<_>>();
         let argument_ordinals = (0..arguments.len())
             .map(|ordinal| crate::ast::ExprId(ordinal as u32))
             .collect::<Vec<_>>();
@@ -897,9 +900,31 @@ impl ProductionSignatureSemantics<'_> {
                         ty: Ty::Error,
                     })
             },
-            &|argument| spread.get(argument).copied().unwrap_or(false),
+            &|argument| argument_kinds[argument].is_spread(),
             &|_, _, _| None,
             &|params, call_sig, slots| {
+                // Applicability is the shared per-argument rule: each argument must fit the
+                // parameter it maps to (a vararg's element unless the argument is spread).
+                let parameter_by_argument = super::super::call_argument_parameter_indices(
+                    slots.args.len(),
+                    params.len(),
+                    slots.arg_names,
+                    slots.trailing_lambda,
+                    call_sig,
+                )?;
+                for (argument, parameter) in parameter_by_argument.into_iter().enumerate() {
+                    let kind = &argument_kinds[argument];
+                    let declared = *params.get(parameter)?;
+                    let expected = if call_sig.vararg_index == Some(parameter) && !kind.is_spread()
+                    {
+                        declared.array_read_elem().unwrap_or(declared)
+                    } else {
+                        declared
+                    };
+                    if !kind.fits_parameter(&*self.table.libraries, &source, expected) {
+                        return None;
+                    }
+                }
                 let mapped = super::super::map_call_sig_args_with_trailing(
                     slots.args,
                     slots.arg_names,
@@ -922,7 +947,7 @@ impl ProductionSignatureSemantics<'_> {
                 result_constraint: super::super::CallResultConstraint::direct(expected_result),
                 name,
                 args: &argument_ordinals,
-                arg_tys: arguments,
+                arg_tys: &arguments,
                 arg_names: names,
                 explicit_type_args: explicit_type_arguments,
                 trailing_lambda,
@@ -1345,9 +1370,8 @@ pub(super) enum SignatureMemberExtensionCallSelection {
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct SignatureMemberExtensionArguments<'a> {
-    pub(super) types: &'a [Ty],
+    pub(super) arguments: &'a [crate::symbol_resolver::CallArgKind],
     pub(super) names: Option<&'a [Option<String>]>,
-    pub(super) spread: &'a [bool],
     pub(super) explicit_type_arguments: &'a [Ty],
     pub(super) trailing_lambda: bool,
 }

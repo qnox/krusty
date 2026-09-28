@@ -228,6 +228,26 @@ pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -
     render_errors(&stderr)
 }
 
+/// Require krusty to report exactly kotlinc's errors for a single `Main.kt`, as recorded per Kotlin
+/// version for the running test, and require kotlinc to accept `source`: the ledger is empty.
+pub fn assert_accepted_like_kotlinc(source: &str) {
+    let sources = [("Main.kt", source)];
+    let expected = super::recorded_support::recorded(|| {
+        reference_error_ledger(&sources, &common::language_directives::kotlinc_args(source))
+    });
+    assert_eq!(
+        krusty_error_ledger(&sources),
+        expected,
+        "krusty's ledger against kotlinc {}",
+        krusty::kotlin_version::target()
+    );
+    assert!(
+        expected.is_empty(),
+        "kotlinc {} accepts the fixture",
+        krusty::kotlin_version::target()
+    );
+}
+
 /// [`reference_error_ledger`] for krusty's CLI.
 pub fn krusty_error_ledger(sources: &[(&str, &str)]) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
