@@ -1,7 +1,7 @@
 //! Rolling a class back to an earlier point of its writing: the constants and source-map lines of
 //! code compiled only to be read back as a method node and written into another class.
 
-use super::{ClassWriter, ConstPool};
+use super::{ClassWriter, Const, ConstPool};
 use crate::jvm::source_map::SourceMap;
 
 /// A point in a class's writing that [`ClassWriter::rollback`] returns its pool and source map to.
@@ -18,7 +18,11 @@ impl ConstPool {
     /// Forget every entry interned past the first `entries` (whose slots start past `slots`).
     fn truncate(&mut self, entries: usize, slots: usize) {
         for forgotten in self.entries.drain(entries..) {
-            self.dedup.remove(&forgotten);
+            if let Const::Utf8(text) = &forgotten {
+                self.utf8_index.remove(text);
+            } else {
+                self.dedup.remove(&forgotten);
+            }
         }
         self.slot_entries.truncate(slots);
     }
@@ -62,4 +66,18 @@ impl ClassWriter {
             self.methods.len(),
         ]
     }
+}
+
+#[test]
+fn rollback_drops_the_utf8_index_entry() {
+    let mut pool = super::ConstPool::default();
+    let keep = pool.utf8("keep");
+    let extra = pool.utf8("extra");
+    assert_ne!(keep, extra);
+    pool.truncate(1, 1);
+    assert_eq!(pool.lookup_utf8("keep"), Some(keep));
+    assert!(pool.lookup_utf8("extra").is_none());
+    let again = pool.utf8("extra");
+    assert_eq!(pool.lookup_utf8("extra"), Some(again));
+    assert_eq!(pool.utf8_at(again), Some("extra"));
 }
