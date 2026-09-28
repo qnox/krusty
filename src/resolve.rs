@@ -129,6 +129,7 @@ pub(crate) use signature_collection::{
 };
 mod singleton_receivers;
 mod source_constructors;
+mod source_package;
 mod stable_path;
 mod streaming_signature_bridge;
 #[cfg(test)]
@@ -5621,10 +5622,7 @@ fn import_levels(
     platform_defaults: &[&str],
     source: &dyn SymbolSource,
 ) -> [Vec<TypeName>; 4] {
-    let own = match &file.package {
-        Some(p) => type_name(&p.replace('.', "/")),
-        None => type_name(""),
-    };
+    let own = source_package::identity(file.package.as_deref());
     let explicit_star: Vec<TypeName> = file
         .import_paths
         .iter()
@@ -5638,13 +5636,11 @@ fn import_levels(
             }
         })
         .collect();
-    let kotlin_defaults: Vec<TypeName> = KOTLIN_DEFAULT_IMPORT_PACKAGES
-        .iter()
-        .map(|s| type_name(&s.replace('.', "/")))
-        .collect();
+    let kotlin_defaults = source_package::kotlin_default_packages().to_vec();
     let platform: Vec<TypeName> = platform_defaults
         .iter()
-        .map(|s| type_name(&s.replace('.', "/")))
+        .copied()
+        .map(|package| source_package::identity(Some(package)))
         .collect();
     [vec![own], explicit_star, kotlin_defaults, platform]
 }
@@ -37156,6 +37152,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     let import_levels = function_import_scope.levels().clone();
     let mut checker = Checker {
         file,
+        source_package: source_package::identity(file.package.as_deref()),
         libraries: syms.libraries(),
         native_plugins: syms.native_plugins(),
         compilation_id: syms.compilation_id(),
@@ -39924,6 +39921,8 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
 
 struct Checker<'a> {
     file: &'a File,
+    /// Interned source package of `file`, computed once from its dotted spelling.
+    source_package: TypeName,
     /// External declarations and platform semantics. This provider is independent of the
     /// temporary current-module signature graph and remains valid after that graph is destroyed.
     libraries: &'a dyn SemanticPlatform,
@@ -51766,14 +51765,7 @@ impl<'a> Checker<'a> {
     }
 
     fn source_package_name(&self) -> TypeName {
-        type_name(
-            &self
-                .file
-                .package
-                .as_deref()
-                .unwrap_or_default()
-                .replace('.', "/"),
-        )
+        self.source_package
     }
 
     /// Resolve a bare unbound class-literal receiver through the ordinary type-reference channel,
