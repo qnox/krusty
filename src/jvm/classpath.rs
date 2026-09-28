@@ -3265,7 +3265,7 @@ impl Classpath {
         let class = self.find_name(owner)?;
         super::metadata::metadata_type_aliases(&class)
             .iter()
-            .filter_map(|alias| crate::types::existing_type_name(&alias.name))
+            .map(|alias| alias.name)
             .find(|identity| identity.segment_ref() == name)
     }
 
@@ -3278,7 +3278,7 @@ impl Classpath {
         let class = self.find_name(owner)?;
         let alias = super::metadata::metadata_type_aliases(&class)
             .iter()
-            .find(|alias| crate::types::existing_type_name(&alias.name) == Some(identity))?;
+            .find(|alias| alias.name == identity)?;
         Some((
             type_name(&alias.target),
             alias.formals.clone(),

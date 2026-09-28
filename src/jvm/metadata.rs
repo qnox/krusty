@@ -2732,16 +2732,12 @@ fn decode_type_aliases(
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some(alias) = parse_type_alias(body, records, d2)? {
+                if let Some(alias) = parse_type_alias(owner, body, records, d2)? {
                     // Key the alias by its FULL internal name — its DECLARING package plus the alias's
                     // simple name — so `kotlin/collections/ArrayList` is distinct from any other
-                    // package's `ArrayList`. `resolve_type` looks it up by that full name, and an
+                    // package's `ArrayList`. `resolve_type` looks it up by that identity, and an
                     // `import kotlin.test.Test` spells the DECLARED package, never the relocated one.
-                    let full = crate::types::type_name_child(owner, &alias.name).render();
-                    out.push(MetaTypeAlias {
-                        name: full,
-                        ..alias
-                    });
+                    out.push(alias);
                 }
             }
             (_, w) => {
@@ -2757,8 +2753,9 @@ fn decode_type_aliases(
 /// One public `typealias` from a file facade's `Package` metadata.
 #[derive(Clone, Debug)]
 pub struct MetaTypeAlias {
-    /// The alias's simple name; the classpath index keys it by declaring package.
-    pub name: String,
+    /// The alias's declaring identity (`package/Name`, or the classifier owner's path plus
+    /// `/Name`). The classpath index keys this identity; it is not a rendered spelling.
+    pub name: crate::types::TypeName,
     /// The expanded target's class internal name.
     pub target: String,
     /// The alias's own type-parameter names, in declaration order — the substitution domain.
@@ -2777,6 +2774,7 @@ pub struct MetaTypeAlias {
 /// four-parameter target, so a use site's arguments must be substituted into the template rather
 /// than pasted onto the target — the template is the only place that mapping exists.
 fn parse_type_alias(
+    owner: crate::types::TypeName,
     body: &[u8],
     records: &[Rec],
     d2: &[String],
@@ -2785,10 +2783,17 @@ fn parse_type_alias(
         .into_iter()
         .map(parse_type_param)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(parse_type_alias_decoded(body, records, d2, type_parameters))
+    Ok(parse_type_alias_decoded(
+        owner,
+        body,
+        records,
+        d2,
+        type_parameters,
+    ))
 }
 
 fn parse_type_alias_decoded(
+    owner: crate::types::TypeName,
     body: &[u8],
     records: &[Rec],
     d2: &[String],
@@ -2824,7 +2829,8 @@ fn parse_type_alias_decoded(
     if flags_visibility(flags) != VIS_PUBLIC {
         return None;
     }
-    let name = d2.get(name_id? as usize).cloned()?;
+    let simple_name = d2.get(name_id? as usize)?;
+    let name = crate::types::type_name_child(owner, simple_name);
     let class_id = expanded_class.or(underlying_class)?;
     let internal = resolve_class_name(records, d2, class_id as usize)?;
     // The alias's OWN type parameters, by metadata id, so the expansion decodes their uses as
@@ -4307,17 +4313,24 @@ mod module_reader_tests {
         let omitted_flags = [0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
         let internal_flags = [0x08, 0x00, 0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
 
-        let public = parse_type_alias(&omitted_flags, &[], &d2)
+        let public = parse_type_alias(crate::types::TypeName::ROOT, &omitted_flags, &[], &d2)
             .expect("valid alias metadata")
             .expect("public alias decodes");
-        assert_eq!(public.name, "Alias");
+        assert_eq!(public.name, crate::types::type_name("Alias"));
+        let packaged =
+            parse_type_alias(crate::types::type_name("sample"), &omitted_flags, &[], &d2)
+                .expect("valid alias metadata")
+                .expect("public alias decodes");
+        assert_eq!(packaged.name, crate::types::type_name("sample/Alias"));
         assert_eq!(public.target, "sample/Real");
         // A bare target remains an explicit expansion rather than becoming a consumer fallback.
         assert!(public.formals.is_empty());
         assert_eq!(public.expansion, Ty::obj("sample/Real"));
-        assert!(parse_type_alias(&internal_flags, &[], &d2)
-            .expect("valid alias metadata")
-            .is_none());
+        assert!(
+            parse_type_alias(crate::types::TypeName::ROOT, &internal_flags, &[], &d2)
+                .expect("valid alias metadata")
+                .is_none()
+        );
     }
 
     #[test]
