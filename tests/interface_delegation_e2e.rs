@@ -587,3 +587,18 @@ fn a_parenthesized_delegate_name_is_the_same_delegate() {
         ],
     );
 }
+
+/// A forwarder has no source line of its own, but kotlinc still gives it a local-variable table
+/// naming its receiver and each parameter, for a function and for a property accessor alike.
+#[test]
+fn delegation_forwarders_name_their_receiver_and_parameters() {
+    let source = "interface Named {
+    fun greet(times: Int, name: String): String
+    var title: String
+    fun reset()
+}
+
+class Forwarding(named: Named) : Named by named
+";
+    common::assert_class_code_matches_kotlinc("forwarder_locals", source, "Forwarding");
+}
