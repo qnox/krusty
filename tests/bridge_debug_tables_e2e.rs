@@ -17,7 +17,12 @@ use super::common;
 use super::common::compare_with_kotlinc_plugin;
 use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
-fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
+fn assert_code_and_debug_identical_with_classpath(
+    name: &str,
+    src: &str,
+    class: &str,
+    classpath: &[std::path::PathBuf],
+) {
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skipping: scratch directory unavailable");
         return;
@@ -36,7 +41,7 @@ fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
     let (status, stderr) =
         common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
     assert_eq!(status, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process_metadata_cp(src, name, &[])
+    let classes = common::compile_in_process_metadata_cp(src, name, classpath)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, bytes) = classes
         .iter()
@@ -57,6 +62,10 @@ fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
     let expected = disassemble(&reference_class);
     let _ = std::fs::remove_dir_all(dir);
     assert_eq!(actual, expected, "{name}: code and debug tables differ");
+}
+
+fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
+    assert_code_and_debug_identical_with_classpath(name, src, class, &[]);
 }
 
 /// The narrowest shape that produces one: a class implementing a generic interface at a concrete
@@ -114,6 +123,32 @@ fn a_member_extension_bridge_keeps_the_receiver_identity() {
     // debug projection. This still covers every instruction, line, and local-table row of both the
     // declaration and its erased bridge.
     assert_code_and_debug_identical("MemberExtensionBridge", src, "StringTransformer");
+}
+
+/// An anonymous context parameter is labelled from the bridge's own Kotlin type, the overridden
+/// declaration's `T` erased to `Any`: `$context-Any`. The implementation renames it `id` and its type
+/// is a value class whose carrier is `Int`, so a label taken from the implementation's parameter, or
+/// from its carrier after value-class lowering, comes out wrong.
+#[test]
+fn a_renamed_anonymous_context_parameter_bridge_keeps_the_overridden_label() {
+    let src = "@JvmInline\n\
+               value class Id(val v: Int)\n\
+               \n\
+               interface Reader<T> {\n\
+               \x20   context(_: T)\n\
+               \x20   fun read(): Int\n\
+               }\n\
+               \n\
+               class IdReader : Reader<Id> {\n\
+               \x20   context(id: Id)\n\
+               \x20   override fun read(): Int = id.v\n\
+               }\n";
+    assert_code_and_debug_identical_with_classpath(
+        "AnonymousContextBridge",
+        src,
+        "IdReader",
+        &[common::stdlib_jar()],
+    );
 }
 
 /// Property bridges do not delegate through an `IrFunction`, so their setter parameter cannot get
