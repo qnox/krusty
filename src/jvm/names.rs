@@ -170,6 +170,31 @@ fn object_descriptor_internal(descriptor: &str) -> Option<&str> {
     (!raw.is_empty()).then_some(raw)
 }
 
+/// Whether `candidate` is `original` with `owner` inserted as the first parameter
+/// (`(I)V` and `pkg/Foo` match `(Lpkg/Foo;I)V`). A miss does not intern the candidate's class.
+pub(crate) fn descriptor_prepends_classifier(
+    original: &str,
+    owner: TypeName,
+    candidate: &str,
+) -> bool {
+    let Some(tail) = original.strip_prefix('(') else {
+        return false;
+    };
+    let Some(after_owner) = candidate.strip_prefix("(L") else {
+        return false;
+    };
+    let Some((class, rest)) = after_owner.split_once(';') else {
+        return false;
+    };
+    if rest != tail {
+        return false;
+    }
+    if let Some(name) = crate::types::existing_type_name(class) {
+        return name == owner;
+    }
+    owner.matches(class)
+}
+
 fn nested_class_tail(owner_segment: &str, nested: &str, tail: &str) -> bool {
     tail.strip_prefix(owner_segment)
         .and_then(|rest| rest.strip_prefix("$"))
@@ -500,6 +525,35 @@ mod tests {
             classfile_internal_name("kotlin/Int.Companion"),
             "kotlin/jvm/internal/IntCompanionObject"
         );
+    }
+
+    #[test]
+    fn prepended_receiver_descriptor_does_not_intern_a_miss() {
+        let owner = crate::types::type_name("probe/holder6044/Face");
+        let nested = crate::types::type_name("probe/holder6044/Outer$Inner");
+        let missing = "probe/holder6044/Missing";
+        assert!(crate::types::existing_type_name(missing).is_none());
+        assert!(descriptor_prepends_classifier(
+            "(I)Ljava/lang/String;",
+            owner,
+            "(Lprobe/holder6044/Face;I)Ljava/lang/String;"
+        ));
+        assert!(descriptor_prepends_classifier(
+            "()V",
+            nested,
+            "(Lprobe/holder6044/Outer$Inner;)V"
+        ));
+        assert!(!descriptor_prepends_classifier(
+            "(I)Ljava/lang/String;",
+            owner,
+            "(Lprobe/holder6044/Missing;I)Ljava/lang/String;"
+        ));
+        assert!(!descriptor_prepends_classifier(
+            "(I)V",
+            owner,
+            "(Lprobe/holder6044/Face;J)V"
+        ));
+        assert!(crate::types::existing_type_name(missing).is_none());
     }
 
     #[test]
