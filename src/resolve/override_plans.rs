@@ -307,6 +307,24 @@ fn module_parameter_identities(
         .expect("an override implementation must publish every typed parameter identity")
 }
 
+/// The overridden declaration's parameter identities: a module declaration publishes them through
+/// the module index, a dependency's through its normalized call signature.
+fn overridden_parameter_identities(
+    index: &ResolvedModuleIndex,
+    overridden: ResolvedFunctionOverrideTarget,
+    declared: &crate::libraries::FunctionInfo,
+    count: usize,
+) -> Box<[crate::fir::ResolvedParameterIdentity]> {
+    match overridden {
+        ResolvedFunctionOverrideTarget::Module(callable) => {
+            module_parameter_identities(index, callable, count)
+        }
+        ResolvedFunctionOverrideTarget::External(_) => {
+            function_parameter_identities(declared, count)
+        }
+    }
+}
+
 fn declaration_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
     let mut parameters = function.semantic_params().into_owned();
     if let Some(receiver) = function
@@ -511,6 +529,7 @@ fn publish_inherited_interface_function_plans(
                 };
                 let (declared_parameters, declared_result) =
                     overridden_declaration_signature(source, declared, overridden);
+                let declared_parameter_count = declared_parameters.len();
                 let implementation_parameters =
                     declaration_parameters_with_receiver(implementation_declared);
                 overrides.push(ResolvedFunctionOverride {
@@ -537,6 +556,12 @@ fn publish_inherited_interface_function_plans(
                     implementation_parameter_identities: function_parameter_identities(
                         &implementation,
                         implementation_parameters.len(),
+                    ),
+                    overridden_parameter_identities: overridden_parameter_identities(
+                        index,
+                        overridden,
+                        declared,
+                        declared_parameter_count,
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -1010,6 +1035,7 @@ fn append_function_override_edges(
             }
             let (declared_parameters, declared_result) =
                 overridden_declaration_signature(source, declared, overridden);
+            let declared_parameter_count = declared_parameters.len();
             overrides.push(ResolvedFunctionOverride {
                 implementation: ResolvedFunctionOverrideTarget::Module(implementation.callable),
                 implementation_owner,
@@ -1035,6 +1061,12 @@ fn append_function_override_edges(
                     index,
                     implementation.callable,
                     implementation.parameters.len(),
+                ),
+                overridden_parameter_identities: overridden_parameter_identities(
+                    index,
+                    overridden,
+                    declared,
+                    declared_parameter_count,
                 ),
                 implementation_result: resolved_ty(
                     implementation.result,

@@ -288,7 +288,7 @@ fn superclass_method_bridges(
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);
-        let parameter_identities = edge.implementation_parameter_identities.clone();
+        let parameter_identities = edge.overridden_parameter_identities.clone();
         if parameter_identities.len() != base_params.len() {
             return Err(SkipReason::Bridges);
         }
