@@ -97,6 +97,17 @@ pub struct IrLambdaOrigin {
     /// `None` for a lambda outside every call, or in a scope that names none (a property
     /// initializer, an assignment, a non-infix operator), and for an anonymous function.
     pub label: Option<String>,
+    /// Which source form the implementation was written in.
+    pub form: IrLambdaForm,
+}
+
+/// The source form of a lowered function literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrLambdaForm {
+    /// A lambda literal (`{ … }`).
+    Literal,
+    /// An anonymous function expression (`fun(…) { … }`).
+    AnonymousFunction,
 }
 
 /// A `catch (e: E)` parameter's debug-local facts.

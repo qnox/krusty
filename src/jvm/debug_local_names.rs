@@ -197,6 +197,7 @@ mod tests {
                 implementation_ordinal: 0,
                 receiver_parameter: Some(0),
                 label: None,
+                form: crate::ir::IrLambdaForm::Literal,
             },
         );
         let declaration = ir.add_expr(IrExpr::Variable {
