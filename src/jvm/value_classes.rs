@@ -2917,14 +2917,14 @@ pub(crate) fn lower_value_classes(
                 // The sole-field coercion (`w.v` → `ImplicitCoercion(<w>, U)`) over a BOXED receiver
                 // (`w!!` of a boxed `W?` shared cell): unbox the receiver first — otherwise the
                 // emitter coerces the box reference straight to the underlying (`checkcast Integer`
-                // on a `W` → CCE).
+                // on a `W` → CCE). Only a recorded sole-property read: `vc as Any?` over a `W(val a: Any?)`
+                // has the carrier's type too, and keeps the box.
                 if let (Some(x), true) = (
                     match repr_ctx.repr(*arg) {
                         Repr::Boxed(x) => Some(x),
                         _ => None,
                     },
-                    type_operand.non_null().obj_internal().is_none()
-                        || !under.contains_key(&type_operand.non_null().obj_internal().unwrap()),
+                    sole_property_coercions.contains(&id),
                 ) {
                     let u = under.get(&x).map(|t| erase(t, &under));
                     if u.map(|u| u.non_null()) == Some(type_operand.non_null()) {
