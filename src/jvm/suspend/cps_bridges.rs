@@ -43,6 +43,7 @@ pub(crate) fn finalize_suspend_bridges(
             bridge
                 .parameter_identities
                 .push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
+            bridge.parameter_types.push(continuation);
             bridge.erased_ret = object;
             let target_key = (
                 class.fq_name,

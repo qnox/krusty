@@ -28,6 +28,11 @@ pub struct Bridge {
     /// declaration's, whose signature the bridge realizes. These are frozen before a
     /// representation pass can prepend carrier/receiver parameters to the delegated target.
     pub parameter_identities: Vec<ResolvedParameterIdentity>,
+    /// The Kotlin types of those parameters on the bridge itself, aligned with
+    /// `parameter_identities`: the overridden declaration's, erased to their bounds. They are frozen
+    /// with the identities, so a representation pass that rewrites `concrete_params` to physical
+    /// carriers never changes a debug label derived from them.
+    pub parameter_types: Vec<Ty>,
     pub name: String,
     pub erased_params: Vec<Ty>,
     pub erased_ret: Ty,

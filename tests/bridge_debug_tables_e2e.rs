@@ -6,8 +6,9 @@
 //! and names its receiver and parameters in a `LocalVariableTable`, and a debugger stepping into
 //! `Sink<String>.accept` reads those.
 //!
-//! The parameter NAMES come from the concrete override the bridge delegates to; their descriptors
-//! are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`).
+//! The parameter NAMES come from the overridden declaration whose signature the bridge realizes;
+//! their descriptors are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`,
+//! not `String`).
 //!
 //! Every Kotlin class that implements a generic supertype emits at least one, so the gap was in
 //! every such class — and in every `@Serializable` class twice over, since a generated `$serializer`
@@ -37,7 +38,7 @@ fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
         return;
     };
     assert_eq!(status, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process_metadata_cp(src, name, &[])
+    let classes = common::compile_in_process_metadata_cp(src, name, &[common::stdlib_jar()])
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, bytes) = classes
         .iter()
@@ -115,6 +116,27 @@ fn a_member_extension_bridge_keeps_the_receiver_identity() {
     // debug projection. This still covers every instruction, line, and local-table row of both the
     // declaration and its erased bridge.
     assert_code_and_debug_identical("MemberExtensionBridge", src, "StringTransformer");
+}
+
+/// An anonymous context parameter is labelled from the bridge's own Kotlin type, the overridden
+/// declaration's `T` erased to `Any`: `$context-Any`. The implementation renames it `id` and its type
+/// is a value class whose carrier is `Int`, so a label taken from the implementation's parameter, or
+/// from its carrier after value-class lowering, comes out wrong.
+#[test]
+fn a_renamed_anonymous_context_parameter_bridge_keeps_the_overridden_label() {
+    let src = "@JvmInline\n\
+               value class Id(val v: Int)\n\
+               \n\
+               interface Reader<T> {\n\
+               \x20   context(_: T)\n\
+               \x20   fun read(): Int\n\
+               }\n\
+               \n\
+               class IdReader : Reader<Id> {\n\
+               \x20   context(id: Id)\n\
+               \x20   override fun read(): Int = id.v\n\
+               }\n";
+    assert_code_and_debug_identical("AnonymousContextBridge", src, "IdReader");
 }
 
 /// Property bridges do not delegate through an `IrFunction`, so their setter parameter cannot get

@@ -47,6 +47,7 @@ pub(super) fn materialize(
                 class,
                 implementation,
                 edge.implementation_parameter_identities.clone(),
+                edge.implementation_parameters.clone(),
             );
             if !entries.contains(&entry) {
                 entries.push(entry);
@@ -54,7 +55,7 @@ pub(super) fn materialize(
         }
     }
     let mut targets = HashSet::new();
-    for (class, implementation, parameter_identities) in entries {
+    for (class, implementation, parameter_identities, parameter_types) in entries {
         // The static member's physical signature, less the carrier it receives first.
         let target = &ir.functions[implementation as usize];
         let parameters = target
@@ -79,6 +80,7 @@ pub(super) fn materialize(
                 kind: crate::ir::BridgeKind::ValueClassInterfaceEntry,
                 target_function: Some(implementation),
                 parameter_identities,
+                parameter_types,
                 name,
                 erased_params: parameters.clone(),
                 erased_ret: result,
