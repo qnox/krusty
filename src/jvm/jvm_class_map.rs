@@ -57,7 +57,7 @@ pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
     let signed_primitive = |ty: Ty| ty.scalar_value_repr() == Some(ty);
     let primitive = Ty::obj_name(classifier);
     if signed_primitive(primitive) {
-        return super::names::type_descriptor(primitive);
+        return super::names::type_descriptor(primitive).to_owned();
     }
     if let Some(element) =
         crate::types::prim_array_element(classifier).filter(|e| signed_primitive(*e))

@@ -283,7 +283,7 @@ impl Emitter<'_> {
         let parameter_types: Vec<String> = lambda
             .parameter_types
             .iter()
-            .map(|&ty| type_descriptor(ty))
+            .map(|&ty| type_descriptor(ty).to_owned())
             .collect();
         let descriptor = format!(
             "({}{})V",
@@ -439,8 +439,8 @@ impl Emitter<'_> {
         }
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
         // body that always throws ends without a return.
-        let return_type = match type_descriptor(result).as_str() {
-            _ if scratch.is_dead() => match type_descriptor(declared_result).as_str() {
+        let return_type = match type_descriptor(result) {
+            _ if scratch.is_dead() => match type_descriptor(declared_result) {
                 "V" | "Lkotlin/Unit;" => "V".to_string(),
                 descriptor => descriptor.to_string(),
             },
@@ -531,7 +531,7 @@ impl Emitter<'_> {
                 node,
                 parameter_types: parameter_types
                     .iter()
-                    .map(|&ty| type_descriptor(ty))
+                    .map(|&ty| type_descriptor(ty).to_owned())
                     .collect(),
                 return_type,
                 value_class_parameters,

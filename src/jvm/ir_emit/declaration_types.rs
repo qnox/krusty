@@ -84,7 +84,7 @@ pub(super) fn jvm_is_erased_top(ty: Ty) -> bool {
 }
 
 pub(super) fn ir_type_desc(ty: &Ty) -> String {
-    type_descriptor(jvm_declared_ty(ty))
+    type_descriptor(jvm_declared_ty(ty)).to_owned()
 }
 
 pub(super) fn local_variable_desc(ty: Ty) -> String {
@@ -93,6 +93,7 @@ pub(super) fn local_variable_desc(ty: Ty) -> String {
     } else {
         ty
     })
+    .to_owned()
 }
 
 pub(super) fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {

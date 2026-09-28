@@ -5354,7 +5354,7 @@ fn erase_descriptor(descriptor: &str, under: &Under) -> String {
 }
 
 fn desc(t: &Ty) -> String {
-    type_descriptor(ir_ty_to_jvm(t))
+    type_descriptor(ir_ty_to_jvm(t)).to_owned()
 }
 
 fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {

@@ -113,7 +113,7 @@ pub(super) fn emit_annotation_impl_class(
         let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
         let mut debug_slot = 1u16;
         for (name, jt) in &members {
-            locals.push((name.clone(), type_descriptor(*jt), debug_slot));
+            locals.push((name.clone(), type_descriptor(*jt).to_owned(), debug_slot));
             debug_slot += slot_words(*jt);
         }
         cw.set_method_debug("<init>", &desc, None, &locals);
