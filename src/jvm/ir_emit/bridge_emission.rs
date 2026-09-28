@@ -259,7 +259,11 @@ fn emit_bridge(
             code.ifnull(dispatch);
         }
         code.aload(parameter_slot);
-        let concrete = crate::jvm::names::instanceof_internal_name(cp[barrier.parameter]);
+        // A value class passed as its carrier arrives as its box, and the check is for the box.
+        let concrete = match b.unbox_params.get(barrier.parameter) {
+            Some(Some(value_class)) => value_class.render(),
+            _ => crate::jvm::names::instanceof_internal_name(cp[barrier.parameter]),
+        };
         let concrete_class = cw.class_ref(&concrete);
         code.instance_of(concrete_class);
         code.ifne(dispatch);
