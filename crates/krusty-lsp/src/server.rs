@@ -1,3 +1,4 @@
+mod diagnostic_page;
 mod engine;
 mod implementation;
 mod line_index;

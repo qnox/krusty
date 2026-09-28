@@ -24,6 +24,9 @@ use super::super::{
     SemanticTokenIndex, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
     MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use super::diagnostic_page::{
+    limit_diagnostic_items, page_workspace_diagnostics, wire_diagnostic_message,
+};
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
 use super::response_page::{
@@ -68,7 +71,6 @@ const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
 /// dumps waiting on the analysis thread without limit.
 const MAX_PENDING_DUMPS: usize = 128;
 const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_WORKSPACE_DIAGNOSTIC_REPORTS: usize = 32 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
 const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
@@ -766,7 +768,8 @@ impl DiagnosticIndex {
     }
 
     fn encode(&self) -> Vec<Value> {
-        self.entries
+        let items = self
+            .entries
             .iter()
             .map(|entry| {
                 let message_id = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
@@ -775,6 +778,7 @@ impl DiagnosticIndex {
                 } else {
                     Value::Null
                 };
+                let message = wire_diagnostic_message(&self.messages[message_id as usize]);
                 json!({
                     "range": {
                         "start": {"line": entry[0], "character": entry[1]},
@@ -782,10 +786,11 @@ impl DiagnosticIndex {
                     },
                     "severity": if entry[4] & DIAGNOSTIC_WARNING_BIT == 0 { 1 } else { 2 },
                     "source": source,
-                    "message": self.messages[message_id as usize],
+                    "message": message.as_ref(),
                 })
             })
-            .collect()
+            .collect();
+        limit_diagnostic_items(items)
     }
 }
 
@@ -3059,13 +3064,6 @@ where
         let Ok(params) = serde_json::from_value::<WorkspaceDiagnosticParams>(params) else {
             return invalid_params(Some(id));
         };
-        if params.previous_result_ids.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
-            return Dispatch::messages(vec![diagnostic_server_cancelled(
-                id,
-                "workspace diagnostic prior-result set exceeds the response limit",
-                false,
-            )]);
-        }
         let previous: HashMap<String, String> = params
             .previous_result_ids
             .into_iter()
@@ -3079,16 +3077,8 @@ where
         uris.extend(previous.keys().cloned());
         uris.sort_unstable();
         uris.dedup();
-        if uris.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
-            return Dispatch::messages(vec![diagnostic_server_cancelled(
-                id,
-                "workspace diagnostic report exceeds the bounded non-streaming response limit",
-                false,
-            )]);
-        }
 
         let mut items = Vec::new();
-        let mut item_wire_bytes = 2usize;
         for uri in uris {
             let workspace_index;
             let open_empty_index;
@@ -3127,34 +3117,15 @@ where
                 "items": index.encode(),
                 })
             };
-            let Ok(encoded) = serde_json::to_vec(&item) else {
-                return Dispatch::messages(vec![rpc_error(
-                    id,
-                    -32603,
-                    "workspace diagnostic serialization failed",
-                )]);
-            };
-            item_wire_bytes = item_wire_bytes
-                .saturating_add(encoded.len())
-                .saturating_add(1);
-            if item_wire_bytes > BOUNDED_EXACT_RESPONSE_BYTES {
-                return Dispatch::messages(vec![diagnostic_server_cancelled(
-                    id,
-                    "workspace diagnostic report exceeds the bounded non-streaming response limit",
-                    false,
-                )]);
-            }
             items.push(item);
         }
-        let response = rpc_result(id.clone(), json!({"items": items}));
-        if !serialized_value_fits(&response, MAX_MESSAGE_BYTES) {
-            return Dispatch::messages(vec![diagnostic_server_cancelled(
-                id,
-                "workspace diagnostic response exceeds the protocol message limit",
-                false,
-            )]);
+        let paged = page_workspace_diagnostics(items, params.partial_result_token.as_ref());
+        let mut messages = paged.progress;
+        messages.push(rpc_result(id, json!({"items": paged.items})));
+        if paged.omitted_full_reports {
+            messages.extend(self.diagnostic_refresh());
         }
-        Dispatch::messages(vec![response])
+        Dispatch::messages(messages)
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -3301,6 +3272,10 @@ struct DocumentDiagnosticParams {
 struct WorkspaceDiagnosticParams {
     #[serde(default)]
     previous_result_ids: Vec<WorkspacePreviousResultId>,
+    /// Zed always sends one. Pages travel as `$/progress` before the final result so a large
+    /// workspace never becomes a single message or a server-cancelled error.
+    #[serde(default)]
+    partial_result_token: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -5671,13 +5646,20 @@ mod tests {
             "one publish plus one full response, independent of repeated pulls"
         );
         assert_eq!(messages[1]["id"], 999);
-        assert_eq!(
-            messages[1]["result"]["items"][0]["message"]
-                .as_str()
-                .unwrap()
-                .len(),
-            MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES
-        );
+        let published = messages[0]["params"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap();
+        let pulled = messages[1]["result"]["items"][0]["message"]
+            .as_str()
+            .unwrap();
+        assert_eq!(published, pulled);
+        assert!(published.len() <= super::super::diagnostic_page::DIAGNOSTIC_MESSAGE_WIRE_BYTES);
+        assert!(published.starts_with('X'));
+        assert!(published.ends_with('…'));
+        assert!(serialized_value_fits(
+            &messages[1],
+            super::super::diagnostic_page::DIAGNOSTIC_PAGE_BYTES
+        ));
         assert!(service.pending_analysis_requests.is_empty());
         assert_eq!(service.pending_analysis_request_bytes, 0);
     }
@@ -8018,6 +8000,195 @@ mod tests {
             "the current open buffer must win over an older sweep snapshot"
         );
     }
+
+    #[test]
+    fn one_file_diagnostic_list_stays_inside_a_single_page() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "bad", 1);
+        let diagnostics = (0..400)
+            .map(|index| Diagnostic {
+                span: krusty::diag::Span::new(0, 1),
+                editor_span: None,
+                identity: None,
+                severity: Severity::Error,
+                kind: DiagnosticKind::Compiler,
+                msg: format!("error {index} {}", "m".repeat(1024)),
+                file: 0,
+            })
+            .collect();
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis {
+                diagnostics,
+                ..DocumentAnalysis::empty()
+            }],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        let published = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/publishDiagnostics")
+            .expect("push diagnostics");
+        let items = published["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostic list");
+        let encoded = serde_json::to_vec(items).unwrap();
+        assert!(encoded.len() <= super::super::diagnostic_page::DIAGNOSTIC_ITEMS_PAGE_BYTES);
+        assert!(items.len() < 400);
+        assert_eq!(
+            items.last().unwrap()["message"],
+            super::super::diagnostic_page::DIAGNOSTIC_OMISSION_MESSAGE
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostics_page_instead_of_failing_the_pull() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": {} },
+                    "workspace": { "diagnostics": { "refreshSupport": true } }
+                }
+            }
+        }));
+        let message = "m".repeat(8 * 1024);
+        let files: Vec<IndexedFile> = (0..80)
+            .map(|index| IndexedFile {
+                uri: format!("file:///w/F{index:03}.kt"),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: message.clone(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".into(),
+            })
+            .collect();
+        let uris: Vec<String> = files.iter().map(|file| file.uri.clone()).collect();
+        let indexed = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: uris.clone(),
+            conclusive: true,
+            files,
+        });
+        assert!(indexed
+            .iter()
+            .any(|message| message["method"] == "workspace/diagnostic/refresh"));
+        // The index batch already asked for a refresh. Answer it so the paged report can ask again
+        // when its first page leaves files behind; a second request is not sent while one is in flight.
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": DIAGNOSTIC_REFRESH_REQUEST_ID,
+            "result": null,
+        }));
+
+        let streamed = service.workspace_diagnostic(
+            Some(json!(2)),
+            json!({ "partialResultToken": "workspace/diagnostic/2" }),
+        );
+        assert!(
+            streamed
+                .messages
+                .iter()
+                .all(|message| message.get("error").is_none()),
+            "a large report must stream, not fail: {:?}",
+            streamed.messages
+        );
+        let mut seen = Vec::new();
+        for message in &streamed.messages {
+            let items = message
+                .pointer("/params/value/items")
+                .or_else(|| message.pointer("/result/items"))
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("diagnostic page missing items: {message}"));
+            let encoded = serde_json::to_vec(items).unwrap();
+            assert!(
+                encoded.len() <= super::super::diagnostic_page::DIAGNOSTIC_PAGE_BYTES
+                    || items.len() == 1,
+                "page is {} bytes",
+                encoded.len()
+            );
+            if message["method"] == "$/progress" {
+                assert_eq!(message["params"]["token"], "workspace/diagnostic/2");
+            }
+            seen.extend(
+                items
+                    .iter()
+                    .filter_map(|item| item["uri"].as_str().map(str::to_string)),
+            );
+        }
+        assert!(streamed
+            .messages
+            .iter()
+            .any(|message| message["method"] == "$/progress"));
+        assert_eq!(seen, uris);
+
+        let first = service.workspace_diagnostic(Some(json!(3)), json!({}));
+        assert!(
+            first
+                .messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "a client without a partial-result token must be asked for the next page"
+        );
+        let result = first
+            .messages
+            .iter()
+            .find(|message| message.get("result").is_some())
+            .expect("first page");
+        assert!(result.get("error").is_none());
+        let page: Vec<String> = result["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["uri"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!page.is_empty() && page.len() < uris.len());
+        let previous: Vec<Value> = result["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| json!({ "uri": item["uri"], "value": item["resultId"] }))
+            .collect();
+        let second =
+            service.workspace_diagnostic(Some(json!(4)), json!({ "previousResultIds": previous }));
+        let second_full: Vec<String> = second
+            .messages
+            .iter()
+            .find(|message| message.get("result").is_some())
+            .unwrap()["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "full")
+            .map(|item| item["uri"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !second_full.is_empty(),
+            "the next pull must advance past the page already delivered"
+        );
+        assert!(second_full.iter().all(|uri| !page.contains(uri)));
+    }
+
     #[test]
     fn each_indexed_chunk_publishes_its_diagnostics_immediately() {
         let mut service = LspService::new(|sources: &[&str]| {
