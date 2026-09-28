@@ -1193,7 +1193,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                             })
                         })
                         .is_some_and(|signature| {
-                            package.is_some_and(|package| package.matches(&signature.package))
+                            package.is_some_and(|package| package == signature.package)
                         })
                 })
                 .collect()
@@ -1242,7 +1242,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
-                if !package.is_some_and(|package| package.matches(&sig.package)) {
+                if !package.is_some_and(|package| package == sig.package) {
                     continue;
                 }
                 overloads.push(fn_info(
@@ -1298,7 +1298,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         }
         for (&source, property) in &self.syms.source_props {
             if property.name != name
-                || !package.is_some_and(|package| package.matches(&property.package))
+                || !package.is_some_and(|package| package == property.package)
                 || (property.visibility.is_private() && self.source_file != Some(source.0))
             {
                 continue;
@@ -1384,7 +1384,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     None
                 };
                 if (associated_classifier.is_none()
-                    && !package.is_some_and(|package| package.matches(&property.package)))
+                    && !package.is_some_and(|package| package == property.package))
                     || (property.visibility.is_private()
                         && self.source_file != Some(property.source.0))
                 {
@@ -1546,7 +1546,7 @@ mod tests {
             source_file: None,
             source_member: None,
             source_receiver: None,
-            package: String::new(),
+            package: crate::types::TypeName::ROOT,
             contract: None,
             plugin_expression: None,
         }
@@ -1800,7 +1800,7 @@ mod tests {
         let mut twice = sig(vec![Ty::Int], Ty::Int);
         twice.source_file = Some(0);
         twice.source_decl = Some(crate::ast::DeclId(1));
-        twice.package = "demo".into();
+        twice.package = type_name("demo");
         st.funs.insert("twice".into(), vec![twice]);
         st.fn_facades_by_decl
             .insert((0, 1), type_name("demo/DemoKt"));
@@ -1830,17 +1830,17 @@ mod tests {
         own.visibility = Visibility::Private;
         own.source_file = Some(0);
         own.stable_declaration = Some(own_declaration);
-        own.package = "demo".into();
+        own.package = type_name("demo");
 
         let mut sibling = sig(Vec::new(), Ty::Int);
         sibling.visibility = Visibility::Private;
         sibling.source_file = Some(1);
         sibling.stable_declaration = Some(sibling_declaration);
-        sibling.package = "demo".into();
+        sibling.package = type_name("demo");
 
         let mut missing_provenance = sig(Vec::new(), Ty::Boolean);
         missing_provenance.visibility = Visibility::Private;
-        missing_provenance.package = "demo".into();
+        missing_provenance.package = type_name("demo");
 
         symbols.ext_funs.entry("mark".into()).or_default().insert(
             receiver.extension_recv_key(),
@@ -1881,7 +1881,7 @@ mod tests {
         let mut only_here = sig(Vec::new(), Ty::Int);
         only_here.source_file = Some(0);
         only_here.source_decl = Some(crate::ast::DeclId(1));
-        only_here.package = "demo".into();
+        only_here.package = type_name("demo");
         first.funs.insert("onlyHere".into(), vec![only_here]);
         first
             .fn_facades_by_decl
@@ -2255,7 +2255,7 @@ mod tests {
                     context_params: Vec::new(),
                     accepts_nullable_receiver: false,
                     source: (0, 3),
-                    package: "one".into(),
+                    package: crate::types::type_name("one"),
                     visibility: Visibility::Private,
                     annotations: Vec::new(),
                     stable_declaration: None,
@@ -2274,7 +2274,7 @@ mod tests {
                     context_params: Vec::new(),
                     accepts_nullable_receiver: false,
                     source: (1, 4),
-                    package: "two".into(),
+                    package: crate::types::type_name("two"),
                     visibility: Visibility::Public,
                     annotations: Vec::new(),
                     stable_declaration: None,
