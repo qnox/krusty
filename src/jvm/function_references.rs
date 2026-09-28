@@ -50,7 +50,12 @@ pub(super) fn reference_class_name(
         // A second node carrying the same source name is a copy of the first; it cannot share
         // the class.
         .filter(|name| ir.classes.iter().all(|class| class.fq_name != *name))
-        .unwrap_or_else(|| type_name(&format!("{current_facade}$fir${kind}${}", ir.classes.len())))
+        .unwrap_or_else(|| {
+            type_name(current_facade)
+                .nested_child("fir")
+                .nested_child(kind)
+                .nested_child(&ir.classes.len().to_string())
+        })
 }
 
 /// What a carrier reflects for a dependency target: kotlinc names the declaration's physical
@@ -672,6 +677,25 @@ pub(super) fn realize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthesized_reference_class_nests_under_the_facade() {
+        let ir = IrFile::default();
+        let function = reference_class_name(&ir, "sample/ref6044/FileKt", 3, "function");
+        assert_eq!(function, type_name("sample/ref6044/FileKt$fir$function$0"));
+        assert_eq!(function.render(), "sample/ref6044/FileKt$fir$function$0");
+
+        let nested = reference_class_name(&ir, "sample/Outer$Inner", 1, "property");
+        assert_eq!(nested, type_name("sample/Outer$Inner$fir$property$0"));
+        assert_eq!(nested.render(), "sample/Outer$Inner$fir$property$0");
+
+        let mut occupied = IrFile::default();
+        occupied
+            .classes
+            .push(IrClass::synthetic(type_name("sample/Other")));
+        let next = reference_class_name(&occupied, "sample/ref6044/FileKt", 0, "function");
+        assert_eq!(next, type_name("sample/ref6044/FileKt$fir$function$1"));
+    }
 
     /// What a reference's single capture is, as the lifted local function declares it.
     #[derive(Clone, Copy)]
