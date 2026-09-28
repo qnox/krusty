@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_formal_bounded_by_another_formal_is_signed_like_kotlinc|TypeVariableBounds|default|plain#TypeVariableBoundsKt]
-2.4.20.. 38e7182e333e39ba4ed5a0fe9a73c893 6773e047c4258a37ad6fa31a22e6a452

@@ -1,3 +1,3 @@
-# Recorded class dumps are zlib blobs. Treat them as binary so a merge does not
-# try to combine two versions as text.
-tests/recorded-bytes/**/*.zz binary
+# The recorded class-dump archive is one zlib stream. Treat it as binary so a merge
+# does not try to combine two versions as text.
+tests/recorded-bytes.zz binary

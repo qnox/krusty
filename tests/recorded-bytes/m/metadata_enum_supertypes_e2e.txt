@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[an_enum_lists_its_interfaces_before_the_implicit_enum_supertype|EnumSupertypes|default|plain#app/Kind]
-2.4.20.. f3284390ef53b9831465f6ff121361b6 8e1547b29f4fcd1921c596e843fbd9b8
-
-[an_enum_without_interfaces_lists_only_the_enum_supertype|EnumOnlySupertype|default|plain#app/Plain]
-2.4.20.. 75ed7e82c2a5d14be57b6895092ebd0a 9dc5dc641ec3e19da69f1067e2da6250

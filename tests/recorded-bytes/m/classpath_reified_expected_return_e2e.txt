@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[emitted_reified_extension_publishes_kotlinc_metadata|Lib|default|plain#lib/LibKt]
-2.4.20.. c62df61629d3730c821b21a69b2545cd 928c3571c5cf8e9725c4fc8c48105944
-
-[emitted_suspend_reified_extension_publishes_kotlinc_metadata|Lib|default|plain#lib/LibKt]
-2.4.20.. c70aab9127fab7ec225290ee399a4a75 06437562049a0bdb7ff10cc93cd5ad9c

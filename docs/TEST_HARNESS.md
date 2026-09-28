@@ -159,17 +159,16 @@ output is ever recorded, so a recorded value stays an oracle for krusty.
 
 Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`,
 `compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
-same rule with class-file dumps under `tests/recorded-bytes/`. Each test module has a text index
-`m/<module>.txt` (shared libraries use `m/_libs.txt`). An entry is an open version range plus a
-content fingerprint and a blob id: `2.4.20..` covers that release and every newer one until a later
-recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one release
-share `2.4.20-RC..` and do not share the release range. The bytes are zlib blobs under `b/`,
-addressed by content, one blob per distinct output. A dump is used when its fingerprint still
-matches the fixture and the compiler's version falls in the range; otherwise the check runs kotlinc
-and, outside CI, writes the blob and extends the index. A release (`2.4.20`, `2.4.20-release-482`)
+same rule with one class-file archive, `tests/recorded-bytes.zz`. The archive is a single zlib
+stream: a text index, then each distinct output once. An index entry is an open version range plus
+a content fingerprint and a blob id: `2.4.20..` covers that release and every newer one until a
+later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
+release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
+still matches the fixture and the compiler's version falls in the range; otherwise the check runs
+kotlinc and, outside CI, rewrites the archive. A release (`2.4.20`, `2.4.20-release-482`)
 and an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) may read and write dumps. A snapshot, dev,
 or beta build never does — that version string is not a stable artifact. `KRUSTY_RECORD=1`
-recompiles and rewrites the ranges the run reaches. The files are read at runtime and are not
+recompiles and rewrites the ranges the run reaches. The archive is read at runtime and is not
 compiled into the test binary. The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler.
 

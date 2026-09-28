@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_classpath_inline_body_names_no_nested_class_for_its_caller|ClasspathInline|default|plain#Both,User]
-2.4.20.. 041142cd96da78f8decc6c3a61c4b895 8edfb8bcfd37b401495a68c1a24cec8e
-
-[a_same_module_inline_body_names_no_nested_class_for_its_caller|SameModuleInline|default|plain#Direct,User]
-2.4.20.. f952ed76c848b4f17993cb2a2c154140 062f1df8531c6b3753cca2056b2a848a

@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_private_or_static_superclass_method_with_the_bridge_signature_owns_no_special_bridge|PrivateLength|default|plain#tree]
-2.4.20.. 692b23081cb375725f1fae76382f7165 a516fdc04e74a1338c7e09f8226c603e

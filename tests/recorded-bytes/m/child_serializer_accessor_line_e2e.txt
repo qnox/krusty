@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[every_generated_cache_member_records_the_declaration_line|ChildSerializerMemberLines|25|c765081fa3351439#Holder]
-2.4.20.. 64d072c4514505ab5f2e4385fe90505e 95e7269551bdb64d9c75f0d92dd961fc

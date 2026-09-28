@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_big_arity_function_supertype_matches_kotlinc|BigArityFunctionSupertype|default|plain#Wide]
-2.4.20.. 6447f365640257313645c62f3d863c68 f11a02f07b3ac5319b782a79ce77cc76
-
-[a_suspend_function_supertype_matches_kotlinc|SuspendFunctionSupertype|default|plain#Probe]
-2.4.20.. 8107b2660b05052baf03ca1ba0c89716 19f0016aecd14ede9f251fc13abd54b3

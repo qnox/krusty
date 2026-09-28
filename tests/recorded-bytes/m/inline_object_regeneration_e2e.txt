@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_member_s_own_type_parameter_shadows_the_call_s_for_the_rest_of_the_copy|Shadowing|default|plain#tree]
-2.4.20.. 472c7880579bad28d34803d5e4710ae9 f4d24fd9a9506699152bca2b8f521d64
-
-[regenerated_objects_are_the_reference_compilers_classes|Regeneration|default|plain#tree]
-2.4.20.. c3c3bb5c22093e6212d467b189d8e6f5 c7a5bf916a256706ba62a1f405246f33

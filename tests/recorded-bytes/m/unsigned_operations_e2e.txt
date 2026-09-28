@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[unsigned_members_are_jdk_unsigned_operations|UnsignedMembers|default|plain#UnsignedMembersKt]
-2.4.20.. 13610fa4d351b69f82aeb12923d45226 15a20d493e8b87f684ec430da65d4f2b
-
-[unsigned_template_operands_render_through_to_string_impl|UnsignedTemplates|default|plain#UnsignedTemplatesKt]
-2.4.20.. 975dd06ce7430221b66906c23b979fb0 9bb79ec06e70aed3951b4974435698b2

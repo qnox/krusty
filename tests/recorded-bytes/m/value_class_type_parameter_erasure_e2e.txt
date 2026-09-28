@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_nullable_type_parameter_underlying_keeps_its_nullability|NullableGenericUnderlying|default|plain#Source]
-2.4.20.. fabe4c3bf6003eea5b06f171a4dbb34f 82ff298874a535f4452779a61c431d09
-
-[an_interface_result_bounded_by_a_nullable_value_class_erases_like_it|NullableValueClassBound|default|plain#Source]
-2.4.20.. cf7eca5f78861212a4e387a7096a17df e55d78a9b3071686bfb7e30e921173d3

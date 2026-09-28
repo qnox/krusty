@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_discarded_generic_result_is_not_cast|DiscardedGenericResult|default|plain#DiscardedGenericResultKt]
-2.4.20.. f989e9cd5181f92d4c3a850d1c1a05da 743542d7f6323f97d54f66cf50eeb7c6

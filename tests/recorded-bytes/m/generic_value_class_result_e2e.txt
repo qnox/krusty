@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[generic_value_class_result_call_site_matches_kotlinc|GenericValueClassResult|default|plain#GenericValueClassResultKt]
-2.4.20.. 0cb6366e929a01ee04b154f44601accf 16cc08154389dec0940b37a50e330ff1

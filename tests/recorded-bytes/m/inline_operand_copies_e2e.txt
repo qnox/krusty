@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[an_inlined_call_pushes_its_operands_from_where_they_are_like_kotlinc|InlineOperandCopies|25|plain#InlineOperandCopiesKt]
-2.4.20.. ea10412ae2c9af64e567c7e34812c825 27e5070ad16c22a38fe41ee804e8263a

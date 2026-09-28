@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_value_class_annotates_only_its_declared_surface|ValueClassNullabilityMembers|25|plain#S]
-2.4.20.. 1d74ee23bb6b3e9d5b266d45cd693af4 91c200bd6724ce94bb16ffb6b0a0d6f7
-
-[a_value_class_annotates_only_its_declared_surface|ValueClassNullabilityPlain|25|plain#N]
-2.4.20.. 390fc9f1476e00fd698d9085a8c3dcf4 079a0223c431204e1c643cd470cdad2f

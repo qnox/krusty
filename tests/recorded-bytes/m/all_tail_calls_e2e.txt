@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_unit_function_discarding_a_result_keeps_its_state_machine|UnitDiscardTail|25|plain#UnitDiscardTailKt]
-2.4.20.. 49cbf80f4b4a5a87c1a1130a9663fcaa b148d88a695b88daec49a720f94291d1
-
-[every_tail_call_forwards_its_continuation_like_kotlinc|AllTailCalls|25|plain#Walker]
-2.4.20.. d745dfdb9c8f7f0cb0d826167dafa755 afe07dd3aa2539adbe7555320ddeb2ac

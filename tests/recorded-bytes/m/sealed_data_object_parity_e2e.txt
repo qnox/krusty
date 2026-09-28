@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_data_object_hashes_its_qualified_name_and_discards_the_narrowed_value|DataObjectShape|25|plain#Origin$Owned]
-2.4.20.. ba0a1934ca4157339917d8d34f1b49ee b2f67c83e5e74e8de59f63482f1215e4
-
-[a_sealed_classifiers_nested_names_are_in_declaration_order|SealedNestedOrder|25|plain#Origin]
-2.4.20.. 7702ccaba9141df1b8953d99fd73696c 57e63039a44d7ae13fc9d55718e06eb0

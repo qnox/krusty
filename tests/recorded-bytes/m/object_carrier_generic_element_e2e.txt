@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[object_carrier_value_class_element_reads_match_kotlinc|ObjectCarrierElement|default|plain#ObjectCarrierElementKt]
-2.4.20.. ee5e2a8639de06729c8c0b614203a629 fe2d7e3832932616da8560b3bb44fdfd

@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[ordinary_packed_vararg_stays_byte_identical_to_kotlinc|OrdinaryVarargBytes|default|plain#OrdinaryVarargBytesKt]
-2.4.20.. 5f175f322894a7a6d590e4fb10c1d15b ae60ed17d20b4e616e59a0508fa101f0

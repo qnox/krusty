@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_value_class_property_argument_matches_kotlinc|ValueClassPropertyArgument|25|plain#Holder]
-2.4.20.. 0c85740a2915e2f4feb88b9998fdad09 0c23094e3bcf260df8428265eef06cdc

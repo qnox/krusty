@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_dead_spilled_reference_goes_through_the_probe_like_kotlinc|NullOutDeadSpills|25|plain#NullOutDeadSpillsKt]
-2.4.20.. 30a323d30a9b3c53fe2ed868f2848c0e ae6f739a37fbf1e34003d03a8c16f96a

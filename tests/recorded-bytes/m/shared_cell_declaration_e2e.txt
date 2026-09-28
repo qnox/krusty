@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_captured_local_stores_its_holder_before_setting_the_element|SharedCellDeclaration|default|plain#SharedCellDeclarationKt]
-2.4.20.. 418c131838b0a776b07b971c57794a53 3ff9d37e527c5b49095430824c3f4488
-
-[a_nested_closure_inside_an_inlined_literal_keeps_the_holder|NestedClosure|default|plain#tree]
-2.4.20.. fb358c446b39a4d42df82cf0d0012ca9 2034a74fe1e30ae1df2fae417a93553a

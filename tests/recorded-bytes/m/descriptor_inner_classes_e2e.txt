@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_nested_builtin_is_a_predefined_metadata_name|DeclaredEntry|default|plain#DeclaredEntryKt]
-2.4.20.. d734919a3635462d165b478fc65d8e50 faa65104150e09e4cb09b64d11528003

@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[short_circuit_operators_are_byte_identical_to_kotlinc|ShortCircuit|default|plain#ShortCircuitKt]
-2.4.20.. e172d0769c6c07c072a17da4f7747b4f 9598fe012a36e667e6c7c0a232d03746

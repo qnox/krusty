@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_source_when_is_byte_identical_to_kotlinc|SourceWhenNop|default|plain#store/SourceWhenNopKt]
-2.4.20.. 12a1844944ef7dfc75001255594b3d55 3d3c8027ddde35596f06b74839282c84

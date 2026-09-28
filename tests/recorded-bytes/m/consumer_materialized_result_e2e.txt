@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_spilled_erased_result_is_cast_only_for_its_consumer|BranchyConsumer|25|plain#BranchyConsumerKt]
-2.4.20.. bf57bea176325133ddb58e97564850be 0f709ae504e2c6439f8bd06843f62f1e
-
-[an_erased_result_is_cast_only_to_its_consumers_type|ConsumerMaterializedResult|25|plain#ConsumerMaterializedResultKt]
-2.4.20.. 35a6c01bce18bc03845d5d50004b1f16 82fbd942da99a251ed5424110d57f3e8

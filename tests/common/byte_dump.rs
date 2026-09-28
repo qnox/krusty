@@ -9,20 +9,22 @@
 //! What is stored is an open version range, not a copy per compiler build. `2.4.20..` covers that
 //! release and every newer one until a later recording disagrees, so adding a Kotlin version does
 //! not rewrite the dumps. RC tags of one release share `2.4.20-RC..` and do not share the release
-//! range. The bytes themselves are zlib blobs addressed by their content, one blob per distinct
-//! output, referenced from a small text index per test module.
+//! range. The bytes live in one zlib archive, `tests/recorded-bytes.zz`. Identical outputs are
+//! stored once inside it, and the whole archive compresses together. A text index in that archive
+//! records the open range for each dump.
 //!
 //! `KRUSTY_RECORD=1` ignores a stored dump and recompiles. Under CI a missing dump still compiles
 //! with kotlinc, and the result is not written: CI does not bless dumps nobody committed.
 //!
-//! Dumps are ordinary files under `tests/recorded-bytes/`, read at runtime. They are not compiled
-//! into the test binary.
+//! The archive is read at runtime and is not compiled into the test binary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -336,7 +338,7 @@ pub fn load_shared_files(slot: &str, fingerprint: u128) -> Option<BTreeMap<Strin
 /// Record `files` (relative path → bytes, including `META-INF` entries) for [`load_shared_files`].
 ///
 /// A no-op for a snapshot, dev, or beta compiler, and under CI. A newer release covered by an open
-/// range whose bytes already match does not rewrite the index.
+/// range whose bytes already match does not rewrite the archive.
 pub fn store_shared_files(slot: &str, fingerprint: u128, files: &BTreeMap<String, Vec<u8>>) {
     let Some(compiler) = compiler_dump_version() else {
         return;
@@ -470,19 +472,21 @@ fn load_files(
     compiler: DumpVersion,
     fingerprint: u128,
 ) -> Option<BTreeMap<String, Vec<u8>>> {
-    let text = std::fs::read_to_string(index_path(root, module)).ok()?;
-    let entries = parse_index(&text);
-    let span = entries.get(key).and_then(|spans| {
-        spans
-            .iter()
-            .filter(|span| {
-                span.channel == compiler.channel
-                    && span.fingerprint == fingerprint
-                    && span_contains(span, compiler.version)
-            })
-            .max_by_key(|span| span.lo)
-    })?;
-    decode_files(&std::fs::read(blob_path(root, span.blob)).ok()?)
+    let path = archive_path(root);
+    let mut cache = dump_cache().lock().expect("class-dump cache");
+    let archive = cached_archive(&path, &mut cache)?;
+    let spans = archive.modules.get(&sanitize(module))?.get(key)?;
+    let span = spans
+        .iter()
+        .filter(|span| {
+            span.channel == compiler.channel
+                && span.fingerprint == fingerprint
+                && span_contains(span, compiler.version)
+        })
+        .max_by_key(|span| span.lo)?;
+    let raw = archive.blob(span.blob)?.to_vec();
+    drop(cache);
+    decode_raw(&raw)
 }
 
 fn store_files(
@@ -493,19 +497,56 @@ fn store_files(
     fingerprint: u128,
     files: &BTreeMap<String, Vec<u8>>,
 ) {
-    let blob = blob_id(files);
-    write_blob(root, blob, files);
-    let dir = dumps_root_of(root);
-    std::fs::create_dir_all(&dir).expect("create tests/recorded-bytes");
-    let lock = std::fs::File::open(&dir).expect("open class-dump directory");
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "lock class-dump directory");
+    let raw = encode_raw(files);
+    let blob = fingerprint_parts(&[&raw]);
+    let path = archive_path(root);
+    let parent = path.parent().expect("class-dump directory");
+    std::fs::create_dir_all(parent).expect("create class-dump directory");
+    let _lock = lock_directory(parent);
+    let mut cache = dump_cache().lock().expect("class-dump cache");
+    let stamp = file_stamp(&path);
+    let mut archive = take_archive(&path, &mut cache);
+    let module = sanitize(module);
+    let updated = revised_spans(
+        archive
+            .modules
+            .get(&module)
+            .and_then(|entries| entries.get(key))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        compiler,
+        fingerprint,
+        blob,
+    );
+    let unchanged = archive
+        .modules
+        .get(&module)
+        .and_then(|entries| entries.get(key))
+        == Some(&updated)
+        && archive.blobs.contains_key(&blob);
+    if unchanged {
+        if let Some(stamp) = stamp {
+            cache.insert(path, CacheSlot { stamp, archive });
+        }
+        return;
+    }
+    archive
+        .modules
+        .entry(module)
+        .or_default()
+        .insert(key.to_string(), updated);
+    archive.insert_blob(blob, raw);
+    write_atomic(&path, &compress(&archive.body));
+    let stamp = file_stamp(&path).expect("written class-dump archive");
+    cache.insert(path, CacheSlot { stamp, archive });
+}
 
-    let path = index_path(root, module);
-    let previous = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut entries = parse_index(&previous);
-    let spans = entries.entry(key.to_string()).or_default();
+fn revised_spans(
+    current: &[Span],
+    compiler: DumpVersion,
+    fingerprint: u128,
+    blob: u128,
+) -> Vec<Span> {
     let mut versions = KotlinVersion::supported();
     if !versions.contains(&compiler.version) {
         versions.push(compiler.version);
@@ -514,7 +555,7 @@ fn store_files(
     let mut projected: Vec<Option<Recorded>> = versions
         .iter()
         .map(|version| {
-            spans
+            current
                 .iter()
                 .find(|span| span.channel == compiler.channel && span_contains(span, *version))
                 .map(|span| Recorded {
@@ -529,28 +570,12 @@ fn store_files(
         .expect("the recorded version is in the version list");
     projected[position] = Some(Recorded { fingerprint, blob });
     let updated = merge_spans(&versions, &projected, compiler.channel);
-    let retained = spans
+    current
         .iter()
         .copied()
         .filter(|span| span.channel != compiler.channel)
         .chain(updated)
-        .collect();
-    *spans = retained;
-    let rendered = render_index(&entries);
-    if rendered != previous {
-        static TEMP: AtomicU64 = AtomicU64::new(0);
-        let staging = path.with_extension(format!(
-            "txt.{}.{}",
-            std::process::id(),
-            TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        if let Some(parent) = staging.parent() {
-            std::fs::create_dir_all(parent).expect("create class-dump index directory");
-        }
-        std::fs::write(&staging, &rendered).expect("write class-dump index");
-        std::fs::rename(&staging, &path).expect("replace class-dump index");
-    }
-    drop(lock);
+        .collect()
 }
 
 fn span_contains(span: &Span, version: KotlinVersion) -> bool {
@@ -588,58 +613,271 @@ fn merge_spans(
     spans
 }
 
-fn index_path(root: &Path, module: &str) -> PathBuf {
-    dumps_root_of(root)
-        .join("m")
-        .join(format!("{}.txt", sanitize(module)))
+/// One process-wide cache. The archive is decompressed once; later lookups copy one payload.
+fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, CacheSlot>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn dumps_root_of(root: &Path) -> PathBuf {
-    root.to_path_buf()
+struct CacheSlot {
+    stamp: Stamp,
+    archive: Archive,
+}
+
+type Stamp = (u64, u32, u64);
+
+struct Archive {
+    modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+    /// Uncompressed archive. Blob ranges point into this buffer.
+    body: Vec<u8>,
+    blobs: BTreeMap<u128, std::ops::Range<usize>>,
+}
+
+impl Archive {
+    fn blob(&self, id: u128) -> Option<&[u8]> {
+        let range = self.blobs.get(&id)?;
+        self.body.get(range.clone())
+    }
+
+    fn insert_blob(&mut self, id: u128, raw: Vec<u8>) {
+        let mut owned = BTreeMap::new();
+        for (existing, range) in &self.blobs {
+            if *existing != id {
+                owned.insert(*existing, self.body[range.clone()].to_vec());
+            }
+        }
+        owned.insert(id, raw);
+        self.retain_referenced(&mut owned);
+        *self = Self::from_parts(std::mem::take(&mut self.modules), owned);
+    }
+
+    fn retain_referenced(&self, blobs: &mut BTreeMap<u128, Vec<u8>>) {
+        let mut referenced = std::collections::BTreeSet::new();
+        for entries in self.modules.values() {
+            for spans in entries.values() {
+                for span in spans {
+                    referenced.insert(span.blob);
+                }
+            }
+        }
+        blobs.retain(|id, _| referenced.contains(id));
+    }
+
+    fn from_parts(
+        modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+        blobs: BTreeMap<u128, Vec<u8>>,
+    ) -> Self {
+        Self::parse(serialize_archive(&modules, &blobs))
+    }
+
+    fn parse(body: Vec<u8>) -> Self {
+        let split = body
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| panic!("class-dump archive has no blob section"));
+        let text = std::str::from_utf8(&body[..split]).expect("class-dump index is utf-8");
+        let modules = parse_modules(text);
+        let mut offset = split + 1;
+        let count = read_u32(&body, &mut offset).expect("class-dump blob count") as usize;
+        let mut blobs = BTreeMap::new();
+        for _ in 0..count {
+            let id_bytes = read_bytes(&body, &mut offset, 16).expect("class-dump blob id");
+            let id = u128::from_be_bytes(id_bytes.try_into().expect("16-byte blob id"));
+            let len = read_u32(&body, &mut offset).expect("class-dump blob length") as usize;
+            let start = offset;
+            let _ = read_bytes(&body, &mut offset, len).expect("class-dump blob bytes");
+            blobs.insert(id, start..offset);
+        }
+        if offset != body.len() {
+            panic!("trailing bytes in class-dump archive");
+        }
+        Self {
+            modules,
+            body,
+            blobs,
+        }
+    }
+}
+
+fn serialize_archive(
+    modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+    blobs: &BTreeMap<u128, Vec<u8>>,
+) -> Vec<u8> {
+    let mut body = render_modules(modules).into_bytes();
+    body.push(0);
+    body.extend_from_slice(&(blobs.len() as u32).to_be_bytes());
+    for (id, raw) in blobs {
+        body.extend_from_slice(&id.to_be_bytes());
+        body.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+        body.extend_from_slice(raw);
+    }
+    body
+}
+
+fn render_modules(modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>) -> String {
+    let mut text = String::from(
+        "# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.\n\
+         # RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.\n",
+    );
+    for (module, entries) in modules {
+        text.push_str(&format!("\n[[{module}]]\n"));
+        for (key, spans) in entries {
+            text.push_str(&format!("[{key}]\n"));
+            let mut ordered = spans.clone();
+            ordered.sort_by_key(|span| (span.channel == Channel::Rc, span.lo));
+            for span in ordered {
+                text.push_str(&render_span(span));
+                text.push('\n');
+            }
+        }
+    }
+    text
+}
+
+fn parse_modules(text: &str) -> BTreeMap<String, BTreeMap<String, Vec<Span>>> {
+    let mut modules: BTreeMap<String, BTreeMap<String, Vec<Span>>> = BTreeMap::new();
+    let mut module: Option<String> = None;
+    let mut key: Option<String> = None;
+    for (index, line) in text.lines().enumerate() {
+        let malformed =
+            || -> ! { panic!("malformed class-dump index line {}: {line:?}", index + 1) };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("[[")
+            .and_then(|line| line.strip_suffix("]]"))
+        {
+            modules.entry(name.to_string()).or_default();
+            module = Some(name.to_string());
+            key = None;
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            match module.as_ref().and_then(|module| modules.get_mut(module)) {
+                Some(entries) => {
+                    entries.entry(name.to_string()).or_default();
+                    key = Some(name.to_string());
+                }
+                None => malformed(),
+            }
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let range = parts.next().unwrap_or_else(|| malformed());
+        let fingerprint = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
+            .unwrap_or_else(|| malformed());
+        let blob = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
+            .unwrap_or_else(|| malformed());
+        if parts.next().is_some() {
+            malformed();
+        }
+        let (channel, lo, hi) = parse_range(range).unwrap_or_else(|| malformed());
+        match module
+            .as_ref()
+            .zip(key.as_ref())
+            .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))
+        {
+            Some(spans) => spans.push(Span {
+                lo,
+                hi,
+                channel,
+                fingerprint,
+                blob,
+            }),
+            None => malformed(),
+        }
+    }
+    modules
+}
+
+fn cached_archive<'a>(
+    path: &Path,
+    cache: &'a mut HashMap<PathBuf, CacheSlot>,
+) -> Option<&'a Archive> {
+    let stamp = file_stamp(path)?;
+    let current = cache.get(path).is_some_and(|slot| slot.stamp == stamp);
+    if !current {
+        cache.insert(
+            path.to_path_buf(),
+            CacheSlot {
+                stamp,
+                archive: Archive::parse(decompress(&std::fs::read(path).ok()?)),
+            },
+        );
+    }
+    cache.get(path).map(|slot| &slot.archive)
+}
+
+fn take_archive(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) -> Archive {
+    if let Some(stamp) = file_stamp(path) {
+        if let Some(slot) = cache.remove(path) {
+            if slot.stamp == stamp {
+                return slot.archive;
+            }
+        }
+        return Archive::parse(decompress(
+            &std::fs::read(path).expect("read class-dump archive"),
+        ));
+    }
+    cache.remove(path);
+    Archive::from_parts(BTreeMap::new(), BTreeMap::new())
+}
+
+fn file_stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let since = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some((since.as_secs(), since.subsec_nanos(), meta.len()))
+}
+
+fn archive_path(root: &Path) -> PathBuf {
+    root.join("recorded-bytes.zz")
 }
 
 fn dumps_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded-bytes")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-fn blob_path(root: &Path, blob: u128) -> PathBuf {
-    let hex = hex128(blob);
-    dumps_root_of(root)
-        .join("b")
-        .join(&hex[..2])
-        .join(format!("{}.zz", &hex[2..]))
+fn lock_directory(dir: &Path) -> std::fs::File {
+    let file = std::fs::File::open(dir).expect("open class-dump directory");
+    // SAFETY: `flock` on a descriptor this function owns until it returns.
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(locked, 0, "lock class-dump directory");
+    file
 }
 
-fn write_blob(root: &Path, blob: u128, files: &BTreeMap<String, Vec<u8>>) {
-    let path = blob_path(root, blob);
-    if path.is_file() {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create class-dump blob directory");
-    }
-    let compressed = encode_files(files);
-    let staging = path.with_extension("zz.tmp");
-    std::fs::write(&staging, compressed).expect("write class-dump blob");
-    match std::fs::rename(&staging, &path) {
-        Ok(()) => {}
-        Err(_) if path.is_file() => {
-            let _ = std::fs::remove_file(&staging);
-        }
-        Err(error) => panic!("publish class-dump blob: {error}"),
-    }
+fn write_atomic(path: &Path, bytes: &[u8]) {
+    static TEMP: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("class-dump archive name");
+    let staging = path.with_file_name(format!(
+        "{name}.{}.{}",
+        std::process::id(),
+        TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&staging, bytes).expect("write class-dump archive");
+    std::fs::rename(&staging, path).expect("replace class-dump archive");
 }
 
-fn blob_id(files: &BTreeMap<String, Vec<u8>>) -> u128 {
-    fingerprint_parts(&[&encode_raw(files)])
-}
-
-fn encode_files(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+fn compress(raw: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(9));
-    encoder
-        .write_all(&encode_raw(files))
-        .expect("compress class dump");
+    encoder.write_all(raw).expect("compress class dump");
     encoder.finish().expect("finish class dump")
+}
+
+fn decompress(bytes: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    ZlibDecoder::new(bytes)
+        .read_to_end(&mut raw)
+        .expect("decompress class dump");
+    raw
 }
 
 fn encode_raw(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
@@ -653,16 +891,14 @@ fn encode_raw(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     raw
 }
 
-fn decode_files(compressed: &[u8]) -> Option<BTreeMap<String, Vec<u8>>> {
-    let mut raw = Vec::new();
-    ZlibDecoder::new(compressed).read_to_end(&mut raw).ok()?;
+fn decode_raw(raw: &[u8]) -> Option<BTreeMap<String, Vec<u8>>> {
     let mut files = BTreeMap::new();
     let mut offset = 0;
     while offset < raw.len() {
-        let name_len = read_u32(&raw, &mut offset)? as usize;
-        let name = std::str::from_utf8(read_bytes(&raw, &mut offset, name_len)?).ok()?;
-        let data_len = read_u32(&raw, &mut offset)? as usize;
-        let data = read_bytes(&raw, &mut offset, data_len)?.to_vec();
+        let name_len = read_u32(raw, &mut offset)? as usize;
+        let name = std::str::from_utf8(read_bytes(raw, &mut offset, name_len)?).ok()?;
+        let data_len = read_u32(raw, &mut offset)? as usize;
+        let data = read_bytes(raw, &mut offset, data_len)?.to_vec();
         files.insert(name.to_string(), data);
     }
     Some(files)
@@ -678,47 +914,6 @@ fn read_bytes<'a>(raw: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a [
     let bytes = raw.get(*offset..end)?;
     *offset = end;
     Some(bytes)
-}
-
-fn parse_index(text: &str) -> BTreeMap<String, Vec<Span>> {
-    let mut entries: BTreeMap<String, Vec<Span>> = BTreeMap::new();
-    let mut key: Option<String> = None;
-    for (index, line) in text.lines().enumerate() {
-        let malformed =
-            || -> ! { panic!("malformed class-dump index line {}: {line:?}", index + 1) };
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = line
-            .strip_prefix('[')
-            .and_then(|line| line.strip_suffix(']'))
-        {
-            entries.entry(name.to_string()).or_default();
-            key = Some(name.to_string());
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let range = parts.next().unwrap_or_else(|| malformed());
-        let fingerprint = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
-            .unwrap_or_else(|| malformed());
-        let blob = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
-            .unwrap_or_else(|| malformed());
-        if parts.next().is_some() {
-            malformed();
-        }
-        let (channel, lo, hi) = parse_range(range).unwrap_or_else(|| malformed());
-        match key.as_ref().and_then(|key| entries.get_mut(key)) {
-            Some(spans) => spans.push(Span {
-                lo,
-                hi,
-                channel,
-                fingerprint,
-                blob,
-            }),
-            None => malformed(),
-        }
-    }
-    entries
 }
 
 fn parse_range(token: &str) -> Option<(Channel, KotlinVersion, Option<KotlinVersion>)> {
@@ -750,23 +945,6 @@ fn parse_bound(token: &str) -> Option<(Channel, KotlinVersion)> {
 
 fn parse_hex128(text: &str) -> Option<u128> {
     u128::from_str_radix(text, 16).ok()
-}
-
-fn render_index(entries: &BTreeMap<String, Vec<Span>>) -> String {
-    let mut text = String::from(
-        "# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.\n\
-         # RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.\n",
-    );
-    for (key, spans) in entries {
-        text.push_str(&format!("\n[{key}]\n"));
-        let mut ordered = spans.clone();
-        ordered.sort_by_key(|span| (span.channel == Channel::Rc, span.lo));
-        for span in ordered {
-            text.push_str(&render_span(span));
-            text.push('\n');
-        }
-    }
-    text
 }
 
 fn render_span(span: Span) -> String {
@@ -899,8 +1077,10 @@ mod tests {
             fingerprint,
             &files(b"one"),
         );
-        let index = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        let index = disk_index(&root);
+        assert!(index.contains("[[mod]]"), "{index}");
         assert!(index.contains("2.4.20.. "), "{index}");
+        assert!(archive_path(&root).is_file());
         assert!(!index.contains("2.4.10"), "{index}");
         let newer = DumpVersion {
             version: KotlinVersion::new(2, 4, 30),
@@ -916,7 +1096,7 @@ mod tests {
             fingerprint,
             &files(b"one"),
         );
-        let again = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        let again = disk_index(&root);
         assert_eq!(
             again, index,
             "matching bytes leave the open range untouched"
@@ -930,7 +1110,7 @@ mod tests {
             fingerprint,
             &files(b"two"),
         );
-        let split = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        let split = disk_index(&root);
         assert!(split.contains("2.4.20 "), "{split}");
         assert!(split.contains("2.4.30.. "), "{split}");
         assert_eq!(
@@ -1028,7 +1208,7 @@ mod tests {
         );
         assert_eq!(got.unwrap().get("pkg/A").unwrap(), b"bytes");
         assert!(
-            !index_path(&root, "mod").exists(),
+            !archive_path(&root).exists(),
             "a miss that is not allowed to record leaves no dump"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1107,15 +1287,107 @@ mod tests {
 
     #[test]
     fn a_blob_round_trips_and_is_smaller_than_the_class_bytes() {
+        let payload = b"kotlin/Metadata".repeat(200);
         let mut map = BTreeMap::new();
-        map.insert("pkg/A.class".to_string(), vec![0u8; 4096]);
+        map.insert("pkg/A.class".to_string(), payload.clone());
         map.insert(
             "META-INF/main.kotlin_module".to_string(),
             b"module".to_vec(),
         );
-        let compressed = encode_files(&map);
-        assert!(compressed.len() < 4096);
-        assert_eq!(decode_files(&compressed), Some(map));
+        let mut second = BTreeMap::new();
+        second.insert("pkg/B.class".to_string(), payload);
+        let archive = Archive::from_parts(
+            BTreeMap::new(),
+            [(1u128, encode_raw(&map)), (2, encode_raw(&second))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(compress(&archive.body).len() < archive.body.len());
+        assert_eq!(decode_raw(archive.blob(1).unwrap()), Some(map));
+        assert_eq!(decode_raw(archive.blob(2).unwrap()), Some(second));
+    }
+
+    #[test]
+    fn every_module_shares_one_archive() {
+        let root = temp_root("one");
+        let fingerprint = fingerprint_parts(&[b"source"]);
+        let release = version("2.4.20");
+        store_files(
+            &root,
+            "mod",
+            "case|A|default|plain",
+            release,
+            fingerprint,
+            &files(b"a"),
+        );
+        store_files(
+            &root,
+            "other",
+            "case|B|default|plain",
+            release,
+            fingerprint,
+            &files(b"b"),
+        );
+        let index = disk_index(&root);
+        assert!(index.contains("[[mod]]"), "{index}");
+        assert!(index.contains("[[other]]"), "{index}");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "modules share one archive file"
+        );
+        assert_eq!(
+            load_files(&root, "mod", "case|A|default|plain", release, fingerprint)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            load_files(&root, "other", "case|B|default|plain", release, fingerprint)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"b"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_committed_dump_archive_loads() {
+        let root = dumps_root();
+        let path = archive_path(&root);
+        assert!(path.is_file(), "class dumps are one archive");
+        assert!(!root.join("recorded-bytes").exists());
+        let archive = Archive::parse(decompress(&std::fs::read(&path).unwrap()));
+        let entries = archive
+            .modules
+            .get("value_class_text_e2e")
+            .expect("recorded module");
+        let (key, spans) = entries
+            .iter()
+            .find(|(key, _)| key.contains("#Holder"))
+            .expect("holder class dump");
+        assert!(spans[0].hi.is_none(), "the newest release range stays open");
+        let version = DumpVersion {
+            version: KotlinVersion::new(2, 4, 30),
+            channel: Channel::Release,
+        };
+        let hit = load_files(
+            &root,
+            "value_class_text_e2e",
+            key,
+            version,
+            spans[0].fingerprint,
+        )
+        .expect("an open range covers a newer release");
+        assert!(hit.keys().any(|name| name.contains("Holder")));
+    }
+
+    fn disk_index(root: &Path) -> String {
+        let raw = decompress(&std::fs::read(archive_path(root)).unwrap());
+        let end = raw.iter().position(|byte| *byte == 0).unwrap();
+        String::from_utf8(raw[..end].to_vec()).unwrap()
     }
 
     fn temp_root(label: &str) -> PathBuf {

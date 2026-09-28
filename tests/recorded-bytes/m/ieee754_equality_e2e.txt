@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[ieee754_equality_is_byte_identical_to_kotlinc|Ieee754Equality|default|plain#store/Ieee754EqualityKt]
-2.4.20.. 3d577f6581b580b2eb3275b406b5c5c5 0eecd7653abba4eaab0944de9952def7
-
-[nullable_ieee754_equality_is_byte_identical_to_kotlinc|NullableIeee754Equality|default|plain#store/NullableIeee754EqualityKt]
-2.4.20.. be5eb254bf5df7432ce3168ef49b88aa 12e32f4aa9abeca326c9f896074cd36a

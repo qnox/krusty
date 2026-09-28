@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[facade_property_constant_emission_is_byte_identical_to_kotlinc|FacadePropertyMetadata|default|plain#parity/FacadePropertyMetadataKt]
-2.4.20.. a67d0fae444953e7d5f9ceeca3a2e312 73418005b1dfc21036a4fd5172ead09d

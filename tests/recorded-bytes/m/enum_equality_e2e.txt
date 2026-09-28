@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[enum_equality_is_byte_identical_to_kotlinc|EnumEquality|default|plain#store/EnumEqualityKt]
-2.4.20.. b5c25779e1d2f1b5e61fd85345b5ef30 074fe9b37b82c44e670c2a130c7ed3b3

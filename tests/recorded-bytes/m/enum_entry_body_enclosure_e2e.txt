@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[an_object_in_an_enum_entry_body_is_enclosed_by_the_entry_constructor|EntryBody|default|plain#Level$HIGH$probe$1]
-2.4.20.. 555ea890f4786e1bea98957c68d49a96 9bb2c523c36b36dfa8fbd344da32721a

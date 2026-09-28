@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[inner_super_delegation_passes_the_outer_parameter_like_kotlinc|SuperArgumentOuter|25|plain#Outer$Second]
-2.4.20.. 8937746c554efb7272b95a378c291edf 6c543bd45ba13d9fc14da54e047f6370

@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_nested_data_class_renders_its_simple_name|NestedDataToString|25|plain#Holder$Inner]
-2.4.20.. 2452570bc0dccfe24079d4ea180e27b3 84c4e954d7c71a7d095247321e2dd16a
-
-[a_top_level_data_class_is_unchanged|NestedDataToString|25|plain#Top]
-2.4.20.. 2452570bc0dccfe24079d4ea180e27b3 256c30087c94522d03893e670dac5924

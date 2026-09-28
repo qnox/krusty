@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_suspension_spills_references_first_and_restores_in_reverse_like_kotlinc|SpillOrder|25|plain#SpillOrderKt]
-2.4.20.. 1409c67303113bfc1c5a464d8c0be3c9 5b448bcf21cef3b7e72bc248253aa6fe

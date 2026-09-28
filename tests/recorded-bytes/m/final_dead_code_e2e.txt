@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_goto_bypassed_by_threaded_jumps_is_removed|finalDceWhile|default|plain#FinalDceWhileKt]
-2.4.20.. 57ed1b1063b7d3dec229aed2b995fe11 de63ce6c90fd21a8a6179b531bb45ba9
-
-[iterator_loops_with_early_returns_receive_final_dce|finalDceIterator|default|plain#FinalDceIteratorKt]
-2.4.20.. c2e15b4201b19d2ecf9831f247a311d7 5600e671c8a60701e9f7f2ce2378e43c

@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_break_guard_is_byte_identical_to_kotlinc|BreakGuard|default|plain#BreakGuardKt]
-2.4.20.. 83db0eb106721a74cbc6612e25df9c9d 74e2cec7b847b30b116296f34b68ab5e
-
-[a_continue_guard_is_byte_identical_to_kotlinc|ContinueGuard|default|plain#ContinueGuardKt]
-2.4.20.. fcd2cc0c57b03e496efc83579453bd38 f180cab4cc6c5828ce92a1f4a38604f9

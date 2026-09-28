@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_suspend_lambda_class_records_its_function_as_kotlinc_does|LambdaMetadata|default|plain#Holder$m$1,LambdaMetadataKt$bodyOnly$1,LambdaMetadataKt$boundOnly$1,LambdaMetadataKt$bounded$1,LambdaMetadataKt$contexts$1,LambdaMetadataKt$contexts$2,LambdaMetadataKt$firstUse$1,LambdaMetadataKt$inArgument$1,LambdaMetadataKt$local$1,LambdaMetadataKt$local$2,LambdaMetadataKt$nullableResult$1,LambdaMetadataKt$onlyReceiver$1,LambdaMetadataKt$twoBounds$1,LambdaMetadataKt$use$1,LambdaMetadataKt$use$2,LambdaMetadataKt$use$3,LambdaMetadataKt$use$4,LambdaMetadataKt$use$5,LambdaMetadataKt$use$n$1]
-2.4.20.. 2f292498956913d7680f3166afd95854 6283ad4822d04c211c6deeb3ee8ce43e

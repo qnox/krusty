@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[an_annotation_instance_class_is_enclosed_by_its_owner_with_no_method|AnnotationInstances|default|plain#AnnotationInstancesKt$annotationImpl$Tag$0,Maker$annotationImpl$Mark$0]
-2.4.20.. f4974599ef08ca7f53018196b0fbd6ae aee0c18907db345f0d23c68cb9a5cc06
-
-[an_annotation_instance_class_is_listed_as_anonymous_and_synthetic|AnnotationInstances|default|plain#AnnotationInstancesKt,AnnotationInstancesKt$annotationImpl$Tag$0,Maker,Maker$annotationImpl$Mark$0]
-2.4.20.. f4974599ef08ca7f53018196b0fbd6ae 943dea584ccd26eaf8f49600739e5a51

@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_local_frame_type_follows_the_cast_its_initializer_takes|LocalFrame|default|plain#f/LocalFrameKt]
-2.4.20.. 2de29436f5e2c965f74a1418d844fe08 cd9761ba14940ae1c2bbfd7f0af07388
-
-[unboxing_and_casts_match_kotlinc_byte_for_byte|Unboxing|default|plain#u/UnboxingKt]
-2.4.20.. fa4b45cd1d7fcd4f5fedb573fcfe1afa 24d512a59add8a6648fb42b14e2e228f

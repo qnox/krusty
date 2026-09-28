@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_block_ending_in_an_unused_val_keeps_its_store|EmptyLocal|default|plain#EmptyLocalKt]
-2.4.20.. 709c618f0a34181f911da405fc4e9c92 9664c98094ebfaa5b805acf18be65a28

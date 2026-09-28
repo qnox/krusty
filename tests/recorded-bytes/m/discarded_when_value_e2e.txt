@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_discarded_typed_if_or_when_pops_its_joined_value_like_kotlinc|DiscardedValue|default|plain#store/DiscardedValueKt]
-2.4.20.. 0de7580b6bc0ebedac6d2e64151dd6e4 82e483c51d48e46ac7d857bd48ca9137

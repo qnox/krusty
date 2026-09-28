@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_tail_call_to_a_dependency_forwards_its_continuation_like_kotlinc|ClasspathTailForward|25|plain#Forwarding]
-2.4.20.. 5ccc2e712395d2d829ad0f9eb884c8a7 59c0e5160fbbc0399b9825a0a25afc98

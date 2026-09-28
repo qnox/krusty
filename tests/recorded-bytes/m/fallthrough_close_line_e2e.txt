@@ -1,5 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[fallthrough_returns_are_byte_identical_to_kotlinc|FallthroughCloseLine|default|plain#store/FallthroughCloseLineKt]
-2.4.20.. d3a2d4cf75000cf9a595ec15003afaf0 b31bbb56e4ea46c6b7fe7b2936d84b4b

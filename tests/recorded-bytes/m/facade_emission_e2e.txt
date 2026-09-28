@@ -1,8 +1,0 @@
-# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
-# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
-
-[a_default_valued_facade_initializer_keeps_an_empty_clinit|FacadeDefaults|default|plain#tree]
-2.4.20.. 37a3768fdd5e8b1463c248964e1952cd 9a3276a6d629895d5a64fa15c21f5520
-
-[a_facade_of_lateinit_and_const_properties_has_no_clinit|FacadeNoInitializer|default|plain#tree]
-2.4.20.. 23ceafaa8d270c71b393e9221fc47e18 04e780365f31f4db463b382c50ef04ba
