@@ -42,6 +42,8 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
+            // kotlinc names the parameter like the field it initializes.
+            IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
             IrGeneratedParameterRole::ValueClassCarrier => Some("arg0".to_string()),
             IrGeneratedParameterRole::ValueClassEqualsOperand { ordinal } => {
                 Some(value_class_equals_operand(ordinal).to_string())
@@ -308,6 +310,16 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
                 }
                 crate::types::ContextParameterKind::LegacyReceiver => {
                     IrParameterIdentity::context_receiver(context_ordinal)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::EnclosingInstance =>
+                {
+                    assert_eq!(
+                        physical_ordinal, 0,
+                        "an outer instance is its constructor's first parameter"
+                    );
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::OuterInstance, None)
                 }
                 crate::types::ContextParameterKind::None => match argument.name.as_deref() {
                     Some(name) => IrParameterIdentity::source(name),

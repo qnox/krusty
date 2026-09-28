@@ -135,9 +135,8 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
         .ctor_args
         .iter()
         .take(count)
-        .enumerate()
-        .map(|(index, argument)| {
-            if class.is_inner_class && index == 0 {
+        .map(|argument| {
+            if argument.provenance == crate::ir::IrCtorParameterProvenance::EnclosingInstance {
                 return parameter("this$0", MANDATED);
             }
             let name = argument
