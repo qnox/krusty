@@ -434,7 +434,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             ));
         }
         if ty.non_null().is_jvm_scalar() {
-            return Some(boxed_descriptor(ty.non_null()));
+            return Some(crate::jvm::names::boxed_descriptor(ty.non_null()).to_owned());
         }
         match *ty {
             Ty::String => Some("Ljava/lang/String;".to_string()),
