@@ -987,6 +987,9 @@ impl Backend for JvmBackend {
         if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
             crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers);
         }
+        // A function value converted to a Kotlin fun interface is wrapped in the file's class for
+        // that interface.
+        crate::jvm::sam_wrappers::realize(&mut file.ir, &facade);
         let property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,

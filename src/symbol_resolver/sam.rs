@@ -30,6 +30,10 @@ pub struct SamSignature {
     /// The method's primitive result replaces a non-primitive result of a declaration it
     /// overrides, at any depth (`override fun f(): Int` of `fun f(): Any`).
     pub(crate) overrides_non_primitive_result: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub(crate) kotlin_interface: bool,
+    /// The selected method's declared parameter names.
+    pub(crate) parameter_names: Vec<String>,
 }
 
 /// One declaration of a member slot: its depth in the hierarchy, and its specialized parameters
@@ -44,9 +48,11 @@ pub(crate) fn semantic_sam_signature(
 ) -> Option<SamSignature> {
     let target = target.non_null();
     let internal = target.obj_internal()?;
-    if !source.classifier(internal)?.sam_eligible {
+    let target_classifier = source.classifier(internal)?;
+    if !target_classifier.sam_eligible {
         return None;
     }
+    let kotlin_interface = target_classifier.is_kotlin;
 
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {
@@ -144,6 +150,8 @@ pub(crate) fn semantic_sam_signature(
         has_receiver: sam.is_member_extension(),
         suspend: sam.suspend(),
         overrides_non_primitive_result,
+        kotlin_interface,
+        parameter_names: sam.call_sig.param_names.clone(),
     })
 }
 

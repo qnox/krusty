@@ -314,6 +314,7 @@ pub(super) fn build_continuation_class(
         prop_ref: None,
         func_ref: None,
         lambda: None,
+        sam_wrapper: None,
         bridges: vec![],
         interfaces: Default::default(),
         is_object: false,

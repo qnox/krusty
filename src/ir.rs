@@ -74,7 +74,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
-pub use lambda_classes::{IrInvokeBridge, IrLambdaClass};
+pub use lambda_classes::{IrInvokeBridge, IrLambdaClass, IrSamTarget, IrSamWrapperClass};
 pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use module_records::{
@@ -1087,29 +1087,6 @@ pub enum IrExpr {
     },
 }
 
-/// Checked functional-interface target attached to a lambda after SAM conversion.
-///
-/// Both the call-site-specialized shape and the declaration shape are retained: the former types
-/// the implementation while the latter determines the platform method that the closure implements.
-/// This is frontend semantic data; platform owner spellings and descriptors do not belong here.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrSamTarget {
-    pub classifier: TypeName,
-    pub method: String,
-    pub parameters: Vec<Ty>,
-    pub result: Ty,
-    pub declared_parameters: Vec<Ty>,
-    pub declared_result: Ty,
-    pub context_count: u32,
-    pub has_receiver: bool,
-    pub suspend: bool,
-    /// The method's primitive result replaces a non-primitive result it overrides.
-    pub overrides_non_primitive_result: bool,
-    /// A fun-interface conversion of a callable reference delegates equality/hashCode through
-    /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
-    pub function_adapter: bool,
-}
-
 /// A function/method declaration (`IrFunction`).
 #[derive(Clone, Debug)]
 pub struct IrFunction {
@@ -1565,6 +1542,9 @@ pub struct IrClass {
     /// Set when this class is a lambda realized as a class of its own (a target that cannot build
     /// the lambda at run time); see [`IrLambdaClass`].
     pub lambda: Option<IrLambdaClass>,
+    /// Set when this class wraps function values converted to a fun interface; see
+    /// [`IrSamWrapperClass`].
+    pub sam_wrapper: Option<IrSamWrapperClass>,
     /// JVM declaration adapters. Most are synthetic bridges for generic/covariant overrides; a boxed
     /// value class also needs ordinary instance entries for interface methods whose implementation is
     /// realized as a static carrier function.
@@ -1791,6 +1771,7 @@ impl IrClass {
             prop_ref: None,
             func_ref: None,
             lambda: None,
+            sam_wrapper: None,
             bridges: Vec::new(),
             interfaces: Default::default(),
             is_object: false,
@@ -1906,6 +1887,7 @@ impl IrClass {
             prop_ref: None,
             func_ref: None,
             lambda: None,
+            sam_wrapper: None,
             bridges: Vec::new(),
             interfaces,
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
