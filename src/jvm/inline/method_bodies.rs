@@ -82,6 +82,7 @@ pub trait MethodBodies {
     }
 
     /// [`Self::owner_is_interface`] for a classifier that is already interned.
+    /// Identity-aware implementations override this compatibility path to avoid rendering.
     fn owner_is_interface_name(&self, owner: TypeName) -> bool {
         self.owner_is_interface(&owner.render())
     }
@@ -141,5 +142,38 @@ pub trait MethodBodies {
     /// JVM storage for an already-resolved semantic singleton classifier.
     fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::MethodBodies;
+    use crate::jvm::classreader::MethodCode;
+    use crate::types::type_name;
+
+    struct StringProbe {
+        owner: RefCell<Option<String>>,
+    }
+
+    impl MethodBodies for StringProbe {
+        fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+
+        fn owner_is_interface(&self, owner: &str) -> bool {
+            self.owner.replace(Some(owner.to_owned()));
+            owner == "sample/Interface"
+        }
+    }
+
+    #[test]
+    fn default_interface_probe_preserves_the_string_capability() {
+        let probe = StringProbe {
+            owner: RefCell::new(None),
+        };
+        assert!(probe.owner_is_interface_name(type_name("sample/Interface")));
+        assert_eq!(probe.owner.take().as_deref(), Some("sample/Interface"));
     }
 }

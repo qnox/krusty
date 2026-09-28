@@ -9905,13 +9905,13 @@ impl<'a> Emitter<'a> {
                     let descriptor = method_descriptor(&param_tys, ret);
                     let static_owner = StaticOwner::Class(*owner);
                     let source_owner_is_interface = static_owner.is_interface(self.ir);
-                    let owner = owner.render();
-                    // `owner_is_interface` answers from the CLASSPATH; a static declared on an
-                    // interface being compiled right now is not there. An `invokestatic` naming an
-                    // interface must use an InterfaceMethodref, so the file's own classes answer
-                    // too.
+                    // The classpath answers whether a library owner is an interface; a static
+                    // declared on an interface being compiled right now is not there. An
+                    // `invokestatic` naming an interface must use an InterfaceMethodref, so the
+                    // file's own classes answer too.
                     let owner_is_interface =
-                        source_owner_is_interface || self.bodies.owner_is_interface(&owner);
+                        source_owner_is_interface || self.bodies.owner_is_interface_name(*owner);
+                    let owner = owner.render();
                     // A private one reached from another class goes through its owner's accessor.
                     let name = if static_accessors::routes_through_accessor(
                         self.ir,
@@ -10300,7 +10300,7 @@ impl<'a> Emitter<'a> {
                     // reached when a call omits an interface-declared default) must be an `InterfaceMethodref`
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
                     // (stdlib facades, the common case) stay `Methodref`.
-                    let owner_is_interface = self.bodies.owner_is_interface(&owner);
+                    let owner_is_interface = self.bodies.owner_is_interface_name(owner_identity);
                     // A private value-class `-impl` another class calls goes through its bridge.
                     let bridged = self.ir.jvm_member_targets.get(&e);
                     let name = match bridged
