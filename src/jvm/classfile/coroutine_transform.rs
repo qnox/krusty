@@ -192,8 +192,9 @@ impl ClassWriter {
         method_desc: &str,
         node: crate::jvm::method_node::MethodNode,
     ) -> Result<(), String> {
-        // The transformed body's constants intern here, in its instruction order, as kotlinc's
-        // writer interns them when the transformed method is visited.
+        // The transformed body's constants intern here; the class's pool layout later places them
+        // where kotlinc's writer interns them when the transformed method is visited.
+        let interned_after = self.cp.slot_count();
         let assembled = node
             .assemble(self)
             .map_err(|error| format!("the transformed body does not assemble: {error:?}"))?;
@@ -220,7 +221,7 @@ impl ClassWriter {
         method.implicit_void_return_pc = None;
         // The rewrites for emitted bodies read the emitter's labels, which the transformed body no
         // longer lays out as.
-        method.rewrite_source = None;
+        let source = method.rewrite_source.take();
         // kotlinc's optimizer takes the transformer's method, as its visitor chain hands it on.
         let identity = MethodIdentity {
             access,
@@ -232,6 +233,11 @@ impl ClassWriter {
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }
+        let interned = interned_after + 1..self.cp.slot_count() + 1;
+        self.methods[index].rewrite_source = source.map(|mut source| {
+            source.transformed = Some(interned);
+            source
+        });
         Ok(())
     }
 }

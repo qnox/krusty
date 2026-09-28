@@ -3465,8 +3465,8 @@ pub fn byte_diff_against_kotlinc_cp_target(
 /// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
 /// which diverge for reasons of their own; this instrument answers the narrower question a splice
 /// or coroutine change is actually about — whether the emitted code is the same instructions in the
-/// same order, over the same local slots. Pool indices are normalized away because two pools
-/// interned in different orders describe the same references.
+/// same order, naming the same members, over the same local slots. Pool indices are normalized away
+/// because two pools interned in different orders describe the same references.
 #[allow(dead_code)]
 pub fn method_code_diff_against_kotlinc(
     name: &str,
@@ -3474,37 +3474,6 @@ pub fn method_code_diff_against_kotlinc(
     src: &str,
     class: &str,
     method: &str,
-) -> Option<Result<(), String>> {
-    method_code_diff(name, lib, src, class, method, PoolReferences::Normalized)
-}
-
-/// [`method_code_diff_against_kotlinc`] that also compares the member each instruction names
-/// (`invokestatic kotlin/coroutines/jvm/internal/Boxing.boxInt`), for a difference that lies only
-/// in which method a call reaches.
-pub fn method_code_and_references_diff_against_kotlinc(
-    name: &str,
-    lib: &[(&str, &str)],
-    src: &str,
-    class: &str,
-    method: &str,
-) -> Option<Result<(), String>> {
-    method_code_diff(name, lib, src, class, method, PoolReferences::Kept)
-}
-
-/// Whether a disassembled instruction keeps the constant-pool entry it names.
-#[derive(Clone, Copy, PartialEq)]
-enum PoolReferences {
-    Normalized,
-    Kept,
-}
-
-fn method_code_diff(
-    name: &str,
-    lib: &[(&str, &str)],
-    src: &str,
-    class: &str,
-    method: &str,
-    references: PoolReferences,
 ) -> Option<Result<(), String>> {
     let libout = if lib.is_empty() {
         None
@@ -3540,8 +3509,8 @@ fn method_code_diff(
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
 
-    let reference = disassembled_method(&kref, class, method, references)?;
-    let actual = disassembled_method(&kout, class, method, references)?;
+    let reference = disassembled_method(&kref, class, method)?;
+    let actual = disassembled_method(&kout, class, method)?;
     let _ = std::fs::remove_dir_all(&dir);
     if reference == actual {
         return Some(Ok(()));
@@ -3580,20 +3549,16 @@ pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<boo
     )
 }
 
-/// One method's instructions and its `LocalVariableTable`, with constant-pool indices and trailing
-/// comments normalized away.
+/// One method's instructions and its `LocalVariableTable`, with constant-pool indices normalized
+/// away and the entry each one names kept (`invokestatic # // Method Boxing.boxInt:(I)…`), so a
+/// call to a different member is a difference.
 ///
 /// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
 /// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
 /// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
 /// not measuring.
 #[allow(dead_code)]
-fn disassembled_method(
-    dir: &Path,
-    class: &str,
-    method: &str,
-    references: PoolReferences,
-) -> Option<String> {
+fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
     let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
         .args(["-p", "-c", "-l", "-cp"])
         .arg(dir)
@@ -3638,7 +3603,7 @@ fn disassembled_method(
                 .collect::<Vec<_>>()
                 .join(" ");
             body.push_str(normalized.trim_end_matches(','));
-            if let (PoolReferences::Kept, Some(reference)) = (references, parts.next()) {
+            if let Some(reference) = parts.next() {
                 body.push_str(" // ");
                 body.push_str(reference.trim());
             }

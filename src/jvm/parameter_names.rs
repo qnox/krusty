@@ -447,12 +447,14 @@ pub(super) fn function_assertions(
     let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
     // kotlinc replaces a function whose signature the value-class ABI mangles (or moves to a static
     // `-impl`) with a copy whose extension receiver is an ordinary parameter, named as the
-    // receiver's local variable. Its guard then quotes that name rather than `<this>`.
-    let replaced = ir
-        .vc_declared_sigs
-        .get(&function)
-        .zip(ir.functions.get(function as usize))
-        .is_some_and(|((declared, ..), physical)| *declared != physical.name);
+    // receiver's local variable. Its guard then quotes that name rather than `<this>`. A lambda's
+    // implementation takes its receiver as such a parameter too (`$this$<label>`).
+    let replaced = ir.lambda_own_params_from.contains_key(&function)
+        || ir
+            .vc_declared_sigs
+            .get(&function)
+            .zip(ir.functions.get(function as usize))
+            .is_some_and(|((declared, ..), physical)| *declared != physical.name);
     Some(
         identities
             .iter()
