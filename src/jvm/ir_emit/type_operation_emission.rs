@@ -11,7 +11,7 @@ use crate::types::{stored_value_ty, Ty};
 
 use super::{
     box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm,
-    semantic_scalar_adapter, type_descriptor, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
+    semantic_scalar_adapter, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
 };
 
 impl Emitter<'_> {
@@ -136,7 +136,7 @@ impl Emitter<'_> {
                         crate::jvm::names::instanceof_internal_name(source) == internal
                     })
                 } else {
-                    type_descriptor(physical_arg) == type_descriptor(jvm_ty)
+                    crate::jvm::names::same_type_descriptor(physical_arg, jvm_ty)
                 };
                 if !redundant {
                     let class = self.cw.class_ref(&internal);
