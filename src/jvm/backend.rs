@@ -289,7 +289,7 @@ impl CollectionOwner {
 
 fn collection_bridge_semantics(
     bridge: &crate::ir::Bridge,
-) -> Option<(CollectionOwner, BridgeBarrier)> {
+) -> Option<(CollectionOwner, BridgeBarrierOutcome)> {
     let (owner, outcome) = match bridge.name.as_str() {
         "contains"
             if bridge.erased_ret == crate::types::Ty::Boolean
@@ -312,7 +312,7 @@ fn collection_bridge_semantics(
         {
             (CollectionOwner::List, BridgeBarrierOutcome::NotFound)
         }
-        "containsKey"
+        "containsKey" | "containsValue"
             if bridge.erased_ret == crate::types::Ty::Boolean
                 && bridge.concrete_ret == crate::types::Ty::Boolean =>
         {
@@ -323,14 +323,18 @@ fn collection_bridge_semantics(
         }
         _ => return None,
     };
-    let parameter = 0;
-    (bridge.erased_params.len() == 1
+    Some((owner, outcome))
+}
+
+/// Whether the bridge's sole erased parameter narrows to a specific reference type, decided on the
+/// declared types before value-class lowering replaces a value class with its carrier: the check
+/// then tests for the value class's box.
+fn narrows_its_parameter(bridge: &crate::ir::Bridge) -> bool {
+    bridge.erased_params.len() == 1
         && bridge.concrete_params.len() == 1
-        && bridge.erased_params[parameter].is_erased_top()
-        && bridge.concrete_params[parameter].is_reference()
-        && !bridge.concrete_params[parameter].is_erased_top())
-    .then_some((parameter, outcome))
-    .map(|(parameter, outcome)| (owner, BridgeBarrier { parameter, outcome }))
+        && bridge.erased_params[0].is_erased_top()
+        && bridge.concrete_params[0].is_reference()
+        && !bridge.concrete_params[0].is_erased_top()
 }
 
 pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier> {
@@ -338,7 +342,10 @@ pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier
         .type_safe_barrier
         .then(|| collection_bridge_semantics(bridge))
         .flatten()
-        .map(|(_, barrier)| barrier)
+        .map(|(_, outcome)| BridgeBarrier {
+            parameter: 0,
+            outcome,
+        })
 }
 
 fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile) {
@@ -350,11 +357,12 @@ fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile) {
             .unwrap_or_default();
         for bridge in &mut class.bridges {
             let semantics = collection_bridge_semantics(bridge);
-            bridge.type_safe_barrier = semantics.is_some_and(|(required, _)| {
-                owners
-                    .iter()
-                    .any(|entry| required.matches(entry.classifier))
-            });
+            bridge.type_safe_barrier = narrows_its_parameter(bridge)
+                && semantics.is_some_and(|(required, _)| {
+                    owners
+                        .iter()
+                        .any(|entry| required.matches(entry.classifier))
+                });
             crate::trace_compiler!(
                 "lower",
                 "collection bridge class={} name={} hierarchy={:?} semantics={:?} barrier={}",
