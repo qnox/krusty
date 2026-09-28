@@ -156,8 +156,14 @@ fn function_enclosure(
     facade: &str,
 ) -> Option<(String, Option<(String, String)>)> {
     let declaration = &ir.functions[function as usize];
+    // A suspend member whose body moved to its static `$suspendImpl` keeps the member's class.
     let owner = declaration
         .dispatch_receiver
+        .or_else(|| {
+            ir.jvm_suspend_impl_bodies
+                .get(&function)
+                .map(|&(owner, _)| owner)
+        })
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
     let descriptor = function_descriptor(ir, function);

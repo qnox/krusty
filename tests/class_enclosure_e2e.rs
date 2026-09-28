@@ -241,7 +241,8 @@ fn accessors_and_secondary_constructors_record_the_exact_callable_scope() {
 
 /// A suspend lambda is a class of its own, and a scope: what its body declares, a nested suspend
 /// lambda's class included, is enclosed by its `invokeSuspend`. The outermost lambda's class is
-/// enclosed by the function it is written in.
+/// enclosed by the function it is written in. An open suspend member's body moves to the static
+/// `$suspendImpl` of the member's class, which encloses what the body declares.
 const SUSPEND_SOURCE: &str = "fun launch(block: suspend () -> Unit): Any = block\n\
 fun box(): String {\n\
 \x20   launch {\n\
@@ -250,6 +251,12 @@ fun box(): String {\n\
 \x20       launch { class Nested }\n\
 \x20   }\n\
 \x20   return \"OK\"\n\
+}\n\
+open class Client {\n\
+\x20   open suspend fun connect(n: Int): Any {\n\
+\x20       class Query(val n: Int)\n\
+\x20       return Query(n)\n\
+\x20   }\n\
 }\n";
 
 const SUSPEND_ENCLOSED: &[&str] = &[
@@ -258,10 +265,11 @@ const SUSPEND_ENCLOSED: &[&str] = &[
     "SuspendEnclosureKt$box$1$probe$1",
     "SuspendEnclosureKt$box$1$1",
     "SuspendEnclosureKt$box$1$1$Nested",
+    "Client$connect$Query",
 ];
 
 #[test]
-fn classes_declared_in_a_suspend_lambda_are_enclosed_by_its_invoke_suspend() {
+fn classes_declared_in_a_suspend_body_are_enclosed_by_its_physical_method() {
     let compiled = compile_both_of(SUSPEND_SOURCE, "SuspendEnclosure")
         .expect("the reference kotlinc and a scratch directory are available");
     for class in SUSPEND_ENCLOSED {
