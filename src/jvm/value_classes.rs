@@ -47,7 +47,7 @@ pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};
 use operation_relocation::clone_below_representation_wrapper;
 pub(crate) use representation::{
-    boxed_value_class_names, boxed_value_class_terminal_underlying, boxed_value_class_underlying,
+    boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
     is_boxed_value_class,
 };
 use result_tail_boxing::box_vc_tail;
@@ -170,47 +170,12 @@ pub(crate) fn lower_value_classes(
             _ => {}
         }
     }
-    // Internal name → JVM carrier of the single underlying property, before recursive value-class
-    // erasure. A generic underlying property uses its declared upper bound: `S<T : String>` carries
-    // `String`, while `V<T : Int>` carries `int`. Keeping the unbound `TyParam` here would incorrectly
-    // force an Object slot and later descriptor code would independently specialize the same bound,
-    // leaving boxing and null guards inconsistent with the emitted method descriptor. A nullable
-    // occurrence (`val x: T?`) keeps its `?` on that bound, as kotlinc's `getUnderlyingType` keeps a
-    // nullable type parameter: `X<T : Any>(val x: T?)` carries `Any?`, so `X?` is boxed.
-    let under: Under = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value)
-        .filter_map(|c| {
-            c.fields.first().map(|f| {
-                let u = f
-                    .type_param
-                    .as_ref()
-                    .map(|name| {
-                        let bound = c
-                            .type_param_bounds
-                            .iter()
-                            .find(|(candidate, _)| candidate == name)
-                            .map(|(_, bound)| *bound)
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                        if f.ty.is_nullable() {
-                            Ty::nullable(bound)
-                        } else {
-                            bound
-                        }
-                    })
-                    .unwrap_or(f.ty)
-                    .canonical_semantic();
-                (c.fq_name, u)
-            })
-        })
-        .collect();
     // Merge classpath `@JvmInline value class`es referenced by this file (`Result` → `Object`). They are
     // NOT in `ir.classes` (no synthesized members — their `-impl`/`box-impl` live on the classpath), so
     // they only contribute to the erasure map: every occurrence of their type erases to the underlying.
     // Every referenced classifier is probed through the normalized checked-fact boundary; the JVM
     // pass never opens source, metadata, or a classpath to rediscover semantic declarations.
-    let mut under = under;
+    let mut under = representation::declared_underlyings(ir);
     let Some(external_underlying_properties) =
         declaration_inventory::merge_referenced(ir, classifiers, &mut under)
     else {

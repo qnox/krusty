@@ -421,7 +421,7 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
     if !field.ty.is_nullable() && !field.generic {
         return intrinsic(
             ir,
-            crate::ir::IrIntrinsic::DataClassFieldHash { ty: field.ty },
+            crate::ir::IrIntrinsic::GeneratedPropertyHash { ty: field.ty },
             vec![value],
             Ty::Int,
         );
@@ -436,7 +436,7 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
     let non_null = read(ir);
     let hash = intrinsic(
         ir,
-        crate::ir::IrIntrinsic::DataClassFieldHash { ty: field.ty },
+        crate::ir::IrIntrinsic::GeneratedPropertyHash { ty: field.ty },
         vec![non_null],
         Ty::Int,
     );
@@ -526,7 +526,7 @@ fn synthesize_equals(
         } else {
             intrinsic(
                 ir,
-                crate::ir::IrIntrinsic::DataClassFieldEquals { ty: field.ty },
+                crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty: field.ty },
                 vec![left, right],
                 Ty::Boolean,
             )

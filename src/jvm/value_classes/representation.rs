@@ -27,15 +27,67 @@ pub(crate) fn boxed_value_class_underlying(ir: &IrFile, classifier: TypeName) ->
     ir.value_class_underlying_name(classifier)
 }
 
-/// The terminal underlying type of a value class the JVM boxes through its own `box-impl`.
-pub(crate) fn boxed_value_class_terminal_underlying(
-    ir: &IrFile,
-    classifier: TypeName,
-) -> Option<Ty> {
+/// Internal name → declared underlying of each value class this file declares, before recursive
+/// value-class erasure. A generic underlying property carries its type parameter's declared upper
+/// bound, read from the checked occurrence itself: `S<T : String>` carries `String`, while
+/// `V<T : Int>` carries `int`. Keeping the unbound `TyParam` here would force an Object slot while
+/// descriptor code specializes the same bound, leaving boxing and null guards inconsistent with the
+/// emitted method descriptor. A nullable occurrence (`val x: T?`) keeps its `?` on that bound, as
+/// kotlinc's `getUnderlyingType` keeps a nullable type parameter: `X<T : Any>(val x: T?)` carries
+/// `Any?`, so `X?` is boxed.
+pub(super) fn declared_underlyings(ir: &IrFile) -> crate::value_classes::UnderlyingTypes {
+    ir.classes
+        .iter()
+        .filter(|c| c.is_value)
+        .filter_map(|c| {
+            let field = c.fields.first()?;
+            Some((
+                c.fq_name,
+                parameter_bound_underlying(field.ty).canonical_semantic(),
+            ))
+        })
+        .collect()
+}
+
+/// `declared` with each type-parameter occurrence replaced by its upper bound, through a chain of
+/// parameters bounded by parameters, keeping any `?` met on the way.
+fn parameter_bound_underlying(declared: Ty) -> Ty {
+    let mut nullable = declared.is_nullable();
+    let mut current = declared.non_null();
+    let mut seen = std::collections::HashSet::new();
+    while let Ty::TyParam(name, bound) = current {
+        assert!(
+            seen.insert(name),
+            "a checked type-parameter bound chain is acyclic"
+        );
+        nullable |= bound.is_nullable();
+        current = bound.non_null();
+    }
+    if nullable {
+        Ty::nullable(current)
+    } else {
+        current
+    }
+}
+
+/// The carrier of a value class the JVM boxes through its own `box-impl`: its underlying erased as
+/// the JVM erases it, through nested value classes but stopping at a nullable one the JVM keeps
+/// boxed (`NZ1(val nz: Z?)` over `Z(val x: Int)` carries `Z`, not `int`).
+pub(crate) fn boxed_value_class_carrier(ir: &IrFile, classifier: TypeName) -> Option<Ty> {
     if has_native_carrier(classifier) {
         return None;
     }
-    ir.terminal_value_class_underlying(Ty::obj_name(classifier))
+    let mut declarations = declared_underlyings(ir);
+    for name in ir.value_class_names() {
+        if let (std::collections::hash_map::Entry::Vacant(entry), Some(declared)) = (
+            declarations.entry(name),
+            ir.value_class_underlying_name(name),
+        ) {
+            entry.insert(declared);
+        }
+    }
+    let underlying = *declarations.get(&classifier)?;
+    Some(super::erase(&underlying, &declarations))
 }
 
 /// Every value class this IR knows that the JVM boxes through its own `box-impl`.

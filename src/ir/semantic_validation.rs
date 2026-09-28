@@ -46,8 +46,8 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::PrimitiveArrayNew { element } => reject("intrinsic array element", *element),
         IrIntrinsic::EnumValueOf { classifier } => reject("enum valueOf classifier", *classifier),
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
-        IrIntrinsic::DataClassFieldEquals { ty }
-        | IrIntrinsic::DataClassFieldHash { ty }
+        IrIntrinsic::GeneratedPropertyEquals { ty }
+        | IrIntrinsic::GeneratedPropertyHash { ty }
         | IrIntrinsic::DataClassArrayToString { ty } => reject("intrinsic property", *ty),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
