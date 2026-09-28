@@ -355,14 +355,7 @@ fn root_enclosure(
     if body.is_default_fragment() {
         return None;
     }
-    let classifier = || {
-        let classifier = index.enclosing_classifier(declaration)?.classifier;
-        let class = ir
-            .classes
-            .iter()
-            .position(|class| class.fq_name == classifier)?;
-        Some(crate::ir::ClassId::try_from(class).expect("too many classes"))
-    };
+    let classifier = || initialized_class(index, ir, declaration);
     let anchor = index.declaration_anchor(declaration)?;
     match anchor.kind {
         DeclarationKind::Function => index
@@ -396,6 +389,27 @@ fn root_enclosure(
         DeclarationKind::Initializer => classifier().map(crate::ir::IrEnclosure::ClassInitializer),
         _ => None,
     }
+}
+
+/// The class whose initialization runs `declaration`: the nearest classifier declaring it, or the
+/// class an enum entry with a body compiles to, which initializes what that body declares.
+fn initialized_class(
+    index: &ResolvedModuleIndex,
+    ir: &IrFile,
+    declaration: crate::fir::DeclarationId,
+) -> Option<crate::ir::ClassId> {
+    let mut current = declaration;
+    let class = loop {
+        let anchor = index.declaration_anchor(current)?;
+        if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
+            return ir.checked_enum_entry_classes.get(&current).copied();
+        }
+        if let Some(classifier) = index.classifier_header(current) {
+            break classifier.classifier;
+        }
+        current = anchor.owner?;
+    };
+    ir.class_id_by_name(class)
 }
 
 #[derive(Clone, Debug)]
