@@ -657,7 +657,7 @@ impl Checker<'_> {
             source_file: Some(self.file_index),
             source_member: Some(source),
             source_receiver: receiver,
-            package: String::new(),
+            package: TypeName::ROOT,
             contract: None,
             plugin_expression: None,
         };

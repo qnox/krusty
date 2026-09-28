@@ -212,7 +212,7 @@ pub(in crate::resolve) fn member_signature_from_header(
         source_file: Some(source_file),
         source_member,
         source_receiver: None,
-        package: String::new(),
+        package: TypeName::ROOT,
         contract: None,
         plugin_expression: None,
     }
