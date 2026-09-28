@@ -3889,12 +3889,11 @@ impl Classpath {
             return Some((type_name(&owner), "INSTANCE".to_string()));
         }
         const PUBLIC_STATIC_FINAL: u16 = 0x0001 | 0x0008 | 0x0010;
-        let descriptor = format!("L{};", classifier.render());
         let declares = |owner: TypeName, name: &str| {
             self.find_name(owner).is_some_and(|class| {
                 class.fields.iter().any(|field| {
                     field.name == name
-                        && field.descriptor == descriptor
+                        && super::names::descriptor_is_classifier(&field.descriptor, classifier)
                         && field.access & PUBLIC_STATIC_FINAL == PUBLIC_STATIC_FINAL
                 })
             })
@@ -7110,6 +7109,38 @@ mod fq_tests {
                 "INSTANCE".to_string(),
             ))
         );
+    }
+
+    #[test]
+    fn singleton_storage_reads_instance_and_companion_fields_by_classifier() {
+        let directory = test_temp_dir("singleton-storage");
+        let owner = "probe/single6044/Box";
+        let companion = "probe/single6044/Box$Companion";
+        let mut class = crate::jvm::classfile::ClassWriter::new(owner, "java/lang/Object");
+        let public_static_final = crate::jvm::classfile::ACC_PUBLIC
+            | crate::jvm::classfile::ACC_STATIC
+            | crate::jvm::classfile::ACC_FINAL;
+        class.add_field(public_static_final, "INSTANCE", &format!("L{owner};"));
+        class.add_field(public_static_final, "Companion", &format!("L{companion};"));
+        let package = directory.join("probe").join("single6044");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(package.join("Box.class"), class.finish()).expect("write class");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert_eq!(
+            classpath.singleton_storage(type_name(owner)),
+            Some((type_name(owner), "INSTANCE".to_string()))
+        );
+        assert_eq!(
+            classpath.singleton_storage(type_name(companion)),
+            Some((type_name(owner), "Companion".to_string()))
+        );
+        assert!(classpath
+            .singleton_storage(type_name("probe/single6044/Box$Absent"))
+            .is_none());
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove singleton directory");
     }
 
     // Method bodies, their owning class bytes, and `.kotlin_builtins` parses are ALSO keyed per
