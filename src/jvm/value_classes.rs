@@ -3097,13 +3097,10 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // A virtual/interface dispatch on an UNBOXED value-class receiver boxes it with `box-impl`
-            // when (1) the owner is NOT the value class (an interface it implements, an `IFoo by Z(x)`
-            // forwarder) or (2) the callee is a SIBLING-FILE user instance method (`params: Some`); a
-            // same-file member is a `MethodCall` (boxed above) and a static `-impl` is `Static`. A
-            // `super` call (`Special`) always takes the box, as kotlinc's `invokespecial` does. Of the
-            // intrinsics only the nullable-Any `toString` consumes a reference; the others carry
-            // concrete scalar/array contracts and must not turn their receiver into an erased box.
+            // An UNBOXED value-class receiver is boxed with `box-impl` by a virtual call whose owner is
+            // not the value class (an interface, an `IFoo by Z(x)` forwarder) or which is a
+            // SIBLING-FILE member (`params: Some`), by a `super` call, by an inherited default whose
+            // provider is an interface's `$default`, and by the nullable-Any `toString` intrinsic.
             if let IrExpr::Call {
                 callee,
                 dispatch_receiver: Some(recv),
@@ -3115,6 +3112,8 @@ pub(crate) fn lower_value_classes(
                         !is_value_class_internal(*owner, &under) || params.is_some()
                     }
                     Callee::Special { .. } => true,
+                    Callee::ModuleWithDefaults { .. } => default_calls::provider_owner(ir, callee)
+                        .is_some_and(|owner| !is_value_class_internal(owner, &under)),
                     Callee::Intrinsic { operation, .. } => {
                         *operation == crate::ir::IrIntrinsic::NullableAnyToString
                     }
