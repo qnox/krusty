@@ -11,7 +11,7 @@ use crate::diag::Span;
 use crate::types::Ty;
 
 use super::lexical_bindings::BindingIdentity;
-use super::scope::{NarrowPath, Ns};
+use super::scope::{NarrowPath, Ns, PathRoot};
 use super::{Checker, CheckerScope, Local, ReceiverFnValueOrigin, ScopeBinding};
 
 impl Checker<'_> {
@@ -67,12 +67,12 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         path: &NarrowPath,
     ) -> Vec<NarrowPath> {
-        if !path.segments.is_empty() {
+        let (PathRoot::Value(root), true) = (&path.root, path.segments.is_empty()) else {
             return Vec::new();
-        }
+        };
         let Some(start) = self
-            .lookup(scope, &path.root)
-            .and_then(|local| local.lexical_capture_identity)
+            .visible_flow_value(scope, *root)
+            .and_then(|(_, local)| local.lexical_capture_identity)
             .map(BindingIdentity::new)
         else {
             return Vec::new();
@@ -85,7 +85,7 @@ impl Checker<'_> {
         .into_iter()
         .filter_map(|identity| {
             self.visible_local_binding(scope, identity)
-                .map(|(name, _)| NarrowPath::root_only(&name))
+                .map(|(_, local)| NarrowPath::root_only(PathRoot::Value(local.flow_identity)))
         })
         .collect()
     }

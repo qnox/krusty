@@ -3493,6 +3493,8 @@ struct PropertyReadMemberSelection {
     source_member: Option<crate::libraries::SourceMember>,
     stable_declaration: Option<crate::fir::DeclarationId>,
     access: Option<(Visibility, TypeName)>,
+    /// Whether a second read through the same receiver returns the same value.
+    stable_read: bool,
 }
 
 enum PropertyReadAmbiguity {
@@ -12324,6 +12326,9 @@ struct Local {
     /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
+    /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
+    /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
+    flow_identity: u32,
     /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
     safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
@@ -14069,6 +14074,7 @@ impl<'a> Checker<'a> {
                         source_member: Some(local.source_member),
                         stable_declaration: local.stable_declaration,
                         access: Some((local.visibility, local.owner)),
+                        stable_read: false,
                     },
                 ))));
             }
@@ -14176,6 +14182,13 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .and_then(|property| property.stable_declaration),
                         access: (visibility != Visibility::Public).then_some((visibility, owner)),
+                        stable_read: selected_property.as_ref().is_some_and(|property| {
+                            let receiver_final = receiver
+                                .obj_internal()
+                                .and_then(|owner| self.resolver().classifier(owner))
+                                .is_some_and(|class| class.is_final());
+                            property.read_stability.permits(receiver_final)
+                        }),
                     },
                 ))));
             }
@@ -14739,6 +14752,7 @@ impl<'a> Checker<'a> {
                     compile_time_constant,
                     source_member,
                     mut stable_declaration,
+                    stable_read,
                     ..
                 } = *member;
                 if let Some(constant) = compile_time_constant {
@@ -14748,6 +14762,9 @@ impl<'a> Checker<'a> {
                 if stable_declaration.is_none() {
                     stable_declaration = source_member
                         .and_then(|source| self.active_source_member_declaration(source));
+                }
+                if stable_read {
+                    self.stable_property_reads.insert(expression);
                 }
                 self.expr_lowers.insert(
                     expression,
@@ -25064,10 +25081,10 @@ impl<'a> Checker<'a> {
             self.attach_safe_call_origin(scope, &name, origin);
         }
         if declared.is_none() && !is_var {
-            let path = NarrowPath::root_only(&name);
-            let constituents = self.inferred_expression_intersection(init);
-            for constituent in constituents {
-                scope.narrow_intersection(path.clone(), constituent);
+            if let Some(path) = self.visible_value_path(scope, &name) {
+                for constituent in self.inferred_expression_intersection(init) {
+                    scope.narrow_intersection(path.clone(), constituent);
+                }
             }
         }
         // A declared type is what the initializer leaves: kotlinc reads `var x: Base = Derived()` as
@@ -37525,6 +37542,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::new(),
         implicit_receiver_selections: HashMap::new(),
+        implicit_receiver_identities: HashMap::new(),
+        read_flow_roots: HashMap::new(),
+        stable_property_reads: std::collections::HashSet::new(),
         implicit_receiver_identity_uses: HashMap::new(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
@@ -37582,6 +37602,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_function_capture_bindings: HashMap::new(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
+        next_flow_identity: 0,
         checked_local_class_declarations: std::collections::HashSet::new(),
         checked_local_classifier_identities: HashMap::new(),
         checked_local_classifier_type_arguments: HashMap::new(),
@@ -40485,6 +40506,13 @@ struct Checker<'a> {
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
     implicit_receiver_selections: HashMap<ExprId, ImplicitReceiverSelection>,
+    /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
+    /// the smart-cast paths of member reads through that receiver.
+    implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
+    /// The flow root each checked lexical-value or `this` read resolved to.
+    read_flow_roots: HashMap<ExprId, scope::PathRoot>,
+    /// Member property reads whose selected declaration reads the same value twice.
+    stable_property_reads: std::collections::HashSet<ExprId>,
     /// Semantic uses of exact lexical receiver bindings. Capture discovery snapshots this table
     /// around a nested classifier check so qualified member-extension calls still capture their
     /// implicit dispatch receiver. The scope identity, unlike type/name matching, distinguishes
@@ -40597,6 +40625,7 @@ struct Checker<'a> {
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
     try_body_writes: Vec<std::collections::HashSet<lexical_bindings::BindingIdentity>>,
+    next_flow_identity: u32,
     checked_local_class_declarations: std::collections::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
@@ -41826,7 +41855,7 @@ impl<'a> Checker<'a> {
     fn actual_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
         self.this_narrow
             .or_else(|| self.local_narrowing(scope, "this"))
-            .or_else(|| self.lookup_path_narrowing(scope, &NarrowPath::root_only("this")))
+            .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?))
             .or_else(|| {
                 let declared = scope.this_ty()?;
                 let shadow = self.lookup(scope, "this")?.ty;
@@ -46463,6 +46492,21 @@ impl<'a> Checker<'a> {
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
+        let mut receivers = self.declared_implicit_receivers(scope);
+        // Flow facts for the unqualified `this` value change the semantic type of the nearest
+        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
+        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
+        // exact receiver depth selected above.
+        if let Some(narrowed) = self.actual_this_narrow(scope) {
+            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
+                current.ty = narrowed;
+            }
+        }
+        receivers
+    }
+
+    /// The receiver tower with each receiver's declared type.
+    fn declared_implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         // Scope owns receiver ordering. Do not reconstruct it from labels or deduplicate equal types:
         // two same-typed receivers remain distinct runtime values and the selected depth is the exact
         // identity handed to lowering.
@@ -46657,15 +46701,6 @@ impl<'a> Checker<'a> {
                 });
             }
         }
-        // Flow facts for the unqualified `this` value change the semantic type of the nearest
-        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
-        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
-        // exact receiver depth selected above.
-        if let Some(narrowed) = self.actual_this_narrow(scope) {
-            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-                current.ty = narrowed;
-            }
-        }
         receivers
     }
 
@@ -46807,6 +46842,8 @@ impl<'a> Checker<'a> {
         let selection = self.implicit_receiver_selection(receiver);
         self.implicit_receiver_selections
             .insert(expression, selection);
+        self.implicit_receiver_identities
+            .insert(expression, receiver.identity);
         self.mark_extension_receiver_used(expression, receiver);
     }
 
@@ -47086,6 +47123,7 @@ impl<'a> Checker<'a> {
     /// (`with("O") { validate1() }` → `this`).
     fn contract_stable_arg_path(
         &self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         param: crate::contracts::ParamRef,
     ) -> Option<NarrowPath> {
@@ -47100,30 +47138,16 @@ impl<'a> Checker<'a> {
         // calls.
         if let crate::contracts::ParamRef::Param(i) = param {
             if let Some(sources) = self.context_args.get(&call) {
-                return sources.get(i).and_then(|source| match source {
-                    ResolvedContextArgument::Binding { name, .. } => {
-                        Some(NarrowPath::root_only(name))
-                    }
-                    ResolvedContextArgument::ImplicitReceiver(selection) if selection.current => {
-                        Some(NarrowPath::root_only("this"))
-                    }
-                    ResolvedContextArgument::ImplicitReceiver(_) => None,
-                });
+                return sources
+                    .get(i)
+                    .and_then(|source| self.context_argument_path(scope, source));
             }
             if let Some(ResolvedCall::TopLevel(c)) = self.resolved_calls.get(&call) {
-                return c.context_args.get(i).and_then(Option::as_ref).and_then(
-                    |source| match source {
-                        ResolvedContextArgument::Binding { name, .. } => {
-                            Some(NarrowPath::root_only(name))
-                        }
-                        ResolvedContextArgument::ImplicitReceiver(selection)
-                            if selection.current =>
-                        {
-                            Some(NarrowPath::root_only("this"))
-                        }
-                        ResolvedContextArgument::ImplicitReceiver(_) => None,
-                    },
-                );
+                return c
+                    .context_args
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .and_then(|source| self.context_argument_path(scope, source));
             }
         }
         None
@@ -47149,7 +47173,7 @@ impl<'a> Checker<'a> {
                 param,
                 negated: true,
             } => {
-                let Some(path) = self.contract_stable_arg_path(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
                     return;
                 };
                 // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
@@ -47161,7 +47185,7 @@ impl<'a> Checker<'a> {
                 ty: ConditionType::Source(tyref),
                 negated: false,
             } => {
-                let Some(path) = self.contract_stable_arg_path(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
                     return;
                 };
                 let tt = self.type_ref_ty_silent(scope, tyref);
@@ -47181,7 +47205,7 @@ impl<'a> Checker<'a> {
                 // A contract decoded from `@Metadata`: the is-type is already semantic but may
                 // mention the callee's type parameters (`value is R`) — substitute them with the
                 // call's bindings (`Refinement<Any, String>.validate` → `String`).
-                let Some(path) = self.contract_stable_arg_path(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
                     return;
                 };
                 let tt = self.subst_contract_metadata_ty(call, *ty);
@@ -47574,34 +47598,6 @@ impl<'a> Checker<'a> {
         match applicable.as_slice() {
             [property] => TopLevelPropertySelection::Selected(Box::new(property.clone())),
             _ => TopLevelPropertySelection::Ambiguous,
-        }
-    }
-
-    fn top_level_property_read_ty(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        property: &crate::libraries::PropertyInfo,
-        site: Span,
-    ) -> Ty {
-        let declared = property.ty;
-        let path = NarrowPath::root_only(name);
-        crate::trace_compiler!(
-            "smartcast",
-            "top-level read candidate path={path:?} declared={declared:?}",
-        );
-        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
-            return declared;
-        };
-        let stable = self.stable_path_ty(scope, &path, site);
-        crate::trace_compiler!(
-            "smartcast",
-            "top-level read path={path:?} declared={declared:?} narrowed={narrowed:?} stable={stable:?}",
-        );
-        if stable == Some(declared) {
-            narrowed
-        } else {
-            declared
         }
     }
 
@@ -49257,8 +49253,8 @@ impl<'a> Checker<'a> {
         is_var: bool,
         function_type: Ty,
     ) {
-        scope.invalidate_paths_rooted_at(name);
         let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
+        let flow_identity = self.allocate_flow_identity();
         scope.rebind(
             name,
             Ns::Value,
@@ -49274,6 +49270,7 @@ impl<'a> Checker<'a> {
                 delegate_storage_ty: None,
                 shared_storage_cell: false,
                 lexical_capture_identity,
+                flow_identity,
                 safe_call_origin: None,
             }),
         );
@@ -49882,10 +49879,8 @@ impl<'a> Checker<'a> {
             is_context_parameter,
             shared_storage_cell,
         } = declaration;
-        // A NEW binding under an existing name invalidates the property-path narrowings rooted at
-        // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
-        // Narrowing shadows are exempt (`declare_narrowing_shadow`): they re-bind the SAME value.
-        scope.invalidate_paths_rooted_at(name);
+        // A NEW binding gets a new flow identity, so the property-path narrowings of a same-named
+        // older value (`if (a.p == null) return; val a = …`) cannot apply to it.
         let write_ty = is_var.then_some(match origin {
             ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
             _ => ty,
@@ -49896,6 +49891,7 @@ impl<'a> Checker<'a> {
         };
         let lexical_capture_identity = matches!(origin, ReceiverFnValueOrigin::Local)
             .then(|| self.allocate_lexical_capture_identity());
+        let flow_identity = self.allocate_flow_identity();
         scope.rebind(
             name,
             Ns::Value,
@@ -49911,9 +49907,18 @@ impl<'a> Checker<'a> {
                 delegate_storage_ty: None,
                 shared_storage_cell,
                 lexical_capture_identity,
+                flow_identity,
                 safe_call_origin: None,
             }),
         );
+    }
+
+    fn allocate_flow_identity(&mut self) -> u32 {
+        let identity = self.next_flow_identity;
+        self.next_flow_identity = identity
+            .checked_add(1)
+            .expect("too many lexical bindings in one bounded checker");
+        identity
     }
 
     fn allocate_lexical_capture_identity(&mut self) -> u32 {
@@ -49941,6 +49946,10 @@ impl<'a> Checker<'a> {
         let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
         let delegate_storage_ty = previous.and_then(|local| local.delegate_storage_ty);
         let lexical_capture_identity = previous.and_then(|local| local.lexical_capture_identity);
+        let flow_identity = match previous {
+            Some(local) => local.flow_identity,
+            None => self.allocate_flow_identity(),
+        };
         let safe_call_origin = previous.and_then(|local| local.safe_call_origin);
         let declared_ty = previous.map(|local| local.declared_ty).unwrap_or(ty);
         let write_ty = previous.and_then(|local| local.write_ty);
@@ -49964,6 +49973,7 @@ impl<'a> Checker<'a> {
                 delegate_storage_ty,
                 shared_storage_cell: previous.is_some_and(|local| local.shared_storage_cell),
                 lexical_capture_identity,
+                flow_identity,
                 safe_call_origin,
             }),
         );
@@ -53673,7 +53683,8 @@ impl<'a> Checker<'a> {
         // implicit-`this` fast path must preserve the same applied target instead of replacing it
         // with raw `Right`, whose `value` property subsequently erases to `Any?`.
         let runtime_tt = self
-            .stable_path_ty(scope, &NarrowPath::root_only("this"), self.span(cond))
+            .current_receiver_path(scope)
+            .and_then(|path| self.stable_path_ty(scope, &path, self.span(cond)))
             .filter(|_| ty.targs.is_empty())
             .map(|declared| {
                 crate::symbol_resolver::apply_subtype_arguments_from_supertype(
@@ -53822,15 +53833,16 @@ impl<'a> Checker<'a> {
         path: &NarrowPath,
         site: Span,
     ) -> Option<(String, Ty)> {
-        if !path.segments.is_empty() {
+        let (scope::PathRoot::Value(identity), true) = (&path.root, path.segments.is_empty())
+        else {
             return None;
-        }
-        let local = self.lookup(scope, &path.root)?;
+        };
+        let (name, local) = self.visible_flow_value(scope, *identity)?;
         if local.is_var
             && matches!(local.origin, ReceiverFnValueOrigin::Local)
-            && self.closure_reassigned_before(&path.root, site)
+            && self.closure_reassigned_before(&name, site)
         {
-            Some((path.root.clone(), local.write_ty.unwrap_or(local.ty)))
+            Some((name, local.write_ty.unwrap_or(local.ty)))
         } else {
             None
         }
@@ -53905,8 +53917,10 @@ impl<'a> Checker<'a> {
             while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
                 root = *receiver;
             }
-            if let Expr::Name(n) = self.file.expr(root).clone() {
-                let root_path = NarrowPath::root_only(&n);
+            if let Some(root_path) = self
+                .expr_access_path(root)
+                .filter(|path| path.segments.is_empty())
+            {
                 self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
             }
             return;
@@ -54404,35 +54418,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// All negative facts currently proved for one stable path, stopping at the binding or receiver
-    /// boundary that gives the path its identity.
-    fn lookup_flow_exclusions(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-    ) -> Vec<FlowExclusion> {
-        let rooted_at_this = path.root == "this";
-        let mut exclusions = Vec::new();
-        for rung in scope.ancestors() {
-            for exclusion in rung.exclusions(path) {
-                if !exclusions.contains(&exclusion) {
-                    exclusions.push(exclusion);
-                }
-            }
-            if rooted_at_this {
-                if matches!(
-                    rung.kind(),
-                    ScopeKind::Class { .. } | ScopeKind::Function { receiver: Some(_) }
-                ) {
-                    break;
-                }
-            } else if rung.declared_here(&path.root, Ns::Value) {
-                break;
-            }
-        }
-        exclusions
-    }
-
     fn collect_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -54490,11 +54475,14 @@ impl<'a> Checker<'a> {
             // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
             // `String & Nothing?`). Classifier type-test proofs continue through the intersection
             // path below.
-            if path.segments.is_empty() && path.root != "this" && ty.non_null() != Ty::Nothing {
-                if let Some(declared) = self
-                    .lookup(scope, &path.root)
-                    .map(|local| local.declared_ty.non_null())
-                {
+            let root_value = match (&path.root, path.segments.is_empty()) {
+                (scope::PathRoot::Value(identity), true) => {
+                    self.visible_flow_value(scope, *identity)
+                }
+                _ => None,
+            };
+            if ty.non_null() != Ty::Nothing {
+                if let Some(declared) = root_value.map(|(_, local)| local.declared_ty.non_null()) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);
@@ -54514,35 +54502,6 @@ impl<'a> Checker<'a> {
     /// Record a property-path narrowing in the scope that proved it.
     fn record_path_narrowing(&mut self, scope: &CheckerScope<'_>, path: NarrowPath, ty: Ty) {
         scope.narrow_path(path, ty);
-    }
-
-    /// All incomparable smart-cast constituents currently proved for one access path. Like the
-    /// ordinary path-narrowing lookup, the walk cannot cross a new binding of the root or a receiver
-    /// boundary. The vector is body-flow state only: callers project one constituent for a concrete
-    /// semantic operation, so no synthetic intersection identity can escape into FIR.
-    fn lookup_intersection_narrowing(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-    ) -> Vec<Ty> {
-        let rooted_at_this = path.root == "this";
-        for rung in scope.ancestors() {
-            let types = rung.intersection_narrowing(path);
-            if !types.is_empty() {
-                return types;
-            }
-            if rooted_at_this {
-                if matches!(
-                    rung.kind(),
-                    ScopeKind::Class { .. } | ScopeKind::Function { receiver: Some(_) }
-                ) {
-                    return Vec::new();
-                }
-            } else if rung.declared_here(&path.root, Ns::Value) {
-                return Vec::new();
-            }
-        }
-        Vec::new()
     }
 
     /// Project a flow intersection onto the constituent that owns the member being used. Candidate
@@ -54752,33 +54711,6 @@ impl<'a> Checker<'a> {
     /// narrowed type, and the lowerer emits the `checkcast`/unbox from its generic per-expression
     /// coercion (`info.ty(e)` against the property's physical type). Re-validated against the
     /// CURRENT scope state — a changed binding or an unstable step drops the narrowing.
-    fn path_narrowed_read_ty(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-        declared: Ty,
-    ) -> Ty {
-        let Some(mut path) = self.expr_access_path(receiver) else {
-            return declared;
-        };
-        path.segments.push(name.to_string());
-        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
-            return declared;
-        };
-        let current = self.stable_path_ty(scope, &path, self.span(receiver));
-        let still_valid = current.is_some_and(|current| current.non_null() == declared.non_null());
-        crate::trace_compiler!(
-            "smartcast",
-            "read path={path:?} declared={declared:?} narrowed={narrowed:?} current={current:?} valid={still_valid}",
-        );
-        if narrowed != declared && still_valid {
-            narrowed
-        } else {
-            declared
-        }
-    }
-
     fn check_duplicate_param_names(
         &mut self,
         params: &[Param],
@@ -61408,16 +61340,18 @@ impl<'a> Checker<'a> {
         // This record is intentionally made at the selected call boundary: later incidental checks
         // of the same parser expression may restore its shared expression-type cache to the declared
         // nullable type, but they cannot invalidate the overload that was already selected here.
-        let selected_local_projection = self
-            .expr_access_path(argument)
-            .filter(|path| path.segments.is_empty() && path.root != "this")
-            .and_then(|path| {
-                let local = self.lookup(scope, &path.root)?;
-                self.stable_path_ty(scope, &path, self.span(argument))?;
-                (!self.receiver_is_assignable(local.declared_ty, expected)
-                    && self.receiver_is_assignable(actual, expected))
-                .then_some(expected)
-            });
+        let selected_local_projection = self.expr_access_path(argument).and_then(|path| {
+            let scope::PathRoot::Value(identity) = path.root else {
+                return None;
+            };
+            let (_, local) = self
+                .visible_flow_value(scope, identity)
+                .filter(|_| path.segments.is_empty())?;
+            self.stable_path_ty(scope, &path, self.span(argument))?;
+            (!self.receiver_is_assignable(local.declared_ty, expected)
+                && self.receiver_is_assignable(actual, expected))
+            .then_some(expected)
+        });
         if let Some(projected) =
             selected_local_projection.or_else(|| selected_intersection_projection.then_some(actual))
         {
@@ -64987,6 +64921,8 @@ impl<'a> Checker<'a> {
                 }
                 if ty != Ty::Error {
                     if let Some(mut receiver) = selected_receiver {
+                        self.read_flow_roots
+                            .insert(e, scope::PathRoot::Receiver(receiver.identity));
                         receiver.ty = ty;
                         self.mark_implicit_receiver_selection(e, receiver);
                     }
@@ -67057,7 +66993,7 @@ impl<'a> Checker<'a> {
         // A property READ (`a?.b`, not a call) proven non-null by an enclosing condition
         // (`a?.b != null`, a contract) reads as the narrowed type in the guarded region.
         let t = if args.is_none() && t != Ty::Error {
-            self.path_narrowed_read_ty(scope, receiver, &name, t)
+            self.path_narrowed_read_ty(scope, e, receiver, t)
         } else {
             t
         };
@@ -67341,6 +67277,8 @@ impl<'a> Checker<'a> {
                 {
                     self.expr_lowers
                         .insert(e, ExprLowering::ClassStorageRead { field });
+                    self.read_flow_roots
+                        .insert(e, scope::PathRoot::Value(l.flow_identity));
                     return self.set(e, self.local_narrowing(scope, &n).unwrap_or(l.ty));
                 }
                 if let ReceiverFnValueOrigin::DispatchProperty {
@@ -67405,10 +67343,16 @@ impl<'a> Checker<'a> {
                             let ty = if selected_dispatch_property && l.ty != declared_ty {
                                 // Lookup already carries the flow type of this exact dispatch
                                 // property after a narrowing shadow changed it. Otherwise the
-                                // semantic member selection supplies the applied generic type.
+                                // semantic member selection supplies the applied generic type,
+                                // narrowed by a proof about this very receiver's property.
                                 l.ty
                             } else {
-                                selected_ty
+                                self.receiver_property_narrowed_read_ty(
+                                    scope,
+                                    e,
+                                    receiver.identity,
+                                    selected_ty,
+                                )
                             };
                             // The member selection reads the symbol table, which still holds the
                             // marker while that member's own type is being determined — and it wins
@@ -67455,6 +67399,10 @@ impl<'a> Checker<'a> {
                         self.narrowed_read_base.insert(e, declared);
                     }
                 }
+                if !matches!(l.origin, ReceiverFnValueOrigin::DispatchProperty { .. }) {
+                    self.read_flow_roots
+                        .insert(e, scope::PathRoot::Value(l.flow_identity));
+                }
                 if matches!(l.origin, ReceiverFnValueOrigin::Local)
                     && self.closure_reassigned_before(&n, self.span(e))
                 {
@@ -67483,10 +67431,18 @@ impl<'a> Checker<'a> {
                     if let Some(bi) = bt.obj_internal() {
                         if let Some(ty) = self.try_member_read(scope, bt, &n, self.span(e), Some(e))
                         {
+                            let receiver = self.implicit_receivers(scope).into_iter().next();
+                            let ty = match receiver {
+                                Some(receiver) => self.receiver_property_narrowed_read_ty(
+                                    scope,
+                                    e,
+                                    receiver.identity,
+                                    ty,
+                                ),
+                                None => ty,
+                            };
                             self.narrowed_this_member.insert(e, bi);
-                            if let Some(receiver) =
-                                self.implicit_receivers(scope).into_iter().next()
-                            {
+                            if let Some(receiver) = receiver {
                                 self.mark_implicit_receiver_selection(e, receiver);
                             }
                             self.mark_current_extension_receiver_used(e);
@@ -67539,6 +67495,12 @@ impl<'a> Checker<'a> {
                         self.read_implicit_receiver_name(scope, e, &n, implicit_receiver)
                     {
                         self.mark_implicit_receiver_selection(e, implicit_receiver);
+                        let ty = self.receiver_property_narrowed_read_ty(
+                            scope,
+                            e,
+                            implicit_receiver.identity,
+                            ty,
+                        );
                         return self.set(e, ty);
                     }
                 }
@@ -67610,7 +67572,6 @@ impl<'a> Checker<'a> {
                             }
                             let ty = self.top_level_property_read_ty(
                                 scope,
-                                &n,
                                 &property.property,
                                 self.span(e),
                             );
@@ -67702,7 +67663,7 @@ impl<'a> Checker<'a> {
                     // A TOP-LEVEL property read (`import pkg.plugin; plugin`): its value is its declaring
                     // facade's static getter call. Last among the value rungs — every enclosing scope
                     // (locals, members, objects) shadows an imported top-level property.
-                    let ty = self.top_level_property_read_ty(scope, &n, &property, self.span(e));
+                    let ty = self.top_level_property_read_ty(scope, &property, self.span(e));
                     self.expr_lowers.insert(
                         e,
                         ExprLowering::TopLevelPropertyGet(Box::new(ResolvedPropertyAccess {
@@ -68407,7 +68368,7 @@ impl<'a> Checker<'a> {
                 self.resolved_constant_receivers.insert(e, receiver);
             }
             // A proof from an enclosing condition (`a.b != null`, `a.b is T`) narrows this read.
-            self.path_narrowed_read_ty(scope, receiver, &name, declared)
+            self.path_narrowed_read_ty(scope, e, receiver, declared)
         };
         self.set(e, t)
     }

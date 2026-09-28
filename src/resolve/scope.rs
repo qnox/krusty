@@ -72,31 +72,61 @@ impl ContextReceiver {
     }
 }
 
-/// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT binding
-/// (`this`, a local `val`/parameter) followed by immutable property segments (`a.b.c`). A root-only
-/// path is the classic name narrowing; segments extend the same proofs (`==`/`!=` null checks,
-/// `is`/`!is` type tests, contract conclusions) to property reads, like kotlinc. One machinery
-/// serves every condition shape and application site — nothing keys on the condition's syntax.
+/// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT value followed
+/// by immutable property segments (`a.b.c`). A root-only path is the classic value narrowing;
+/// segments extend the same proofs (`==`/`!=` null checks, `is`/`!is` type tests, contract
+/// conclusions) to property reads, like kotlinc. One machinery serves every condition shape and
+/// application site — nothing keys on the condition's syntax.
+///
+/// Every component is a resolved identity recorded when the path's expression was checked, never
+/// a spelling: a proof about one receiver's property cannot be found by a read of a same-named
+/// property of another receiver, or of an overriding declaration.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct NarrowPath {
-    pub(crate) root: String,
-    pub(crate) segments: Vec<String>,
+    pub(crate) root: PathRoot,
+    pub(crate) segments: Vec<PathProperty>,
 }
 
 impl NarrowPath {
-    pub(crate) fn root_only(root: &str) -> Self {
+    pub(crate) fn root_only(root: PathRoot) -> Self {
         NarrowPath {
-            root: root.to_string(),
+            root,
             segments: Vec::new(),
         }
     }
+
+    /// This path followed by one more selected property.
+    pub(crate) fn then(mut self, property: PathProperty) -> Self {
+        self.segments.push(property);
+        self
+    }
 }
 
-/// A recorded property-path narrowing. A `this`-rooted path names a property of one specific
-/// receiver object, and a `this` rebind — a receiver lambda, an inner class, an extension receiver,
-/// even to the SAME type — is a different object. That is expressed by WHERE the narrowing lives:
-/// it sits in the frame of the scope that proved it, and `lookup_path_narrowing` stops walking
-/// outward at the rung that established the receiver.
+/// The value a [`NarrowPath`] starts from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PathRoot {
+    /// A lexical value, by the flow identity its declaration allocated. A narrowing shadow keeps
+    /// the identity of the value it narrows; a new declaration of the same name gets another.
+    Value(u32),
+    /// A receiver (`this`, an extension or dispatch receiver), by its receiver-tower coordinate.
+    Receiver((usize, usize)),
+    /// A top-level property, by its selected declaration.
+    TopLevel(PathProperty),
+}
+
+/// A selected property declaration, as the checker's selection of one read recorded it: the
+/// classifier (or file facade) declaring it, its declared name, the type that read has, and whether
+/// a second read through the same receiver returns the same value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PathProperty {
+    pub(crate) owner: TypeName,
+    pub(crate) name: String,
+    pub(crate) ty: Ty,
+    pub(crate) stable: bool,
+}
+
+/// A recorded property-path narrowing. It sits in the frame of the scope that proved it and dies
+/// with that scope; which receiver or value it is about is carried by the path's identities.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct PathNarrowing {
     pub(crate) ty: Ty,
@@ -610,6 +640,25 @@ impl<'p, B> Scope<'p, B> {
         None
     }
 
+    /// The `name` binding with `depth` nearer same-named bindings in front of it, the coordinate
+    /// [`Self::find_context_value`] reports.
+    pub(crate) fn shadowed_binding(&self, ns: Ns, name: &str, depth: usize) -> Option<B>
+    where
+        B: Clone,
+    {
+        self.ancestors()
+            .flat_map(|scope| {
+                let bindings = scope.bindings.borrow();
+                bindings
+                    .iter()
+                    .rev()
+                    .filter(|binding| binding.ns == ns && binding.name == name)
+                    .map(|binding| binding.payload.clone())
+                    .collect::<Vec<_>>()
+            })
+            .nth(depth)
+    }
+
     /// Every binding THIS scope introduces in `ns`, in declaration order. The per-rung view a
     /// namespace whose lookup is rung-sensitive needs (classifiers stop at [`Self::classifier_rungs`]).
     pub(crate) fn own_bindings(&self, ns: Ns, mut visit: impl FnMut(&str, &B)) {
@@ -679,13 +728,14 @@ impl<'p, B> Scope<'p, B> {
             .map(|narrowing| narrowing.ty)
     }
 
-    /// Drop every path proof rooted at `root`. A NEW binding under that name invalidates them —
-    /// the proof was about the old value.
-    pub(crate) fn invalidate_paths_rooted_at(&self, root: &str) {
-        let mut flow = self.flow.borrow_mut();
-        flow.paths.retain(|path, _| path.root != root);
-        flow.intersections.retain(|path, _| path.root != root);
-        flow.exclusions.retain(|path, _| path.root != root);
+    /// Drop every path fact rooted at `root` in the whole chain: a write replaced that value.
+    pub(crate) fn forget_paths_rooted_at(&self, root: &PathRoot) {
+        for rung in self.ancestors() {
+            let mut flow = rung.flow.borrow_mut();
+            flow.paths.retain(|path, _| path.root != *root);
+            flow.intersections.retain(|path, _| path.root != *root);
+            flow.exclusions.retain(|path, _| path.root != *root);
+        }
     }
 
     /// Record the straight-line read type of `name` for the rest of THIS scope, or with `None`
@@ -695,22 +745,6 @@ impl<'p, B> Scope<'p, B> {
     /// disproves a narrowing an enclosing scope established (`var x: Int? = 10; if (c) { x = null }`
     /// — the outer proof is dead once the branch can run), so `None` clears the whole chain.
     pub(crate) fn narrow_local(&self, name: &str, ty: Option<Ty>) {
-        // An assignment replaces every type fact about this runtime value, including an `A & B`
-        // proof established by an enclosing condition. Stop at the declaring rung so a same-named
-        // outer binding keeps its unrelated facts.
-        for rung in self.ancestors() {
-            rung.flow
-                .borrow_mut()
-                .intersections
-                .retain(|path, _| path.root != name);
-            rung.flow
-                .borrow_mut()
-                .exclusions
-                .retain(|path, _| path.root != name);
-            if rung.declared_here(name, Ns::Value) {
-                break;
-            }
-        }
         match ty {
             Some(ty) => {
                 self.flow.borrow_mut().locals.insert(name.to_string(), ty);
