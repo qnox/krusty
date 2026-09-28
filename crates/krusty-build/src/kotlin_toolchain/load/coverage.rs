@@ -5,9 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{execute, load, load_using, BuildCommand};
+use super::{execute, load, BuildCommand};
 use crate::graph::ModuleGraph;
-use crate::kotlin_toolchain::tool::{FnRunner, ToolCommand, ToolOutput};
 use crate::model::{Module, SourceRootKind};
 
 struct Temp(PathBuf);
@@ -557,14 +556,6 @@ fn module_schema_outside_jvm_products_and_project_dependencies_is_rejected() {
             "dependency '$libs.ktor' needs a project catalog; looked for libs.versions.toml and gradle/libs.versions.toml",
         ),
         (
-            "product: jvm/app\ndependencies:\n  - not-a-coordinate\n",
-            "dependency 'not-a-coordinate' is not a Maven coordinate",
-        ),
-        (
-            "product: jvm/app\ndependencies:\n  - group:artifact\n",
-            "dependency 'group:artifact' is not a Maven coordinate",
-        ),
-        (
             "product: jvm/app\ndependencies:\n  - bom:imports\n",
             "dependency 'bom:imports' is not a project module",
         ),
@@ -722,19 +713,14 @@ ktor-client-java = { module = \"io.ktor:ktor-client-java\", version.ref = \"ktor
         "product: jvm/app\ndependencies:\n  - $libs.ktor.client.java: compile-only\n",
     );
     tree.write("src/main.kt", "fun main() {}\n");
-    let loaded = load_using(&command(&tree.0), &coordinate_runner("/repo/ktor.jar")).expect("load");
     assert_eq!(
-        loaded.modules[0].classpath,
-        vec![PathBuf::from("/repo/ktor.jar")]
+        load(&command(&tree.0)).unwrap_err(),
+        file_error(
+            &tree,
+            "module.yaml",
+            "dependency 'io.ktor:ktor-client-java:2.3.0' is an external library. krusty-toolchain build compiles modules named in module.yaml. A Gradle, Maven, or Bazel plugin resolves external libraries."
+        )
     );
-    let pom = std::fs::read_to_string(
-        tree.0
-            .join("build/krusty/maven/io.ktor_ktor-client-java_2.3.0/pom.xml"),
-    )
-    .expect("generated pom");
-    assert!(pom.contains("<groupId>io.ktor</groupId>"));
-    assert!(pom.contains("<artifactId>ktor-client-java</artifactId>"));
-    assert!(pom.contains("<version>2.3.0</version>"));
 
     let gradle = Temp::new("gradle-catalog");
     gradle.write(
@@ -746,47 +732,14 @@ ktor-client-java = { module = \"io.ktor:ktor-client-java\", version.ref = \"ktor
         "product: jvm/app\ndependencies:\n  - $libs.commons.lang3\n",
     );
     gradle.write("src/main.kt", "fun main() {}\n");
-    let loaded =
-        load_using(&command(&gradle.0), &coordinate_runner("/repo/commons.jar")).expect("load");
     assert_eq!(
-        loaded.modules[0].classpath,
-        vec![PathBuf::from("/repo/commons.jar")]
+        load(&command(&gradle.0)).unwrap_err(),
+        file_error(
+            &gradle,
+            "module.yaml",
+            "dependency 'org.apache.commons:commons-lang3:3.14.0' is an external library. krusty-toolchain build compiles modules named in module.yaml. A Gradle, Maven, or Bazel plugin resolves external libraries."
+        )
     );
-    let pom = std::fs::read_to_string(
-        gradle
-            .0
-            .join("build/krusty/maven/org.apache.commons_commons-lang3_3.14.0/pom.xml"),
-    )
-    .expect("generated pom");
-    assert!(pom.contains("<groupId>org.apache.commons</groupId>"));
-    assert!(pom.contains("<artifactId>commons-lang3</artifactId>"));
-    assert!(pom.contains("<version>3.14.0</version>"));
-}
-
-fn coordinate_runner(
-    jar: &'static str,
-) -> FnRunner<impl Fn(&ToolCommand) -> Result<ToolOutput, String>> {
-    FnRunner(move |invocation: &ToolCommand| {
-        assert!(
-            invocation
-                .args
-                .iter()
-                .any(|arg| arg == "dependency:build-classpath"),
-            "maven coordinates are resolved by Maven, not by reading a POM: {:?}",
-            invocation.args
-        );
-        let output = invocation
-            .args
-            .iter()
-            .find_map(|arg| arg.strip_prefix("-Dmdep.outputFile="))
-            .expect("classpath file");
-        std::fs::write(output, format!("{jar}\n")).expect("classpath");
-        Ok(ToolOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        })
-    })
 }
 
 #[test]
@@ -867,7 +820,7 @@ fn discovery_stops_after_sixteen_ancestors_and_names_gradle_and_jps() {
     assert_eq!(
         load(&command(&found)).unwrap_err(),
         format!(
-            "no Kotlin Toolchain, Gradle, or Maven project found at {} or its parents (looked for module.yaml, project.yaml, a Gradle build, or pom.xml)",
+            "no Kotlin Toolchain project found at {} or its parents (looked for module.yaml or project.yaml)",
             found.display()
         )
     );
@@ -882,24 +835,13 @@ fn discovery_stops_after_sixteen_ancestors_and_names_gradle_and_jps() {
     ] {
         let gradle = Temp::new("gradle-marker");
         gradle.write(marker, "");
-        let program = if marker == "gradlew" || marker == "gradlew.bat" {
-            gradle.0.join(marker).display().to_string()
-        } else {
-            "gradle".to_string()
-        };
         assert_eq!(
-            load_using(
-                &command(&gradle.0),
-                &FnRunner(|_invocation: &ToolCommand| {
-                    Ok(ToolOutput {
-                        status: 1,
-                        stdout: String::new(),
-                        stderr: "probe\n".to_string(),
-                    })
-                })
-            )
-            .unwrap_err(),
-            format!("{program} exited with status 1: probe"),
+            load(&command(&gradle.0)).unwrap_err(),
+            format!(
+                "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                 {} is a Gradle project. Compile it with the Gradle plugin, or describe the modules in module.yaml. This command does not read Gradle projects.",
+                gradle.0.display()
+            ),
             "marker {marker}"
         );
     }
@@ -908,20 +850,68 @@ fn discovery_stops_after_sixteen_ancestors_and_names_gradle_and_jps() {
     both.write("gradlew", "");
     both.write(".idea/modules.xml", "<project/>");
     assert_eq!(
-        load_using(
-            &command(&both.0),
-            &FnRunner(|_invocation: &ToolCommand| {
-                Ok(ToolOutput {
-                    status: 1,
-                    stdout: String::new(),
-                    stderr: "probe\n".to_string(),
-                })
-            })
-        )
-        .unwrap_err(),
+        load(&command(&both.0)).unwrap_err(),
         format!(
-            "{} exited with status 1: probe",
-            both.0.join("gradlew").display()
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+             {} is a Gradle project. Compile it with the Gradle plugin, or describe the modules in module.yaml. This command does not read Gradle projects.",
+            both.0.display()
+        )
+    );
+
+    for marker in ["pom.xml", "mvnw", "mvnw.cmd"] {
+        let maven = Temp::new("maven-marker");
+        maven.write(marker, "this is not a pom\n");
+        assert_eq!(
+            load(&command(&maven.0)).unwrap_err(),
+            format!(
+                "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                 {} is a Maven project. Compile it with the Maven plugin, or describe the modules in module.yaml. This command does not read Maven projects.",
+                maven.0.display()
+            ),
+            "marker {marker}"
+        );
+    }
+
+    for marker in [
+        "MODULE.bazel",
+        "WORKSPACE",
+        "WORKSPACE.bazel",
+        "BUILD.bazel",
+    ] {
+        let bazel = Temp::new("bazel-marker");
+        bazel.write(marker, "");
+        assert_eq!(
+            load(&command(&bazel.0)).unwrap_err(),
+            format!(
+                "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                 {} is a Bazel project. Compile it with the Bazel plugin, or describe the modules in module.yaml. This command does not read Bazel projects.",
+                bazel.0.display()
+            ),
+            "marker {marker}"
+        );
+    }
+
+    let gradle_and_maven = Temp::new("gradle-and-maven");
+    gradle_and_maven.write("build.gradle.kts", "??? not groovy\n");
+    gradle_and_maven.write("pom.xml", "this is not a pom\n");
+    assert_eq!(
+        load(&command(&gradle_and_maven.0)).unwrap_err(),
+        format!(
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+             {} is a Gradle project. Compile it with the Gradle plugin, or describe the modules in module.yaml. This command does not read Gradle projects.",
+            gradle_and_maven.0.display()
+        )
+    );
+
+    let maven_and_bazel = Temp::new("maven-and-bazel");
+    maven_and_bazel.write("pom.xml", "this is not a pom\n");
+    maven_and_bazel.write("MODULE.bazel", "");
+    assert_eq!(
+        load(&command(&maven_and_bazel.0)).unwrap_err(),
+        format!(
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+             {} is a Maven project. Compile it with the Maven plugin, or describe the modules in module.yaml. This command does not read Maven projects.",
+            maven_and_bazel.0.display()
         )
     );
 
@@ -933,7 +923,7 @@ fn discovery_stops_after_sixteen_ancestors_and_names_gradle_and_jps() {
         load(&command(&child)).unwrap_err(),
         format!(
             "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-             {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
+             {} is a JetBrains .iml project. .iml dependencies are read by the language server, not by this command. Describe the modules in module.yaml to compile them.",
             idea.0.display()
         )
     );

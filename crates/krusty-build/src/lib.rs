@@ -22,16 +22,17 @@
 //!   not `Send`.
 //! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
 //!   process per module.
-//! * [`kotlin_toolchain`] — project loading for `krusty-toolchain build`. The executable lives in
-//!   `krusty-toolchain`; this crate does not. Toolchain files are read directly. Gradle and Maven
-//!   are run so they can read their own descriptors.
+//! * [`kotlin_toolchain`] — `module.yaml` / `project.yaml` loading for `krusty-toolchain build`. The
+//!   executable lives in `krusty-toolchain`; this crate does not.
 //!
 //! # What is NOT here
 //!
-//! BSP and JetBrains `.iml` projects are not compiled by this crate. The language server still owns
-//! those project models. `krusty-toolchain build` recognizes an `.iml` tree and stops. Parallelism
-//! needs a process pool with crash isolation and interleaved diagnostics, and the sequential driver
-//! is its oracle: the same graph must produce the same artifacts either way.
+//! Gradle, Maven, Bazel, and `.iml` projects are not compiled by this crate. The language server
+//! reads Gradle, Maven, and `.iml` dependencies. A Gradle, Maven, or Bazel build drives compilation
+//! through its plugin. `krusty-toolchain build` recognizes those trees and stops, rather than reading
+//! them as a toolchain project. Parallelism needs a process pool with crash isolation and interleaved
+//! diagnostics, and the sequential driver is its oracle: the same graph must produce the same
+//! artifacts either way.
 //!
 //! # The property this all rests on
 //!

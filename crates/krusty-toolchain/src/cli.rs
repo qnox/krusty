@@ -14,20 +14,19 @@ krusty stand-in for the Kotlin Toolchain CLI (`kotlin build`). The compiler is t
 `krusty` executable (`KRUSTY_COMPILER`, the same directory as this program, or `PATH`).
 
 Commands:
-  build                   compile a JVM project
+  build                   compile a JVM project (module.yaml or project.yaml)
 
-A module.yaml or project.yaml project is read directly. Gradle and Maven projects are compiled
-by running that tool; their build scripts and POMs are not parsed. A JetBrains .iml project is
-recognized and left to its project-model extension.
+Gradle, Maven, and Bazel projects compile through their own plugins. Gradle, Maven, and .iml
+dependency models are read by krusty-lsp, not by this command.
 ";
 
 pub const BUILD_HELP: &str = "\
 usage: krusty-toolchain build [options]
 
-Compile a JVM project in the working directory. A module.yaml or project.yaml project is read
-directly. A Gradle or Maven project is compiled by running that tool; its descriptors are not
-parsed. A JetBrains .iml project is recognized and left to its project-model extension.
-Same options as the toolchain `kotlin build` command.
+Compile a Kotlin Toolchain JVM project in the working directory (module.yaml or project.yaml).
+Same options as the toolchain `kotlin build` command. Gradle, Maven, and Bazel projects compile
+through their own plugins. Gradle, Maven, and .iml dependency models are read by krusty-lsp,
+not by this command.
 
 Options:
   -m, --module <module>   build this module (repeatable). Dependencies are included.

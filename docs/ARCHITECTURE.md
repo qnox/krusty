@@ -68,9 +68,9 @@ beside `kotlinc`. `krusty-toolchain build` reads `module.yaml` and `project.yaml
 modules with the driver above, spawning `krusty` (`KRUSTY_COMPILER`, a sibling of the
 `krusty-toolchain` executable, or `PATH`). It accepts the same `build` options as the toolchain
 command. It does not extend the toolchain's plugin API, and it does not shell out to an upstream
-toolchain distribution. A Gradle project is compiled by running Gradle, and a Maven project or a
-Maven coordinate by running Maven; those tools read their own descriptors. A JetBrains `.iml`
-project is recognized and refused.
+toolchain distribution. It does not read Gradle, Maven, Bazel, or `.iml` projects. Those builds
+compile through their plugins. The language server reads Gradle, Maven, and `.iml` dependencies
+for the editor.
 
 The build model is wider than an analysis-only project model. A build unit records resources, Java
 sources, module name, processor inputs, per-module JDK selection, friend paths, and output shape

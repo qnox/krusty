@@ -1,9 +1,9 @@
 //! Which project a `krusty-toolchain build` invocation is standing in.
 //!
-//! A `project.yaml` owns every `module.yaml` beneath it. Gradle and Maven are located by their
-//! markers and then compiled by running those tools; the marker file is not read. A JetBrains
-//! `.iml` model is recognized so it is not mistaken for a toolchain project, and compiling it
-//! stays with that project-model extension.
+//! The Kotlin Toolchain layout (`module.yaml` / `project.yaml`) is the project this command
+//! compiles. Gradle, Maven, Bazel, and a JetBrains `.iml` model are recognized only so they are
+//! not read as that layout. Gradle, Maven, and `.iml` dependencies are read by the language
+//! server. A Gradle, Maven, or Bazel build compiles through its own plugin.
 
 use std::path::{Path, PathBuf};
 
@@ -20,11 +20,19 @@ const GRADLE_MARKERS: &[&str] = &[
 
 const MAVEN_MARKERS: &[&str] = &["pom.xml", "mvnw", "mvnw.cmd"];
 
+const BAZEL_MARKERS: &[&str] = &[
+    "MODULE.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+    "BUILD.bazel",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ProjectKind {
     Toolchain(PathBuf),
     Gradle(PathBuf),
     Maven(PathBuf),
+    Bazel(PathBuf),
     Jps(PathBuf),
 }
 
@@ -45,11 +53,20 @@ pub(super) fn discover(start: &Path) -> Option<ProjectKind> {
             }
             continue;
         }
-        if project.is_none() && module.is_none() && has_marker(directory, GRADLE_MARKERS) {
+        if project.is_some() || module.is_some() {
+            if jps.is_none() && directory.join(".idea").join("modules.xml").is_file() {
+                jps = Some(ProjectKind::Jps(directory.to_path_buf()));
+            }
+            continue;
+        }
+        if has_marker(directory, GRADLE_MARKERS) {
             return Some(ProjectKind::Gradle(directory.to_path_buf()));
         }
-        if project.is_none() && module.is_none() && has_marker(directory, MAVEN_MARKERS) {
+        if has_marker(directory, MAVEN_MARKERS) {
             return Some(ProjectKind::Maven(directory.to_path_buf()));
+        }
+        if has_marker(directory, BAZEL_MARKERS) {
+            return Some(ProjectKind::Bazel(directory.to_path_buf()));
         }
         if jps.is_none() && directory.join(".idea").join("modules.xml").is_file() {
             jps = Some(ProjectKind::Jps(directory.to_path_buf()));
@@ -61,10 +78,24 @@ pub(super) fn discover(start: &Path) -> Option<ProjectKind> {
         .or(jps)
 }
 
-pub(super) fn jps_message(root: &Path) -> String {
+pub(super) fn extension_message(kind: &ProjectKind) -> Option<String> {
+    match kind {
+        ProjectKind::Toolchain(_) => None,
+        ProjectKind::Gradle(root) => Some(plugin_message(root, "Gradle", "Gradle plugin")),
+        ProjectKind::Maven(root) => Some(plugin_message(root, "Maven", "Maven plugin")),
+        ProjectKind::Bazel(root) => Some(plugin_message(root, "Bazel", "Bazel plugin")),
+        ProjectKind::Jps(root) => Some(format!(
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+             {} is a JetBrains .iml project. .iml dependencies are read by the language server, not by this command. Describe the modules in module.yaml to compile them.",
+            root.display()
+        )),
+    }
+}
+
+fn plugin_message(root: &Path, kind: &str, plugin: &str) -> String {
     format!(
         "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
-         {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
+         {} is a {kind} project. Compile it with the {plugin}, or describe the modules in module.yaml. This command does not read {kind} projects.",
         root.display()
     )
 }
