@@ -73,3 +73,34 @@ fn a_map_checks_the_value_type_of_contains_value() {
 fn collection_bridges_reject_foreign_values() {
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
+
+/// A value class that delegates a mutable collection forwards bulk updates (`addAll`, `putAll`)
+/// to the underlying collection, and an override of `addAll` is the method a caller hits.
+const BULK: &str = "@JvmInline value class IC1<T>(val list: MutableList<T>) : MutableList<T> by list\n\
+    @JvmInline value class IC2<T>(val x: Int) : MutableCollection<T> {\n\
+    \x20   override val size: Int get() = TODO()\n\
+    \x20   override fun clear() = TODO()\n\
+    \x20   override fun addAll(elements: Collection<T>) = true\n\
+    \x20   override fun add(element: T) = TODO()\n\
+    \x20   override fun isEmpty() = TODO()\n\
+    \x20   override fun iterator() = TODO()\n\
+    \x20   override fun retainAll(elements: Collection<T>) = TODO()\n\
+    \x20   override fun removeAll(elements: Collection<T>) = TODO()\n\
+    \x20   override fun remove(element: T) = TODO()\n\
+    \x20   override fun containsAll(elements: Collection<T>) = TODO()\n\
+    \x20   override fun contains(element: T) = TODO()\n\
+    }\n\
+    @JvmInline value class IC3<T>(val map: MutableMap<T, T>) : MutableMap<T, T> by map\n\
+    fun box(): String {\n\
+    \x20   val inlineList = IC1(mutableListOf(\"a1\")).also { it.addAll(0, listOf(\"a2\", \"a3\")) }\n\
+    \x20   if (inlineList.list != listOf(\"a2\", \"a3\", \"a1\")) return \"Fail 1\"\n\
+    \x20   if (!IC2<String>(1).addAll(setOf(\"b\"))) return \"Fail 2\"\n\
+    \x20   val inlineMap = IC3(mutableMapOf(\"a\" to \"b\")).also { it.putAll(mapOf(\"b\" to \"c\", \"c\" to \"d\")) }\n\
+    \x20   if (inlineMap.map != mapOf(\"a\" to \"b\", \"b\" to \"c\", \"c\" to \"d\")) return \"Fail 3\"\n\
+    \x20   return \"OK\"\n\
+    }\n";
+
+#[test]
+fn a_delegated_value_class_collection_forwards_bulk_updates() {
+    assert_eq!(common::expect_box_run_with_stdlib(BULK, "Bulk"), "OK");
+}

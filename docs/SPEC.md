@@ -8173,8 +8173,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lastIndexOf` when the override narrows the parameter: a foreign argument answers `false`, `null`
   or `-1` instead of failing the `checkcast`. Whether a bridge narrows is decided on declared types,
   before value-class lowering; for a value class the check is `instanceof` its box, which the bridge
-  then unboxes for the mangled override. Tests: `tests/collection_bridge_barrier_e2e.rs`. Corpus:
-  `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic` forms).
+  then unboxes for the mangled override. A value class that delegates `MutableList` or
+  `MutableMap` still forwards `addAll` and `putAll` to the underlying collection, and an override
+  of `addAll` is the method the caller hits. Tests: `tests/collection_bridge_barrier_e2e.rs`.
+  Corpus: `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic`
+  forms, and `inlineMutableCollectionBulkAdd`).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

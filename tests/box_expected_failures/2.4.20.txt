@@ -115,7 +115,6 @@ inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/hiddenConstructor/innerClassConstructor.kt
 inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
-inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
