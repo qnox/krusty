@@ -415,28 +415,44 @@ pub fn type_descriptor(ty: Ty) -> &'static str {
 /// `Lname;` for an interned classfile internal name. The first use formats it; later uses return
 /// that same spelling.
 fn reference_descriptor(classfile_name: &'static str) -> &'static str {
-    remembered_descriptor::<b'L'>(classfile_name, |name| format!("L{name};"))
+    remembered_descriptor(DescriptorSpell::Reference, classfile_name, |name| {
+        format!("L{name};")
+    })
 }
 
 /// `[element` for an interned element descriptor, including another array descriptor.
 fn array_descriptor(element: &'static str) -> &'static str {
-    remembered_descriptor::<b'['>(element, |element| format!("[{element}"))
+    remembered_descriptor(DescriptorSpell::Array, element, |element| {
+        format!("[{element}")
+    })
 }
 
-fn remembered_descriptor<const KIND: u8>(
+/// Which remembered spelling a key builds. A default-package class can be named with one letter
+/// (`interface S`), and that same letter is the element descriptor of the corresponding primitive
+/// array (`ShortArray` is `[S`). The two spellings share the key text and must not share an entry:
+/// a `thread_local` inside a const-generic function is one cache for every instantiation, so a
+/// kind parameter there would return `LS;` for `short[]` or `[S` for the class.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DescriptorSpell {
+    Reference,
+    Array,
+}
+
+fn remembered_descriptor(
+    spell: DescriptorSpell,
     key: &'static str,
     format_spelling: impl FnOnce(&str) -> String,
 ) -> &'static str {
-    debug_assert!(KIND == b'L' || KIND == b'[');
     thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<&'static str, &'static str>> =
-            std::cell::RefCell::default();
+        static CACHE: std::cell::RefCell<
+            std::collections::HashMap<(DescriptorSpell, &'static str), &'static str>,
+        > = std::cell::RefCell::default();
     }
-    if let Some(found) = CACHE.with(|cache| cache.borrow().get(key).copied()) {
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&(spell, key)).copied()) {
         return found;
     }
     let interned = crate::types::intern_text(&format_spelling(key));
-    CACHE.with(|cache| cache.borrow_mut().insert(key, interned));
+    CACHE.with(|cache| cache.borrow_mut().insert((spell, key), interned));
     interned
 }
 
@@ -918,6 +934,76 @@ mod tests {
             type_descriptor(Ty::obj("kotlin/IntArray")),
             type_descriptor(Ty::obj("kotlin/UIntArray"))
         ));
+    }
+
+    #[test]
+    fn a_one_letter_class_does_not_steal_a_primitive_array_descriptor() {
+        // Remembering either spelling first must leave the other intact. `interface S` is a real
+        // default-package classifier whose internal name is the element tag of `ShortArray`.
+        let array_first = [
+            ("B", Ty::Byte, "kotlin/ByteArray", "[B"),
+            ("C", Ty::Char, "kotlin/CharArray", "[C"),
+            ("D", Ty::Double, "kotlin/DoubleArray", "[D"),
+            ("F", Ty::Float, "kotlin/FloatArray", "[F"),
+        ];
+        let class_first = [
+            ("I", Ty::Int, "kotlin/IntArray", "[I"),
+            ("J", Ty::Long, "kotlin/LongArray", "[J"),
+            ("S", Ty::Short, "kotlin/ShortArray", "[S"),
+            ("Z", Ty::Boolean, "kotlin/BooleanArray", "[Z"),
+        ];
+        for (class_name, element, array_class, array_desc) in array_first {
+            assert_spelling_pair(class_name, element, array_class, array_desc, true);
+        }
+        for (class_name, element, array_class, array_desc) in class_first {
+            assert_spelling_pair(class_name, element, array_class, array_desc, false);
+        }
+    }
+
+    fn assert_spelling_pair(
+        class_name: &str,
+        element: Ty,
+        array_class: &str,
+        array_desc: &str,
+        array_first: bool,
+    ) {
+        let class_ty = Ty::obj(class_name);
+        let class_desc = format!("L{class_name};");
+        let array_of_class = format!("[L{class_name};");
+        let check = || {
+            assert_eq!(type_descriptor(class_ty), class_desc, "{class_name}");
+            assert_eq!(
+                type_descriptor(Ty::obj(array_class)),
+                array_desc,
+                "{array_class}"
+            );
+            assert_eq!(
+                type_descriptor(Ty::array(element)),
+                array_desc,
+                "{element:?}"
+            );
+            assert_eq!(
+                type_descriptor(Ty::obj_args("kotlin/Array", &[class_ty])),
+                array_of_class,
+                "Array<{class_name}>"
+            );
+            assert!(std::ptr::eq(
+                type_descriptor(class_ty),
+                type_descriptor(class_ty)
+            ));
+            assert!(std::ptr::eq(
+                type_descriptor(Ty::obj(array_class)),
+                type_descriptor(Ty::array(element))
+            ));
+        };
+        if array_first {
+            assert_eq!(type_descriptor(Ty::obj(array_class)), array_desc);
+            assert_eq!(type_descriptor(class_ty), class_desc);
+        } else {
+            assert_eq!(type_descriptor(class_ty), class_desc);
+            assert_eq!(type_descriptor(Ty::obj(array_class)), array_desc);
+        }
+        check();
     }
 
     #[test]
