@@ -3,7 +3,9 @@
 use super::{Classpath, Entry, EntryCache, EntryKey};
 use crate::jvm::classreader::{parse_class, ClassBodies, MethodCode};
 use crate::types::TypeName;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{OnceLock, RwLock};
 
 /// Process-global cache of lazily-read method bodies, one [`EntryCache`] slot per classpath entry.
 /// A body is keyed by the owning entry, so classpath-order shadowing stays per lookup while bodies
@@ -11,7 +13,41 @@ use std::collections::HashMap;
 ///
 /// Only facts derived from one entry's bytes belong here. Composition-dependent records embed
 /// shadowable classpath facts and must remain scoped to the complete [`super::Classpath`].
-type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
+///
+/// The name and descriptor are interned spellings, so a cache hit does not allocate a key.
+pub(super) type MethodBodyKey = (TypeName, &'static str, &'static str);
+
+pub(super) fn method_body_key(owner: TypeName, name: &str, descriptor: &str) -> MethodBodyKey {
+    (
+        owner,
+        intern_method_text(name),
+        intern_method_text(descriptor),
+    )
+}
+
+/// Intern a repeated JVM method-name or descriptor cache key. These physical spellings remain
+/// owned by the classpath cache rather than entering the common semantic type interners.
+fn intern_method_text(value: &str) -> &'static str {
+    const SHARD_COUNT: usize = 64;
+    type Shard = RwLock<HashSet<&'static str, crate::name_tree::FxBuildHasher>>;
+    static TEXT: OnceLock<[Shard; SHARD_COUNT]> = OnceLock::new();
+    let shards = TEXT.get_or_init(|| std::array::from_fn(|_| RwLock::new(HashSet::default())));
+    let mut hash = crate::name_tree::FxHasher::default();
+    value.hash(&mut hash);
+    let shard = &shards[hash.finish() as usize % SHARD_COUNT];
+    if let Some(&existing) = shard.read().unwrap().get(value) {
+        return existing;
+    }
+    let mut values = shard.write().unwrap();
+    if let Some(&existing) = values.get(value) {
+        return existing;
+    }
+    let stored = Box::leak(value.to_owned().into_boxed_str());
+    values.insert(stored);
+    stored
+}
+
+type BodyMap = HashMap<MethodBodyKey, Option<MethodCode>>;
 pub(super) type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
 
 pub(super) fn global_entry_body_cache(key: &EntryKey) -> BodyCache {

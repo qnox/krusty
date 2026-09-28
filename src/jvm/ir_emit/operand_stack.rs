@@ -72,7 +72,7 @@ impl Emitter<'_> {
             && (self.inlined_lambda_branches(args)
                 || self
                     .bodies
-                    .body(&owner.render(), name, descriptor)
+                    .body_name(*owner, name, descriptor)
                     .and_then(|b| crate::jvm::inline::disassemble(&b.code))
                     .is_some_and(|ins| {
                         ins.iter()

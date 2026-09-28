@@ -65,6 +65,14 @@ pub trait MethodBodies {
     /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
 
+    /// [`Self::body`] for a classifier that is already interned.
+    ///
+    /// The default has no classpath, so it answers `None` without rendering the owner. An
+    /// implementation that can read a body overrides this method directly.
+    fn body_name(&self, _owner: TypeName, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+        None
+    }
+
     /// The class file of `internal`, for a class an inlined body's objects are copied from.
     fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
         None
@@ -162,6 +170,7 @@ mod tests {
 
     impl MethodBodies for StringProbe {
         fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            self.called.set(true);
             None
         }
 
@@ -177,6 +186,17 @@ mod tests {
             called: Cell::new(false),
         };
         assert!(!probe.owner_is_interface_name(type_name("sample/Interface")));
+        assert!(!probe.called.get());
+    }
+
+    #[test]
+    fn default_body_probe_ignores_the_string_method() {
+        let probe = StringProbe {
+            called: Cell::new(false),
+        };
+        assert!(probe
+            .body_name(type_name("shared/Pool"), "answer", "()I")
+            .is_none());
         assert!(!probe.called.get());
     }
 }
