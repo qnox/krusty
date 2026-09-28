@@ -8274,6 +8274,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   complete (`try { fail() } catch (e: Throwable) { Outcome(Failure(e)) }`) leaves the handler's
   carrier as the `try`'s value, so coercing the `try` to `Outcome` casts and unboxes nothing.
   Tests: `tests/value_class_try_value_e2e.rs`.
+- **A caller passes the box to a `Result` parameter of a generic override.** `kotlin.Result` does
+  not mangle its function's name, so `override fun take(x: Result<Any?>)` of `Sink<T>.take(x: T)`
+  keeps `take(Object)` and receives the box, as kotlinc does. Its callers box the carrier with
+  `box-impl` and pass the box as it is, although the `Object` slot is also `Result`'s carrier: the
+  call records the override's declared parameters with that position marked as the box, and a
+  nullable destination over a null-accepting underlying is the box. The override checks no null,
+  as for any `Result` parameter. Tests: `tests/result_generic_override_argument_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
