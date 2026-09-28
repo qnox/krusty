@@ -11076,7 +11076,7 @@ impl<'a> Emitter<'a> {
                         (
                             iface.to_owned(),
                             "invoke".to_string(),
-                            jvm_function_invoke_descriptor(*arity),
+                            jvm_function_invoke_descriptor(*arity).to_owned(),
                             inst_desc,
                         )
                     }
@@ -12270,15 +12270,6 @@ Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
 /// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
 /// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
-fn sam_descriptor(arity: u8) -> String {
-    let mut s = String::from("(");
-    for _ in 0..arity {
-        s.push_str("Ljava/lang/Object;");
-    }
-    s.push_str(")Ljava/lang/Object;");
-    s
-}
-
 fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
 }
@@ -12287,12 +12278,8 @@ fn jvm_function_interface(arity: u8) -> &'static str {
     crate::jvm::names::function_interface_internal_name(usize::from(arity))
 }
 
-fn jvm_function_invoke_descriptor(arity: u8) -> String {
-    if is_high_arity_function(arity) {
-        "([Ljava/lang/Object;)Ljava/lang/Object;".to_string()
-    } else {
-        sam_descriptor(arity)
-    }
+fn jvm_function_invoke_descriptor(arity: u8) -> &'static str {
+    crate::jvm::names::function_invoke_descriptor(usize::from(arity))
 }
 
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
