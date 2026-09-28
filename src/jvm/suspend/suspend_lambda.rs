@@ -149,6 +149,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
         ir.expr_source_lines.insert(unit, close);
     }
     become_invoke_suspend(ir, fid, internal);
+    enclose_in_invoke_suspend(ir, fid);
     ir.classes[class as usize].methods.push(fid);
 
     // The lambda value is a fresh instance with no completion. Its type is the class's: a
@@ -597,6 +598,22 @@ fn read_parameters(
 }
 
 /// Make the lifted lambda function the class's `invokeSuspend(Object $result): Object`.
+/// The lambda is a scope of its own: what its body declares is enclosed by the `invokeSuspend` it
+/// became, kotlinc's `EnclosingMethod` for a class declared in a suspend lambda.
+fn enclose_in_invoke_suspend(ir: &mut IrFile, fid: u32) {
+    let lambda = crate::ir::IrEnclosure::Lambda(fid);
+    let invoke_suspend = crate::ir::IrEnclosure::Function(fid);
+    let enclosures = ir
+        .classes
+        .iter_mut()
+        .filter_map(|class| class.enclosure.as_mut())
+        .chain(ir.callable_reference_enclosures.values_mut());
+    for enclosure in enclosures.filter(|enclosure| **enclosure == lambda) {
+        *enclosure = invoke_suspend;
+    }
+    ir.lambda_enclosures.remove(&fid);
+}
+
 fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     let object = Ty::nullable(Ty::obj("kotlin/Any"));
     ir.fn_params.insert(

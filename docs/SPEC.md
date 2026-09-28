@@ -6506,7 +6506,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   descriptor; one in a top-level property initializer names the file facade with no method; one in
   an instance property initializer or `init` block names the primary constructor `<init>`; one in
   an object's property names the object, and one in a companion's property the class that stores
-  it, both with no method. A callable-reference class carries the same attribute from the scope
+  it, both with no method. A suspend lambda that becomes a `SuspendLambda` class is a scope of its
+  own: a class declared in its body, a nested suspend lambda's class included, names that class's
+  `invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;` (`IrEnclosure::Lambda`, turned into the
+  `invokeSuspend` function when the class is declared; a lambda not realized as a class keeps the
+  scope around it). A callable-reference class carries the same attribute from the scope
   its reference was written in (`IrFile::callable_reference_enclosures`), and lists only itself in
   `InnerClasses` as a `static final synthetic` class with no outer class
   (`tests/class_enclosure_e2e.rs`). The class-level attributes go out in kotlinc's order:
