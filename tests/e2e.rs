@@ -115,6 +115,8 @@ mod break_continue_expr_e2e;
 mod break_continue_in_branch_e2e;
 #[path = "bridge_debug_tables_e2e.rs"]
 mod bridge_debug_tables_e2e;
+#[path = "bridge_parameter_names_e2e.rs"]
+mod bridge_parameter_names_e2e;
 #[path = "bridge_return_unbox_e2e.rs"]
 mod bridge_return_unbox_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
