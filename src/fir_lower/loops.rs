@@ -41,11 +41,12 @@ impl BodyLowering<'_> {
     ) -> (u32, ExprId) {
         let source = crate::fir::LocalValueId::from_raw(variable);
         let variable = self.value_slot(source);
+        // A destructuring loop's container is compiler-generated, not a named source variable.
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: variable,
             ty,
             init: Some(initializer),
-            named: true,
+            named: !self.body.is_destructuring_loop_container(source),
         });
         if let Some(name) = self.body.debug_value_name(source) {
             self.ir.value_names.insert(declaration, name.to_owned());
