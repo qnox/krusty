@@ -10151,18 +10151,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_node(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
-            IrExpr::Block { stmts, value } => {
-                self.link_safe_call_chain(e, code);
-                // Scope block-locals: restore the slot *map* after the block so a local declared
-                // here doesn't leak into a later merge-point frame (its slot must read as `Top` once
-                // out of scope — else a sibling branch that never initialized it fails verification).
-                let saved = self.open_slot_scope();
-                let terminal_target = self.terminal_statement_target.take();
-                self.emit_open_block(stmts, value, terminal_target, code);
-                self.close_scope_locals(code);
-                self.block_depth -= 1;
-                self.restore_slot_scope(saved);
-            }
+            IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
                 index, ty, init, ..

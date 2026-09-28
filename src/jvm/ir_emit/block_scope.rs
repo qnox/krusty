@@ -6,6 +6,29 @@ use super::frame_map::{FrameKey, Mark};
 use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
 
 impl Emitter<'_> {
+    /// Emit a block in statement position within its own lexical slot scope. Restoring the slot
+    /// *map* afterwards keeps a local declared here out of a later merge-point frame: its slot must
+    /// read as `Top` once out of scope, or a sibling branch that never initialized it fails
+    /// verification. A callable's own scope leaves its debug ranges open to the callable's end, so
+    /// its locals cover the return.
+    pub(super) fn emit_statement_block(
+        &mut self,
+        block: u32,
+        stmts: Vec<u32>,
+        value: Option<u32>,
+        code: &mut CodeBuilder,
+    ) {
+        self.link_safe_call_chain(block, code);
+        let saved = self.open_slot_scope();
+        let terminal_target = self.terminal_statement_target.take();
+        self.emit_open_block(stmts, value, terminal_target, code);
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_scope_locals(code);
+        }
+        self.block_depth -= 1;
+        self.restore_slot_scope(saved);
+    }
+
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
     /// it immediately; a post-test loop closes it only after emitting the bottom condition, whose
     /// Kotlin scope includes declarations from the body.

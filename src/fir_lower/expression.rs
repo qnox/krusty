@@ -1273,10 +1273,14 @@ impl BodyLowering<'_> {
                         Ok(lowered)
                     })
                     .transpose()?;
-                self.ir.add_expr(IrExpr::Block {
+                let block = self.ir.add_expr(IrExpr::Block {
                     stmts: lowered_statements,
                     value,
-                })
+                });
+                if self.root_block == Some(expression_id) {
+                    self.lowered_root_block = Some(block);
+                }
+                block
             }
             FirExprKind::CapturedValueRead {
                 enclosing_depth,

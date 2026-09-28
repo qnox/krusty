@@ -1418,6 +1418,7 @@ impl<'a> CommonIrBodySink<'a> {
             );
         }
         let roots = lowered.roots.into_vec();
+        self.ir.callable_scopes.extend(lowered.root_block);
         // The rewrite below covers a tail self-call whose whole frame is the parameter list it
         // reassigns, which is more shapes than "a top-level `fun` called by name".
         //
