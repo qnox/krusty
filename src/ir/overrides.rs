@@ -57,3 +57,21 @@ pub struct IrFunctionOverride {
     pub has_kotlin_superclass_override: bool,
     pub depth: u32,
 }
+
+impl IrFunctionOverride {
+    /// Whether the overridden declaration's own result is not a Kotlin primitive: a type parameter,
+    /// a nullable or reference type, or an unsigned type. kotlinc's JVM backend boxes the result of
+    /// a primitive override of such a declaration.
+    pub fn overrides_non_primitive_result(&self) -> bool {
+        !is_kotlin_primitive(self.declared_result)
+    }
+}
+
+/// Kotlin's primitive types: a non-null built-in scalar, never an unsigned type, a nullable one or
+/// a type parameter.
+pub fn is_kotlin_primitive(ty: Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char
+    )
+}

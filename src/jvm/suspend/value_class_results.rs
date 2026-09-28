@@ -59,6 +59,7 @@ pub(super) fn resumed_carrier(
             descriptor,
             params: None,
             interface: false,
+            module_target: None,
         },
         dispatch_receiver: Some(boxed),
         args: Vec::new(),

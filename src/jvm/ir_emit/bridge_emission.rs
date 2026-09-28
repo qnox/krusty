@@ -159,7 +159,7 @@ pub(super) fn emit_bridges(
     cw: &mut ClassWriter,
     env: &EmitEnv<'_>,
 ) {
-    let class = ClassBridges::of(ir, c, env);
+    let class = ClassBridges::new(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -175,16 +175,18 @@ struct ClassBridges<'a> {
     class: &'a crate::ir::IrClass,
     adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
+    override_results: &'a crate::jvm::override_results::OverrideResults,
     run: &'a EmitRun,
 }
 
 impl<'a> ClassBridges<'a> {
-    fn of(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &'a EmitEnv<'_>) -> Self {
+    fn new(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &EmitEnv<'a>) -> Self {
         Self {
             ir,
             class,
             adaptations: env.bridge_adaptations,
             argument_arrays: env.function_argument_arrays,
+            override_results: env.override_results,
             run: env.run,
         }
     }
@@ -203,6 +205,7 @@ fn emit_bridge(
         class: c,
         adaptations,
         argument_arrays,
+        override_results,
         run,
     } = *class;
     let packs_arguments = argument_arrays.packs(c.fq_name_id(), b);
@@ -231,7 +234,7 @@ fn emit_bridge(
     // The target is a declaration, so its result is spelled as declared (`Nothing?` is `Void`).
     let tr = static_target.map_or_else(
         || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
-        |(_, function)| jvm_declared_ty(&function.ret),
+        |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
     );
     let erased_desc = method_descriptor(&ep, er);
     // A bridge whose (name, descriptor) already names a REAL method on this class would be a
@@ -660,7 +663,7 @@ pub(super) fn emit_value_class_interface_entries(
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         let header = EntryHeader::of(ir, formatter, member, &descriptor);
-        let class = ClassBridges::of(ir, c, env);
+        let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
     }

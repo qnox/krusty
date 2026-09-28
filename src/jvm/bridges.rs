@@ -21,7 +21,7 @@ use crate::types::{stored_value_ty, Ty};
 pub(super) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
-    boxed_results: &crate::jvm::override_results::BoxedResults,
+    override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
@@ -38,7 +38,7 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             classpath,
-            boxed_results,
+            override_results,
             argument_arrays,
             &mut order,
         )?;
@@ -157,7 +157,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
-    boxed_results: &crate::jvm::override_results::BoxedResults,
+    override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
@@ -181,7 +181,10 @@ fn superclass_method_bridges(
         // An overridden declaration whose primitive result is realized as its wrapper is reached
         // through that wrapper.
         if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {
-            if boxed_results.boxes(ir, callable) {
+            if override_results
+                .boxed_callable_result(ir, callable)
+                .is_some()
+            {
                 declared_result = Ty::nullable(declared_result);
             }
         }
@@ -194,9 +197,19 @@ fn superclass_method_bridges(
         let mut concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());
-        let mut concrete_ret = own_fid
-            .map(|function| ir.functions[function as usize].ret)
-            .unwrap_or(edge.implementation_result);
+        // The implementation's JVM result: the wrapper where its primitive result is boxed, as it
+        // is for an implementation inherited from another file's declaration.
+        let mut concrete_ret = match (own_fid, edge.implementation) {
+            (Some(function), _) => override_results.physical_result(ir, function),
+            (None, crate::fir::ResolvedFunctionOverrideTarget::Module(callable))
+                if override_results
+                    .boxed_callable_result(ir, callable)
+                    .is_some() =>
+            {
+                Ty::nullable(edge.implementation_result)
+            }
+            (None, _) => edge.implementation_result,
+        };
         // A bridge carries the overridden declaration's signature, so kotlinc names its parameters
         // after that declaration's, not the override's.
         let mut parameter_identities = edge.overridden_parameter_identities.clone();

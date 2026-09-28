@@ -147,7 +147,7 @@ impl Emitter<'_> {
             // statement: kotlinc leaves nothing of its value on the stack.
             self.emit_discarding(value, code);
         } else {
-            self.emit_value_as(value, ret, code);
+            self.emit_returned_value(value, ret, code);
         }
         // `return <diverging>` has already transferred control and must not grow dead bytecode.
         if self.diverges(value) {

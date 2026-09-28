@@ -14,6 +14,7 @@ use super::*;
 pub(super) fn materialize(
     ir: &mut IrFile,
     lowered_value_members: &HashSet<u32>,
+    override_results: &crate::jvm::override_results::OverrideResults,
     entry_name: impl Fn(&IrFile, u32) -> String,
 ) -> HashSet<u32> {
     let mut entries = Vec::new();
@@ -73,7 +74,8 @@ pub(super) fn materialize(
             parameters.len(),
             "a value-class interface entry retains its semantic parameters"
         );
-        let result = target.ret;
+        // The member's JVM result: the wrapper where a primitive override result is boxed.
+        let result = override_results.physical_result(ir, implementation);
         let name = entry_name(ir, implementation);
         let bridges = &mut ir.classes[class].bridges;
         if !bridges.iter().any(|bridge| {

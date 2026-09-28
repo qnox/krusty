@@ -529,6 +529,7 @@ fn publish_inherited_interface_function_plans(
                 };
                 let (declared_parameters, declared_result) =
                     overridden_declaration_signature(source, declared, overridden);
+                let declared_parameter_count = declared_parameters.len();
                 let implementation_parameters =
                     declaration_parameters_with_receiver(implementation_declared);
                 overrides.push(ResolvedFunctionOverride {
@@ -560,7 +561,7 @@ fn publish_inherited_interface_function_plans(
                         index,
                         overridden,
                         declared,
-                        declared_parameters.len(),
+                        declared_parameter_count,
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -1034,6 +1035,7 @@ fn append_function_override_edges(
             }
             let (declared_parameters, declared_result) =
                 overridden_declaration_signature(source, declared, overridden);
+            let declared_parameter_count = declared_parameters.len();
             overrides.push(ResolvedFunctionOverride {
                 implementation: ResolvedFunctionOverrideTarget::Module(implementation.callable),
                 implementation_owner,
@@ -1064,7 +1066,7 @@ fn append_function_override_edges(
                     index,
                     overridden,
                     declared,
-                    declared_parameters.len(),
+                    declared_parameter_count,
                 ),
                 implementation_result: resolved_ty(
                     implementation.result,

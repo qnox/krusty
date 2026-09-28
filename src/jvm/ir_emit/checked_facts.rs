@@ -15,6 +15,8 @@ pub(crate) struct EmitMetadata<'a> {
     pub(crate) bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     pub(crate) function_argument_arrays:
         &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
+    /// The overrides whose primitive result is declared as its wrapper.
+    pub(crate) override_results: &'a crate::jvm::override_results::OverrideResults,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
