@@ -218,7 +218,10 @@ impl BodyFirChecker<'_> {
         }))
     }
 
-    fn explicit_receiver(&mut self, expression: ExprId) -> Result<FirReceiver, BodyCheckFailure> {
+    pub(super) fn explicit_receiver(
+        &mut self,
+        expression: ExprId,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
         let value = self.expression(expression)?;
         // Only a smart cast of the receiver's OWN value. `narrowed_this_member` is not one: it is
         // keyed by a BARE member access and says that the implicit `this` INSIDE that access needs

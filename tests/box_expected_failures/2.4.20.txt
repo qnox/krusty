@@ -108,7 +108,6 @@ enum/enumEntryReferenceFromInnerClassConstructor1.kt
 enum/enumEntryReferenceFromInnerClassConstructor2.kt
 enum/enumEntryReferenceFromInnerClassConstructor3.kt
 evaluate/intrinsicConst/enumNameWithInit.kt
-exceptions/kt69534.kt
 extensionFunctions/executionOrder.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
@@ -160,7 +159,6 @@ inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
-inference/pcla/issues/kt57707.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionFunctions.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionProperties.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt

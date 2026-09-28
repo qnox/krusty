@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::ast::{Expr, ExprId, File, Stmt, StmtId};
 
+use super::scope::PathRoot;
 use super::{local_class_capture_expressions, Checker, CheckerScope};
 
 /// Collect every name reassigned (`=`, compound assignment, or inc/dec) anywhere in an expression,
@@ -63,6 +64,9 @@ impl Checker<'_> {
             collect_all_reassigned(self.file, part, &mut written);
         }
         for name in &written {
+            if let Some(local) = self.lookup(scope, name) {
+                scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
+            }
             scope.narrow_local(name, None);
         }
     }
