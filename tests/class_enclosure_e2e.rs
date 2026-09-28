@@ -115,22 +115,25 @@ impl Drop for Compiled {
 }
 
 fn compile_both() -> Option<Compiled> {
+    compile_both_of(SOURCE, "Enclosure")
+}
+
+fn compile_both_of(source: &str, stem: &str) -> Option<Compiled> {
     let dir = common::scratch_dir()?;
     let reference = dir.join("ref");
     let ours = dir.join("out");
     std::fs::create_dir_all(&reference).ok()?;
     std::fs::create_dir_all(&ours).ok()?;
-    let source_path = dir.join("Enclosure.kt");
-    std::fs::write(&source_path, SOURCE).ok()?;
+    let source_path = dir.join(format!("{stem}.kt"));
+    std::fs::write(&source_path, source).ok()?;
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference.to_string_lossy().into_owned(),
         source_path.to_string_lossy().into_owned(),
     ])?;
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let emitted =
-        common::compile_in_process_metadata_cp(SOURCE, "Enclosure", &[common::stdlib_jar()])
-            .expect("krusty compiles the enclosed classes");
+    let emitted = common::compile_in_process_metadata_cp(source, stem, &[common::stdlib_jar()])
+        .expect("krusty compiles the enclosed classes");
     for (name, bytes) in &emitted {
         std::fs::write(ours.join(format!("{name}.class")), bytes).ok()?;
     }
@@ -228,6 +231,48 @@ fn accessors_and_secondary_constructors_record_the_exact_callable_scope() {
         return;
     };
     for class in CALLABLE_ENCLOSED {
+        assert_eq!(
+            enclosing_callable(&compiled.ours, class),
+            enclosing_callable(&compiled.reference, class),
+            "{class}: callable enclosure differs from kotlinc"
+        );
+    }
+}
+
+/// A suspend lambda is a class of its own, and a scope: what its body declares, a nested suspend
+/// lambda's class included, is enclosed by its `invokeSuspend`. The outermost lambda's class is
+/// enclosed by the function it is written in. An open suspend member's body moves to the static
+/// `$suspendImpl` of the member's class, which encloses what the body declares.
+const SUSPEND_SOURCE: &str = "fun launch(block: suspend () -> Unit): Any = block\n\
+fun box(): String {\n\
+\x20   launch {\n\
+\x20       class Local\n\
+\x20       val probe = object {}\n\
+\x20       launch { class Nested }\n\
+\x20   }\n\
+\x20   return \"OK\"\n\
+}\n\
+open class Client {\n\
+\x20   open suspend fun connect(n: Int): Any {\n\
+\x20       class Query(val n: Int)\n\
+\x20       return Query(n)\n\
+\x20   }\n\
+}\n";
+
+const SUSPEND_ENCLOSED: &[&str] = &[
+    "SuspendEnclosureKt$box$1",
+    "SuspendEnclosureKt$box$1$Local",
+    "SuspendEnclosureKt$box$1$probe$1",
+    "SuspendEnclosureKt$box$1$1",
+    "SuspendEnclosureKt$box$1$1$Nested",
+    "Client$connect$Query",
+];
+
+#[test]
+fn classes_declared_in_a_suspend_body_are_enclosed_by_its_physical_method() {
+    let compiled = compile_both_of(SUSPEND_SOURCE, "SuspendEnclosure")
+        .expect("the reference kotlinc and a scratch directory are available");
+    for class in SUSPEND_ENCLOSED {
         assert_eq!(
             enclosing_callable(&compiled.ours, class),
             enclosing_callable(&compiled.reference, class),

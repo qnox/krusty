@@ -1247,9 +1247,13 @@ pub struct IrCtorArg {
 /// as its own enclosure record (the JVM's `EnclosingMethod`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrEnclosure {
-    /// A function body, or a local function's own function. A lambda is not a scope of its own:
-    /// what it declares belongs to the function the lambda is written in.
+    /// A function body, or a local function's own function.
     Function(FunId),
+    /// A suspend lambda's body. Whether the lambda is a scope of its own is the backend's: one it
+    /// realizes as a class of its own encloses what the body declares, and otherwise the body's
+    /// declarations belong to the scope the lambda is written in (see
+    /// [`IrFile::lambda_enclosures`]).
+    Lambda(FunId),
     /// A source property accessor. The common IR keeps the property identity and accessor role;
     /// each backend resolves that pair through its finalized property realization.
     PropertyAccessor {
@@ -2007,6 +2011,8 @@ pub struct IrFile {
     /// by expression id. A target that realizes one as a class of its own records that class's
     /// enclosure.
     pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
+    /// The scope each [`IrEnclosure::Lambda`] lambda is written in, by the lambda's function.
+    pub(crate) lambda_enclosures: std::collections::HashMap<FunId, IrEnclosure>,
     /// Every lifting site the file's bodies declare (see [`crate::fir::FirLiftingSite`]), by
     /// sequence and source position: the step's source name, and whether it is lifted at all.
     pub(crate) lifting_sequences: std::collections::HashMap<
