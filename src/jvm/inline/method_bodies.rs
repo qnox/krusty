@@ -21,14 +21,14 @@ pub struct StaticMemberRealization {
 pub enum PropertyAccess {
     /// `getfield` / `getstatic <owner>.<name>:<descriptor>`.
     Field {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         is_static: bool,
     },
     /// `invokevirtual` / `invokeinterface` / `invokestatic <owner>.<name><descriptor>`.
     Accessor {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         is_static: bool,
@@ -37,7 +37,7 @@ pub enum PropertyAccess {
     /// `invokestatic <owner>.<name>…` — a synthetic static access bridge. An instance member's
     /// bridge takes the receiver as its first argument; a named object's static field does not.
     AccessBridge {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         takes_receiver: bool,
@@ -81,6 +81,11 @@ pub trait MethodBodies {
         false
     }
 
+    /// [`Self::owner_is_interface`] for a classifier that is already interned.
+    fn owner_is_interface_name(&self, owner: TypeName) -> bool {
+        self.owner_is_interface(&owner.render())
+    }
+
     /// Whether an instruction-level method or field reference is private to its defining class.
     fn member_is_private(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
         false
@@ -116,12 +121,12 @@ pub trait MethodBodies {
     }
 
     /// Decode a selected property read into its exact accessor or field realization.
-    fn property_read_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
+    fn property_read_access(&self, _owner: TypeName, _property: &str) -> Option<PropertyAccess> {
         None
     }
 
     /// Decode a selected mutable-property write into its exact realization.
-    fn property_write_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
+    fn property_write_access(&self, _owner: TypeName, _property: &str) -> Option<PropertyAccess> {
         None
     }
 
