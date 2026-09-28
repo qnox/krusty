@@ -95,6 +95,7 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
             Some("-Xconsistent-data-class-copy-visibility")
         }
         "--x_context_parameters" => Some("-XXLanguage:+ContextParameters"),
+        "--x_explicit_backing_fields" => Some("-Xexplicit-backing-fields"),
         "--x_context_receivers" => Some("-Xcontext-receivers"),
         "--x_inline_classes" => Some("-Xinline-classes"),
         "--x_skip_prerelease_check" => Some("-Xskip-prerelease-check"),
@@ -982,6 +983,53 @@ mod tests {
         assert!(parsed
             .features
             .has("DataClassCopyRespectsConstructorVisibility"));
+    }
+
+    #[test]
+    fn explicit_backing_fields_are_accepted() {
+        let unit = translate(&args(&[
+            "--x_explicit_backing_fields",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("explicit backing fields must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("ExplicitBackingFields"));
+    }
+
+    #[test]
+    fn context_parameters_are_accepted() {
+        let unit = translate(&args(&[
+            "--x_context_parameters",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("context parameters must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("ContextParameters"));
+    }
+
+    #[test]
+    fn name_based_destructuring_complete_is_accepted() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xname-based-destructuring=complete",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("name-based destructuring must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("NameBasedDestructuring"));
+        assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
     }
 
     #[test]

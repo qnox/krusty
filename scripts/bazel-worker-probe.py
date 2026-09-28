@@ -84,6 +84,8 @@ def worker_args(raw: list[str]) -> list[str]:
             out += ["--x_xlanguage", token.split(":", 1)[1]]
         elif token == "-Xcontext-parameters":
             out += ["--x_context_parameters"]
+        elif token == "-Xexplicit-backing-fields":
+            out += ["--x_explicit_backing_fields"]
         elif token == "-Xconsistent-data-class-copy-visibility":
             out += ["--x_consistent_data_class_copy_visibility"]
         elif token.startswith("-Xexplicit-api="):
