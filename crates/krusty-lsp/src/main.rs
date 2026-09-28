@@ -786,10 +786,7 @@ fn main() {
     // Worker mode is an internal framed protocol, not a second invocation of the server CLI. Parse
     // user-facing options only in the supervisor: the child receives its complete launch classpath in
     // the first frame and every analysis-specific setting in the request that uses it.
-    let options = LspOptions::parse(arguments).unwrap_or_else(|error| {
-        eprintln!("krusty-lsp: {error}");
-        std::process::exit(2);
-    });
+    let options = LspOptions::parse_or_exit(arguments);
 
     let worker = AnalysisWorker::spawn(
         std::env::current_exe().expect("locate krusty-lsp executable"),
