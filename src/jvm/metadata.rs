@@ -3,8 +3,10 @@
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
 pub(crate) mod anonymous_origin;
+pub use inline_class::InlineClass;
 pub(super) mod builtin_bridge;
 mod class_identity;
+mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod string_table;
@@ -1977,7 +1979,7 @@ pub fn decode_metadata(
         },
         companion_name: class_identity::companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
-        inline: inline_class(&ctx),
+        inline: inline_class::inline_class(&ctx),
         multifile_parts: Vec::new(),
         package,
     })
@@ -2885,156 +2887,6 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
         }
     }
     out
-}
-
-/// A classpath value class's underlying property and Kotlin type decoded from `@Metadata`.
-#[derive(Clone, Debug)]
-pub struct InlineClass {
-    /// Underlying class name, or `None` when a type parameter erases to `Object`.
-    pub underlying_class: Option<String>,
-    /// Declared underlying nullability; `None` when metadata omitted the type shape.
-    pub underlying_nullable: Option<bool>,
-    /// The sole property's name (`data` for `UInt`/`Result`).
-    pub property_name: Option<String>,
-}
-
-/// If `ci` is a Kotlin `@JvmInline value class`, its decoded [`InlineClass`] (presence of the
-/// `inline_class_underlying_type` proto field is the marker); `None` for an ordinary class.
-fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
-    let records = ctx.records;
-    let d2 = ctx.d2;
-    let mut pb = Pb::new(ctx.msg);
-    let mut is_value = false;
-    let mut underlying_class = None;
-    let mut underlying_nullable = None;
-    let mut property_name = None;
-    let mut underlying_type_id: Option<u64> = None;
-    let mut type_table: Option<&[u8]> = None;
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (17, 0) => {
-                // inline_class_underlying_property_name (name id in table)
-                let id = pb.varint()?;
-                is_value = true;
-                property_name = resolve_string(records, d2, id as usize);
-            }
-            (18, 2) => {
-                // inline_class_underlying_type (inline Type message)
-                let n = pb.varint()? as usize;
-                let tbody = pb.bytes(n)?;
-                is_value = true;
-                let (cls, nullable) = parse_type_class_and_nullable(tbody);
-                underlying_class = cls.and_then(|id| resolve_class_name(records, d2, id as usize));
-                underlying_nullable = Some(nullable);
-            }
-            (19, 0) => {
-                // inline_class_underlying_type_id (type id in the class's TypeTable) — marks a value
-                // class even when the type isn't inlined; resolved from the table after the loop.
-                underlying_type_id = pb.varint();
-                is_value = true;
-            }
-            (30, 2) => {
-                // Class.typeTable — holds the referenced `Type`s when the compiler shares them by id.
-                let n = pb.varint()? as usize;
-                type_table = pb.bytes(n);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    // Resolve a table-carried underlying type (field 19): index the TypeTable; a type at
-    // `index >= firstNullable` is nullable even without its own `nullable` flag (the table's
-    // nullability-sharing optimization).
-    if underlying_class.is_none() {
-        if let (Some(id), Some(tt)) = (underlying_type_id, type_table) {
-            if let Some((tbody, table_nullable)) = type_table_entry(tt, id as usize) {
-                let (cls, own_nullable) = parse_type_class_and_nullable(tbody);
-                underlying_class =
-                    cls.and_then(|cid| resolve_class_name(records, d2, cid as usize));
-                underlying_nullable = Some(own_nullable || table_nullable);
-            }
-        }
-    }
-    // When BOTH the inline type (18) and the table id (19) are absent, the underlying type is the
-    // declared type of the underlying PROPERTY (field 17 names it; `Class.property` = field 10
-    // carries it) — kotlinc omits the class-level copy as derivable. `Property.returnType` = 3
-    // (inline `Type`) or `returnTypeId` = 9 (a TypeTable id; 7 is the RECEIVER type id).
-    if is_value && underlying_class.is_none() {
-        if let Some(pname) = &property_name {
-            let mut pb = Pb::new(ctx.msg);
-            while !pb.at_end() {
-                let Some(tag) = pb.varint() else { break };
-                match (tag >> 3, tag & 7) {
-                    (10, 2) => {
-                        let Some(n) = pb.varint() else { break };
-                        let Some(prop) = pb.bytes(n as usize) else {
-                            break;
-                        };
-                        let Some((nid, rt, rtid)) = parse_property_name_and_return(prop) else {
-                            continue;
-                        };
-                        if resolve_string(records, d2, nid as usize).as_deref() != Some(pname) {
-                            continue;
-                        }
-                        if let Some(tbody) = rt {
-                            let (cls, nullable) = parse_type_class_and_nullable(tbody);
-                            underlying_class =
-                                cls.and_then(|cid| resolve_class_name(records, d2, cid as usize));
-                            underlying_nullable = Some(nullable);
-                        } else if let (Some(id), Some(tt)) = (rtid, type_table) {
-                            if let Some((tbody, table_nullable)) = type_table_entry(tt, id as usize)
-                            {
-                                let (cls, own_nullable) = parse_type_class_and_nullable(tbody);
-                                underlying_class = cls
-                                    .and_then(|cid| resolve_class_name(records, d2, cid as usize));
-                                underlying_nullable = Some(own_nullable || table_nullable);
-                            }
-                        }
-                        break;
-                    }
-                    (_, w) => {
-                        if pb.skip(w).is_none() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    is_value.then_some(InlineClass {
-        underlying_class,
-        underlying_nullable,
-        property_name,
-    })
-}
-
-/// A property's decoded `(name id, inline returnType body, returnTypeId)`.
-type PropNameAndReturn<'a> = (u64, Option<&'a [u8]>, Option<u64>);
-
-/// A `Property` message's `name` (field 2, string id), inline `returnType` (field 3), and
-/// `returnTypeId` (field 9, a TypeTable index — field 7 is the RECEIVER type id, unlike `Function`).
-fn parse_property_name_and_return(body: &[u8]) -> Option<PropNameAndReturn<'_>> {
-    let mut pb = Pb::new(body);
-    let mut name = None;
-    let mut rt: Option<&[u8]> = None;
-    let mut rtid = None;
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (2, 0) => name = pb.varint(),
-            (3, 2) => {
-                let n = pb.varint()? as usize;
-                rt = pb.bytes(n);
-            }
-            (9, 0) => rtid = pb.varint(),
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    Some((name?, rt, rtid))
 }
 
 /// The `index`-th `Type` in a `TypeTable` message (field 1, repeated), plus whether the table's
