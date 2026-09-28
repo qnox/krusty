@@ -40892,10 +40892,12 @@ impl<'a> Checker<'a> {
 
     /// What a statement-position local class reads from its enclosing scope.
     ///
-    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
-    /// a name that merely *looks* like one is treated as such. Over-reporting costs an unused
-    /// constructor parameter (or a skipped file, when the name is one of the unmodelled kinds);
-    /// under-reporting emits a class without the constructor parameter its capture needs.
+    /// Deliberately syntactic and conservative: a name the class also declares is not a capture,
+    /// unless an enclosing function local already owns that spelling — the local wins inside the
+    /// class, so the class must capture it (`objects/flist.kt`). A name that merely *looks* like a
+    /// capture is treated as such. Over-reporting costs an unused constructor parameter (or a
+    /// skipped file, when the name is one of the unmodelled kinds); under-reporting emits a class
+    /// without the constructor parameter its capture needs.
     fn local_class_captures(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> LocalClassCaptures {
         let mut result = LocalClassCaptures::default();
         let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -40958,13 +40960,22 @@ impl<'a> Checker<'a> {
                 through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
             }
         }
-        // A property occupies the value namespace and shadows every outer source of that name.
+        // A property shadows an enclosing class member of the same spelling, not an enclosing
+        // function local. `fun f(head: T) { object { val head get() = head } }` captures `head`.
         for name in cl
             .props
             .iter()
             .map(|p| &p.name)
             .chain(cl.body_props.iter().map(|p| &p.name))
         {
+            if self
+                .lookup(scope, name)
+                .is_some_and(|binding| matches!(binding.origin, ReceiverFnValueOrigin::Local))
+            {
+                unsupported.remove(name);
+                through_outer.remove(name);
+                continue;
+            }
             outer.remove(name);
             unsupported.remove(name);
             through_outer.remove(name);
@@ -49060,10 +49071,12 @@ impl<'a> Checker<'a> {
         // call itself. `this.name` is a member access and still reads the property. An
         // enclosing class member is not a local, so a nested constructor `val` still shadows
         // it.
-        if self
-            .lookup(scope, name)
-            .is_some_and(|local| matches!(local.origin, ReceiverFnValueOrigin::Local))
-        {
+        if self.lookup(scope, name).is_some_and(|local| {
+            matches!(
+                local.origin,
+                ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_)
+            )
+        }) {
             return;
         }
         let implicit_receivers = self.implicit_receivers(scope);
@@ -49367,18 +49380,6 @@ impl<'a> Checker<'a> {
         labels
     }
 
-    /// Shadow synthetic immutable capture properties with their semantic source bindings. A shared
-    /// cell remains writable inside methods and accessors even though the field holding the cell is
-    /// itself final.
-    fn body_class_declares_property_named(&self, declaration: DeclId, name: &str) -> bool {
-        matches!(self.file.decl(declaration), Decl::Class(class) if class
-            .props
-            .iter()
-            .map(|property| property.name.as_str())
-            .chain(class.body_props.iter().map(|property| property.name.as_str()))
-            .any(|property| property == name))
-    }
-
     /// Bind the lexical capture selected for one property's own initializer, so `val x = x`
     /// reads the enclosing value's storage. A function local already owns that unqualified name
     /// in every nested body (`declare_dispatch_property_with_provenance`); this binding is the
@@ -49430,7 +49431,6 @@ impl<'a> Checker<'a> {
                 AnonymousObjectCaptureSource::LexicalValue
                     | AnonymousObjectCaptureSource::ClassStorage { .. }
             ) && capture.storage_ty.is_none()
-                && !self.body_class_declares_property_named(declaration, &capture.name)
             {
                 self.declare_class_storage(
                     scope,
@@ -56654,9 +56654,8 @@ impl<'a> Checker<'a> {
                 for (parameter, ty) in cl.props.iter().zip(primary_parameter_types) {
                     self.declare(property_scope, &parameter.name, ty, parameter.is_var);
                 }
-                // Reapply non-colliding semantic capture bindings after provider-visible synthetic
-                // storage and constructor parameters enter this child rung. A same-named source
-                // property gets its capture only in the initializer-specific scope below.
+                // Reapply capture bindings after constructor parameters. An enclosing function local
+                // is one of those captures and stays ahead of a same-named constructor `val`.
                 self.declare_body_class_storage_captures(property_scope, d);
                 for (property_index, property) in cl.body_props.iter().enumerate() {
                     let source_member = crate::libraries::SourceMember::ClassProperty {
@@ -58122,6 +58121,11 @@ impl<'a> Checker<'a> {
                 let scope = &body_scope;
                 for (p, &parameter_ty) in cl.props.iter().zip(&source_primary_params) {
                     self.declare(scope, &p.name, parameter_ty, p.is_var);
+                }
+                if body_local_class {
+                    // Constructor parameters are locals on this rung. Rebinding captures after them
+                    // keeps an enclosing function local in front of a same-named constructor `val`.
+                    self.declare_body_class_storage_captures(scope, d);
                 }
                 // Base class constructor args are evaluated before the body and may reference ctor params.
                 // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver
