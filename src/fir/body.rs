@@ -90,6 +90,10 @@ pub struct FirSamConversion {
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub kotlin_interface: bool,
+    /// The selected method's declared parameter names.
+    pub parameter_names: Box<[Box<str>]>,
 }
 
 /// Checked payload for one platform-type narrowing. This is language-level Java interop behavior,

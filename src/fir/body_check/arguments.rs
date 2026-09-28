@@ -1061,6 +1061,12 @@ impl BodyFirChecker<'_> {
             suspend: sam.suspend,
             overrides_non_primitive_result: sam.overrides_non_primitive_result,
             nullable,
+            kotlin_interface: sam.kotlin_interface,
+            parameter_names: sam
+                .parameter_names
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
         })
     }
 }

@@ -52,3 +52,12 @@ impl IrInvokeBridge {
         }
     }
 }
+
+/// The class a target writes for function values converted to one fun interface: shared by every
+/// such conversion in the file, it holds the value in its one field, and `method` implements the
+/// interface's single method by calling the value's `invoke`.
+#[derive(Clone, Debug)]
+pub struct IrSamWrapperClass {
+    pub interface: TypeName,
+    pub method: FunId,
+}

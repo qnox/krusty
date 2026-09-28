@@ -87,6 +87,7 @@ mod property_reference_class;
 mod property_reference_values;
 mod return_emission;
 mod safe_calls;
+mod sam_wrapper_class;
 mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
@@ -3474,6 +3475,9 @@ fn emit_class(
     }
     if let Some(lambda) = &c.lambda {
         return lambda_class::emit_lambda_class(ir, c, lambda, facade, env, opts);
+    }
+    if let Some(wrapper) = &c.sam_wrapper {
+        return sam_wrapper_class::emit_sam_wrapper_class(ir, c, wrapper, facade, env, opts);
     }
     if let Some(lambda) = env.emit_time_machines.suspend_lambda(c.fq_name_id()) {
         return suspend_lambda_class::emit_suspend_lambda_class(ir, c, lambda, facade, env, opts);
@@ -12653,17 +12657,6 @@ const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljav
 Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
-/// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
-/// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
-fn sam_descriptor(arity: u8) -> String {
-    let mut s = String::from("(");
-    for _ in 0..arity {
-        s.push_str("Ljava/lang/Object;");
-    }
-    s.push_str(")Ljava/lang/Object;");
-    s
-}
-
 fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
 }
@@ -12672,12 +12665,14 @@ fn jvm_function_interface(arity: u8) -> String {
     crate::jvm::names::function_interface_internal_name(usize::from(arity))
 }
 
+/// `FunctionN.invoke`'s erased descriptor: one `Object` per parameter, or the array of them.
 fn jvm_function_invoke_descriptor(arity: u8) -> String {
-    if is_high_arity_function(arity) {
-        "([Ljava/lang/Object;)Ljava/lang/Object;".to_string()
+    let parameters = if is_high_arity_function(arity) {
+        "[Ljava/lang/Object;".to_string()
     } else {
-        sam_descriptor(arity)
-    }
+        "Ljava/lang/Object;".repeat(usize::from(arity))
+    };
+    format!("({parameters})Ljava/lang/Object;")
 }
 
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.

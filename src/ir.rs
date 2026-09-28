@@ -77,7 +77,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
-pub use lambda_classes::{IrInvokeBridge, IrLambdaClass};
+pub use lambda_classes::{IrInvokeBridge, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use module_records::{
@@ -1431,6 +1431,9 @@ pub struct IrClass {
     /// Set when this class is a lambda realized as a class of its own (a target that cannot build
     /// the lambda at run time); see [`IrLambdaClass`].
     pub lambda: Option<IrLambdaClass>,
+    /// Set when this class wraps function values converted to a fun interface; see
+    /// [`IrSamWrapperClass`].
+    pub sam_wrapper: Option<IrSamWrapperClass>,
     /// JVM declaration adapters. Most are synthetic bridges for generic/covariant overrides; a boxed
     /// value class also needs ordinary instance entries for interface methods whose implementation is
     /// realized as a static carrier function.
@@ -1657,6 +1660,7 @@ impl IrClass {
             prop_ref: None,
             func_ref: None,
             lambda: None,
+            sam_wrapper: None,
             bridges: Vec::new(),
             interfaces: Default::default(),
             is_object: false,
@@ -1772,6 +1776,7 @@ impl IrClass {
             prop_ref: None,
             func_ref: None,
             lambda: None,
+            sam_wrapper: None,
             bridges: Vec::new(),
             interfaces,
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),

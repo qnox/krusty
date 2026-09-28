@@ -7495,6 +7495,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument and calls the entry. krusty named the static function from the bridge
   (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
+- **A function value converted to a Kotlin fun interface is wrapped in a class.** `B(f)` for a
+  function value `f` (not a lambda literal or a callable reference) builds kotlinc's
+  `<FileFacade>$sam$<B's FQ name, dots as underscores>$0`: one `final synthetic` class per file and
+  interface, shared by every such conversion in the file. It implements `B` and `FunctionAdapter`;
+  its constructor checks and stores `f` in `private final synthetic function: FunctionN`; its method
+  is typed as `B` declares it (mangled for value classes) and calls `function.invoke`; and
+  `getFunctionDelegate`, `equals` and `hashCode` make two wrappers of one function equal. The
+  conversion is `new` of the wrapper cast to `B`. A Java interface keeps the `invokedynamic`
+  conversion. Not yet ported: a conversion inside an inline function (kotlinc's public `$sam$i$`
+  wrapper), a suspend method, and the statement line kotlinc starts at the wrapped value rather
+  than at `new`. Tests: `tests/sam_wrapper_class_e2e.rs`. Corpus:
+  `inlineClasses/funInterface/mangledSamWrappers` and `mangledSamWrappersGeneric`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

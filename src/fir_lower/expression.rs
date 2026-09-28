@@ -1711,6 +1711,13 @@ impl BodyLowering<'_> {
                         suspend: conversion.suspend,
                         overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                         function_adapter: false,
+                        wraps_function_value: false,
+                        kotlin_interface: conversion.kotlin_interface,
+                        parameter_names: conversion
+                            .parameter_names
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
