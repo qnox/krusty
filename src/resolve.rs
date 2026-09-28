@@ -49,6 +49,7 @@ mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_selection;
 mod capture_analysis;
+mod capture_field_order;
 mod capture_storage;
 mod catch_flow;
 mod checker_symbol_queries;
@@ -98,6 +99,7 @@ mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
+mod receiver_uses;
 mod resolved_type_occurrences;
 mod safe_call_flow;
 mod sam_constructors;
@@ -19050,6 +19052,7 @@ impl<'a> Checker<'a> {
                 // is not knowable from syntax: overload selection and implicit-receiver selection
                 // make that decision. Install all rungs provisionally, then replace this list below
                 // with exactly the receiver identities whose semantic use counts advanced.
+                let uses_before_body = self.implicit_receiver_identity_uses.mark();
                 let mut provisional_candidates = deferred_implicit_receivers
                     .iter()
                     .map(|(candidate, ..)| candidate.clone())
@@ -19092,6 +19095,15 @@ impl<'a> Checker<'a> {
                         self.diags.diags.truncate(diagnostics);
                     }
                 }
+                // kotlinc captures receivers in the order the body first uses them.
+                let mut deferred_implicit_receivers = deferred_implicit_receivers;
+                deferred_implicit_receivers.sort_by_key(|(_, identity, _, extension)| {
+                    self.implicit_receiver_identity_uses.first_use_since(
+                        uses_before_body,
+                        *identity,
+                        extension.map(|(declaration, _)| declaration),
+                    )
+                });
                 let mut selected_receiver_candidates = Vec::new();
                 for (candidate, receiver_identity, before, extension_use) in
                     deferred_implicit_receivers
@@ -24863,6 +24875,7 @@ impl<'a> Checker<'a> {
                     self.discovered_local_class_capture_bindings
                         .insert(d, capture_bindings.clone());
                 }
+                let uses_before_body = self.implicit_receiver_identity_uses.mark();
                 let saved = self.take_body_state();
                 self.check_class(scope, &cl, d);
                 self.restore_body_state(saved);
@@ -24873,19 +24886,36 @@ impl<'a> Checker<'a> {
                     &mut captures.values,
                     &mut capture_bindings,
                 );
+                let mut used_receivers = Vec::new();
                 for (candidate, identities) in receiver_candidates {
-                    if !identities.iter().any(|(identity, before)| {
-                        self.implicit_receiver_identity_use_count(*identity) > *before
-                    }) || captures
+                    let Some(first_use) = identities
+                        .iter()
+                        .filter(|(identity, before)| {
+                            self.implicit_receiver_identity_use_count(*identity) > *before
+                        })
+                        .map(|(identity, _)| {
+                            let uses = &self.implicit_receiver_identity_uses;
+                            uses.first_use_since(uses_before_body, *identity, None)
+                        })
+                        .min()
+                    else {
+                        continue;
+                    };
+                    used_receivers.push((first_use, candidate.source));
+                    if captures
                         .values
                         .iter()
-                        .any(|existing| existing.source == candidate.source)
+                        .all(|existing| existing.source != candidate.source)
                     {
-                        continue;
+                        captures.values.push(candidate);
+                        capture_bindings.push(None);
                     }
-                    captures.values.push(candidate);
-                    capture_bindings.push(None);
                 }
+                capture_field_order::order_receivers_by_first_use(
+                    &mut captures.values,
+                    &mut capture_bindings,
+                    used_receivers,
+                );
                 if !captures.values.is_empty() {
                     self.discovered_local_class_captures
                         .insert(d, captures.values);
@@ -37525,7 +37555,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_identities: HashMap::new(),
         read_flow_roots: HashMap::new(),
         stable_property_reads: std::collections::HashSet::new(),
-        implicit_receiver_identity_uses: HashMap::new(),
+        implicit_receiver_identity_uses: receiver_uses::ReceiverUses::default(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
@@ -37951,7 +37981,7 @@ fn record_anonymous_construction_captures(
     // Match ordinary name lookup for name-addressed captures: `visit_bindings` is innermost-first,
     // so retain the first lexical/storage candidate for each spelling. Receiver captures are
     // coordinate-addressed scope-tower rungs; generated field spellings are not their identities.
-    let mut selected = candidates
+    let selected = candidates
         .iter()
         .enumerate()
         .filter(|(index, candidate)| {
@@ -38018,49 +38048,11 @@ fn record_anonymous_construction_captures(
         "resolve",
         "anonymous capture selection declaration={declaration:?} captures={selected:?}",
     );
-    // Postponed generic-lambda checking may revisit the same construction while one receiver type
-    // is temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
-    // recorded by the earlier check nor renumber an established capture field. Descendant
-    // constructions can already carry one of these ordinals as their resolved `ClassStorage`
-    // source, so retain the established order while discovery is provisional. The returned field
-    // permutation lets direct descendants update their exact storage coordinates after unused
-    // receiver rungs are removed. This table crosses the retained-inline boundary and no pending
-    // semantic type may reach checked FIR.
-    let mut field_remap = Vec::new();
-    if let Some(previous) = captures.get(&declaration) {
-        field_remap.resize(previous.len(), None);
-        let mut pending = selected;
-        selected = Vec::with_capacity(previous.len().max(pending.len()));
-        for (previous_field, exact) in previous.iter().enumerate() {
-            let Some(position) = pending
-                .iter()
-                .position(|capture| capture.name == exact.name && capture.source == exact.source)
-            else {
-                if preserve_missing {
-                    field_remap[previous_field] = u32::try_from(selected.len()).ok();
-                    selected.push(exact.clone());
-                }
-                continue;
-            };
-            let mut capture = pending.remove(position);
-            capture.shared_cell |= exact.shared_cell;
-            if (capture.ty.mentions_pending()
-                || capture
-                    .storage_ty
-                    .is_some_and(|storage| storage.mentions_pending()))
-                && !exact.ty.mentions_pending()
-                && exact
-                    .storage_ty
-                    .is_none_or(|storage| !storage.mentions_pending())
-            {
-                capture.ty = exact.ty;
-                capture.storage_ty = exact.storage_ty;
-            }
-            field_remap[previous_field] = u32::try_from(selected.len()).ok();
-            selected.push(capture);
-        }
-        selected.extend(pending);
-    }
+    let (selected, field_remap) = capture_field_order::reconcile(
+        captures.get(&declaration).map(Vec::as_slice),
+        selected,
+        preserve_missing,
+    );
     crate::trace_compiler!(
         "resolve",
         "anonymous captures selected declaration={declaration:?} captures={selected:?}",
@@ -40495,11 +40487,8 @@ struct Checker<'a> {
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
     /// Member property reads whose selected declaration reads the same value twice.
     stable_property_reads: std::collections::HashSet<ExprId>,
-    /// Semantic uses of exact lexical receiver bindings. Capture discovery snapshots this table
-    /// around a nested classifier check so qualified member-extension calls still capture their
-    /// implicit dispatch receiver. The scope identity, unlike type/name matching, distinguishes
-    /// same-typed receiver rungs.
-    implicit_receiver_identity_uses: HashMap<(usize, usize), usize>,
+    /// Semantic uses of exact lexical receiver bindings; see [`receiver_uses`].
+    implicit_receiver_identity_uses: receiver_uses::ReceiverUses,
     /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
     /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
     /// irrespective of function declaration order.
@@ -46809,10 +46798,8 @@ impl<'a> Checker<'a> {
     }
 
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
-        *self
-            .implicit_receiver_identity_uses
-            .entry(receiver.identity)
-            .or_default() += 1;
+        self.implicit_receiver_identity_uses
+            .record(receiver.identity);
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
         }
@@ -46875,17 +46862,13 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        *self
-            .implicit_receiver_identity_uses
-            .entry(receiver.identity)
-            .or_default() += 1;
+        self.implicit_receiver_identity_uses
+            .record(receiver.identity);
     }
 
     fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
-        *self
-            .implicit_receiver_identity_uses
-            .entry(receiver.identity)
-            .or_default() += 1;
+        self.implicit_receiver_identity_uses
+            .record(receiver.identity);
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_stmt_span_used(statement, span);
         }
@@ -46896,6 +46879,7 @@ impl<'a> Checker<'a> {
         if !uses.contains(&span) {
             uses.push(span);
         }
+        self.implicit_receiver_identity_uses.record_extension(span);
     }
 
     fn mark_extension_receiver_stmt_span_used(&mut self, statement: StmtId, span: Span) {
@@ -46903,6 +46887,7 @@ impl<'a> Checker<'a> {
         if !uses.contains(&span) {
             uses.push(span);
         }
+        self.implicit_receiver_identity_uses.record_extension(span);
     }
 
     fn extension_receiver_use_count(&self, declaration: Span) -> usize {
@@ -46918,10 +46903,7 @@ impl<'a> Checker<'a> {
     }
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
-        self.implicit_receiver_identity_uses
-            .get(&identity)
-            .copied()
-            .unwrap_or_default()
+        self.implicit_receiver_identity_uses.count(identity)
     }
 
     fn mark_extension_receiver_label_used(&mut self, expression: ExprId, label_index: usize) {

@@ -1456,6 +1456,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its fields carry no annotation, and its parameters take no slot in the constructor's parameter
   annotation table, so an inner class's first declared parameter is slot 0, as javac writes it.
   Test: `tests/local_class_nullability_e2e.rs`.
+- **Captured receivers are ordered by first use.** A local class or anonymous object that reads
+  several enclosing receivers (`this@outer`, `this@inner`, an implicit receiver) captures them in
+  the order its body first uses them, as kotlinc's local declaration lowering does, not in
+  scope-tower order: that order fixes the `$this_…` fields and the constructor's parameters. Test:
+  `tests/local_class_capture_constructors_e2e.rs::nested_labeled_receivers_reach_their_own_lambda_like_kotlinc`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
