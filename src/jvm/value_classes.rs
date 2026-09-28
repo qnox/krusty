@@ -34,6 +34,7 @@ mod operation_relocation;
 mod property_references;
 mod representation;
 mod result_tail_boxing;
+mod return_unboxing;
 mod substitution_coercions;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
@@ -3993,11 +3994,12 @@ pub(crate) fn lower_value_classes(
             if let Some(body) = ir.functions[fid].body {
                 box_vc_tail(ir, body, &under, &orig_rets, false);
             }
-        } else if let Ty::Obj(fq_name, _) = &orig_rets[fid] {
-            // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`) whose tail is a
-            // BOXED value (the `!!` of a nullable safe-call yields a boxed `Z`) must `unbox-impl` it — the
-            // erased return is the underlying.
-            let x = *fq_name;
+        } else if let Ty::Obj(x, _) = orig_rets[fid].non_null() {
+            // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`), or an `X?`
+            // its carrier holds (a boxed `X?` took the branch above), `unbox-impl`s a BOXED tail: the
+            // erased return is the underlying. A nullable tail is unboxed null-safely (`null_slot`).
+            let null_slot = orig_rets[fid].is_nullable().then_some(fresh);
+            fresh += u32::from(null_slot.is_some());
             if under.contains_key(&x) && suspend_fids.contains(&(fid as u32)) {
                 // …EXCEPT a `suspend fun`: its CPS return is `Object`. The declaration-level suspension
                 // representation decides whether the carrier crosses directly or is wrapped in the value
@@ -4033,7 +4035,7 @@ pub(crate) fn lower_value_classes(
                             // suspend declaration's selected CPS boundary is its raw reference carrier.
                             // Convert that exact boxed tail once; ordinary carrier-producing tails are
                             // already unboxed and remain unchanged.
-                            unbox_tail(
+                            return_unboxing::unbox_tail(
                                 ir,
                                 body,
                                 x,
@@ -4045,6 +4047,7 @@ pub(crate) fn lower_value_classes(
                                     field_getters: &field_getters,
                                     carrier_unboxes: &carrier_unboxes,
                                 },
+                                null_slot,
                             );
                         }
                         None => unreachable!("the return was already identified as a value class"),
@@ -4052,7 +4055,7 @@ pub(crate) fn lower_value_classes(
                 }
             } else if under.contains_key(&x) {
                 if let Some(body) = ir.functions[fid].body {
-                    unbox_tail(
+                    return_unboxing::unbox_tail(
                         ir,
                         body,
                         x,
@@ -4064,6 +4067,7 @@ pub(crate) fn lower_value_classes(
                             field_getters: &field_getters,
                             carrier_unboxes: &carrier_unboxes,
                         },
+                        null_slot,
                     );
                 }
             }
@@ -4921,6 +4925,7 @@ fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, 
     ir.exprs.push(IrExpr::When {
         branches: vec![(Some(is_null), null2), (None, unboxed)],
     });
+    ir.null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {
         stmts: vec![var],
         value: Some(when),
@@ -5175,36 +5180,6 @@ fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
 
 /// At a value-producing (return) position, box an unboxed `X` with `box-impl`, recursing through
 /// `when`/block tails so each branch is boxed (a `null` branch is left alone).
-/// At a function's return tail (recursing `return`/block tails), `unbox-impl` a BOXED value-class value so
-/// it matches the function's erased (underlying) return type — `fun f(): Z = a?.foo()!!` returns the box.
-fn unbox_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: ReprInputs<'_>) {
-    let under = inputs.under;
-    if ir.physical_types.get(&id).is_some_and(|ty| {
-        ty.non_null()
-            .obj_internal()
-            .is_some_and(|classifier| classifier == x)
-    }) {
-        unbox_wrap(ir, id, x, under);
-        return;
-    }
-    match &ir.exprs[id as usize] {
-        IrExpr::Return(Some(v)) | IrExpr::Block { value: Some(v), .. } => {
-            let v = *v;
-            unbox_tail(ir, v, x, inputs);
-        }
-        IrExpr::Block { value: None, stmts } => {
-            if let Some(&last) = stmts.last() {
-                unbox_tail(ir, last, x, inputs);
-            }
-        }
-        _ => {
-            if inputs.over(ir).is_boxed_vc(id, x) {
-                unbox_wrap(ir, id, x, under);
-            }
-        }
-    }
-}
-
 fn box_tail(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     match &ir.exprs[id as usize] {
         IrExpr::When { branches } => {
@@ -5505,6 +5480,7 @@ fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, sl
     ir.exprs.push(IrExpr::When {
         branches: vec![(Some(is_null), null2), (None, boxed)],
     });
+    ir.null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {
         stmts: vec![var],
         value: Some(when),
