@@ -35,6 +35,7 @@ mod module_members;
 mod operand_nullness;
 mod property_references;
 mod representation;
+use representation::is_ref;
 mod result_tail_boxing;
 mod return_unboxing;
 mod substitution_coercions;
@@ -2980,7 +2981,20 @@ pub(crate) fn lower_value_classes(
                 // class; consequently a `NotVc` operand under this checked coercion is a boxed
                 // value-class reference, never a raw carrier discovered by guesswork. Coerced to `X?`
                 // over a reference carrier, the box may be null and unboxes null-safely.
+                // A sole-property read yielding a nested value class over a reference carrier
+                // (`zn.z!!` for `ZN(val z: Z1?)`) already is that class's carrier.
+                let mut operand = *arg;
+                while let IrExpr::NotNullAssert { operand: inner, .. } = ir.exprs[operand as usize]
+                {
+                    operand = inner;
+                }
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
+                    if sole_property_coercions.contains(&operand)
+                        && repr_ctx.unboxed_value_class(operand, &under) == Some(target)
+                    {
+                        retarget.push((id, erase(&under[&target], &under)));
+                        continue;
+                    }
                     if matches!(repr_ctx.repr(*arg), Repr::NotVc)
                         && !repr_ctx.operand_null_only(*arg)
                     {
@@ -5322,43 +5336,6 @@ fn suspend_result_representation(
         })
     } else {
         Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
-    }
-}
-
-/// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
-/// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
-/// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
-/// `Class` is a reference.
-fn is_ref(t: &Ty) -> bool {
-    if t.is_nullable() {
-        return true;
-    }
-    // A Kotlin type parameter always occupies an erased JVM reference slot, even when its upper
-    // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
-    // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
-    // instead of the value class's boxed wrapper.
-    if matches!(t.non_null(), Ty::TyParam(..)) {
-        return true;
-    }
-    // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
-    // reference. Check this FIRST — `kotlin_class_internal(UInt)` is "kotlin/UInt" but `unboxed_primitive`
-    // only knows the signed wrappers, so the descriptor check below would misclassify it as a reference.
-    if t.is_jvm_scalar() {
-        return false;
-    }
-    // A FUNCTION type realizes as a `FunctionN` object and an array as its array class — both are
-    // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
-    // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
-    // other non-null reference parameter).
-    if matches!(t, Ty::Fun(_)) || t.is_array() {
-        return true;
-    }
-    // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no
-    // `obj_internal()` — treating it as a non-reference makes `nullable_is_boxed` think a `String`-backed
-    // value class is primitive-like (`Str?` wrongly boxed instead of unboxed to `String?`).
-    match t.kotlin_class_internal() {
-        Some(fq_name) => Ty::obj_name(fq_name).unboxed_primitive().is_none(),
-        None => false,
     }
 }
 

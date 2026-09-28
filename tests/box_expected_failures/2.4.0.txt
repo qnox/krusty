@@ -158,9 +158,6 @@ inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
 inlineClasses/jvmInline.kt
 inlineClasses/kt25771.kt
-inlineClasses/kt27096_enum.kt
-inlineClasses/kt27096_functional.kt
-inlineClasses/kt27096_reference.kt
 inlineClasses/kt57973.kt
 inlineClasses/result/directCall2.kt
 inlineClasses/resultRunCatchingOrElse.kt
