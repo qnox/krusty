@@ -512,23 +512,31 @@ fn a_constructor_val_property_delegate_reuses_its_field() {
         common::expect_box_run_with_stdlib(PROPERTY_DELEGATE_SRC, "DelegPropertyField"),
         "OK"
     );
-    let classes = common::expect_classes_with_stdlib(PROPERTY_DELEGATE_SRC, "DelegPropertyField");
-    let reference =
-        common::kotlinc_library(PROPERTY_DELEGATE_SRC).expect("kotlinc compiles the reference");
-    // The local class is named after its file, which each compiler receives under its own stem.
-    for (class, reference_class) in [
-        ("Shared", "Shared"),
-        ("Hidden", "Hidden"),
-        ("Narrow", "Narrow"),
-        ("Mutable", "Mutable"),
-        ("Other", "Other"),
-        ("Second", "Second"),
-        (
-            "DelegPropertyFieldKt$local$Captured",
-            "LibKt$local$Captured",
-        ),
-    ] {
-        let (_, bytes) = classes
+    assert_fields_match_kotlinc(
+        PROPERTY_DELEGATE_SRC,
+        "DelegPropertyField",
+        &[
+            ("Shared", "Shared"),
+            ("Hidden", "Hidden"),
+            ("Narrow", "Narrow"),
+            ("Mutable", "Mutable"),
+            ("Other", "Other"),
+            ("Second", "Second"),
+            // The local class is named after its file, which each compiler receives under its own stem.
+            (
+                "DelegPropertyFieldKt$local$Captured",
+                "LibKt$local$Captured",
+            ),
+        ],
+    );
+}
+
+/// Compares each class's declared fields with kotlinc's, as (krusty class, kotlinc class) pairs.
+fn assert_fields_match_kotlinc(src: &str, stem: &str, classes: &[(&str, &str)]) {
+    let emitted = common::expect_classes_with_stdlib(src, stem);
+    let reference = common::kotlinc_library(src).expect("kotlinc compiles the reference");
+    for &(class, reference_class) in classes {
+        let (_, bytes) = emitted
             .iter()
             .find(|(name, _)| name == class)
             .unwrap_or_else(|| panic!("{class} emitted"));
@@ -540,4 +548,37 @@ fn a_constructor_val_property_delegate_reuses_its_field() {
             "{class} declares different fields than kotlinc"
         );
     }
+}
+
+const PARENTHESIZED_DELEGATE_SRC: &str = "interface Greeter { fun greet(): String }\n\
+class Impl(private val text: String) : Greeter { override fun greet() = text }\n\
+class Wrapped(val greeter: Greeter) : Greeter by (greeter)\n\
+class Nested(val greeter: Greeter) : Greeter by ((greeter)) {\n\
+    fun extra() = \"\"\n\
+}\n\
+class Parameter(greeter: Greeter) : Greeter by (greeter)\n\
+fun box(): String =\n\
+    Wrapped(Impl(\"O\")).greet() + Nested(Impl(\"K\")).greet() + Parameter(Impl(\"\")).greet() +\n\
+        Last(Impl(\"\")).greet()\n\
+class Last(val greeter: Greeter) : Greeter by greeter";
+
+/// Parentheses around a delegate name leave it the same delegate: kotlinc still reuses a `val`
+/// property's field and still synthesizes `$$delegate_N` for a plain parameter. A bare name that
+/// ends the file is the same form as one followed by a newline.
+#[test]
+fn a_parenthesized_delegate_name_is_the_same_delegate() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(PARENTHESIZED_DELEGATE_SRC, "DelegParenthesized"),
+        "OK"
+    );
+    assert_fields_match_kotlinc(
+        PARENTHESIZED_DELEGATE_SRC,
+        "DelegParenthesized",
+        &[
+            ("Wrapped", "Wrapped"),
+            ("Nested", "Nested"),
+            ("Parameter", "Parameter"),
+            ("Last", "Last"),
+        ],
+    );
 }
