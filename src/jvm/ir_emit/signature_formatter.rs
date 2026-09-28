@@ -328,18 +328,36 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// `Continuation<in result>`, the continuation a suspend function takes. Its `in` projection is
     /// written unless it is redundant, as over `Any`: kotlinc signs `Continuation<Object>` there.
     pub(super) fn continuation(&self, result: Ty, wildcards: Wildcards) -> Option<String> {
+        let mut signature = String::new();
+        self.write_continuation(&mut signature, result, wildcards)?;
+        Some(signature)
+    }
+
+    fn write_continuation(&self, out: &mut String, result: Ty, wildcards: Wildcards) -> Option<()> {
         let wildcard = if self.wildcard_is_redundant(TypeVariance::In, result)? {
             ""
         } else {
             "-"
         };
-        Some(format!(
-            "Lkotlin/coroutines/Continuation<{wildcard}{}>;",
-            self.ty_at(&result, wildcards)?
-        ))
+        out.push_str("Lkotlin/coroutines/Continuation<");
+        out.push_str(wildcard);
+        self.write_ty_at(out, &result, wildcards)?;
+        out.push_str(">;");
+        Some(())
     }
 
     fn function_ty(&self, signature: &crate::types::FnSig, wildcards: Wildcards) -> Option<String> {
+        let mut rendered = String::new();
+        self.write_function_ty(&mut rendered, signature, wildcards)?;
+        Some(rendered)
+    }
+
+    fn write_function_ty(
+        &self,
+        out: &mut String,
+        signature: &crate::types::FnSig,
+        wildcards: Wildcards,
+    ) -> Option<()> {
         let arity = signature.params.len() + usize::from(signature.suspend);
         if arity > 22 {
             // `FunctionN` has only its covariant result parameter. Kotlin metadata carries the
@@ -349,34 +367,41 @@ impl<'a> JvmSignatureFormatter<'a> {
             } else {
                 signature.ret
             };
-            return Some(format!(
-                "Lkotlin/jvm/functions/FunctionN<{}>;",
-                self.type_argument(TypeVariance::Out, result, wildcards)?
-            ));
+            out.push_str("Lkotlin/jvm/functions/FunctionN<");
+            self.write_type_argument(out, TypeVariance::Out, result, wildcards)?;
+            out.push_str(">;");
+            return Some(());
         }
-        let mut rendered = format!("Lkotlin/jvm/functions/Function{arity}<");
+        out.push_str("Lkotlin/jvm/functions/Function");
+        if arity >= 10 {
+            out.push(char::from(b'0' + (arity / 10) as u8));
+        }
+        out.push(char::from(b'0' + (arity % 10) as u8));
+        out.push('<');
         for parameter in &signature.params {
-            rendered.push_str(&self.type_argument(TypeVariance::In, *parameter, wildcards)?);
+            self.write_type_argument(out, TypeVariance::In, *parameter, wildcards)?;
         }
         if signature.suspend {
             // The continuation's own `in` projection is part of the type; the wildcards on the
             // `FunctionN` arguments follow the position, like every other argument's.
             if wildcards.writes_declaration_site() {
-                rendered.push('-');
+                out.push('-');
             }
             let continuation = wildcards.for_argument(TypeVariance::In);
-            rendered.push_str(
-                &self.continuation(signature.ret, continuation.for_argument(TypeVariance::In))?,
-            );
+            self.write_continuation(
+                out,
+                signature.ret,
+                continuation.for_argument(TypeVariance::In),
+            )?;
             if wildcards.writes_declaration_site() {
-                rendered.push('+');
+                out.push('+');
             }
-            rendered.push_str("Ljava/lang/Object;");
+            out.push_str("Ljava/lang/Object;");
         } else {
-            rendered.push_str(&self.type_argument(TypeVariance::Out, signature.ret, wildcards)?);
+            self.write_type_argument(out, TypeVariance::Out, signature.ret, wildcards)?;
         }
-        rendered.push_str(">;");
-        Some(rendered)
+        out.push_str(">;");
+        Some(())
     }
 
     /// One parameter or return position in a method `Signature`. Positions without generic structure
@@ -424,25 +449,49 @@ impl<'a> JvmSignatureFormatter<'a> {
     }
 
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
+        let mut signature = String::new();
+        self.write_ty_at(&mut signature, ty, wildcards)?;
+        Some(signature)
+    }
+
+    /// Append one signature element. Nested arguments write into `out` instead of allocating a
+    /// string that the caller would copy.
+    fn write_ty_at(&self, out: &mut String, ty: &Ty, wildcards: Wildcards) -> Option<()> {
         if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = ty {
-            return self.ty_at(inner, wildcards);
+            return self.write_ty_at(out, inner, wildcards);
         }
         if let Ty::TyParam(name, _) = ty {
-            return Some(format!(
-                "T{};",
-                crate::types::type_parameter_source_name(name)
-            ));
+            out.push('T');
+            out.push_str(crate::types::type_parameter_source_name(name));
+            out.push(';');
+            return Some(());
         }
         if ty.non_null().is_jvm_scalar() {
-            return Some(crate::jvm::names::boxed_descriptor(ty.non_null()).to_owned());
+            out.push_str(crate::jvm::names::boxed_descriptor(ty.non_null()));
+            return Some(());
         }
         match *ty {
-            Ty::String => Some("Ljava/lang/String;".to_string()),
-            Ty::Unit => Some("Lkotlin/Unit;".to_string()),
-            Ty::Nothing => Some("Lkotlin/Nothing;".to_string()),
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
-            Ty::Fun(signature) => self.function_ty(signature, wildcards),
+            Ty::String => {
+                out.push_str("Ljava/lang/String;");
+                Some(())
+            }
+            Ty::Unit => {
+                out.push_str("Lkotlin/Unit;");
+                Some(())
+            }
+            Ty::Nothing => {
+                out.push_str("Lkotlin/Nothing;");
+                Some(())
+            }
+            Ty::InProjection(inner) => {
+                out.push('-');
+                self.write_ty_at(out, inner, wildcards)
+            }
+            Ty::OutProjection(inner) => {
+                out.push('+');
+                self.write_ty_at(out, inner, wildcards)
+            }
+            Ty::Fun(signature) => self.write_function_ty(out, signature, wildcards),
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
             // how a signature must spell it. Writing `Lkotlin/Array<…>;` names a class no loader can
             // resolve, so any reader of the attribute (reflection, a Java consumer, a decompiler)
@@ -463,15 +512,15 @@ impl<'a> JvmSignatureFormatter<'a> {
                     }
                     argument => (TypeVariance::Invariant, argument),
                 };
-                Some(format!(
-                    "[{}",
-                    self.ty_at(&element, wildcards.for_argument(variance))?
-                ))
+                out.push('[');
+                self.write_ty_at(out, &element, wildcards.for_argument(variance))
             }
-            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
-                "L{};",
-                crate::jvm::names::classfile_internal_name_of(owner)
-            )),
+            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => {
+                out.push('L');
+                out.push_str(crate::jvm::names::classfile_internal_name_of(owner));
+                out.push(';');
+                Some(())
+            }
             Ty::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
                 let declared_arguments: usize =
@@ -479,29 +528,30 @@ impl<'a> JvmSignatureFormatter<'a> {
                 let arguments =
                     self.classifier_usage_arguments(owner, arguments, declared_arguments)?;
                 let (outer, _) = chain.first()?;
-                let jvm = crate::jvm::names::classfile_internal_name_of(*outer);
-                let mut signature = format!("L{jvm}");
+                out.push('L');
+                out.push_str(crate::jvm::names::classfile_internal_name_of(*outer));
                 let mut argument_index = 0;
                 for (segment_index, (classifier, variances)) in chain.iter().enumerate() {
                     if segment_index != 0 {
-                        signature.push('.');
-                        signature.push_str(classifier.nested_segment_ref());
+                        out.push('.');
+                        out.push_str(classifier.nested_segment_ref());
                     }
                     if !variances.is_empty() {
-                        signature.push('<');
+                        out.push('<');
                         for &variance in variances {
-                            signature.push_str(&self.type_argument(
+                            self.write_type_argument(
+                                out,
                                 variance,
                                 arguments[argument_index],
                                 wildcards,
-                            )?);
+                            )?;
                             argument_index += 1;
                         }
-                        signature.push('>');
+                        out.push('>');
                     }
                 }
-                signature.push(';');
-                Some(signature)
+                out.push(';');
+                Some(())
             }
             _ => None,
         }
