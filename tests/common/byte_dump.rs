@@ -254,11 +254,12 @@ pub fn kotlinc_class_dumps(
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<Vec<Vec<u8>>> {
     let (module, case) = running_test();
+    let suffix = classes_suffix(classes);
     let produced = recall(
         Recall {
             root: &dumps_root(),
             module: &module,
-            key: &entry_key(&case, stem, jvm_target, variant, ""),
+            key: &entry_key(&case, stem, jvm_target, variant, &suffix),
             compiler: compiler_dump_version(),
             fingerprint,
             force: record_forced(),
@@ -429,6 +430,14 @@ fn entry_key(case: &str, stem: &str, jvm_target: &str, variant: &str, suffix: &s
         "{case}|{stem}|{jvm_target}|{}{suffix}",
         variant_component(variant)
     )
+}
+
+/// The requested class set is part of the key. Callers store only those classes, so two requests
+/// that share a stem must not overwrite each other's bytes.
+fn classes_suffix(classes: &[&str]) -> String {
+    let mut names: Vec<&str> = classes.to_vec();
+    names.sort_unstable();
+    format!("#{}", names.join(","))
 }
 
 fn variant_component(variant: &str) -> String {
@@ -714,7 +723,7 @@ fn parse_index(text: &str) -> BTreeMap<String, Vec<Span>> {
 
 fn parse_range(token: &str) -> Option<(Channel, KotlinVersion, Option<KotlinVersion>)> {
     let (lo, hi) = match token.split_once("..") {
-        Some((lo, hi)) if hi.is_empty() => (lo, None),
+        Some((lo, "")) => (lo, None),
         Some((lo, hi)) => (lo, Some(hi)),
         None => (token, Some(token)),
     };
@@ -1023,6 +1032,13 @@ mod tests {
             "a miss that is not allowed to record leaves no dump"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn distinct_class_sets_do_not_share_a_dump_key() {
+        assert_ne!(classes_suffix(&["pkg/A"]), classes_suffix(&["pkg/B"]));
+        assert_eq!(classes_suffix(&["pkg/B", "pkg/A"]), "#pkg/A,pkg/B");
+        assert_ne!(classes_suffix(&["pkg/A"]), "#tree");
     }
 
     #[test]
