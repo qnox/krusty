@@ -259,8 +259,12 @@ keeps the default setter, which is private and so never generated: f100 names on
 f8 is still 66 with a `<set-?>` parameter, and another class in the file writes through
 `access$set<X>$p`.
 
-Still open (kotlinc 2.4.20): a delegated top-level property records `isDelegated` and its
-`x$delegate` field.
+A delegated top-level property records `isDelegated` as a member property does, and its
+`JvmPropertySignature.field` names the `x$delegate` storage with both name and descriptor, interned
+after the accessors. A top-level `lateinit` property likewise records `isLateinit`. A private
+delegated property's accessors are private methods. Tests:
+`a_delegated_top_level_property_records_its_delegate_field` and
+`a_top_level_lateinit_property_records_lateinit`.
 
 Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
 8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.
