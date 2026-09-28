@@ -104,7 +104,7 @@ fn reified_class_internal(ty: Ty) -> Option<String> {
         });
     }
     if value.is_array() {
-        return Some(super::names::instanceof_internal_name(value));
+        return Some(super::names::instanceof_internal_name(value).to_owned());
     }
     let internal = stored_value_ty(ty).kotlin_class_internal()?.render();
     Some(super::jvm_class_map::to_jvm_internal(&internal).to_owned())
