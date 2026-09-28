@@ -87,6 +87,7 @@ mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod enum_entries;
 mod enum_entry_method_owner;
+mod explicit_backing_fields;
 mod explicit_property_write;
 mod expression_getter;
 mod finalized_projection;
@@ -47190,59 +47191,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// A qualified read sees an explicit backing field's type when a lexical binding of this
-    /// property carries that field and the receiver's static type is exactly the declaring class.
-    /// The field is loaded only when this expression is compiled into that class (`other.a` and
-    /// `this.a` are `getfield`; a local function and a lambda are too). A nested or inner class
-    /// keeps the field's type but calls the getter, which returns the public type and is then
-    /// checked back. A subclass value and an inherited property stay on the public type and the getter.
-    fn qualified_owner_storage_type(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        receiver_ty: Ty,
-        name: &str,
-    ) -> Option<Ty> {
-        let binding = scope.ancestors().find_map(|rung| {
-            let local = rung.own_binding(name, Ns::Value)?.value()?;
-            match local.origin {
-                ReceiverFnValueOrigin::DispatchProperty {
-                    owner,
-                    owner_storage: true,
-                    ..
-                } if receiver_ty.non_null().obj_internal() == Some(owner) => Some(local),
-                _ => None,
-            }
-        })?;
-        let ReceiverFnValueOrigin::DispatchProperty {
-            declared_ty,
-            owner: binding_owner,
-            receiver_identity,
-            ..
-        } = binding.origin
-        else {
-            return None;
-        };
-        let Some(ExprLowering::MemberPropertyRead {
-            owner,
-            owner_storage,
-            ..
-        }) = self.expr_lowers.get_mut(&expression)
-        else {
-            return None;
-        };
-        if *owner != binding_owner {
-            return None;
-        }
-        let compiled_into_owner = scope
-            .innermost_class_receiver_identity()
-            .is_none_or(|class_identity| class_identity == receiver_identity);
-        if compiled_into_owner {
-            *owner_storage = true;
-        }
-        (binding.ty != declared_ty).then_some(binding.ty)
-    }
-
     fn declare_scoped_property(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -47276,27 +47224,7 @@ impl<'a> Checker<'a> {
         } else {
             ErrorProvenance::None
         };
-        // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a type,
-        // and only for a property this class itself declares. An inherited property keeps its
-        // public type: the subclass sees the getter, not the superclass's field. The declaring
-        // class is the innermost class rung, not whichever receiver `this` currently names: a
-        // context receiver or an extension is nearer than the class and must not hide the field.
-        // While the field's own initializer is being determined it is the marker, and taking it
-        // then makes every read of the property inside its own class undetermined even though the
-        // PROPERTY's type is already known.
-        let declaring_class = scope
-            .innermost_class_receiver_identity()
-            .and_then(|identity| {
-                self.implicit_receivers(scope)
-                    .into_iter()
-                    .find(|receiver| receiver.identity == identity)
-                    .and_then(|receiver| receiver.ty.non_null().obj_internal())
-            })
-            .or_else(|| scope.this_ty().and_then(|ty| ty.non_null().obj_internal()));
-        let declared_here = declaring_class.is_some_and(|context| context == property.owner);
-        let storage = property.owner_storage_ty.filter(|storage| {
-            owner_storage_visible && declared_here && !storage.mentions_pending()
-        });
+        let storage = self.visible_owner_storage_type(scope, property, owner_storage_visible);
         self.declare_dispatch_property_with_provenance(
             scope,
             &property.name,
