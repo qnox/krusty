@@ -1783,9 +1783,11 @@ pub struct IrFile {
     /// the anonymous constructor around the forwarded value)`.
     pub(crate) anonymous_super_forwards:
         std::collections::HashMap<(crate::fir::DeclarationId, u32), (u32, u8)>,
-    /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
-    /// ordinary function marker rather than constructor/value-class markers.
-    pub class_static_local_functions: std::collections::HashSet<FunId>,
+    /// Body-local static functions physically owned by a class, by exact function and owner
+    /// identity. Their `$default` ABI uses the ordinary function marker rather than
+    /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
+    /// without scanning classes or recovering ownership from its generated name.
+    pub class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:

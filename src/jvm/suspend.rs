@@ -1844,8 +1844,11 @@ fn build_state_machine(
     // but value-class lowering has already made it static and inserted the carrier as parameter zero.
     // Such a method has no JVM `this` slot and its continuation must not capture one.
     let semantic_owner: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
-    let receiver: Option<TypeName> =
-        semantic_owner.filter(|_| !ir.functions[fid as usize].is_static);
+    let is_static = ir.functions[fid as usize].is_static;
+    let receiver: Option<TypeName> = semantic_owner.filter(|_| !is_static);
+    let static_owner = is_static
+        .then(|| semantic_owner.or_else(|| ir.class_static_local_functions.get(&fid).copied()));
+    let static_owner = static_owner.flatten();
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
@@ -2175,6 +2178,7 @@ fn build_state_machine(
         &layout,
         suspended_result_returns,
         receiver,
+        static_owner,
         &real_params,
     );
 

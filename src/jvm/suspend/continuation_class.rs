@@ -19,6 +19,7 @@ pub(super) fn build_continuation_class(
     layout: &SpillLayout,
     suspended_result_returns: &mut SuspendedResultReturns,
     receiver: Option<TypeName>,
+    static_owner: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
@@ -66,13 +67,21 @@ pub(super) fn build_continuation_class(
     // correct placeholders, exactly as kotlinc passes `iconst_0`/`aconst_null`.
     let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
     reentry_args.push(this_as_cont);
-    let call_outer = match receiver {
-        None => ir.add_expr(IrExpr::Call {
+    let call_outer = match (receiver, static_owner) {
+        (None, Some(owner)) => ir.add_expr(IrExpr::Call {
+            callee: Callee::ClassStatic {
+                owner,
+                function: outer_fid,
+            },
+            dispatch_receiver: None,
+            args: reentry_args,
+        }),
+        (None, None) => ir.add_expr(IrExpr::Call {
             callee: Callee::Local(outer_fid),
             dispatch_receiver: None,
             args: reentry_args,
         }),
-        Some(owner) => {
+        (Some(owner), None) => {
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
@@ -132,6 +141,7 @@ pub(super) fn build_continuation_class(
                 })
             }
         }
+        (Some(_), Some(_)) => unreachable!("a static re-entry has no instance receiver"),
     };
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
     // The function returns a value class's carrier where kotlinc's value-class ABI says so; its

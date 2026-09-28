@@ -212,8 +212,6 @@ pub(super) fn suspend_result_representation(
     under: &Under,
     force_boxed: bool,
 ) -> Option<IrValueClassSuspendResult> {
-    // `T : IC?` crosses exactly as `IC?` does.
-    let declared = &super::member_names::value_class_bound_occurrence(*declared, under);
     let classifier = declared
         .non_null()
         .obj_internal()

@@ -76,3 +76,31 @@ suspend fun maybe(t: Tag?): Tag? = pass(t)\n";
         reference
     );
 }
+
+/// A type parameter bounded by a nullable value class still crosses its generic suspend boundary
+/// as the value-class box. The star-projected caller must not reinterpret that box as the carrier.
+#[test]
+fn a_star_projected_generic_suspend_result_remains_boxed() {
+    let src = "import kotlin.coroutines.*\n\
+@JvmInline value class Tag(val s: Any)\n\
+interface Source<T : Tag?> { suspend fun tag(): T }\n\
+class Concrete : Source<Tag> {\n\
+  override suspend fun tag(): Tag = suspendCoroutine { it.resume(Tag(\"OK\")) }\n\
+}\n\
+fun builder(block: suspend () -> Unit) {\n\
+  block.startCoroutine(object : Continuation<Unit> {\n\
+    override val context: CoroutineContext = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+  })\n\
+}\n\
+fun box(): String {\n\
+  var result: String? = null\n\
+  builder {\n\
+    val source: Source<*> = Concrete()\n\
+    result = source.tag()!!.s as String\n\
+  }\n\
+  return result!!\n\
+}\n";
+
+    common::expect_box_ok_with_stdlib(src, "StarProjectedSuspendValueClass");
+}
