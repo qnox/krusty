@@ -10,11 +10,10 @@ fn explicit_backing_field_requires_read_only_property() {
              var value: Any field: String = \"value\"\n\
          }",
     );
-    assert!(errors.iter().any(|error| {
-        error.contains(
-            "explicit backing field requires a final, read-only property with default accessors",
-        )
-    }));
+    assert_eq!(
+        errors,
+        ["an explicit backing field requires a final, read-only property with default accessors"]
+    );
 }
 
 #[test]
@@ -25,9 +24,10 @@ fn explicit_backing_field_type_must_refine_property_type() {
              val value: String field: Any = \"value\"\n\
          }",
     );
-    assert!(errors
-        .iter()
-        .any(|error| error.contains("backing field type of 'value' is 'Any', which is not a subtype of its property type 'String'.")));
+    assert_eq!(
+        errors,
+        ["backing field type of 'value' is 'Any', which is not a subtype of its property type 'String'."]
+    );
 }
 
 #[test]

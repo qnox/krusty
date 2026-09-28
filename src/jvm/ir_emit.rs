@@ -8144,7 +8144,8 @@ impl<'a> Emitter<'a> {
                         operation.interface,
                     ),
             };
-            if let Some(access) = access {
+            if let Some(mut access) = access {
+                self.retarget_explicit_backing_read(&operation, &mut access);
                 return self.emit_realized_property_read(
                     operation.expression,
                     operation.receiver,
@@ -8177,12 +8178,13 @@ impl<'a> Emitter<'a> {
         }
         // A source declaration from this compilation supplies the invocation shape; a checker-selected
         // spelling refines only its otherwise-conventional accessor name.
-        if let Some(access) = self.declared_property_read_access(
+        if let Some(mut access) = self.declared_property_read_access(
             operation.owner,
             operation.name,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
         ) {
+            self.retarget_explicit_backing_read(&operation, &mut access);
             return self.emit_realized_property_read(
                 operation.expression,
                 operation.receiver,
@@ -8640,6 +8642,54 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// The virtual owner of an explicit-backing-field getter. kotlinc names the call on the
+    /// receiver's static class (`HolderChild.getStamp`), not on the class that declared the field.
+    fn explicit_backing_receiver_class(
+        &self,
+        owner: &str,
+        name: &str,
+        receiver: Option<crate::ir::ExprId>,
+    ) -> Option<String> {
+        let class = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name_matches(owner))?;
+        class
+            .properties
+            .iter()
+            .find(|property| property.name == name && property.storage_ty.is_some())?;
+        let receiver = receiver?;
+        let static_type = self
+            .ir
+            .logical_types
+            .get(&receiver)
+            .copied()
+            .unwrap_or_else(|| self.value_ty(receiver));
+        let static_name = static_type.non_null().obj_internal()?;
+        if class.fq_name_matches(&static_name.render()) {
+            return None;
+        }
+        Some(static_name.render())
+    }
+
+    fn retarget_explicit_backing_read(
+        &self,
+        operation: &PropertyOperation<'_>,
+        access: &mut crate::jvm::inline::PropertyAccess,
+    ) {
+        let Some(receiver_owner) = self.explicit_backing_receiver_class(
+            operation.owner,
+            operation.name,
+            operation.receiver,
+        ) else {
+            return;
+        };
+        if let crate::jvm::inline::PropertyAccess::Accessor { owner, .. } = access {
+            *owner = receiver_owner;
+        }
+    }
+
     /// How to read property `name` of a class THIS compilation declares — there is no class file to ask,
     /// the IR is the declaration. Inside the declaring class the private backing field is loaded directly,
     /// which is what kotlinc emits there; from outside, the read goes through the accessor. `None` when
@@ -8795,6 +8845,14 @@ impl<'a> Emitter<'a> {
     ) -> bool {
         if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
             return true;
+        }
+        // An explicit backing field is a different type from the property. The checker already
+        // chose a field read, and lowered it as one, when the receiver's static type is exactly
+        // this class. A property read that remains is the getter: a subclass value, a nested
+        // class, and every other receiver. Loading the private field here would skip that choice
+        // and hand back the carrier (`Integer.valueOf`) instead of the getter's public value.
+        if !writable && declared.is_some_and(|property| property.storage_ty.is_some()) {
+            return false;
         }
         class.fq_name_matches(&self.owner)
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
