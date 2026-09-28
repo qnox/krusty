@@ -1514,7 +1514,7 @@ fn extract_ctor_default(
                 .classifier(internal)
                 .is_some_and(|t| t.is_object())
             {
-                CtorDefaultValue::Object(internal.render())
+                CtorDefaultValue::Object(internal)
             } else {
                 return None;
             }
