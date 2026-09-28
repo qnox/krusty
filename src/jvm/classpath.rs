@@ -4129,7 +4129,7 @@ impl Classpath {
     ) -> Option<MethodCode> {
         let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         let read_once = || {
-            self.class_bytes(&internal.render())
+            self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal_id))
                 .and_then(|bytes| ClassBodies::parse(std::sync::Arc::new(bytes)))
                 .and_then(|class| class.method_code(name, descriptor))
         };
@@ -7390,6 +7390,70 @@ mod fq_tests {
         assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
         assert_ne!(first.code, second.code);
         assert_eq!(second.code, second_again.code);
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove temp dir");
+    }
+
+    // A metadata classifier can keep a dot in its final segment (`Outer.Inner`). The class file is
+    // stored under `$`. The body read must use that physical spelling.
+    #[test]
+    fn method_body_of_a_dotted_classifier_reads_the_dollar_class_file() {
+        let directory = test_temp_dir("dotted-body-class");
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        let mut cw = crate::jvm::classfile::ClassWriter::new(
+            "probe/body6044/Outer$Inner",
+            "java/lang/Object",
+        );
+        let mut code = crate::jvm::classfile::CodeBuilder::new(0);
+        code.push_int(7, &mut cw);
+        code.ireturn();
+        cw.add_method(
+            crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
+            "answer",
+            "()I",
+            &code,
+        );
+        let jar = directory.join("nested.jar");
+        write_test_jar_with_entry(&jar, "probe/body6044/Outer$Inner.class", &cw.finish());
+
+        let dotted = crate::types::type_name_child(type_name("probe/body6044"), "Outer.Inner");
+        let classpath = Classpath::new(vec![jar]);
+        let code = classpath
+            .method_code_name(dotted, "answer", "()I")
+            .expect("dotted classifier reads Outer$Inner.class");
+        assert_eq!(code.code.last().copied(), Some(0xac)); // ireturn
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove temp dir");
+    }
+
+    // `kotlin/Function1` is a metadata name. Its bytecode lives in `kotlin/jvm/functions/Function1`.
+    #[test]
+    fn method_body_of_a_function_classifier_reads_the_jvm_function_class() {
+        let directory = test_temp_dir("function-body-class");
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        let mut cw = crate::jvm::classfile::ClassWriter::new(
+            "kotlin/jvm/functions/Function1",
+            "java/lang/Object",
+        );
+        let mut code = crate::jvm::classfile::CodeBuilder::new(0);
+        code.push_int(3, &mut cw);
+        code.ireturn();
+        cw.add_method(
+            crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
+            "answer",
+            "()I",
+            &code,
+        );
+        let jar = directory.join("function.jar");
+        write_test_jar_with_entry(&jar, "kotlin/jvm/functions/Function1.class", &cw.finish());
+
+        let classpath = Classpath::new(vec![jar]);
+        let code = classpath
+            .method_code_name(type_name("kotlin/Function1"), "answer", "()I")
+            .expect("Function1 reads kotlin/jvm/functions/Function1.class");
+        assert_eq!(code.code.last().copied(), Some(0xac));
 
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove temp dir");

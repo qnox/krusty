@@ -51,7 +51,7 @@ impl Classpath {
         {
             return Some(Some(hit));
         }
-        let internal = internal_id.render();
+        let internal = crate::jvm::names::classfile_internal_name_of(internal_id);
         let name = format!("{internal}.class");
         let bytes = match self.entries.get(entry_index)? {
             Entry::Dir(directory) => std::fs::read(directory.join(&name)).ok().filter(|bytes| {
