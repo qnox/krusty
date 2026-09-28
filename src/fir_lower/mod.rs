@@ -400,16 +400,7 @@ fn initialized_class(
     let class = loop {
         let anchor = index.declaration_anchor(current)?;
         if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
-            let enum_class = index.classifier_header(anchor.owner?)?.classifier;
-            let order = index.source_order(current)?;
-            break ir
-                .classes
-                .iter()
-                .find(|class| class.fq_name == enum_class)?
-                .enum_entries
-                .iter()
-                .find(|entry| entry.source_order == order)?
-                .subclass?;
+            return ir.checked_enum_entry_classes.get(&current).copied();
         }
         if let Some(classifier) = index.classifier_header(current) {
             break classifier.classifier;
