@@ -79,7 +79,7 @@ pub(super) fn emission_contexts(
             ir.statics
                 .iter()
                 .filter(|property| property.owner.is_none())
-                .map(|property| property.init),
+                .filter_map(|property| property.init),
         )
         .collect();
     let mut contexts = vec![EmissionContext {
@@ -128,7 +128,7 @@ pub(super) fn emission_contexts(
             ir.statics
                 .iter()
                 .filter(|property| property.owner == Some(class.fq_name))
-                .map(|property| property.init),
+                .filter_map(|property| property.init),
         );
         contexts.push(EmissionContext {
             owner: StaticOwner::Class(class.fq_name),

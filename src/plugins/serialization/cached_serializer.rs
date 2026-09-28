@@ -96,7 +96,7 @@ pub(super) fn add_cached_serializer_delegate(
     ir.statics.push(crate::ir::IrStatic {
         name: CACHED_SERIALIZER_DELEGATE.to_string(),
         ty: lazy_ty,
-        init: lazy,
+        init: Some(lazy),
         is_var: false,
         is_const: false,
         owner: Some(class_name),

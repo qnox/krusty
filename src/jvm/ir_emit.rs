@@ -1240,7 +1240,12 @@ fn build_class_metadata(
                         .initializer
                         .is_some_and(|init| static_fields::literal_initializer(ir, init))
                         || static_fields::hoisted_static_for(ir, c, property_index).is_some_and(
-                            |s| !s.is_var && static_fields::literal_initializer(ir, s.init),
+                            |s| {
+                                !s.is_var
+                                    && s.init.is_some_and(|init| {
+                                        static_fields::literal_initializer(ir, init)
+                                    })
+                            },
                         ),
                     is_const: false,
                     modifiers: property.modifiers,
@@ -2990,22 +2995,22 @@ fn emit_jvm_interface_companion_surface(
         .map(|(_, s)| s)
     {
         let descriptor = ir_type_desc(&s.ty);
-        if let Some(value) = static_fields::const_value_idx(ir, s.init, cw) {
+        if let Some(value) = s
+            .init
+            .and_then(|init| static_fields::const_value_idx(ir, init, cw))
+        {
             cw.add_field_const(0x0019, &s.name, &descriptor, value);
         } else {
             cw.add_field(0x0019, &s.name, &descriptor);
         }
     }
 
-    let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
+    let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
-        .filter(|(_, s)| {
-            s.owner_matches(&fq_name)
-                && !(s.is_const && static_fields::const_value_idx_peek(ir, s.init))
-        })
-        .map(|(index, s)| (index as u32, s))
+        .filter(|(_, s)| s.owner_matches(&fq_name))
+        .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
         cw.reserve_method_name("<clinit>");
@@ -3018,12 +3023,12 @@ fn emit_jvm_interface_companion_surface(
             &fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|(_, property)| property.init),
+            clinit_statics.iter().map(|&(_, _, init)| init),
         );
         let mut clinit = CodeBuilder::new(0);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
-        for &(static_index, s) in &clinit_statics {
+        for &(static_index, s, init) in &clinit_statics {
             let pc = clinit.bytes.len() as u16;
             if let Some(&line) = c
                 .companion_class
@@ -3034,7 +3039,7 @@ fn emit_jvm_interface_companion_surface(
                     clinit_lines.push((pc, line));
                 }
             }
-            emitter.emit_static_initializer_store(&fq_name, static_index, &mut clinit);
+            emitter.emit_static_initializer_store(&fq_name, static_index, init, &mut clinit);
         }
         clinit.ret_void();
         clinit.ensure_locals(emitter.frame.max());
@@ -3283,7 +3288,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
             }
         }
         for st in &ir.statics {
-            roots.push(st.init);
+            roots.extend(st.init);
         }
         let mut out = std::collections::HashSet::new();
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -6962,11 +6967,14 @@ fn emit_enum_class(
         // line marks — so pushing entries here is the only thing that reaches the attribute.
         let mut stepped_away = false;
         for &(static_index, s) in &owner_statics {
+            let Some(init) = s.init else {
+                continue;
+            };
             if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
                 clinit_lines.push((clinit.bytes.len() as u16, s.line));
                 stepped_away = true;
             }
-            e.emit_static_initializer_store(&fq, static_index, &mut clinit);
+            e.emit_static_initializer_store(&fq, static_index, init, &mut clinit);
         }
         // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
         // line. An enum with no generated statics has a single-entry table, and adding a closing

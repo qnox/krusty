@@ -80,7 +80,7 @@ pub(super) fn add_cached_descriptor(
     ir.statics.push(IrStatic {
         name: "$cachedDescriptor".to_string(),
         ty: descriptor_ty,
-        init,
+        init: Some(init),
         is_var: false,
         is_const: false,
         owner: Some(owner),

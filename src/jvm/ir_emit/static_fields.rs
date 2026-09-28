@@ -49,6 +49,16 @@ pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool 
     const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
 }
 
+/// The initializer `<clinit>` runs for static `s`: its source initializer, unless a `const val`
+/// folds it into a `ConstantValue`. `None` for a static with no initializer (`lateinit var`).
+pub(super) fn clinit_initializer(
+    ir: &IrFile,
+    s: &crate::ir::IrStatic,
+) -> Option<crate::ir::ExprId> {
+    s.init
+        .filter(|&init| !(s.is_const && const_value_idx_peek(ir, init)))
+}
+
 pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
@@ -101,14 +111,15 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
         // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
         // first interns at its accessor body and the const payload lands after the `<clinit>` window.
-        let cv = (s.is_const && const_value_idx_peek(ir, s.init))
-            .then(|| match ir.expr(s.init) {
+        let cv = s
+            .init
+            .filter(|&init| s.is_const && const_value_idx_peek(ir, init))
+            .and_then(|init| match ir.expr(init) {
                 crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
                     Some(c.clone())
                 }
                 _ => None,
-            })
-            .flatten();
+            });
         cw.add_field_late_sig(
             acc,
             &s.name,
@@ -122,16 +133,17 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     // `const val` folded into a `ConstantValue`, nor for an initializer that IS the field's default
     // (`val absent: String? = null`, `var count: Int = 0`) — the same elision instance fields get
     // from `elide_default_property_stores`.
-    let should_store = |s: &crate::ir::IrStatic| {
-        !(crate::jvm::fresh_storage::holds_fresh_value(ir, s.ty, s.init)
-            || s.is_const && const_value_idx_peek(ir, s.init))
+    let stored_initializer = |s: &crate::ir::IrStatic| {
+        clinit_initializer(ir, s)
+            .filter(|&init| !crate::jvm::fresh_storage::holds_fresh_value(ir, s.ty, init))
     };
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
-    // interns. With nothing left to store there is NO `<clinit>` at all, so reserve only when a
-    // store will be emitted.
+    // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a
+    // `<clinit>`, even when its store is elided above (`var x = 0` leaves a lone `return`); a
+    // file of only `const val`s and `lateinit var`s has none.
     if !facade_statics
         .iter()
-        .any(|(_, property)| should_store(property))
+        .any(|(_, property)| clinit_initializer(ir, property).is_some())
     {
         return;
     }
@@ -145,20 +157,22 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         facade,
         facade,
         Ty::Unit,
-        facade_statics.iter().map(|(_, property)| property.init),
+        facade_statics
+            .iter()
+            .filter_map(|(_, property)| property.init),
     );
     let mut code = CodeBuilder::new(0);
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     for &(index, s) in &facade_statics {
-        if !should_store(s) {
+        let Some(init) = stored_initializer(s) else {
             continue;
-        }
+        };
         if s.line != 0 {
             clinit_lines.push((code.bytes.len() as u16, s.line));
         }
-        e.emit_static_initializer_store(facade, index, &mut code);
+        e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
@@ -385,14 +399,15 @@ pub(super) fn emit_class_static_fields(
         // first interns at its `access$…$cp` bridge and a folded const's name + `ConstantValue`
         // land after the `<clinit>` window.
         let fold = s.is_const && !s.is_var && !hoisted;
-        let cv = fold
-            .then(|| match ir.expr(s.init) {
+        let cv = s
+            .init
+            .filter(|_| fold)
+            .and_then(|init| match ir.expr(init) {
                 crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
                     Some(c.clone())
                 }
                 _ => None,
-            })
-            .flatten();
+            });
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
@@ -504,14 +519,12 @@ pub(super) fn emit_class_static_initializer(
     byte_parity: bool,
     cw: &mut ClassWriter,
 ) {
-    let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
+    let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
-        .filter(|s| {
-            s.1.owner_matches(fq_name) && !(s.1.is_const && const_value_idx_peek(ir, s.1.init))
-        })
-        .map(|(index, s)| (index as u32, s))
+        .filter(|(_, s)| s.owner_matches(fq_name))
+        .filter_map(|(index, s)| Some((index as u32, s, clinit_initializer(ir, s)?)))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
         // kotlinc visits `<clinit>` (name + descriptor) before its body's companion
@@ -526,7 +539,7 @@ pub(super) fn emit_class_static_initializer(
             fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|(_, property)| property.init),
+            clinit_statics.iter().map(|&(_, _, init)| init),
         );
         let mut clinit = CodeBuilder::new(0);
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
@@ -534,11 +547,11 @@ pub(super) fn emit_class_static_initializer(
         // store's pc, mapping to the property's declaration line in the COMPANION source. The
         // `Companion` construction itself has no entry.
         let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-        for (static_index, s) in &clinit_statics {
+        for &(static_index, s, init) in &clinit_statics {
             let pc = clinit.bytes.len() as u16;
             // A hoisted companion property's line lives on the companion. A static a compiler
             // plugin generated has no property to look up and carries its own.
-            let line = if ir.is_jvm_companion_hoisted_static(*static_index) {
+            let line = if ir.is_jvm_companion_hoisted_static(static_index) {
                 c.companion_class
                     .as_ref()
                     .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
@@ -550,7 +563,7 @@ pub(super) fn emit_class_static_initializer(
             if line != 0 {
                 clinit_lines.push((pc, line));
             }
-            e.emit_static_initializer_store(fq_name, *static_index, &mut clinit);
+            e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());
@@ -726,15 +739,16 @@ impl Emitter<'_> {
         &mut self,
         owner: &str,
         static_index: u32,
+        init: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
         let field = &self.ir.statics[static_index as usize];
-        self.emit_value(field.init, code);
-        if self.diverges(field.init) {
+        self.emit_value(init, code);
+        if self.diverges(init) {
             return;
         }
         let physical = jvm_declared_ty(&field.ty);
-        self.adapt_physical_operand_for(field.init, self.value_ty(field.init), physical, code);
+        self.adapt_physical_operand_for(init, self.value_ty(init), physical, code);
         // Static storage is identified by its place in the file's static table.
         let reference = self.cw.fieldref(
             owner,

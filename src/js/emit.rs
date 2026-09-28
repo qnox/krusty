@@ -86,11 +86,14 @@ pub fn emit_file(ir: &IrFile) -> String {
     // Top-level properties: module-level `let`s initialized in declaration order (after classes,
     // which a `new`-using initializer may reference; before functions, which JS hoists).
     for s in &ir.statics {
-        out.push_str(&format!(
-            "let {} = {};\n",
-            s.name,
-            emit_expr(ir, s.init, false)
-        ));
+        match s.init {
+            Some(init) => out.push_str(&format!(
+                "let {} = {};\n",
+                s.name,
+                emit_expr(ir, init, false)
+            )),
+            None => out.push_str(&format!("let {};\n", s.name)),
+        }
     }
     for (i, f) in ir.functions.iter().enumerate() {
         if f.dispatch_receiver.is_some() || class_methods.contains(&(i as u32)) {
