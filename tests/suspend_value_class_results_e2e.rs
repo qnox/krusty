@@ -9,9 +9,13 @@
 use super::common;
 
 fn expect_method_matches(src: &str, class: &str, method: &str) {
+    expect_method_matches_over(&[], src, class, method);
+}
+
+fn expect_method_matches_over(lib: &[(&str, &str)], src: &str, class: &str, method: &str) {
     match common::method_code_diff_against_kotlinc(
         "SuspendValueClassResults",
-        &[],
+        lib,
         src,
         class,
         method,
@@ -80,6 +84,59 @@ fn a_call_to_a_type_parameter_result_unboxes_it() {
         OVERRIDES,
         "SuspendValueClassResultsKt$viaBase$1",
         "public final java.lang.Object invokeSuspend(java.lang.Object);",
+    );
+}
+
+const DEPENDENCY_BASE: &str = "package dep\n\
+interface Base<T> { suspend fun value(): T }\n";
+
+const DEPENDENCY_OVERRIDE: &str = "import dep.*\n\
+@JvmInline value class Name(val s: String)\n\
+interface Gate { suspend fun open(): Int }\n\
+suspend fun <T> pick(g: Gate, v: T): T { g.open(); return v }\n\
+class Derived(val g: Gate) : Base<Name> { override suspend fun value(): Name = pick(g, Name(\"z\")) }\n";
+
+/// A dependency's declaration counts like a module's: overriding its type-parameter result makes
+/// `Derived.value` return the box, forwarding its continuation to the generic `pick`.
+#[test]
+fn an_override_of_a_dependency_type_parameter_result_returns_the_box() {
+    expect_method_matches_over(
+        &[("Lib.kt", DEPENDENCY_BASE)],
+        DEPENDENCY_OVERRIDE,
+        "Derived",
+        "public java.lang.Object value-t1DQ2nc(kotlin.coroutines.Continuation<? super Name>);",
+    );
+}
+
+/// A caller of the dependency's `Base.value` receives the box whether `Derived` completes at once
+/// or suspends and is resumed later.
+#[test]
+fn a_dependency_override_hands_its_callers_the_box_on_either_path() {
+    let main = format!(
+        "{DEPENDENCY_OVERRIDE}\
+         import kotlin.coroutines.*\n\
+         import kotlin.coroutines.intrinsics.*\n\
+         var parked: Continuation<Int>? = null\n\
+         class Immediate : Gate {{ override suspend fun open(): Int = 1 }}\n\
+         class Parking : Gate {{\n\
+         \x20   override suspend fun open(): Int = suspendCoroutineUninterceptedOrReturn {{ parked = it; COROUTINE_SUSPENDED }}\n\
+         }}\n\
+         suspend fun read(base: Base<Name>): String = base.value().s\n\
+         fun box(): String {{\n\
+         \x20   var result = \"\"\n\
+         \x20   val body: suspend () -> Unit = {{\n\
+         \x20       result += read(Derived(Immediate()))\n\
+         \x20       result += read(Derived(Parking()))\n\
+         \x20   }}\n\
+         \x20   body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
+         \x20   parked!!.resume(2)\n\
+         \x20   return if (result == \"zz\") \"OK\" else \"result $result\"\n\
+         }}\n"
+    );
+    assert_eq!(
+        common::expect_box_run_against_ref("dependency-override-results", DEPENDENCY_BASE, &main)
+            .as_deref(),
+        Some("OK")
     );
 }
 

@@ -710,12 +710,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
   or null-capable carrier crosses as the box on both paths (`Boxed`). Following kotlinc's
   `originalReturnTypeOfSuspendFunctionReturningUnboxedInlineClass`, a suspend override also returns
-  the box when a module declaration it overrides returns another classifier, a type parameter
-  included (`override suspend fun generic(): X` over `fun generic(): T`). A call to a same-module
-  callee that declares no value-class result receives the box on either path and unboxes it; when
-  the caller returns that same box it forwards its continuation, with neither an unbox nor a cast
-  (`jvm/value_classes/suspend_results.rs`, `jvm/suspend/value_class_results.rs`). Tests:
-  `tests/suspend_value_class_results_e2e.rs`.
+  the box when a declaration it overrides, in this module or a dependency, returns another
+  classifier, a type parameter included (`override suspend fun generic(): X` over
+  `fun generic(): T`). A call to a callee that declares no value-class result, in this module or a
+  dependency, receives the box on either path and unboxes it. A dependency's suspend callable
+  therefore keeps its declared result like any other, so a call through `Base<X>.value(): T` knows
+  it reads a box. When the caller returns that same box it forwards its continuation, with neither
+  an unbox nor a cast (`jvm/value_classes/suspend_results.rs`,
+  `jvm/suspend/value_class_results.rs`). Tests: `tests/suspend_value_class_results_e2e.rs`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.

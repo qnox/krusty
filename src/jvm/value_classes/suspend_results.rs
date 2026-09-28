@@ -33,7 +33,9 @@ pub(super) fn record_suspend_results(
     let external = ir.suspend_calls.iter().filter_map(|(&call, result)| {
         suspend_result_representation(result, under, false).map(|realization| (call, realization))
     });
-    // A same-module callee that returns a type parameter completes with the box on either path; the call's checked coercion names the value class it unboxes to.
+    // A callee that declares a type parameter, or another classifier, as its result completes with
+    // the box on either path, in this module or a dependency; the call's checked coercion names the
+    // value class it unboxes to.
     let generic = ir.exprs.iter().filter_map(|expression| {
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -43,8 +45,11 @@ pub(super) fn record_suspend_results(
         else {
             return None;
         };
-        let callee = crate::jvm::suspend::suspend_call_fid(ir, call, suspend_functions)?;
-        let declared = declared_results.get(callee as usize)?;
+        let declared = match crate::jvm::suspend::suspend_call_fid(ir, call, suspend_functions) {
+            Some(callee) => declared_results.get(callee as usize)?,
+            None if ir.suspend_calls.contains_key(&call) => ir.call_declared_ret.get(&call)?,
+            None => return None,
+        };
         if suspend_result_representation(declared, under, false).is_some() {
             return None;
         }
@@ -73,8 +78,9 @@ fn boxed(result: IrValueClassSuspendResult) -> IrValueClassSuspendResult {
 /// Suspend overrides whose value-class result crosses as its box. A supertype that observes a
 /// non-value-class result through a bridge needs the concrete value class's box across `Object`,
 /// even when its carrier happens to have the same JVM descriptor; and kotlinc boxes whenever an
-/// overridden module declaration returns another classifier, a type parameter included. Each
-/// bridge and override edge carries the exact selected target; emitted names are never lookup input.
+/// overridden declaration, in this module or a dependency, returns another classifier, a type
+/// parameter included. Each bridge and override edge carries the exact selected target; emitted
+/// names are never lookup input.
 fn force_boxed_results(
     ir: &IrFile,
     under: &Under,
@@ -102,35 +108,30 @@ fn force_boxed_results(
                 && (!bridge.erased_ret.is_nullable() || !nullable_is_boxed(classifier, under));
             (!supertype_uses_same_value_class_carrier).then_some(target)
         });
-    let overridden = ir
-        .function_overrides
-        .values()
-        .flatten()
-        .filter(|edge| matches!(edge.overridden, ResolvedFunctionOverrideTarget::Module(_)))
-        .filter_map(|edge| {
-            let function = edge
-                .implementation_function
-                .or_else(|| match edge.implementation {
-                    ResolvedFunctionOverrideTarget::Module(declaration) => {
-                        ir.checked_callable_functions.get(&declaration).copied()
-                    }
-                    ResolvedFunctionOverrideTarget::External(_) => None,
-                })?;
-            if !suspend_functions.contains(&function) {
-                return None;
-            }
-            let classifier = declared_results
-                .get(function as usize)?
-                .non_null()
-                .obj_internal()
-                .filter(|classifier| under.contains_key(classifier))?;
-            // A type parameter has no classifier of its own, whatever its bound.
-            let overridden_classifier = match edge.declared_result.non_null() {
-                Ty::TyParam(..) => None,
-                result => result.obj_internal(),
-            };
-            (overridden_classifier != Some(classifier)).then_some(function)
-        });
+    let overridden = ir.function_overrides.values().flatten().filter_map(|edge| {
+        let function = edge
+            .implementation_function
+            .or_else(|| match edge.implementation {
+                ResolvedFunctionOverrideTarget::Module(declaration) => {
+                    ir.checked_callable_functions.get(&declaration).copied()
+                }
+                ResolvedFunctionOverrideTarget::External(_) => None,
+            })?;
+        if !suspend_functions.contains(&function) {
+            return None;
+        }
+        let classifier = declared_results
+            .get(function as usize)?
+            .non_null()
+            .obj_internal()
+            .filter(|classifier| under.contains_key(classifier))?;
+        // A type parameter has no classifier of its own, whatever its bound.
+        let overridden_classifier = match edge.declared_result.non_null() {
+            Ty::TyParam(..) => None,
+            result => result.obj_internal(),
+        };
+        (overridden_classifier != Some(classifier)).then_some(function)
+    });
     bridged.chain(overridden).collect()
 }
 
