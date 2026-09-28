@@ -126,3 +126,40 @@ mod tests {
 pub(crate) fn instance_representation(ir: &IrFile, classifier: TypeName) -> Ty {
     boxed_value_class_carrier(ir, classifier).unwrap_or_else(|| Ty::obj_name(classifier))
 }
+
+/// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
+/// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
+/// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
+/// `Class` is a reference.
+pub(super) fn is_ref(t: &Ty) -> bool {
+    if t.is_nullable() {
+        return true;
+    }
+    // A Kotlin type parameter always occupies an erased JVM reference slot, even when its upper
+    // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
+    // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
+    // instead of the value class's boxed wrapper.
+    if matches!(t.non_null(), Ty::TyParam(..)) {
+        return true;
+    }
+    // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
+    // reference. Check this FIRST — `kotlin_class_internal(UInt)` is "kotlin/UInt" but `unboxed_primitive`
+    // only knows the signed wrappers, so the descriptor check below would misclassify it as a reference.
+    if t.is_jvm_scalar() {
+        return false;
+    }
+    // A FUNCTION type realizes as a `FunctionN` object and an array as its array class — both are
+    // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
+    // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
+    // other non-null reference parameter).
+    if matches!(t, Ty::Fun(_)) || t.is_array() {
+        return true;
+    }
+    // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no
+    // `obj_internal()` — treating it as a non-reference makes `nullable_is_boxed` think a `String`-backed
+    // value class is primitive-like (`Str?` wrongly boxed instead of unboxed to `String?`).
+    match t.kotlin_class_internal() {
+        Some(fq_name) => Ty::obj_name(fq_name).unboxed_primitive().is_none(),
+        None => false,
+    }
+}
