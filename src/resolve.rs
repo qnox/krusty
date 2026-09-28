@@ -104,6 +104,7 @@ mod sam_constructors;
 mod source_fragment;
 use source_fragment::SourceFragmentMode;
 mod scope;
+mod selected_argument_commitment;
 mod signature_collection;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
@@ -13974,6 +13975,7 @@ impl<'a> Checker<'a> {
                         arg_tys,
                     },
                     &validation_params,
+                    &validation_params,
                     &candidate.call_sig,
                     None,
                 ) {
@@ -15982,6 +15984,7 @@ impl<'a> Checker<'a> {
                     args,
                     arg_tys: &argument_types,
                 },
+                &shape.params,
                 &shape.params,
                 &shape.call_sig,
                 None,
@@ -18028,6 +18031,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             },
             &params,
+            &params,
             &cs,
             None,
         ) {
@@ -18705,6 +18709,7 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys: &argument_types,
                     },
+                    &shape.params,
                     &shape.params,
                     &shape.call_sig,
                     None,
@@ -19644,6 +19649,7 @@ impl<'a> Checker<'a> {
                                         arg_tys: &arg_tys,
                                     },
                                     &m.params,
+                                    &m.params,
                                     &m.call_sig,
                                     None,
                                 ) {
@@ -19712,6 +19718,7 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_tys: &arg_tys,
                                 },
+                                &member.params,
                                 &member.params,
                                 &member.call_sig,
                                 None,
@@ -19864,6 +19871,7 @@ impl<'a> Checker<'a> {
                                 args,
                                 arg_tys: &arg_tys,
                             },
+                            &shape.params,
                             &shape.params,
                             &shape.call_sig,
                             None,
@@ -48127,6 +48135,19 @@ impl<'a> Checker<'a> {
                 );
             }
         };
+        // The parameters as declared, before the call's own type arguments apply: kotlinc commits
+        // a platform argument to non-null against these (see `expect_call_arg_labeled`).
+        let declared_signature = selected.semantic_signature();
+        debug_assert_eq!(
+            declared_signature.params.len(),
+            selected.callable.params.len(),
+            "a selected callable's declared and selected parameters line up"
+        );
+        let declared_params = shape
+            .parameter_indices
+            .iter()
+            .map(|&parameter| declared_signature.params[parameter])
+            .collect::<Vec<_>>();
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
@@ -48149,6 +48170,7 @@ impl<'a> Checker<'a> {
                         arg_tys,
                     },
                     &shape.params,
+                    &declared_params,
                     &shape.call_sig,
                     (!expectations.is_empty()).then_some(&expectations),
                 )
@@ -58948,6 +58970,7 @@ impl<'a> Checker<'a> {
                                         c.expect_call_arg_labeled(
                                             header_scope,
                                             expected,
+                                            expected,
                                             arg,
                                             actual,
                                             label.as_deref(),
@@ -60630,144 +60653,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    /// Validate the source arguments of one already-selected callable and commit their semantic
-    /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
-    /// named/default/vararg/trailing-lambda mapping for every selected callable.
-    fn expect_selected_call_args(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        params: &[Ty],
-        call_sig: &CallSig,
-        argument_expectations: Option<&HashMap<ExprId, Ty>>,
-    ) -> bool {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        // Candidate probing and selected-call commitment must expose the same implicit label.
-        // Rechecking a postponed/SAM lambda against the winner otherwise drops `return@callee`
-        // even though the call syntax—and therefore the label—has not changed.
-        let implicit_lambda_label = call_implicit_lambda_label(self.file, call).map(str::to_string);
-        let slots = match map_call_args(
-            args,
-            arg_names,
-            &call_sig.param_names,
-            params.len(),
-            call_sig.required,
-            &call_sig.param_defaults,
-            call_sig.vararg_index,
-            trailing_lambda,
-        ) {
-            Ok(slots) => slots,
-            Err(error) => {
-                self.report_call_arg_mapping_error(call, args, error);
-                return false;
-            }
-        };
-        let Some(argument_parameters) = call_argument_parameter_indices(
-            args.len(),
-            params.len(),
-            arg_names,
-            trailing_lambda,
-            call_sig,
-        ) else {
-            debug_assert!(false, "successful argument mapping must be invertible");
-            return false;
-        };
-        for (source, (&argument, &parameter)) in args.iter().zip(&argument_parameters).enumerate() {
-            let Some((&array_or_parameter, &probed_actual)) =
-                params.get(parameter).zip(arg_tys.get(source))
-            else {
-                debug_assert!(false, "selected call argument lies outside its signature");
-                return false;
-            };
-            let named = arg_names
-                .and_then(|names| names.get(source))
-                .is_some_and(Option::is_some);
-            let whole_array = call_sig.vararg_index == Some(parameter)
-                && (named || self.file.is_spread_arg(argument));
-            let inferred = argument_expectations
-                .and_then(|expectations| expectations.get(&argument))
-                .copied();
-            let expected = if call_sig.vararg_index == Some(parameter) {
-                self.vararg_argument_expected(
-                    array_or_parameter,
-                    probed_actual,
-                    whole_array,
-                    inferred,
-                )
-            } else {
-                inferred.unwrap_or(array_or_parameter)
-            };
-            let actual = self.selected_argument_type(
-                scope,
-                argument,
-                probed_actual,
-                expected,
-                call_sig,
-                parameter,
-                implicit_lambda_label.as_deref(),
-            );
-            if whole_array {
-                self.expect_whole_array_vararg_arg(
-                    Some(scope),
-                    argument,
-                    actual,
-                    array_or_parameter,
-                );
-                continue;
-            }
-            if self.implicit_integer_coercion_applies(
-                argument,
-                expected,
-                call_sig
-                    .implicit_integer_coercion
-                    .get(parameter)
-                    .copied()
-                    .unwrap_or(false),
-            ) {
-                continue;
-            }
-            self.expect_call_arg_labeled(
-                scope,
-                expected,
-                argument,
-                actual,
-                implicit_lambda_label.as_deref(),
-            );
-        }
-        self.resolved_call_arg_slots.insert(call, slots);
-        true
-    }
-
-    /// Project one declared vararg array onto the representation currently carried by its source
-    /// argument. A spread can be probed either as the array expression (`*xs: Array<T>`) or as the
-    /// contributed element (`*xs: T`); selection and final checking must accept both without losing
-    /// the full `Array<T>` expectation needed to contextually type an array-producing generic call.
-    fn vararg_argument_expected(
-        &self,
-        declared_array: Ty,
-        _actual: Ty,
-        whole_array_syntax: bool,
-        inferred_element: Option<Ty>,
-    ) -> Ty {
-        let declared_element = declared_array.array_read_elem().unwrap_or(declared_array);
-        let element = inferred_element.unwrap_or(declared_element);
-        if !whole_array_syntax {
-            return element;
-        }
-        match declared_array.non_null() {
-            Ty::Obj(owner, _) if owner.matches("kotlin/Array") => {
-                Ty::obj_args_name(owner, &[element])
-            }
-            _ => declared_array,
-        }
-    }
-
     /// Commit the expected type supplied by the selected declaration. Candidate probing is allowed
     /// to leave lambdas and generic-return calls provisional; after selection every argument form,
     /// including a whole-array vararg spread, must pass through this one contextual-typing seam before
@@ -61141,13 +61026,17 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         actual: Ty,
     ) {
-        self.expect_call_arg_labeled(scope, expected, argument, actual, None);
+        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, None);
     }
 
+    /// `declared` is the selected parameter's own type, before the call's type variables are
+    /// inferred: a platform argument is committed to non-null only when that type excludes null
+    /// (see [`Self::narrow_platform_value`]).
     fn expect_call_arg_labeled(
         &mut self,
         scope: &CheckerScope<'_>,
         expected: Ty,
+        declared: Ty,
         argument: ExprId,
         actual: Ty,
         implicit_lambda_label: Option<&str>,
@@ -61351,7 +61240,9 @@ impl<'a> Checker<'a> {
         {
             return;
         }
-        self.narrow_platform_value(expected, argument, PlatformNarrowing::Argument);
+        if !declared.upper_bound_admits_null() {
+            self.narrow_platform_value(expected, argument, PlatformNarrowing::Argument);
+        }
         self.expect_call_argument_assignable(Some(scope), expected, actual, self.span(argument));
     }
 
@@ -71324,6 +71215,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             },
             &shape.params,
+            &shape.params,
             &shape.call_sig,
             None,
         ) {
@@ -72187,6 +72079,7 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
+            &visible_params,
             &visible_params,
             &shape.call_sig,
             None,
@@ -73820,6 +73713,7 @@ impl<'a> Checker<'a> {
                 args,
                 arg_tys: &arg_tys,
             },
+            &contextual.params,
             &contextual.params,
             &contextual.call_sig,
             None,
