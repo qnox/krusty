@@ -60,6 +60,10 @@ fn finish_analysis(
             eprintln!("krusty-lsp: {error}; source analysis remains pending");
             Vec::new()
         }
+        Err(error) if krusty_lsp::analysis_was_superseded(error.kind()) => {
+            *analysis_pending = false;
+            Vec::new()
+        }
         Err(error) => {
             *analysis_pending = false;
             (0..document_count)
@@ -1128,6 +1132,8 @@ struct WorkerHost {
     index_project_sources: ProjectSources,
     analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
+    gate: std::sync::Arc<krusty_lsp::AnalysisGate>,
+    superseded: bool,
     platform_classpath: Vec<PathBuf>,
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
@@ -1141,6 +1147,8 @@ struct WorkerHost {
 impl WorkerHost {
     fn new(mut worker: AnalysisWorker, options: LspOptions) -> Self {
         worker.set_language_features(options.language_features());
+        let gate = std::sync::Arc::new(krusty_lsp::AnalysisGate::new());
+        worker.set_analysis_gate(std::sync::Arc::clone(&gate));
         let platform_classpath =
             krusty_lsp::effective_platform_classpath(options.jdk_home(), options.no_jdk());
         Self {
@@ -1157,6 +1165,8 @@ impl WorkerHost {
             index_project_sources: ProjectSources::default(),
             analysis_cache: Vec::new(),
             analysis_pending: false,
+            gate,
+            superseded: false,
             platform_classpath,
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
@@ -1505,6 +1515,14 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.analysis_pending
     }
 
+    fn analysis_gate(&self) -> Option<std::sync::Arc<krusty_lsp::AnalysisGate>> {
+        Some(std::sync::Arc::clone(&self.gate))
+    }
+
+    fn take_superseded(&mut self) -> bool {
+        std::mem::take(&mut self.superseded)
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         let result = self.worker.analyze(sources);
         finish_analysis(&mut self.analysis_pending, result, sources.len())
@@ -1628,6 +1646,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             .collect::<Vec<_>>();
         let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
         self.analysis_pending = false;
+        self.superseded = false;
         // Retention spans the pass, not one group inside it: every group this loop reaches is
         // recorded, so a file is dumpable whichever module it belongs to.
         self.retained.begin_pass();
@@ -1820,6 +1839,14 @@ impl krusty_lsp::Analysis for WorkerHost {
                     &language_arguments,
                     classpath.as_deref(),
                 );
+                if result
+                    .as_ref()
+                    .is_err_and(|error| krusty_lsp::analysis_was_superseded(error.kind()))
+                {
+                    self.analysis_pending = false;
+                    self.superseded = true;
+                    return (Vec::new(), Vec::new());
+                }
                 let cacheable = result.is_ok();
                 let mut group_analyses =
                     finish_analysis(&mut self.analysis_pending, result, documents.len());
@@ -2761,6 +2788,25 @@ mod tests {
         assert!(analysis_remains_pending(io::ErrorKind::Interrupted));
         assert!(analysis_remains_pending(io::ErrorKind::TimedOut));
         assert!(!analysis_remains_pending(io::ErrorKind::UnexpectedEof));
+        assert!(!analysis_remains_pending(io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn superseded_analysis_publishes_neither_a_failure_nor_a_retry() {
+        let mut pending = true;
+        let analyses = finish_analysis(
+            &mut pending,
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "analysis superseded by a newer edit",
+            )),
+            3,
+        );
+        assert!(!pending);
+        assert!(analyses.is_empty());
+        assert!(krusty_lsp::analysis_was_superseded(
+            io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]

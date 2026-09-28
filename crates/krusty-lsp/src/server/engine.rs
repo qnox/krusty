@@ -14,6 +14,7 @@ use super::super::{
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
+use crate::analysis_gate::{AnalysisGate, AnalysisRun};
 use crate::compiler_analysis::LibraryRef;
 use crate::{ScanProgress, ScanReporter};
 
@@ -255,7 +256,8 @@ impl AnalysisEngine {
         analyze: A,
         events: SyncSender<Incoming>,
     ) -> AnalysisEngine {
-        let (commands, command_rx) = command_queue();
+        let gate = analyze.analysis_gate();
+        let (commands, command_rx) = command_queue(gate);
         let admission = Arc::new(RwLock::new(DocumentAdmission::default()));
         let engine_admission = admission.clone();
         let handle = std::thread::spawn(move || run(analyze, command_rx, events, engine_admission));
@@ -337,6 +339,8 @@ struct CommandState {
     indexed_total: usize,
     generation: u64,
     disconnected: bool,
+    /// Present when the host can cancel the analysis that is already inside the worker.
+    gate: Option<Arc<AnalysisGate>>,
 }
 
 enum CommandReceive {
@@ -345,9 +349,12 @@ enum CommandReceive {
     Disconnected,
 }
 
-fn command_queue() -> (CommandSender, CommandReceiver) {
+fn command_queue(gate: Option<Arc<AnalysisGate>>) -> (CommandSender, CommandReceiver) {
     let queue = Arc::new(CommandQueue {
-        state: Mutex::new(CommandState::default()),
+        state: Mutex::new(CommandState {
+            gate,
+            ..CommandState::default()
+        }),
         ready: Condvar::new(),
     });
     (
@@ -387,6 +394,9 @@ impl CommandState {
     fn enqueue(&mut self, command: EngineCommand) {
         match command {
             EngineCommand::Analyze(job) => {
+                if let Some(gate) = &self.gate {
+                    gate.note_newer_analysis();
+                }
                 if let Some(index) = self
                     .pending
                     .iter()
@@ -777,6 +787,15 @@ impl CommandReceiver {
             .indexing_progress()
     }
 
+    fn analysis_gate(&self) -> Option<Arc<AnalysisGate>> {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .gate
+            .clone()
+    }
+
     fn interactive_pending(&self) -> bool {
         !self
             .queue
@@ -1084,8 +1103,12 @@ fn run<A: Analysis>(
                 }
             }
             Some(EngineCommand::Analyze(job)) => {
+                let _run = commands.analysis_gate().map(AnalysisRun::begin);
                 let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                 let batch = job.run(&mut analyze);
+                if analyze.take_superseded() {
+                    continue;
+                }
                 if events
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
                     .is_err()
@@ -2418,7 +2441,7 @@ mod tests {
 
     #[test]
     fn a_disconnected_queue_abandons_index_work_but_finishes_interactive_work() {
-        let (sender, receiver) = command_queue();
+        let (sender, receiver) = command_queue(None);
         sender.send(EngineCommand::Analyze(AnalysisJob {
             documents: vec![("file:///w/Open.kt".into(), String::new(), 1, 0)],
             open_uris: vec!["file:///w/Open.kt".into()],
@@ -2444,7 +2467,7 @@ mod tests {
     }
     #[test]
     fn an_expired_refresh_deadline_wins_over_queued_index_work() {
-        let (sender, receiver) = command_queue();
+        let (sender, receiver) = command_queue(None);
         sender.send(EngineCommand::Index(IndexJob {
             generation: 0,
             priority: IndexPriority::Sweep,
@@ -2646,7 +2669,7 @@ mod tests {
 
     #[test]
     fn a_model_refresh_replaces_the_queue_generation_and_discards_old_work() {
-        let (_sender, receiver) = command_queue();
+        let (_sender, receiver) = command_queue(None);
         receiver.enqueue(EngineCommand::Index(IndexJob {
             generation: 0,
             priority: IndexPriority::Sweep,
@@ -2751,6 +2774,108 @@ mod tests {
             1,
             "interactive analyses must not re-walk the complete workspace once its sweep is queued"
         );
+        engine.join();
+    }
+
+    #[test]
+    fn a_newer_analysis_preempts_one_that_has_already_started() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::sync_channel;
+        use std::sync::{Arc, Condvar, Mutex};
+
+        struct Host {
+            gate: Arc<AnalysisGate>,
+            entered: Arc<(Mutex<bool>, Condvar)>,
+            runs: Arc<AtomicUsize>,
+            superseded: bool,
+        }
+
+        impl Analysis for Host {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analysis_gate(&self) -> Option<Arc<AnalysisGate>> {
+                Some(Arc::clone(&self.gate))
+            }
+
+            fn take_superseded(&mut self) -> bool {
+                std::mem::take(&mut self.superseded)
+            }
+
+            fn analyze_open_documents(
+                &mut self,
+                _documents: &[(&str, &str)],
+                _open_uris: &[&str],
+            ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+                let run = self.runs.fetch_add(1, Ordering::SeqCst);
+                {
+                    let (lock, ready) = &*self.entered;
+                    *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+                    ready.notify_all();
+                }
+                if run == 0 {
+                    let started = Instant::now();
+                    while !self.gate.is_cancelled() && started.elapsed() < Duration::from_secs(5) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    self.superseded = self.gate.is_cancelled();
+                    return (Vec::new(), Vec::new());
+                }
+                (vec![DocumentAnalysis::empty()], Vec::new())
+            }
+        }
+
+        let gate = Arc::new(AnalysisGate::with_preempt_after(0));
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (events, incoming) = sync_channel(32);
+        let engine = AnalysisEngine::spawn(
+            Host {
+                gate,
+                entered: Arc::clone(&entered),
+                runs: Arc::clone(&runs),
+                superseded: false,
+            },
+            events,
+        );
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a() {}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+        {
+            let (lock, ready) = &*entered;
+            let guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (guard, wait) = ready
+                .wait_timeout_while(guard, Duration::from_secs(2), |entered| !*entered)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(
+                *guard && !wait.timed_out(),
+                "the first analysis should enter"
+            );
+        }
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun b() {}".into(), 2)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+
+        let mut completed = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while completed < 1 && Instant::now() < deadline {
+            match incoming.recv_timeout(Duration::from_millis(200)) {
+                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_))) => completed += 1,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert_eq!(completed, 1, "the superseded pass must not publish");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
         engine.join();
     }
 }

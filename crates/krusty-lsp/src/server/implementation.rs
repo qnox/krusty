@@ -316,6 +316,16 @@ pub trait Analysis {
         false
     }
 
+    /// Gate the engine arms when this host can cancel an in-flight worker read.
+    fn analysis_gate(&self) -> Option<std::sync::Arc<crate::AnalysisGate>> {
+        None
+    }
+
+    /// Take the flag set when the pass that just returned was cancelled for a newer edit.
+    fn take_superseded(&mut self) -> bool {
+        false
+    }
+
     /// Adopt the workspace root and report the initial project state.
     fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> ProjectFeedback {
         ProjectFeedback::default()

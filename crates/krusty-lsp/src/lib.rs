@@ -1,4 +1,5 @@
 mod analysis;
+mod analysis_gate;
 mod compiler_analysis;
 mod dependency_cache;
 mod dependency_sources;
@@ -16,6 +17,7 @@ pub mod uri;
 mod worker;
 
 pub use analysis::*;
+pub use analysis_gate::{analysis_was_superseded, AnalysisGate};
 pub use compiler_analysis::LibraryRef;
 pub use dependency_sources::render as deps_render;
 pub use dependency_symbols::{

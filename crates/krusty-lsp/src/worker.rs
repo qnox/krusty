@@ -9,8 +9,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
@@ -34,6 +34,11 @@ const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How often a worker read rechecks whether a newer edit cancelled the pass.
+const ANALYSIS_CANCEL_POLL: Duration = Duration::from_millis(100);
+/// Bound on waiting for a killed worker after preemption. An unbounded wait here is the stall
+/// preemption is meant to end.
+const SUPERSEDE_REAP_GRACE: Duration = Duration::from_secs(2);
 const WORKER_READY: &[u8] = b"ready";
 
 #[derive(Serialize)]
@@ -291,6 +296,7 @@ struct WorkerProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: Option<BufReader<ChildStdout>>,
+    gate: Option<Arc<crate::AnalysisGate>>,
 }
 
 /// Borrowed send shape: a many-thousand-entry classpath must stream into the bounded writer without
@@ -497,6 +503,80 @@ where
     receiver
 }
 
+enum FrameWait {
+    Continue,
+    Superseded,
+    TimedOut,
+}
+
+fn frame_wait_decision(elapsed: Duration, timeout: Duration, cancelled: bool) -> FrameWait {
+    if cancelled {
+        FrameWait::Superseded
+    } else if elapsed >= timeout {
+        FrameWait::TimedOut
+    } else {
+        FrameWait::Continue
+    }
+}
+
+#[derive(Debug)]
+enum FrameWaitError {
+    Superseded,
+    TimedOut,
+    Disconnected,
+}
+
+fn poll_frame<T>(
+    receiver: &mpsc::Receiver<T>,
+    timeout: Duration,
+    gate: Option<&crate::AnalysisGate>,
+) -> Result<T, FrameWaitError> {
+    let started = Instant::now();
+    loop {
+        let elapsed = started.elapsed();
+        let cancelled = gate.is_some_and(crate::AnalysisGate::is_cancelled);
+        match frame_wait_decision(elapsed, timeout, cancelled) {
+            FrameWait::Superseded => return Err(FrameWaitError::Superseded),
+            FrameWait::TimedOut => {
+                return match receiver.try_recv() {
+                    Ok(value) => Ok(value),
+                    Err(mpsc::TryRecvError::Empty) => Err(FrameWaitError::TimedOut),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(FrameWaitError::Disconnected),
+                };
+            }
+            FrameWait::Continue => {}
+        }
+        let remaining = timeout.saturating_sub(elapsed);
+        let slice = if gate.is_some() {
+            remaining.min(ANALYSIS_CANCEL_POLL)
+        } else {
+            remaining
+        };
+        match receiver.recv_timeout(slice) {
+            Ok(value) => return Ok(value),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(FrameWaitError::Disconnected);
+            }
+        }
+    }
+}
+
+fn reap_child_within(child: &mut Child, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if Instant::now() >= deadline => return false,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn worker_error_restarts_later(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+}
+
 impl WorkerProcess {
     fn spawn(executable: &Path, classpath: &[PathBuf]) -> io::Result<Self> {
         let configuration = encode_launch_configuration(classpath)?;
@@ -522,6 +602,7 @@ impl WorkerProcess {
             child,
             stdin,
             stdout: Some(BufReader::new(stdout)),
+            gate: None,
         };
         write_framed(&mut process.stdin, &configuration)?;
         process.wait_until_ready()?;
@@ -558,12 +639,12 @@ impl WorkerProcess {
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
         let receiver = framed_read_receiver(stdout, max_bytes);
-        match receiver.recv_timeout(timeout) {
+        match poll_frame(&receiver, timeout, self.gate.as_deref()) {
             Ok((stdout, response)) => {
                 self.stdout = Some(stdout);
                 response
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(FrameWaitError::TimedOut) => {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 if let Ok((stdout, _)) = receiver.recv() {
@@ -571,7 +652,15 @@ impl WorkerProcess {
                 }
                 Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+            Err(FrameWaitError::Superseded) => {
+                let _ = self.child.kill();
+                let _ = reap_child_within(&mut self.child, SUPERSEDE_REAP_GRACE);
+                if let Ok((stdout, _)) = receiver.recv_timeout(SUPERSEDE_REAP_GRACE) {
+                    self.stdout = Some(stdout);
+                }
+                Err(crate::analysis_gate::superseded_error())
+            }
+            Err(FrameWaitError::Disconnected) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "analysis worker response reader stopped",
             )),
@@ -664,6 +753,7 @@ pub struct AnalysisWorker {
     analyses: usize,
     max_analyses: usize,
     language_features: LangFeatures,
+    gate: Option<Arc<crate::AnalysisGate>>,
 }
 
 impl AnalysisWorker {
@@ -677,7 +767,20 @@ impl AnalysisWorker {
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
             language_features: LangFeatures::new(),
+            gate: None,
         })
+    }
+
+    pub fn set_analysis_gate(&mut self, gate: Arc<crate::AnalysisGate>) {
+        self.process.gate = Some(Arc::clone(&gate));
+        self.gate = Some(gate);
+    }
+
+    fn adopt_process(&mut self, mut process: WorkerProcess) {
+        process.gate = self.gate.clone();
+        self.process = process;
+        self.restart_required = false;
+        self.analyses = 0;
     }
 
     fn restart(&mut self) -> io::Result<()> {
@@ -685,9 +788,7 @@ impl AnalysisWorker {
         let _ = self.process.child.wait();
         self.restart_required = true;
         let replacement = WorkerProcess::spawn(&self.executable, &self.classpath)?;
-        self.process = replacement;
-        self.restart_required = false;
-        self.analyses = 0;
+        self.adopt_process(replacement);
         Ok(())
     }
 
@@ -717,9 +818,7 @@ impl AnalysisWorker {
         self.restart_required = true;
         let replacement = WorkerProcess::spawn(&self.executable, &classpath)?;
         self.classpath = classpath;
-        self.process = replacement;
-        self.restart_required = false;
-        self.analyses = 0;
+        self.adopt_process(replacement);
         Ok(())
     }
 
@@ -810,7 +909,7 @@ impl AnalysisWorker {
                 Ok(result)
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            Err(error) if worker_error_restarts_later(error.kind()) => {
                 self.restart_required = true;
                 Err(error)
             }
@@ -1348,6 +1447,54 @@ mod tests {
         let text = String::from_utf8(encoded).unwrap();
         assert!(text.contains("class A {}"));
         assert!(text.contains("class B {}"));
+    }
+
+    #[test]
+    fn a_cancelled_read_returns_before_the_worker_timeout() {
+        let gate = Arc::new(crate::AnalysisGate::with_preempt_after(0));
+        gate.begin();
+        gate.note_newer_analysis();
+        let (_sender, receiver) = mpsc::sync_channel::<u8>(1);
+        let started = Instant::now();
+        let result = poll_frame(&receiver, Duration::from_secs(30), Some(&gate));
+        assert!(matches!(result, Err(FrameWaitError::Superseded)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_ready_frame_is_kept_when_nothing_cancelled_it() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(7_u8).unwrap();
+        assert_eq!(
+            poll_frame(&receiver, Duration::from_secs(1), None).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn superseded_analysis_restarts_later_instead_of_retrying() {
+        assert!(worker_error_restarts_later(io::ErrorKind::WouldBlock));
+        assert!(worker_error_restarts_later(io::ErrorKind::TimedOut));
+        assert!(!worker_error_restarts_later(io::ErrorKind::InvalidInput));
+        assert!(!worker_error_restarts_later(io::ErrorKind::UnexpectedEof));
+        assert!(crate::analysis_was_superseded(io::ErrorKind::WouldBlock));
+        assert!(!crate::analysis_was_superseded(io::ErrorKind::Interrupted));
+    }
+
+    #[test]
+    fn frame_wait_keeps_a_short_pass_and_the_overall_deadline() {
+        assert!(matches!(
+            frame_wait_decision(Duration::from_millis(10), Duration::from_secs(30), false),
+            FrameWait::Continue
+        ));
+        assert!(matches!(
+            frame_wait_decision(Duration::from_secs(31), Duration::from_secs(30), false),
+            FrameWait::TimedOut
+        ));
+        assert!(matches!(
+            frame_wait_decision(Duration::ZERO, Duration::from_secs(30), true),
+            FrameWait::Superseded
+        ));
     }
 
     struct DelayedEof {
