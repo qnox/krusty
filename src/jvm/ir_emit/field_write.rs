@@ -62,8 +62,20 @@ impl Emitter<'_> {
         ) {
             code.mark_line(statement_line);
         }
-        let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
-        code.putfield(field_ref, slot_words(field_ty) as i32);
+        if let Some(method) = super::static_accessors::cross_class_backing_field_method(
+            self.cw,
+            self.ir,
+            &self.facade,
+            self.static_owner,
+            class,
+            index,
+            true,
+        ) {
+            code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);
+        } else {
+            let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
+            code.putfield(field_ref, slot_words(field_ty) as i32);
+        }
     }
 
     fn emit_static_storage_field(

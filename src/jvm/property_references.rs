@@ -724,8 +724,10 @@ fn module_property(
     // `access$set<X>$p`, whatever the owner is.
     let bridged_getter = declared.bridged_getter;
     let bridged_setter = declared.bridged_setter;
-    let bridged_name = |declared: &str, bridged: bool| {
-        if access_bridge || bridged {
+    let bridged_name = |declared: &str, bridged: bool, source_declared: bool| {
+        if access_bridge {
+            super::private_static_access::member_property_accessor_name(declared, source_declared)
+        } else if bridged {
             format!("access${declared}$p")
         } else {
             declared.to_owned()
@@ -789,11 +791,15 @@ fn module_property(
             owner_internal: Some(owner),
             call_owner_internal: Some(enclosing.unwrap_or(static_owner)),
             prop_name: name.to_string(),
-            getter_name: bridged_name(&declared_getter_name, bridged_getter.is_some()),
+            getter_name: bridged_name(
+                &declared_getter_name,
+                bridged_getter.is_some(),
+                declared.getter.is_some(),
+            ),
             getter_descriptor: getter_descriptor.clone(),
-            setter_name: declared_setter_name
-                .as_deref()
-                .map(|name| bridged_name(name, bridged_setter.is_some())),
+            setter_name: declared_setter_name.as_deref().map(|name| {
+                bridged_name(name, bridged_setter.is_some(), declared.setter.is_some())
+            }),
             setter_descriptor,
             owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
             prop_ty: property.ty,
