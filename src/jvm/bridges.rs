@@ -11,7 +11,7 @@
 //! runs before the value-class pass so an existing bridge's target is retargeted/renamed with the
 //! mangled name once mangling is known.
 
-use crate::ir::{Bridge, BridgeKind, IrFile};
+use crate::ir::{Bridge, BridgeKind, BridgeParameter, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::names::{property_getter_name, property_setter_name};
@@ -163,15 +163,10 @@ fn superclass_method_bridges(
         // says `Echo<T>.echo: T`. Only then apply JVM bridge erasure. Using the physical descriptor
         // here is too early: it would manufacture a bridge for semantic value-class parameters such
         // as `Continuation.resumeWith(Result<T>)` before the value-class pass realizes their carrier.
-        let (mut base_params, mut base_ret) = match edge.overridden {
-            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => (
-                edge.declared_parameters
-                    .iter()
-                    .copied()
-                    .map(bridge_erasure)
-                    .collect::<Vec<_>>(),
-                bridge_erasure(edge.declared_result),
-            ),
+        let (mut declared_parameters, declared_result) = match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => {
+                (edge.declared_parameters.to_vec(), edge.declared_result)
+            }
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
                 let realization = classpath
                     .external_callable(target)
@@ -193,23 +188,24 @@ fn superclass_method_bridges(
                     .declared_ret
                     .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
                     .unwrap_or(callable.ret);
-                (
-                    declared_parameters
-                        .iter()
-                        .copied()
-                        .map(bridge_erasure)
-                        .collect(),
-                    bridge_erasure(declared_result),
-                )
+                (declared_parameters.to_vec(), declared_result)
             }
         };
+        let mut base_params = declared_parameters
+            .iter()
+            .copied()
+            .map(bridge_erasure)
+            .collect::<Vec<_>>();
+        let mut base_ret = bridge_erasure(declared_result);
         let mut concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());
         let mut concrete_ret = own_fid
             .map(|function| ir.functions[function as usize].ret)
             .unwrap_or(edge.implementation_result);
-        let mut parameter_identities = edge.implementation_parameter_identities.clone();
+        // A bridge carries the overridden declaration's signature, so kotlinc names its parameters
+        // after that declaration's, not the override's.
+        let mut parameter_identities = edge.overridden_parameter_identities.clone();
         let suspend_function_supertype =
             crate::libraries::function_classifiers::classifier(edge.overridden_owner)
                 .is_some_and(|function| function.is_suspend() && !function.is_reflective());
@@ -222,6 +218,7 @@ fn superclass_method_bridges(
             base_ret = Ty::nullable(Ty::obj("kotlin/Any"));
             concrete_params.push(Ty::obj("kotlin/coroutines/Continuation"));
             concrete_ret = base_ret;
+            declared_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
             parameter_identities.push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
         }
         let packed_arguments =
@@ -321,9 +318,16 @@ fn superclass_method_bridges(
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);
-        if parameter_identities.len() != concrete_params.len() {
+        if parameter_identities.len() != concrete_params.len()
+            || declared_parameters.len() != concrete_params.len()
+        {
             return Err(SkipReason::Bridges);
         }
+        let parameters = parameter_identities
+            .into_iter()
+            .zip(declared_parameters)
+            .map(|(identity, semantic)| BridgeParameter { identity, semantic })
+            .collect();
         order.push(
             own_fid
                 .and_then(|function| ir.fn_source_order.get(&function).copied())
@@ -333,7 +337,7 @@ fn superclass_method_bridges(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
-            parameter_identities,
+            parameters,
             name: bridge_name,
             erased_params: base_params,
             erased_ret: base_ret,
@@ -482,11 +486,14 @@ fn push_member_extension_accessor_bridges(
         own(edge.implementation_getter),
         own(edge.implementation_setter),
     );
-    let receiver = crate::fir::ResolvedParameterIdentity::ExtensionReceiver;
+    let receiver = BridgeParameter {
+        identity: crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+        semantic: declared_receiver,
+    };
     let accessor = |name, target_function, erased_ret, concrete_ret| Bridge {
         kind: BridgeKind::Function,
         target_function,
-        parameter_identities: vec![receiver.clone()],
+        parameters: vec![receiver.clone()],
         name,
         erased_params: vec![bridge_erasure(declared_receiver)],
         erased_ret,
@@ -507,9 +514,10 @@ fn push_member_extension_accessor_bridges(
     )];
     if edge.overridden_mutable && edge.implementation_mutable {
         let mut setter = accessor(property_setter_name(&edge.name), setter, Ty::Unit, Ty::Unit);
-        setter
-            .parameter_identities
-            .push(crate::fir::ResolvedParameterIdentity::PropertySetterValue);
+        setter.parameters.push(BridgeParameter {
+            identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+            semantic: edge.declared_type,
+        });
         setter
             .erased_params
             .push(bridge_erasure(edge.declared_type));
@@ -548,7 +556,7 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: None,
-            parameter_identities: Vec::new(),
+            parameters: Vec::new(),
             name: getter_name,
             erased_params: vec![],
             erased_ret: super_ret,
@@ -574,7 +582,10 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
             target_function: None,
-            parameter_identities: vec![crate::fir::ResolvedParameterIdentity::PropertySetterValue],
+            parameters: vec![BridgeParameter {
+                identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+                semantic: super_ty,
+            }],
             name: sname,
             erased_params: vec![super_ty],
             erased_ret: Ty::Unit,

@@ -7,6 +7,17 @@
 use super::{Ty, TypeName};
 use crate::fir::ResolvedParameterIdentity;
 
+/// One parameter of a bridge, described by the OVERRIDDEN declaration the bridge's signature comes
+/// from: kotlinc names and labels a bridge's locals after that declaration, never after the
+/// override it delegates to, whose parameter types a representation pass may later rewrite into
+/// physical carriers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BridgeParameter {
+    pub identity: ResolvedParameterIdentity,
+    /// The overridden declaration's semantic type for this parameter, before erasure.
+    pub semantic: Ty,
+}
+
 /// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeKind {
@@ -24,9 +35,9 @@ pub struct Bridge {
     /// Exact same-module function this bridge delegates to. Backend realization uses this stable
     /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
     pub target_function: Option<u32>,
-    /// Exact source identities of the parameters visible on this bridge. These are frozen before a
+    /// The parameters visible on this bridge, one per erased parameter. These are frozen before a
     /// representation pass can prepend carrier/receiver parameters to the delegated target.
-    pub parameter_identities: Vec<ResolvedParameterIdentity>,
+    pub parameters: Vec<BridgeParameter>,
     pub name: String,
     pub erased_params: Vec<Ty>,
     pub erased_ret: Ty,

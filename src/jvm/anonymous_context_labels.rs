@@ -19,7 +19,9 @@ fn ordinal_separator() -> char {
 fn label(ty: Ty) -> String {
     let stem = match ty.non_null() {
         Ty::Obj(name, _) => name.nested_segment_ref(),
-        Ty::TyParam(name, _) => name,
+        // A type parameter is labelled after its upper bound: `context(_: T)` is `$context-Any`,
+        // and with `T : CharSequence` it is `$context-CharSequence`.
+        Ty::TyParam(_, bound) => return label(*bound),
         Ty::Unit => "Unit",
         Ty::Fun(_) => "Function",
         Ty::Nothing => "Nothing",

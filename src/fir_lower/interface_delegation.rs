@@ -307,6 +307,10 @@ fn materialize_delegation(
                             .overridden
                             .parameter_identities
                             .to_vec(),
+                        overridden_parameter_identities: member
+                            .overridden
+                            .parameter_identities
+                            .to_vec(),
                         implementation_result: member.call.result.get(),
                         suspend: member.call.suspend,
                         // A delegation forwarder implements an interface obligation no superclass

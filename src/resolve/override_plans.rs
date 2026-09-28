@@ -322,6 +322,24 @@ fn applied_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -
     declaration_parameters_with_receiver(function)
 }
 
+/// The overridden declaration's parameter identities: a module callable publishes them in the
+/// index, as an implementation's do; a dependency declaration carries them normalized.
+fn overridden_parameter_identities(
+    index: &ResolvedModuleIndex,
+    overridden: ResolvedFunctionOverrideTarget,
+    declared: &crate::libraries::FunctionInfo,
+    count: usize,
+) -> Box<[crate::fir::ResolvedParameterIdentity]> {
+    match overridden {
+        ResolvedFunctionOverrideTarget::Module(callable) => {
+            module_parameter_identities(index, callable, count)
+        }
+        ResolvedFunctionOverrideTarget::External(_) => {
+            function_parameter_identities(declared, count)
+        }
+    }
+}
+
 fn function_parameter_identities(
     function: &crate::libraries::FunctionInfo,
     count: usize,
@@ -484,6 +502,12 @@ fn publish_inherited_interface_function_plans(
                     implementation_parameter_identities: function_parameter_identities(
                         &implementation,
                         implementation_parameters.len(),
+                    ),
+                    overridden_parameter_identities: overridden_parameter_identities(
+                        index,
+                        overridden,
+                        declared,
+                        declared_parameters.len(),
                     ),
                     implementation_result: resolved_ty(
                         implementation_declared
@@ -987,6 +1011,12 @@ fn append_function_override_edges(
                     index,
                     implementation.callable,
                     implementation.parameters.len(),
+                ),
+                overridden_parameter_identities: overridden_parameter_identities(
+                    index,
+                    overridden,
+                    declared,
+                    declared_parameters.len(),
                 ),
                 implementation_result: resolved_ty(
                     implementation.result,
