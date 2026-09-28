@@ -3393,6 +3393,46 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
 /// frontend. Those class protos omit fields 17-19, but the JVM ABI is unambiguous and the ordinary
 /// underlying property remains in metadata. This stays at the JVM provider boundary: consumers see
 /// the same semantic classifier shape regardless of which metadata generation encoded it.
+/// `type_descriptor` of this classifier is `L` plus its rendered internal name. Numbered and
+/// reflective function classifiers, intrinsic companions, and a dotted class tail spell a
+/// different class file, so a descriptor comparison still has to build that spelling.
+fn descriptor_spells_rendered_name(name: TypeName) -> bool {
+    !super::jvm_class_map::maps_to_distinct_jvm_internal(name)
+        && super::jvm_class_map::intrinsic_companion_jvm_class(name).is_none()
+        && !name.segment_ref().contains('.')
+}
+
+/// Rung of `want` in `receiver`'s superclass-then-interface closure. The walk matches
+/// [`supertype_descriptors`] for a classifier whose descriptor is its rendered name, without
+/// building those strings.
+fn object_supertype_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option<u32> {
+    let Ty::Obj(start, _) = receiver else {
+        return None;
+    };
+    let start = super::jvm_class_map::to_jvm_type_name(start);
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = std::collections::VecDeque::new();
+    pending.push_back(start);
+    let mut index = 0u32;
+    while let Some(name) = pending.pop_front() {
+        if !seen.insert(name) {
+            continue;
+        }
+        if name == want {
+            return Some(index);
+        }
+        index += 1;
+        if let Some(class) = cp.find_name(name) {
+            pending.extend(class.interfaces.iter_ids());
+            if let Some(superclass) = class.super_class {
+                pending.push_back(superclass);
+            }
+        }
+    }
+    let object = type_name("java/lang/Object");
+    (want == object && !seen.contains(&object)).then_some(index)
+}
+
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
 /// breadth-first so a more specific receiver is tried before a more general one.
 fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
@@ -5529,23 +5569,36 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             return (recv.obj_internal() == decl_recv.obj_internal() && recv == decl_recv)
                 .then_some(0);
         }
-        // Index the extension's declared-receiver descriptor into the receiver's most-specific-first MRO —
-        // the same supertype/widening order the classpath extension lookup ranks by (`Int → Number →
-        // Comparable → Any`, `List → Collection → Iterable`), so most-specific selection is preserved. The
-        // MRO carries JVM-form descriptors (`Ljava/lang/Object;`), so normalize the declared receiver to the
-        // same form first (`kotlin/Any` → `java/lang/Object`, a Kotlin collection → its `java/util/*` face).
-        let want = type_descriptor(
-            <Self as crate::libraries::SemanticPlatform>::library_value_form(self, decl_recv),
-        );
-        let rank = supertype_descriptors(&self.cp, recv)
-            .iter()
-            .position(|d| *d == want)
-            .map(|i| i as u32)
-            .or_else(|| {
-                // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every receiver at
-                // the lowest precedence when the MRO does not list the implicit root explicitly.
-                matches!(want.as_str(), "Ljava/lang/Object;").then_some(u32::MAX - 1)
-            })?;
+        // Index the extension's declared receiver into the receiver's most-specific-first MRO — the same
+        // supertype/widening order the classpath extension lookup ranks by (`Int → Number → Comparable →
+        // Any`, `List → Collection → Iterable`). An object classifier compares by its JVM identity.
+        // Arrays, scalars, and function classifiers still match the descriptor spelling, because that
+        // spelling is not the rendered classifier (`[Ljava/lang/String;`, `I`, `kotlin/jvm/functions/Function1`).
+        let form =
+            <Self as crate::libraries::SemanticPlatform>::library_value_form(self, decl_recv);
+        let rank = match form {
+            Ty::Obj(want, _)
+                if !recv.is_array()
+                    && matches!(recv, Ty::Obj(_, _))
+                    && descriptor_spells_rendered_name(want) =>
+            {
+                object_supertype_rank(&self.cp, recv, want).or_else(|| {
+                    // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every
+                    // receiver at the lowest precedence when the MRO does not list the implicit root.
+                    want.matches("java/lang/Object").then_some(u32::MAX - 1)
+                })
+            }
+            _ => {
+                let want = type_descriptor(form);
+                supertype_descriptors(&self.cp, recv)
+                    .iter()
+                    .position(|descriptor| descriptor == &want)
+                    .map(|index| index as u32)
+                    .or_else(|| {
+                        matches!(want.as_str(), "Ljava/lang/Object;").then_some(u32::MAX - 1)
+                    })
+            }
+        }?;
         // ELEMENT (type-argument) compatibility: the erased receivers matched, but a concrete element must
         // agree — `Iterable<Int>.sum` (`@JvmName sumOfInt`) must not bind an `Iterable<Long>` receiver. A
         // type-VARIABLE decl element (a generic extension, decoded to `Any`) matches any element.
@@ -5939,6 +5992,110 @@ mod tests {
 
     fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
         super::JvmLibraries::new(classpath).expect("JVM provider initialization")
+    }
+
+    fn descriptor_receiver_rank(
+        libraries: &super::JvmLibraries,
+        recv: Ty,
+        decl: Ty,
+    ) -> Option<u32> {
+        let want = crate::jvm::names::type_descriptor(SemanticPlatform::library_value_form(
+            libraries, decl,
+        ));
+        super::supertype_descriptors(&libraries.cp, recv)
+            .iter()
+            .position(|descriptor| descriptor == &want)
+            .map(|index| index as u32)
+            .or_else(|| (want == "Ljava/lang/Object;").then_some(u32::MAX - 1))
+    }
+
+    #[test]
+    fn object_extension_rank_matches_descriptor_order_without_rendering() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-extension-rank-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create rank directory");
+        let write = |internal: &str, bytes: Vec<u8>| {
+            let path = directory.join(format!("{internal}.class"));
+            std::fs::create_dir_all(path.parent().expect("package")).expect("create package");
+            std::fs::write(path, bytes).expect("write class");
+        };
+        write("probe/rank6044/Face", {
+            let mut face =
+                crate::jvm::classfile::ClassWriter::new("probe/rank6044/Face", "java/lang/Object");
+            face.set_access(
+                crate::jvm::classfile::ACC_PUBLIC
+                    | crate::jvm::classfile::ACC_INTERFACE
+                    | crate::jvm::classfile::ACC_ABSTRACT,
+            );
+            face.finish()
+        });
+        write(
+            "probe/rank6044/Base",
+            crate::jvm::classfile::ClassWriter::new("probe/rank6044/Base", "java/lang/Object")
+                .finish(),
+        );
+        write("probe/rank6044/Mid", {
+            let mut mid = crate::jvm::classfile::ClassWriter::new(
+                "probe/rank6044/Mid",
+                "probe/rank6044/Base",
+            );
+            mid.add_interface("probe/rank6044/Face");
+            mid.finish()
+        });
+        write(
+            "probe/rank6044/Leaf",
+            crate::jvm::classfile::ClassWriter::new("probe/rank6044/Leaf", "probe/rank6044/Mid")
+                .finish(),
+        );
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![directory.clone()]),
+        ));
+        let leaf = Ty::obj("probe/rank6044/Leaf");
+        let mid = Ty::obj("probe/rank6044/Mid");
+        let base = Ty::obj("probe/rank6044/Base");
+        let face = Ty::obj("probe/rank6044/Face");
+        let any = Ty::obj("kotlin/Any");
+        let other = Ty::obj("probe/rank6044/Other");
+        let array = Ty::obj_args("kotlin/Array", &[leaf]);
+        let function = Ty::obj("kotlin/Function1");
+        for (recv, decl) in [
+            (leaf, leaf),
+            (leaf, mid),
+            (leaf, base),
+            (leaf, face),
+            (leaf, any),
+            (leaf, other),
+            (array, any),
+            (array, leaf),
+            (Ty::Int, any),
+            (function, function),
+            (function, any),
+        ] {
+            assert_eq!(
+                SemanticPlatform::extension_receiver_rank(&libraries, recv, decl),
+                descriptor_receiver_rank(&libraries, recv, decl)
+            );
+        }
+        assert_eq!(
+            SemanticPlatform::extension_receiver_rank(&libraries, leaf, leaf),
+            Some(0)
+        );
+        assert_eq!(
+            SemanticPlatform::extension_receiver_rank(&libraries, leaf, other),
+            None
+        );
+        assert!(
+            SemanticPlatform::extension_receiver_rank(&libraries, leaf, any).unwrap()
+                > SemanticPlatform::extension_receiver_rank(&libraries, leaf, face).unwrap()
+        );
+        drop(libraries);
+        std::fs::remove_dir_all(directory).expect("remove rank directory");
     }
 
     #[test]
