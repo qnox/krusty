@@ -97,7 +97,7 @@ fn class_mapper_lite_descriptor_spelling(classifier: TypeName) -> &'static str {
     {
         return retained_reference_descriptor(&companion_object_internal(owner));
     }
-    retained_reference_descriptor(&super::names::binary_class_name(classifier))
+    super::names::reference_descriptor(classifier.rendered())
 }
 
 /// Retain `Lname;` for the surrounding JVM cache. These generated physical spellings must not use
@@ -1436,6 +1436,22 @@ mod tests {
             super::class_mapper_lite_function_descriptor(1, true),
             "Lkotlin/coroutines/SuspendFunction1;"
         );
+    }
+
+    #[test]
+    fn unmapped_class_mapper_descriptor_reuses_the_rendered_name() {
+        let nested = type_name("sample/bin6044/Outer.Middle.Inner");
+        let descriptor = super::class_mapper_lite_descriptor(nested);
+        assert_eq!(descriptor, "Lsample/bin6044/Outer$Middle$Inner;");
+        assert!(std::ptr::eq(
+            descriptor,
+            crate::jvm::names::reference_descriptor(nested.rendered()),
+        ));
+        let host = type_name("sample/bin6044/Host");
+        assert!(std::ptr::eq(
+            super::class_mapper_lite_descriptor(host),
+            crate::jvm::names::reference_descriptor(host.rendered()),
+        ));
     }
 
     #[test]
