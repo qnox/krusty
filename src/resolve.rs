@@ -57043,13 +57043,10 @@ impl<'a> Checker<'a> {
                     let entry_receiver = scope
                         .this_ty()
                         .expect("an enum entry body has its enum receiver");
-                    let entry_owner = type_name(&format!(
-                        "{}${}",
-                        current_owner
-                            .expect("enum class must have a source owner")
-                            .render(),
-                        entry.name
-                    ));
+                    let entry_owner = type_name_nested_child(
+                        current_owner.expect("enum class must have a source owner"),
+                        &entry.name,
+                    );
                     let entry_tparams = class_tparams.clone();
                     for (method_index, method) in entry.methods.iter().enumerate() {
                         let stable_declaration = match self.active_declarations {
