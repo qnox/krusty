@@ -984,14 +984,16 @@ pub fn build_class(
             prop.field_message(6, parameter); // Property.setter_value_parameter = 6
         }
         for (name, kind, ty) in &p.context_params {
+            // Kotlin keeps the type-only compatibility list for every context entry, including a
+            // named context parameter that is also published below as `context_parameter`.
+            let ty = type_pb_declared(
+                st,
+                *ty,
+                crate::spelling::Spelled::NONE,
+                &property_type_parameters,
+            );
+            prop.repeated_message(12, &ty); // Property.context_receiver_type = 12
             if *kind == crate::types::ContextParameterKind::LegacyReceiver {
-                let ty = type_pb_declared(
-                    st,
-                    *ty,
-                    crate::spelling::Spelled::NONE,
-                    &property_type_parameters,
-                );
-                prop.repeated_message(12, &ty); // Property.context_receiver_type = 12
                 continue;
             }
             let name = if *kind == crate::types::ContextParameterKind::Anonymous {
@@ -1001,12 +1003,6 @@ pub fn build_class(
             };
             let mut parameter = Pb::new();
             parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-            let ty = type_pb_declared(
-                st,
-                *ty,
-                crate::spelling::Spelled::NONE,
-                &property_type_parameters,
-            );
             parameter.field_message(3, &ty); // ValueParameter.type = 3
             prop.repeated_message(17, &parameter); // Property.context_parameter = 17
         }
@@ -1219,12 +1215,14 @@ pub fn build_class(
             "metadata member context roles must match the leading parameter prefix"
         );
         for (i, (pname, pty)) in m.params.iter().enumerate() {
-            if m.context_parameter_kinds.get(i)
-                == Some(&crate::types::ContextParameterKind::LegacyReceiver)
-            {
+            let context_kind = m.context_parameter_kinds.get(i);
+            if context_kind.is_some() {
+                // Kotlin keeps the type-only compatibility list for named context parameters too.
                 let ty =
                     type_pb_declared(st, *pty, m.spellings.param(i), &function_type_parameters);
                 func.repeated_message(10, &ty); // Function.context_receiver_type = 10
+            }
+            if context_kind == Some(&crate::types::ContextParameterKind::LegacyReceiver) {
                 continue;
             }
             let mut vp = Pb::new();
