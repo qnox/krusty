@@ -150,7 +150,7 @@ impl Parameters {
     fn place(&self, slot: u16, frame_base: u16) -> Remapped<'_> {
         let args_size = self.args_size();
         if slot >= args_size {
-            return Remapped::Frame(frame_base + self.temporaries_size() - args_size + slot);
+            return Remapped::Frame(frame_base + self.temporaries_size() + (slot - args_size));
         }
         let mut declaration = 0u16;
         let mut temporary = 0u16;
