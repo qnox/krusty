@@ -46,7 +46,9 @@ mod declaration_types;
 mod declared_nullability;
 mod delegated_property_array;
 mod field_nullability;
-use field_nullability::{field_nullability_kind, is_nonnull_reference_field, nullability_annotation};
+use field_nullability::{
+    field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
+};
 mod discarding;
 mod enclosure;
 mod enum_entry_subclass;
@@ -11863,7 +11865,9 @@ impl<'a> Emitter<'a> {
                         // includes both inaccessible `@InlineOnly` bodies and metadata-declared
                         // reified functions; a substitution map is only a specialization operand.
                         // An operand elided because the body never reads it needs the splice too.
-                        let elided = args.iter().any(|&arg| self.ir.is_unread_inline_operand(arg));
+                        let elided = args
+                            .iter()
+                            .any(|&arg| self.ir.is_unread_inline_operand(arg));
                         if inline.must_inline() || elided {
                             crate::trace_compiler!(
                                 "emit",
