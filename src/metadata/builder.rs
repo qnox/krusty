@@ -884,6 +884,11 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     } else {
         0
     };
+    let lateinit_bit = if m.modifiers.lateinit {
+        property_flags::IS_LATEINIT
+    } else {
+        0
+    };
     let delegated_bit = if m.modifiers.delegated {
         property_flags::IS_DELEGATED
     } else {
@@ -893,6 +898,7 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         | (vis << 1)
         | const_bit
         | companion_bit
+        | lateinit_bit
         | delegated_bit;
     // protobuf omits an optional field at its declared default — a plain `public val` with a
     // non-constant initializer records NO flags word, exactly like a class property.
