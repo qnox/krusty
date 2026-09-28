@@ -22,13 +22,13 @@
 //!   not `Send`.
 //! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
 //!   process per module.
-//! * [`kotlin_toolchain`] — `module.yaml` / `project.yaml` loading for `krusty build`, the drop-in
-//!   for the Kotlin Toolchain's `kotlin build` on JVM modules.
+//! * [`kotlin_toolchain`] — `module.yaml` / `project.yaml` loading for `kotlin build`, the toolchain
+//!   command. The `kotlin` executable lives in `krusty-kotlin`; this crate does not.
 //!
 //! # What is NOT here
 //!
 //! Gradle, Maven, BSP, and JPS are not compiled by this crate. The language server still owns those
-//! project models. `krusty build` recognizes a Gradle or `.iml` tree and stops, rather than reading
+//! project models. `kotlin build` recognizes a Gradle or `.iml` tree and stops, rather than reading
 //! it as a toolchain project. Parallelism needs a process pool with crash isolation and interleaved
 //! diagnostics, and the sequential driver is its oracle: the same graph must produce the same
 //! artifacts either way.

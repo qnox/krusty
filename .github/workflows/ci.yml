@@ -234,6 +234,10 @@ jobs:
         id: compiler_pkg
         shell: bash
         run: echo "path=$(just package "${{ matrix.target.triple }}")" >> "$GITHUB_OUTPUT"
+      - name: package toolchain CLI
+        id: kotlin_pkg
+        shell: bash
+        run: echo "path=$(just package "${{ matrix.target.triple }}" kotlin)" >> "$GITHUB_OUTPUT"
       - name: package language server
         id: lsp_pkg
         shell: bash
@@ -243,6 +247,7 @@ jobs:
           name: krusty-${{ matrix.target.triple }}
           path: |
             ${{ steps.compiler_pkg.outputs.path }}
+            ${{ steps.kotlin_pkg.outputs.path }}
             ${{ steps.lsp_pkg.outputs.path }}
           if-no-files-found: error
 

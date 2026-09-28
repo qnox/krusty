@@ -507,7 +507,7 @@ version:
     v=$(just max-version)
     echo "${v}-build.$(just build-number "$v")"
 
-# Build optimized compiler and LSP executables from their independent workspace packages.
+# Build optimized compiler, toolchain CLI, and LSP executables from their independent packages.
 build-release TARGET="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -515,22 +515,24 @@ build-release TARGET="":
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
         cargo build --release --target {{TARGET}} -p krusty-cli --bin krusty
+        cargo build --release --target {{TARGET}} -p krusty-kotlin --bin kotlin
         cargo build --release --target {{TARGET}} -p krusty-lsp
     else
         cargo build --release -p krusty-cli --bin krusty
+        cargo build --release -p krusty-kotlin --bin kotlin
         cargo build --release -p krusty-lsp
     fi
-    echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
+    echo "built krusty, kotlin, and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 
 # Package one executable into dist/ (.tar.gz on unix, .zip on windows). PRODUCT defaults to the
-# compiler for compatibility; release CI invokes this once for `krusty` and once for `krusty-lsp`.
+# compiler for compatibility; release CI invokes this for `krusty`, `kotlin`, and `krusty-lsp`.
 package TARGET PRODUCT="krusty":
     #!/usr/bin/env bash
     set -euo pipefail
     ver=$(just version)
     product="{{PRODUCT}}"
     case "$product" in
-        krusty|krusty-lsp) ;;
+        krusty|kotlin|krusty-lsp) ;;
         *) echo "unknown release product: $product" >&2; exit 2 ;;
     esac
     bindir="target/{{TARGET}}/release"

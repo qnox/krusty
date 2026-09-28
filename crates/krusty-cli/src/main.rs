@@ -21,9 +21,6 @@ fn main() {
         run_persistent_worker();
         return;
     }
-    if krusty_cli::build::is_build_command(&argv) {
-        std::process::exit(krusty_cli::build::run(&argv[1..]));
-    }
     let opts = cli::parse(argv);
 
     if opts.print_version {
