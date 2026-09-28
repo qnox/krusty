@@ -8083,6 +8083,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   properties resolvable as implicit-`this` members of the inner class (in both signature collection,
   for return-type inference, and body checking). An inner property initializer may combine outer and
   own members (`val z = x + y`); the constructor body scopes `this$0` as the first parameter value.
+  When that inner class also extends the enclosing class (`inner class Inner : Outer`), the two
+  instances stay distinct: `this` is the subclass, and `this@Outer` is still the captured enclosing
+  instance. Being a subtype of `Outer` does not make the inner instance a stand-in for `this@Outer`
+  (an inherited backing field on the subclass is the other way round: that field does live on `this`).
+  Tests: `inner_class_extending_its_enclosing_class_keeps_labeled_outer_distinct`,
+  `tests/labeled_this_e2e.rs::inner_class_extending_outer_reads_enclosing_instance`.
 
 - **Nullable primitives** (`Int?`/`Long?`/`Char?`/…): modeled as their boxed JVM wrapper
   (`Int?` = `java/lang/Integer`) everywhere — `resolve_ty`, `ir_lower::ty_of`, and the `Stmt::Local`
