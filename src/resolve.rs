@@ -11802,6 +11802,9 @@ pub enum ExprLowering {
         /// Present only when leading context arguments must be inserted before invoking the accessor.
         context_access: Option<Box<ResolvedPropertyAccess>>,
         compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
+        /// The read names the property on its owner's own receiver where the owner sees its explicit
+        /// backing field: it reads that field, typed as the field (kotlinc's `IrGetField`).
+        owner_storage: bool,
     },
     /// A property-read `recv.name` resolved to an extension property. The complete selected property
     /// is retained for every provider; origin affects only local/cross-file/library linkage.
@@ -11884,6 +11887,9 @@ pub enum ReceiverFnValueOrigin {
         /// anonymous subclass. The checker converts it to a stable declaration before publishing
         /// FIR; ordinary classifier properties leave it absent.
         enum_entry_property: Option<u32>,
+        /// The binding reads the property's explicit backing field, which its owner sees: a read
+        /// of it on the owner's own receiver is a read of that field, at the field's type.
+        owner_storage: bool,
     },
     /// A value stored in a compiler-generated field of the class whose body is being checked.
     /// The index is the exact IR field slot; lowering consumes it without looking up a name.
@@ -13297,6 +13303,8 @@ struct DispatchPropertyBinding {
     read_ty: Ty,
     declared_ty: Ty,
     error_provenance: ErrorProvenance,
+    /// `read_ty` is the property's explicit backing field, visible in its owner.
+    owner_storage: bool,
 }
 
 /// The packages in scope for an unqualified top-level or extension call.
@@ -14739,6 +14747,7 @@ impl<'a> Checker<'a> {
                         interface,
                         context_access,
                         compiler_intrinsic,
+                        owner_storage: false,
                     },
                 );
                 if let Some(getter) = getter {
@@ -27065,6 +27074,8 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
+    mod explicit_backing_fields;
+
     /// Where NO_VALUE_FOR_PARAMETER is anchored: `argument` in the argument list, or the callee's
     /// name where the reference version reports it there. That table row is checked against kotlinc
     /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
@@ -33017,62 +33028,6 @@ fun box(): String {
              val current: Scope = scope",
             "context property cannot have a backing field",
         );
-    }
-
-    #[test]
-    fn explicit_backing_field_requires_read_only_property() {
-        let errors = check_with_detected_features(
-            "// LANGUAGE: +ExplicitBackingFields\n\
-             class Holder {\n\
-                 var value: Any field: String = \"value\"\n\
-             }",
-        );
-        assert!(errors.iter().any(|error| {
-            error.contains(
-                "explicit backing field requires a final, read-only property with default accessors",
-            )
-        }));
-    }
-
-    #[test]
-    fn explicit_backing_field_type_must_refine_property_type() {
-        let errors = check_with_detected_features(
-            "// LANGUAGE: +ExplicitBackingFields\n\
-             class Holder {\n\
-                 val value: String field: Any = \"value\"\n\
-             }",
-        );
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("backing field type of 'value' is 'Any', which is not a subtype of its property type 'String'.")));
-    }
-
-    #[test]
-    fn explicit_backing_field_accepts_semantic_value_class_type() {
-        let errors = check_with_annotation_fixtures(
-            "// LANGUAGE: +ExplicitBackingFields\n\
-             @JvmInline value class Label(val text: String)\n\
-             class Holder {\n\
-                 val value: Any field: Label = Label(\"value\")\n\
-             }",
-            true,
-        )
-        .0;
-        assert!(errors.is_empty(), "{errors:?}");
-    }
-
-    #[test]
-    fn owner_reads_explicit_backing_field_at_its_narrower_type() {
-        let errors = check_with_detected_features(
-            "// LANGUAGE: +ExplicitBackingFields\n\
-             interface Base { val value: Any }\n\
-             class Holder : Base {\n\
-                 final override val value: Any field: String = \"OK\"\n\
-                 fun read(): String = accept(value)\n\
-             }\n\
-             fun accept(value: String): String = value\n",
-        );
-        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]
@@ -50241,6 +50196,7 @@ impl<'a> Checker<'a> {
                 read_ty: ty,
                 declared_ty,
                 error_provenance: ErrorProvenance::None,
+                owner_storage: false,
             },
             is_var,
             owner,
@@ -50248,7 +50204,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn declare_enum_entry_dispatch_property(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -50256,7 +50211,6 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         owner: TypeName,
-        declared_ty: Ty,
         sibling: u32,
     ) {
         self.declare_dispatch_property_with_provenance(
@@ -50264,8 +50218,9 @@ impl<'a> Checker<'a> {
             name,
             DispatchPropertyBinding {
                 read_ty: ty,
-                declared_ty,
+                declared_ty: ty,
                 error_provenance: ErrorProvenance::None,
+                owner_storage: false,
             },
             is_var,
             owner,
@@ -50320,6 +50275,7 @@ impl<'a> Checker<'a> {
                     receiver_identity,
                     declared_ty: binding.declared_ty,
                     enum_entry_property,
+                    owner_storage: binding.owner_storage,
                 },
                 binding.error_provenance,
             ),
@@ -50359,24 +50315,21 @@ impl<'a> Checker<'a> {
         } else {
             ErrorProvenance::None
         };
+        // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a type.
+        // While the field's own initializer is being determined it is the marker, and taking it then
+        // makes every read of the property inside its own class undetermined even though the
+        // PROPERTY's type is already known.
+        let storage = property
+            .owner_storage_ty
+            .filter(|storage| owner_storage_visible && !storage.mentions_pending());
         self.declare_dispatch_property_with_provenance(
             scope,
             &property.name,
             DispatchPropertyBinding {
-                read_ty: if owner_storage_visible {
-                    // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a
-                    // type. While the field's own initializer is being determined it is the marker, and
-                    // taking it then makes every read of the property inside its own class undetermined
-                    // even though the PROPERTY's type is already known.
-                    property
-                        .owner_storage_ty
-                        .filter(|storage| !storage.mentions_pending())
-                        .unwrap_or(property.ty)
-                } else {
-                    property.ty
-                },
+                read_ty: storage.unwrap_or(property.ty),
                 declared_ty: property.ty,
                 error_provenance,
+                owner_storage: storage.is_some(),
             },
             is_var,
             property.owner,
@@ -50714,7 +50667,6 @@ impl<'a> Checker<'a> {
                 ty,
                 property.is_var,
                 entry_owner,
-                ty,
                 field as u32,
             );
             properties.push(ScopedProperty {
@@ -51085,6 +51037,7 @@ impl<'a> Checker<'a> {
                             receiver_identity,
                             declared_ty,
                             enum_entry_property,
+                            owner_storage,
                         } => {
                             let receivers = self.implicit_receivers(scope);
                             let recorded_is_owner = receivers.iter().any(|receiver| {
@@ -51111,6 +51064,7 @@ impl<'a> Checker<'a> {
                                 receiver_identity,
                                 declared_ty,
                                 enum_entry_property,
+                                owner_storage,
                             }
                         }
                         origin => origin,
@@ -51138,6 +51092,7 @@ impl<'a> Checker<'a> {
                             receiver_identity: receiver.identity,
                             declared_ty: property.ty,
                             enum_entry_property: property.enum_entry_property,
+                            owner_storage: false,
                         },
                     )),
                     _ => None,
@@ -68284,6 +68239,7 @@ impl<'a> Checker<'a> {
                     receiver_identity,
                     declared_ty,
                     enum_entry_property,
+                    owner_storage,
                 } = l.origin
                 {
                     if let Some(sibling) = enum_entry_property {
@@ -68338,6 +68294,15 @@ impl<'a> Checker<'a> {
                             // receiver before it was already offered by the scope tower, so the first
                             // receiver at its rung is the exact dispatch instance carrying this flow.
                             let selected_dispatch_property = receiver.identity == receiver_identity;
+                            if selected_dispatch_property && owner_storage {
+                                if let Some(ExprLowering::MemberPropertyRead {
+                                    owner_storage,
+                                    ..
+                                }) = self.expr_lowers.get_mut(&e)
+                                {
+                                    *owner_storage = true;
+                                }
+                            }
                             let ty = if selected_dispatch_property && l.ty != declared_ty {
                                 // Lookup already carries the flow type of this exact dispatch
                                 // property after a narrowing shadow changed it. Otherwise the
