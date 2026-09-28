@@ -53,57 +53,90 @@ fn companion_object_internal(owner: TypeName) -> String {
 /// kotlinc's table does: no `Boolean.Companion`, numbered `Function`/`KFunction` interfaces only
 /// through 22, no `KSuspendFunction` erasure, and an unmapped classifier (a value class or unsigned
 /// type included) keeps its class id, nested segments joined by `$`.
-pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
+pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> &'static str {
+    thread_local! {
+        static CACHE: std::cell::RefCell<FxHashMap<TypeName, &'static str>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&classifier).copied()) {
+        return found;
+    }
+    let spelled = class_mapper_lite_descriptor_spelling(classifier);
+    CACHE.with(|cache| cache.borrow_mut().insert(classifier, spelled));
+    spelled
+}
+
+fn class_mapper_lite_descriptor_spelling(classifier: TypeName) -> &'static str {
     let signed_primitive = |ty: Ty| ty.scalar_value_repr() == Some(ty);
     let primitive = Ty::obj_name(classifier);
     if signed_primitive(primitive) {
-        return super::names::type_descriptor(primitive).to_owned();
+        return super::names::type_descriptor(primitive);
     }
-    if let Some(element) =
-        crate::types::prim_array_element(classifier).filter(|e| signed_primitive(*e))
+    if crate::types::prim_array_element(classifier).is_some_and(|element| signed_primitive(element))
     {
-        return format!("[{}", super::names::type_descriptor(element));
+        return super::names::array_class_descriptor(classifier)
+            .expect("a signed primitive array classifier has an array descriptor");
     }
     let function = super::function_classifiers::classifier(classifier).filter(|function| {
         function.identity() == classifier
             && !function.is_suspend()
             && function.arity() <= super::names::MAX_NUMBERED_FUNCTION_ARITY
     });
-    let internal = if let Some(jvm) = type_name_to_jvm_builtin_internal(classifier) {
-        jvm.to_owned()
-    } else if let Some(function) = function {
-        match function.is_reflective() {
-            true => crate::types::KFUNCTION_INTERNAL.to_owned(),
-            false => super::names::function_interface_internal_name(function.arity()).to_owned(),
-        }
-    } else if let Some(owner) =
+    if let Some(jvm) = type_name_to_jvm_builtin_internal(classifier) {
+        return super::names::reference_descriptor(jvm);
+    }
+    if let Some(function) = function {
+        let internal = match function.is_reflective() {
+            true => crate::types::KFUNCTION_INTERNAL,
+            false => super::names::function_interface_internal_name(function.arity()),
+        };
+        return super::names::reference_descriptor(internal);
+    }
+    if let Some(owner) =
         intrinsic_companion_owner(classifier).filter(|owner| Ty::obj_name(*owner) != Ty::Boolean)
     {
-        companion_object_internal(owner)
-    } else {
-        super::names::binary_class_name(classifier)
-    };
-    format!("L{internal};")
+        return interned_reference_descriptor(&companion_object_internal(owner));
+    }
+    interned_reference_descriptor(&super::names::binary_class_name(classifier))
+}
+
+/// `Lname;` remembered by its text. `name` is not already a static classfile spelling, so this
+/// does not key [`super::names::reference_descriptor`]; the result still shares that interner.
+fn interned_reference_descriptor(name: &str) -> &'static str {
+    let mut descriptor = String::with_capacity(name.len() + 2);
+    descriptor.push('L');
+    descriptor.push_str(name);
+    descriptor.push(';');
+    crate::types::intern_text(&descriptor)
 }
 
 /// [`class_mapper_lite_descriptor`] of `kotlin.Nothing`, which is a type rather than a classifier.
-pub(super) fn class_mapper_lite_nothing_descriptor() -> String {
-    format!("L{NOTHING_JVM};")
+pub(super) fn class_mapper_lite_nothing_descriptor() -> &'static str {
+    super::names::reference_descriptor(NOTHING_JVM)
 }
 
 /// [`class_mapper_lite_descriptor`] of a function type's class id, `kotlin.FunctionN` or
 /// `kotlin.coroutines.SuspendFunctionN` for its arity.
-pub(super) fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool) -> String {
-    if suspend {
-        format!("Lkotlin/coroutines/SuspendFunction{arity};")
-    } else if arity <= super::names::MAX_NUMBERED_FUNCTION_ARITY {
-        format!(
-            "L{};",
-            super::names::function_interface_internal_name(arity)
-        )
-    } else {
-        format!("Lkotlin/Function{arity};")
+pub(super) fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool) -> &'static str {
+    if !suspend && arity <= super::names::MAX_NUMBERED_FUNCTION_ARITY {
+        return super::names::reference_descriptor(super::names::function_interface_internal_name(
+            arity,
+        ));
     }
+    thread_local! {
+        static CACHE: std::cell::RefCell<FxHashMap<(bool, usize), &'static str>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&(suspend, arity)).copied()) {
+        return found;
+    }
+    let spelled = if suspend {
+        interned_reference_descriptor(&format!("kotlin/coroutines/SuspendFunction{arity}"))
+    } else {
+        interned_reference_descriptor(&format!("kotlin/Function{arity}"))
+    };
+    CACHE.with(|cache| cache.borrow_mut().insert((suspend, arity), spelled));
+    spelled
 }
 
 /// The JVM class `kotlin.Nothing` erases to.
@@ -1301,6 +1334,41 @@ mod tests {
         assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
             "example/UserType"
         )));
+    }
+
+    #[test]
+    fn class_mapper_lite_reuses_the_descriptor_spelling() {
+        let mapped = |name| super::class_mapper_lite_descriptor(type_name(name));
+        let int = mapped("kotlin/Int");
+        assert_eq!(int, "I");
+        assert!(std::ptr::eq(int, mapped("kotlin/Int")));
+        let entry = mapped("kotlin/collections/MutableMap.MutableEntry");
+        assert_eq!(entry, "Ljava/util/Map$Entry;");
+        assert!(std::ptr::eq(
+            entry,
+            mapped("kotlin/collections/MutableMap.MutableEntry")
+        ));
+        let nested = mapped("app/Outer.Inner");
+        assert_eq!(nested, "Lapp/Outer$Inner;");
+        assert!(std::ptr::eq(nested, mapped("app/Outer.Inner")));
+        let nothing = super::class_mapper_lite_nothing_descriptor();
+        assert_eq!(nothing, "Ljava/lang/Void;");
+        assert!(std::ptr::eq(
+            nothing,
+            super::class_mapper_lite_nothing_descriptor()
+        ));
+        let suspend = super::class_mapper_lite_function_descriptor(1, true);
+        assert_eq!(suspend, "Lkotlin/coroutines/SuspendFunction1;");
+        assert!(std::ptr::eq(
+            suspend,
+            super::class_mapper_lite_function_descriptor(1, true)
+        ));
+        let wide = super::class_mapper_lite_function_descriptor(23, false);
+        assert_eq!(wide, "Lkotlin/Function23;");
+        assert!(std::ptr::eq(
+            wide,
+            super::class_mapper_lite_function_descriptor(23, false)
+        ));
     }
 
     #[test]
