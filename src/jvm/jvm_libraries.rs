@@ -41,7 +41,7 @@ use crate::libraries::{
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{existing_type_name, type_name, Ty, TypeName, TypeNameList};
+use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -199,11 +199,13 @@ pub struct JvmLibraries {
 struct JvmBuiltInsCustomizer;
 
 impl JvmBuiltInsCustomizer {
-    fn classifier_name(&self, fqn: &str) -> Option<TypeName> {
-        let builtin_array = fqn
-            .strip_prefix("kotlin/")
-            .is_some_and(|name| name == "Array" || Ty::primitive_array_element(name).is_some());
-        (fqn == "kotlin/Cloneable" || builtin_array).then(|| type_name(fqn))
+    fn classifier_name(&self, package: TypeName, name: &str) -> Option<TypeName> {
+        if !package.matches("kotlin") {
+            return None;
+        }
+        let recognized =
+            name == "Cloneable" || name == "Array" || Ty::primitive_array_element(name).is_some();
+        recognized.then(|| crate::types::type_name_child(package, name))
     }
 
     fn customize(&self, internal: TypeName, base: Option<LibraryType>) -> Option<LibraryType> {
@@ -1608,7 +1610,7 @@ impl JvmLibraries {
                     if physical == internal_name {
                         return None;
                     }
-                    return mapped_builtin_signature(&internal_name.render());
+                    return mapped_builtin_signature(internal_name);
                 }
             };
             let internal = &internal_name.render();
@@ -3449,6 +3451,22 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
     false
 }
 
+/// Textual internal name of a namespace probe. Used only when an incomplete catalog must open class
+/// bytes; a complete catalog answers [`JvmLibraries::proven_classifier`] without this spelling.
+fn classifier_spelling(namespace: SymbolNamespace, name: &str) -> String {
+    let namespace_name = namespace.name().render();
+    match namespace {
+        SymbolNamespace::Package(_) => {
+            if namespace_name.is_empty() {
+                name.to_string()
+            } else {
+                format!("{namespace_name}/{name}")
+            }
+        }
+        SymbolNamespace::Classifier(_) => format!("{namespace_name}${name}"),
+    }
+}
+
 impl JvmLibraries {
     /// Federate the classpath package catalog with the core declaration source. `symbols()` already
     /// combines those sources; package-prefix resolution must expose the same namespace or an explicit
@@ -4322,6 +4340,31 @@ impl JvmLibraries {
         built
     }
 
+    /// Promote `name` only after the classpath catalog proves an exact class file. A complete catalog
+    /// answers from the package name tree, so a function or property probe does not render a classifier
+    /// spelling. An incomplete catalog still verifies the textual internal name against class bytes.
+    fn proven_classifier(&self, namespace: SymbolNamespace, name: &str) -> Option<TypeName> {
+        let tree = self.cp.package_tree();
+        if !tree.catalog_complete() {
+            let spelling = classifier_spelling(namespace, name);
+            return self
+                .cp
+                .class_exists(&spelling)
+                .then(|| type_name(&spelling));
+        }
+        let declared = match namespace {
+            SymbolNamespace::Package(package) => tree.contains_exact_class(package, name),
+            SymbolNamespace::Classifier(owner) => {
+                let segment = format!("{}${}", owner.segment_ref(), name);
+                tree.contains_exact_class(owner.namespace(), &segment)
+            }
+        };
+        declared.then(|| match namespace {
+            SymbolNamespace::Package(package) => crate::types::type_name_child(package, name),
+            SymbolNamespace::Classifier(owner) => crate::types::type_name_nested_child(owner, name),
+        })
+    }
+
     fn symbols(
         &self,
         namespace: SymbolNamespace,
@@ -4331,55 +4374,43 @@ impl JvmLibraries {
         if let Some(cached) = self.cp.cached_symbols(namespace, name) {
             return cached;
         }
-        let namespace_name = namespace.name();
-        let namespace_text = namespace_name.render();
-        let fqn = if namespace_text.is_empty() {
-            name.to_string()
-        } else {
-            format!("{namespace_text}/{name}")
-        };
-        let classifier_fqn = match namespace {
-            SymbolNamespace::Package(_) => fqn.clone(),
-            SymbolNamespace::Classifier(_) => format!("{namespace_text}${name}"),
-        };
         // A typealias is a declaration in the namespace, not a JVM nested class. Package aliases
         // come from facade metadata; classifier aliases come directly from their owner's Class
         // metadata and retain their slash-separated source identity.
         let alias_identity = match namespace {
-            SymbolNamespace::Package(_) => self
-                .cp
-                .type_alias_target_text(&classifier_fqn)
-                .map(|_| type_name(&classifier_fqn)),
+            SymbolNamespace::Package(package) => self.cp.package_alias_identity(package, name),
             SymbolNamespace::Classifier(owner) => {
                 self.cp.classifier_type_alias_identity(owner, name)
             }
         };
-        let alias_target =
-            alias_identity.and_then(|identity| self.cp.type_alias_target_name(identity));
         // Classifier namespace: the class/interface/object (or a typealias's semantic declaration)
-        // at this key.
+        // at this key. Identity probes run before any spelling is rendered. A miss interns a name
+        // only when a recognized builtin family or a catalogued class file proves it exists.
         let classifier_name = alias_identity
+            .or_else(|| namespace.existing_classifier(name))
             .or_else(|| match namespace {
                 SymbolNamespace::Package(package) => {
-                    crate::types::existing_type_name_child(package, name)
+                    self.builtins_customizer.classifier_name(package, name)
                 }
-                SymbolNamespace::Classifier(owner) => {
-                    crate::types::existing_type_name_nested_child(owner, name)
-                }
+                SymbolNamespace::Classifier(_) => None,
             })
-            .or_else(|| self.builtins_customizer.classifier_name(&classifier_fqn))
-            .or_else(|| super::function_classifiers::classifier_name(&classifier_fqn))
-            .or_else(|| self.cp.builtin_classifier_name_text(&classifier_fqn))
-            .or_else(|| {
-                existing_type_name(&classifier_fqn)
-                    .filter(|internal| self.common_expectations.contains(*internal))
+            .or_else(|| match namespace {
+                SymbolNamespace::Package(package) => {
+                    super::function_classifiers::classifier_name_in(package, name)
+                }
+                SymbolNamespace::Classifier(_) => None,
             })
             .or_else(|| {
-                // A raw namespace probe must not intern arbitrary property/function names. Promote the
-                // spelling only after the classpath proves that an exact classifier exists.
-                (self.cp.class_exists(&classifier_fqn) || alias_target.is_some())
-                    .then(|| type_name(&classifier_fqn))
-            });
+                let package = match namespace {
+                    SymbolNamespace::Package(package) => package,
+                    SymbolNamespace::Classifier(owner) => owner.namespace(),
+                };
+                self.cp.load_package_builtins(package);
+                namespace
+                    .existing_classifier(name)
+                    .and_then(|identity| self.cp.builtin_classifier_name(identity))
+            })
+            .or_else(|| self.proven_classifier(namespace, name));
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
@@ -4449,11 +4480,7 @@ impl JvmLibraries {
             .into_iter()
             .flat_map(|package| self.cp.package_facades_name(package))
         {
-            let facade_rendered = facade.render();
-            let lambda_return_overload = self
-                .cp
-                .lambda_return_overloads(&facade_rendered)
-                .contains(name);
+            let lambda_return_overload = self.cp.lambda_return_overloads(facade).contains(name);
             for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension() || mf.deprecated_hidden() {
                     continue;
@@ -4477,9 +4504,7 @@ impl JvmLibraries {
                     .first()
                     .copied()
                     .and_then(Ty::kotlin_class_internal)
-                    .map(|i| i.render())
-                    .map(|i| i.rsplit('/').next().unwrap_or(&i).to_string())
-                    .map(|s| format!("{}Of{s}", mf.jvm_name));
+                    .map(|element| format!("{}Of{}", mf.jvm_name, element.segment_ref()));
                 let lambda_return_mangled = lambda_return_overload
                     .then_some(mf.ret_class)
                     .flatten()
@@ -4520,7 +4545,7 @@ impl JvmLibraries {
                 });
                 let by_name = |n: &str| {
                     self.cp.facade_method(
-                        &facade_rendered,
+                        facade,
                         n,
                         Some(&recv_desc),
                         ret_desc.as_deref(),
@@ -4672,7 +4697,7 @@ impl JvmLibraries {
             if matching_properties != 0 {
                 crate::trace_compiler!(
                     "metadata_properties",
-                    "property symbols fqn={fqn} facade={} decoded={} matching={matching_properties}",
+                    "property symbols namespace={namespace:?} name={name} facade={} decoded={} matching={matching_properties}",
                     facade.render(),
                     mprops.iter().count(),
                 );
