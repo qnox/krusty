@@ -44,8 +44,10 @@ impl IrStaticAccessors {
 pub struct IrStatic {
     pub name: String,
     pub ty: Ty,
-    /// The initializer expression (run in `<clinit>` in declaration order).
-    pub init: ExprId,
+    /// The initializer expression, run in `<clinit>` in declaration order. `None` when source
+    /// declares none (a `lateinit var`): the field starts at its JVM default and `<clinit>` has
+    /// nothing to run for it.
+    pub init: Option<ExprId>,
     /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
     pub is_var: bool,
     /// `const val` ⇒ kotlinc keeps the field `static final` (inlined at use) with no accessor, at the

@@ -242,7 +242,7 @@ pub(super) fn add_child_serializer_cache(
             ir.statics.push(crate::ir::IrStatic {
                 name: "$childSerializers".to_string(),
                 ty: lazy_cache_ty(),
-                init: unsupported,
+                init: Some(unsupported),
                 is_var: false,
                 is_const: false,
                 owner: Some(serialized),
@@ -353,7 +353,7 @@ pub(super) fn add_child_serializer_cache(
         ir.statics.push(crate::ir::IrStatic {
             name: "$childSerializers".to_string(),
             ty: lazy_arr_ty,
-            init: arr,
+            init: Some(arr),
             is_var: false,
             is_const: false,
             owner: Some(serialized),
@@ -592,7 +592,7 @@ mod tests {
             .expect("the refusal is published as the cache's own initializer");
         assert!(
             matches!(
-                ir.expr(cache.init),
+                ir.expr(cache.init.expect("the cache has an initializer")),
                 IrExpr::PluginPlaceholder {
                     plugin: "serialization",
                     ..
@@ -627,7 +627,10 @@ mod tests {
             .find(|s| s.name == "$childSerializers")
             .expect("a `List<String>` element serializer derives, so the cache is built");
         assert!(
-            !matches!(ir.expr(cache.init), IrExpr::PluginPlaceholder { .. }),
+            !matches!(
+                ir.expr(cache.init.expect("the cache has an initializer")),
+                IrExpr::PluginPlaceholder { .. }
+            ),
             "a derivable slot publishes a real initializer"
         );
         assert!(

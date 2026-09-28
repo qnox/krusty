@@ -710,7 +710,7 @@ fn push_delegate_static(
     ir.statics.push(IrStatic {
         name,
         ty,
-        init,
+        init: Some(init),
         is_var: false,
         is_const: false,
         owner,

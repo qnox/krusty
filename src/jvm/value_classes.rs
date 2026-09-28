@@ -452,7 +452,7 @@ pub(crate) fn lower_value_classes(
     let orig_static_slots = ir
         .statics
         .iter()
-        .map(|property| constructor_bodies::slot_map(&ir.exprs, [property.init], &[]))
+        .map(|property| constructor_bodies::slot_map(&ir.exprs, property.init, &[]))
         .collect::<Vec<_>>();
 
     // Value-class-FIELD getters: `(class-index, method-index)` → the field's (pre-erasure) value-class
@@ -2116,7 +2116,9 @@ pub(crate) fn lower_value_classes(
     // construction here (`val p = arrayListOf(X(0))`) must rewrite `new X` → `constructor-impl` too;
     // otherwise a private `<init>` leaks an `IllegalAccessError` from `<clinit>`.
     for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
-        s4_bodies.push((property.init, slots.clone()));
+        if let Some(init) = property.init {
+            s4_bodies.push((init, slots.clone()));
+        }
     }
     append_inline_body_scopes(ir, &mut s4_bodies, &slot_types, &inline_own_parameters);
     // Map each reachable target expr to its body's slot map. A real lambda body belongs only to its
@@ -2945,7 +2947,9 @@ pub(crate) fn lower_value_classes(
     // Top-level property initializers (facade `<clinit>`, static) — box/unbox their value-class accesses
     // and boundary constructions just like any function body.
     for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
-        bodies.push((property.init, slots.clone()));
+        if let Some(init) = property.init {
+            bodies.push((init, slots.clone()));
+        }
     }
     append_inline_body_scopes(ir, &mut bodies, &slot_types, &inline_own_parameters);
     for (root, slots) in &bodies {
@@ -3929,8 +3933,7 @@ pub(crate) fn lower_value_classes(
         };
         let erased = ir.statics[si].erased_declared_ty.is_some();
         let declared = ir.statics[si].ty;
-        if !erased {
-            let root = ir.statics[si].init;
+        if let Some(root) = ir.statics[si].init.filter(|_| !erased) {
             box_tail(ir, root, x, &under);
         }
         let property = &mut ir.statics[si];

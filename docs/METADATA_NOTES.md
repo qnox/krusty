@@ -260,8 +260,7 @@ f8 is still 66 with a `<set-?>` parameter, and another class in the file writes 
 `access$set<X>$p`.
 
 Still open (kotlinc 2.4.20): a delegated top-level property records `isDelegated` and its
-`x$delegate` field. A facade keeps an empty `<clinit>` when every non-const initializer is a
-default value (`var x = 0`); krusty drops it.
+`x$delegate` field.
 
 Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
 8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.

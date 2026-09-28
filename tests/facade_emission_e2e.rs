@@ -38,23 +38,36 @@ fn top_level_property_emits_facade() {
     );
 }
 
+/// Compiles `src` with kotlinc and krusty over the same classpath.
+fn classes_against_kotlinc(stem: &str, src: &str) -> common::ClassSets {
+    common::classes_against_kotlinc_lib(stem, &[("Lib.kt", "package lib\n\nclass Lib\n")], src)
+        .expect("reference kotlinc is provisioned")
+}
+
 #[test]
-fn all_default_valued_facade_fields_need_no_clinit() {
+fn a_default_valued_facade_initializer_keeps_an_empty_clinit() {
+    // Each store is elided (the JVM already holds the default), but kotlinc still gives the
+    // facade a `<clinit>` holding only `return`.
     let src = "val absent: String? = null\n\
         var count: Int = 0\n\
         val disabled: Boolean = false\n\
         var ratio: Double = 0.0\n";
-    let classes = common::compile_in_process(src, "FacadeDefaults", &[], None)
-        .expect("default-valued facade compiles");
-    let (_, bytes) = classes
-        .iter()
-        .find(|(name, _)| name == "FacadeDefaultsKt")
-        .expect("facade class emitted");
-    let class = krusty::jvm::classreader::parse_class(bytes).expect("facade class parses");
-    assert!(
-        class.method("<clinit>", "()V").is_none(),
-        "JVM-default static values must not create an empty <clinit>"
-    );
+    let classes = classes_against_kotlinc("FacadeDefaults", src);
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn a_facade_of_lateinit_and_const_properties_has_no_clinit() {
+    // Neither runs code at class initialization: a `lateinit var` has no initializer and a
+    // `const val` is a `ConstantValue`.
+    let src = "lateinit var name: String\n\
+        const val limit = 3\n";
+    let classes = classes_against_kotlinc("FacadeNoInitializer", src);
+    let (kotlinc, krusty) = classes
+        .method_declarations("FacadeNoInitializerKt")
+        .expect("both compilers write the facade");
+    assert_eq!(krusty, kotlinc);
 }
 
 #[test]
