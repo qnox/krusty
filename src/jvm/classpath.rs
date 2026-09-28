@@ -2684,8 +2684,10 @@ impl Classpath {
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
-    pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
-        let internal_id = type_name(internal);
+    pub fn lambda_return_overloads(
+        &self,
+        internal_id: TypeName,
+    ) -> std::rc::Rc<LambdaReturnOverloads> {
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
             if let Some(m) = self.meta_overloads.borrow_mut().get(&internal_id) {
@@ -3183,27 +3185,47 @@ impl Classpath {
             return Some(target);
         }
         let tree = self.package_tree();
-        if !tree.incomplete_entries.is_empty() {
+        if !tree.catalog_complete() {
             return self.scan_types().type_aliases.get(&internal).copied();
         }
-        let package = internal.parent().unwrap_or_else(|| type_name(""));
-        if let Some(index) = self.aliases.borrow_mut().get(&package) {
-            return index.type_aliases.get(&internal).copied();
-        }
+        let package = internal.namespace();
+        self.package_alias_index(package)?
+            .type_aliases
+            .get(&internal)
+            .copied()
+    }
 
-        let mut index = TypeIndex::default();
-        if let Some(node) = tree.node_for_name(package) {
+    /// The alias identity `package.name` after that package's alias table has been loaded. A miss
+    /// does not intern `name`. Loading the table interns the aliases the package actually declares,
+    /// which is what makes a later identity lookup succeed.
+    pub fn package_alias_identity(&self, package: TypeName, name: &str) -> Option<TypeName> {
+        if let Some(identity) = crate::types::existing_type_name_child(package, name) {
+            return self.type_alias_target_name(identity).map(|_| identity);
+        }
+        self.package_alias_index(package)?;
+        let identity = crate::types::existing_type_name_child(package, name)?;
+        self.type_alias_target_name(identity).map(|_| identity)
+    }
+
+    fn package_alias_index(&self, package: TypeName) -> Option<std::sync::Arc<TypeIndex>> {
+        if self.class_load_error.borrow().is_some() {
+            return None;
+        }
+        if let Some(index) = self.aliases.borrow_mut().get(&package) {
+            return Some(index.clone());
+        }
+        let mut aliases = TypeIndex::default();
+        if let Some(node) = self.package_tree().node_for_name(package) {
             for &entry_id in &node.jars {
-                merge_alias_part(&mut index, &self.entry_package_types(entry_id, package));
+                merge_alias_part(&mut aliases, &self.entry_package_types(entry_id, package));
                 if self.class_load_error.borrow().is_some() {
                     return None;
                 }
             }
         }
-        let index = std::sync::Arc::new(index);
-        let target = index.type_aliases.get(&internal).copied();
-        self.aliases.borrow_mut().insert(package, index);
-        target
+        let index = std::sync::Arc::new(aliases);
+        self.aliases.borrow_mut().insert(package, index.clone());
+        Some(index)
     }
 
     /// The alias's EXPANSION template — its formal names plus the target applied to its own
@@ -3302,21 +3324,7 @@ impl Classpath {
                 .node_for(package_text)
                 .map(|_| crate::types::type_name(package_text))
         })?;
-        if self.aliases.borrow_mut().get(&package).is_none() {
-            let mut aliases = TypeIndex::default();
-            if let Some(node) = self.package_tree().node_for_name(package) {
-                for &entry_id in &node.jars {
-                    merge_alias_part(&mut aliases, &self.entry_package_types(entry_id, package));
-                    if self.class_load_error.borrow().is_some() {
-                        return None;
-                    }
-                }
-            }
-            self.aliases
-                .borrow_mut()
-                .insert(package, std::sync::Arc::new(aliases));
-        }
-        self.aliases.borrow_mut().get(&package).and_then(|index| {
+        self.package_alias_index(package).and_then(|index| {
             index
                 .type_aliases
                 .iter()
@@ -3423,6 +3431,12 @@ impl Classpath {
     pub fn builtin_classifier_name(&self, internal: TypeName) -> Option<TypeName> {
         self.builtins_file_for_package(Self::builtins_package_for(internal))
             .canonical_name(internal)
+    }
+
+    /// Read this package's `.kotlin_builtins` fragment. Parsing interns the fragment's classifier
+    /// identities, so a later child lookup can see them without rendering the probed spelling.
+    pub fn load_package_builtins(&self, package: TypeName) {
+        let _ = self.builtins_file_for_package(package);
     }
 
     /// Metadata-proven classifier identity for a raw symbol query. The leaf is never interned merely
@@ -4167,7 +4181,7 @@ impl Classpath {
     /// alone would pick the wrong one; `None` takes the first method of that name.
     pub fn facade_method(
         &self,
-        root: &str,
+        root: TypeName,
         jvm_name: &str,
         recv_desc: Option<&str>,
         ret_desc: Option<&str>,
@@ -4196,7 +4210,7 @@ impl Classpath {
             }
         };
         let named: Vec<ExtCandidate> = self
-            .facade_statics(type_name(root))
+            .facade_statics(root)
             .iter()
             .filter(|c| c.name == jvm_name)
             .cloned()
@@ -5003,6 +5017,23 @@ impl PackageTree {
             return Vec::new();
         };
         self.jars_for_class_id(class)
+    }
+
+    pub(crate) fn catalog_complete(&self) -> bool {
+        self.incomplete_entries.is_empty()
+    }
+
+    /// Whether `package` directly declares a class whose final path segment is `class_segment`.
+    /// The segment is the class file's last component (`CollectionsKt`, `Map$Entry`), not a source
+    /// nested name, and a miss does not intern it into the global type-name tree.
+    pub(crate) fn contains_exact_class(&self, package: TypeName, class_segment: &str) -> bool {
+        let Some(parent) = crate::types::existing_type_name_in(&self.names, package) else {
+            return false;
+        };
+        let Some(class) = self.names.existing_child_of(parent, class_segment) else {
+            return false;
+        };
+        !self.jars_for_class_id(class).is_empty()
     }
 
     fn jars_for_class_id(&self, class: NameId) -> Vec<JarId> {
@@ -7642,7 +7673,7 @@ mod fq_tests {
             return;
         };
         let cp = Classpath::new(vec![jar]);
-        let facade = "kotlin/collections/CollectionsKt";
+        let facade = type_name("kotlin/collections/CollectionsKt");
         // `maxOrNull` has many same-named receiver overloads; the receiver descriptor selects the
         // Iterable form, and a concrete return descriptor the numeric specialization.
         let d = cp.facade_method(

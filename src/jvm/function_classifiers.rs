@@ -12,8 +12,8 @@ pub(super) fn classifier(internal: TypeName) -> Option<common::FunctionClassifie
     common::classifier(internal)
 }
 
-pub(super) fn classifier_name(fqn: &str) -> Option<TypeName> {
-    common::classifier_name(fqn)
+pub(super) fn classifier_name_in(package: TypeName, name: &str) -> Option<TypeName> {
+    common::classifier_name_in(package, name)
 }
 
 pub(crate) fn is_reflective_function_classifier(internal: TypeName) -> bool {
