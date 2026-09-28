@@ -131,13 +131,21 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
     );
+    let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
     class
         .ctor_args
         .iter()
+        .zip(&identities)
         .take(count)
-        .map(|argument| {
-            if argument.provenance == crate::ir::IrCtorParameterProvenance::EnclosingInstance {
-                return parameter("this$0", MANDATED);
+        .map(|(argument, identity)| {
+            // The enclosing instance is the generated identity constructor_identities recorded.
+            // An unnamed capture maps to a positional identity and is named by its storage below.
+            if let IrParameterRole::Generated(role @ IrGeneratedParameterRole::OuterInstance) =
+                identity.role
+            {
+                let name = crate::jvm::parameter_names::method_parameter(identity, "<init>")
+                    .expect("a generated constructor prefix has a JVM parameter name");
+                return parameter(name, generated_constructor_flags(role));
             }
             let name = argument
                 .capture
@@ -152,6 +160,15 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
             parameter(name, SYNTHETIC)
         })
         .collect()
+}
+
+/// kotlinc marks an inner class constructor's outer instance `MANDATED`: the Java language requires
+/// it, unlike a synthetic capture.
+fn generated_constructor_flags(role: IrGeneratedParameterRole) -> u16 {
+    match role {
+        IrGeneratedParameterRole::OuterInstance => MANDATED,
+        _ => SYNTHETIC,
+    }
 }
 
 pub(super) fn primary_constructor(

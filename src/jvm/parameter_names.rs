@@ -292,7 +292,11 @@ fn function_semantic_parameter_types(
         .collect()
 }
 
-fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameterIdentity> {
+/// The identities of a constructor's physical parameters: the one projection its
+/// `LocalVariableTable` and `MethodParameters` names and flags are derived from.
+pub(super) fn constructor_identities(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<IrParameterIdentity> {
     let mut context_ordinal = 0u32;
     arguments
         .iter()
@@ -315,6 +319,10 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
                     if argument.provenance
                         == crate::ir::IrCtorParameterProvenance::EnclosingInstance =>
                 {
+                    assert!(
+                        argument.name.is_none() && argument.capture.is_none(),
+                        "a generated constructor parameter has no source or capture identity"
+                    );
                     assert_eq!(
                         physical_ordinal, 0,
                         "an outer instance is its constructor's first parameter"
