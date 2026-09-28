@@ -166,14 +166,19 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
         return physical;
     }
-    let physical = crate::types::intern(&physical_classfile_name_of(internal));
+    let physical = physical_classfile_name_of(internal);
     INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
     physical
 }
 
-fn physical_classfile_name_of(internal: TypeName) -> String {
+fn physical_classfile_name_of(internal: TypeName) -> &'static str {
     let mapped = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(internal);
-    mapped.jvm_binary_name()
+    // The classfile mapping already chose the physical classifier. Reuse its rendered spelling
+    // when that spelling is the binary name; a dotted tail still becomes `$`.
+    if mapped.segment_ref().contains('.') {
+        return crate::types::intern(&mapped.jvm_binary_name());
+    }
+    mapped.rendered()
 }
 
 /// Whether `descriptor` is the object descriptor of `classifier` (`Lpkg/Foo;`). The comparison uses
@@ -881,6 +886,26 @@ mod tests {
             ));
             assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));
         }
+    }
+
+    #[test]
+    fn classfile_name_reuses_the_rendered_spelling() {
+        let host = crate::types::type_name("sample/classfile6044/Host");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(host),
+            host.rendered(),
+        ));
+        let string = crate::types::type_name("kotlin/String");
+        let java_string = crate::types::type_name("java/lang/String");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(string),
+            java_string.rendered(),
+        ));
+        let function = crate::types::type_name("kotlin/Function1");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(function),
+            crate::jvm::jvm_class_map::jvm_internal_name(function),
+        ));
     }
 
     #[test]
