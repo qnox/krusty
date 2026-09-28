@@ -456,13 +456,23 @@ impl NameTree {
     pub fn existing_nested_child_of(&self, owner: NameId, nested: &str) -> Option<NameId> {
         let owner_node = self.node(owner);
         let parent = owner_node.parent?;
-        let h = child_hash_parts(
-            parent,
-            &[owner_node.segment.as_bytes(), b"$", nested.as_bytes()],
-        );
+        self.existing_nested_under(parent, &owner_node.segment, nested)
+    }
+
+    /// The classfile sibling `owner_segment$nested` under `parent`, without inserting it.
+    /// `owner_segment` is the owner's final path segment (`Outer`, `Outer$Inner`). A flat
+    /// `insert("pkg/Outer$Companion")` is found this way even when `pkg/Outer` itself was never
+    /// inserted.
+    pub(crate) fn existing_nested_under(
+        &self,
+        parent: NameId,
+        owner_segment: &str,
+        nested: &str,
+    ) -> Option<NameId> {
+        let h = child_hash_parts(parent, &[owner_segment.as_bytes(), b"$", nested.as_bytes()]);
         // SAFETY: see `child_or_insert`.
         let table = unsafe { &*self.current.load(Ordering::Acquire) };
-        table.probe_nested(&self.arena, parent, &owner_node.segment, nested, h)
+        table.probe_nested(&self.arena, parent, owner_segment, nested, h)
     }
 
     /// The already-interned child of `parent` for `segment`, without inserting.
@@ -1129,6 +1139,45 @@ mod tests {
             dst.len(),
             before,
             "read-only transfer must not insert a miss"
+        );
+    }
+
+    #[test]
+    fn flat_classfile_nested_child_matches_inserted_sibling() {
+        let names = NameTree::default();
+        let companion = names.insert("pkg/Outer$Companion");
+        let inner = names.insert("pkg/Outer$Inner$Companion");
+        let short = names.insert("A$B");
+        let long = names.insert("pkg/Abcdefghij$Companion");
+        let package = names.get("pkg").expect("package");
+        let before = names.len();
+
+        assert_eq!(
+            names.existing_nested_under(package, "Outer", "Companion"),
+            Some(companion)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Outer$Inner", "Companion"),
+            Some(inner)
+        );
+        assert_eq!(
+            names.existing_nested_under(NameTree::ROOT, "A", "B"),
+            Some(short)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Abcdefghij", "Companion"),
+            Some(long)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Outer", "Missing"),
+            None
+        );
+        assert_eq!(names.len(), before, "a nested miss must not insert");
+
+        let owner = names.insert("pkg/Outer");
+        assert_eq!(
+            names.existing_nested_child_of(owner, "Companion"),
+            Some(companion)
         );
     }
 
