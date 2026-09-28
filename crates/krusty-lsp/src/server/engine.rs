@@ -1,5 +1,6 @@
 //! Analysis worker for the LSP request loop.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -157,6 +158,39 @@ pub struct AnalysisBatch {
     pub pending: bool,
 }
 
+thread_local! {
+    static ANALYZED_SNAPSHOT_TEXTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Open-document texts the analysis thread already owns for one batch.
+///
+/// Applying a fresh batch used to clone every live editor buffer into the navigation snapshot,
+/// on top of the copy the job held while analysis ran. The engine moves that job copy here so
+/// the snapshot can take it. A batch that did not travel through the engine leaves the slot
+/// empty, and [`AnalyzedSnapshot::next`] clones the live buffer instead.
+pub(crate) struct AnalyzedSnapshot {
+    texts: std::vec::IntoIter<String>,
+}
+
+impl AnalyzedSnapshot {
+    pub(crate) fn install(texts: Vec<String>) {
+        ANALYZED_SNAPSHOT_TEXTS.with(|slot| *slot.borrow_mut() = texts);
+    }
+
+    /// Take whatever the engine installed for this apply, leaving the slot empty.
+    pub(crate) fn take() -> Self {
+        Self {
+            texts: ANALYZED_SNAPSHOT_TEXTS
+                .with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+                .into_iter(),
+        }
+    }
+
+    pub(crate) fn next(&mut self, live: &str) -> String {
+        self.texts.next().unwrap_or_else(|| live.to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ServerStatus {
     Working(String),
@@ -225,7 +259,7 @@ pub(crate) enum EngineEvent {
     WatchedGlobs(Vec<String>),
     Project(ProjectFeedback),
     ReanalyzeRequested,
-    AnalysisComplete(AnalysisBatch),
+    AnalysisComplete(AnalysisBatch, Vec<String>),
     /// The project model or its compiler configuration changed. Clear retained workspace results
     /// immediately; waiting for the first batch of the replacement sweep would expose old-model
     /// diagnostics in the interval.
@@ -1127,11 +1161,19 @@ fn run<A: Analysis>(
                     break;
                 }
             }
-            Some(EngineCommand::Analyze(job)) => {
+            Some(EngineCommand::Analyze(mut job)) => {
                 let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                 let batch = job.run(&mut analyze);
+                let document_texts = job
+                    .documents
+                    .into_iter()
+                    .map(|(_uri, text, _version, _lifetime)| text)
+                    .collect::<Vec<_>>();
                 if events
-                    .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
+                    .send(Incoming::Engine(EngineEvent::AnalysisComplete(
+                        batch,
+                        document_texts,
+                    )))
                     .is_err()
                 {
                     break;
@@ -1544,6 +1586,18 @@ mod tests {
     }
 
     #[test]
+    fn analyzed_snapshot_reuses_carried_text_and_falls_back_to_live() {
+        AnalyzedSnapshot::install(vec!["fun analyzed() {}".to_string(), "second".to_string()]);
+        let mut snapshot = AnalyzedSnapshot::take();
+        assert_eq!(snapshot.next("fun live() {}"), "fun analyzed() {}");
+        assert_eq!(snapshot.next("other"), "second");
+        assert_eq!(snapshot.next("fun live() {}"), "fun live() {}");
+
+        let mut empty = AnalyzedSnapshot::take();
+        assert_eq!(empty.next("fun live() {}"), "fun live() {}");
+    }
+
+    #[test]
     fn analyze_command_produces_completion_event() {
         use std::sync::mpsc::sync_channel;
 
@@ -1566,8 +1620,9 @@ mod tests {
         let mut found = false;
         for _ in 0..4 {
             match rx.recv().unwrap() {
-                Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
+                Incoming::Engine(EngineEvent::AnalysisComplete(batch, document_texts)) => {
                     assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 2)]);
+                    assert_eq!(document_texts, vec!["fun a(){}".to_string()]);
                     assert_eq!(batch.analyses.len(), 1);
                     found = true;
                     break;
@@ -1685,7 +1740,7 @@ mod tests {
         let mut support = None;
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
+                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch, _))) => {
                     support = Some(batch.support_documents);
                     break;
                 }
@@ -1783,7 +1838,7 @@ mod tests {
         let mut found = false;
         for _ in 0..4 {
             match rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
-                Incoming::Engine(EngineEvent::AnalysisComplete(_)) => {
+                Incoming::Engine(EngineEvent::AnalysisComplete(_, _)) => {
                     found = true;
                     break;
                 }
@@ -2891,7 +2946,7 @@ mod tests {
             }));
             loop {
                 match incoming.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_))) => break,
+                    Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_, _))) => break,
                     Ok(_) => {}
                     Err(error) => panic!("analysis event timed out: {error}"),
                 }

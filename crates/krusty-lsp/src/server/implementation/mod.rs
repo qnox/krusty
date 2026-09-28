@@ -47,9 +47,7 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
-/// How long shutdown waits for the analysis thread to notice the disconnect before
-/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
-/// worker child — alive indefinitely after the client is gone.
+/// How long shutdown waits for the analysis thread before abandoning a wedged worker.
 const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
@@ -1261,6 +1259,7 @@ where
 
     fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
         self.analysis_in_flight = false;
+        let mut snapshot_texts = super::engine::AnalyzedSnapshot::take();
         let resubmit = std::mem::take(&mut self.resubmit_pending);
         let changed = std::mem::take(&mut self.changed_identities);
         let fresh = batch
@@ -1397,7 +1396,7 @@ where
                 ));
             }
             if batch_is_fresh {
-                analyzed_documents.push((uri, open.text.clone()));
+                analyzed_documents.push((uri, snapshot_texts.next(&open.text)));
             }
         }
         if batch_is_fresh {
@@ -1405,9 +1404,7 @@ where
                 .into_iter()
                 .chain(batch.support_documents)
                 .collect();
-            // The builder numbers entries by their position in the analyzed source set; this is the
-            // first place that knows which document each position was. After binding the index
-            // names its own files and no longer depends on the source set being retained.
+            // Bind each source-set slot to its URI before the index records those positions.
             let uris = self
                 .source_set
                 .iter()
@@ -4361,7 +4358,8 @@ where
             }
         }
         EngineEvent::ReanalyzeRequested => service.mark_analysis_dirty(),
-        EngineEvent::AnalysisComplete(batch) => {
+        EngineEvent::AnalysisComplete(batch, texts) => {
+            super::engine::AnalyzedSnapshot::install(texts);
             for message in service.apply_analysis_batch(batch) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
                 write_framed(writer, &encoded)?;
@@ -4573,6 +4571,8 @@ fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+#[cfg(test)]
+mod analyzed_snapshot;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4910,7 +4910,7 @@ mod tests {
             &mut out,
             &incoming,
             &mut pending,
-            Incoming::Engine(EngineEvent::AnalysisComplete(batch)),
+            Incoming::Engine(EngineEvent::AnalysisComplete(batch, Vec::new())),
         )
         .unwrap();
 
