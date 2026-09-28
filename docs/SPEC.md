@@ -7553,6 +7553,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call records the override's declared parameters with that position marked as the box, and a
   nullable destination over a null-accepting underlying is the box. The override checks no null,
   as for any `Result` parameter. Tests: `tests/result_generic_override_argument_e2e.rs`.
+- **A nested value class's property is the shared carrier.** For `Outer(val inner: Inner)` over
+  `Inner(val x: Any)`, `outer.inner` reads nothing: it is `Inner`'s carrier, which `Outer`'s carrier
+  already is, so `Outer(outer.inner)` and `outer.inner.x` neither cast nor unbox, as kotlinc does.
+  A call whose checked declaration returns a non-null type (a member returning `Outer`) is boxed
+  into a generic slot with a plain `box-impl`, without a null test. Tests:
+  `tests/value_class_nested_sole_property_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
