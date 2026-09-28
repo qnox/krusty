@@ -981,6 +981,7 @@ pub(super) fn realize(
                                 descriptor: crate::jvm::names::method_descriptor(&[], element),
                                 params: None,
                                 interface: false,
+                                module_target: None,
                                 target: Some(selected),
                             }
                         }
@@ -997,6 +998,7 @@ pub(super) fn realize(
                                 descriptor,
                                 params: None,
                                 interface,
+                                module_target: None,
                                 target: Some(selected),
                             }
                         }
@@ -1029,6 +1031,7 @@ pub(super) fn realize(
                                 descriptor,
                                 params: None,
                                 interface,
+                                module_target: None,
                                 target: Some(selected),
                             }
                         }

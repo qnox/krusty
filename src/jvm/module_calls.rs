@@ -998,6 +998,7 @@ fn realize_property(
                     descriptor: String::new(),
                     params: Some((parameters.clone(), ret)),
                     interface: owner_is_jvm_interface(property),
+                    module_target: None,
                     target: Some(if value.is_some() {
                         crate::ir::IrVirtualTarget::PropertySetter(target)
                     } else {
