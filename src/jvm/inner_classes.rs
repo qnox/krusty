@@ -182,7 +182,11 @@ impl InnerClasses {
         let declaring = ir
             .classes
             .iter()
-            .filter(|class| class.enclosure.is_some())
+            .filter(|class| {
+                class
+                    .enclosure
+                    .is_some_and(|scope| !foreign_scope(ir, scope))
+            })
             .filter_map(|class| {
                 let (owner, _) = crate::jvm::ir_emit::class_enclosure(ir, class, facade)?;
                 Some((class.fq_name(), owner))
@@ -201,6 +205,26 @@ impl InnerClasses {
         }
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
+    }
+}
+
+/// Whether `scope` is code another source file declares: an inline function retained here only as
+/// a call-site template. kotlinc generates a class declared there from that file's own classes, so
+/// no class of this file declares it.
+fn foreign_scope(ir: &IrFile, scope: crate::ir::IrEnclosure) -> bool {
+    use crate::ir::IrEnclosure;
+    match scope {
+        IrEnclosure::Function(function) => ir.foreign_inline_templates.contains(&function),
+        IrEnclosure::Lambda(function) => ir
+            .lambda_enclosures
+            .get(&function)
+            .is_some_and(|&outer| foreign_scope(ir, outer)),
+        IrEnclosure::ClassInitializer(class)
+        | IrEnclosure::Classifier(class)
+        | IrEnclosure::Constructor { class, .. } => ir.classes[class as usize]
+            .enclosure
+            .is_some_and(|outer| foreign_scope(ir, outer)),
+        IrEnclosure::PropertyAccessor { .. } | IrEnclosure::File => false,
     }
 }
 
