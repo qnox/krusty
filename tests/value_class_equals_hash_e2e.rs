@@ -12,28 +12,35 @@
 use super::common;
 
 const SRC: &str = "@JvmInline value class Label(val text: String)\n\
+    open class Owned(val id: Int)\n\
+    @JvmInline value class OwnedId(val id: Int)\n\
     @JvmInline value class MaybeLabel(val text: String?)\n\
     @JvmInline value class MaybeCount(val count: Int?)\n\
     @JvmInline value class Anything(val value: Any?)\n\
     @JvmInline value class Slot<T>(val value: T)\n\
-    @JvmInline value class Present<T : Any>(val value: T)\n\
+    @JvmInline value class Present<T : Owned>(val value: T)\n\
+    @JvmInline value class Chained<T : U, U : Owned>(val value: T)\n\
     @JvmInline value class Cells(val cells: IntArray)\n\
     @JvmInline value class MaybeCells(val cells: IntArray?)\n\
     @JvmInline value class Wrapped(val inner: MaybeLabel)\n\
     @JvmInline value class Count(val count: Int)\n\
-    @JvmInline value class Unsigneds(val values: Array<UInt>)\n\
-    @JvmInline value class Names(val names: Array<String>?)\n\
+    @JvmInline value class OwnedValues(val values: Array<OwnedId>)\n\
+    @JvmInline value class OwnedRefs(val values: Array<Owned>?)\n\
     @JvmInline value class MaybeCountBox(val inner: Count?)\n\
     @JvmInline value class NestedBox(val inner: MaybeCountBox)\n\
     fun box(): String {\n\
     \x20   if (MaybeCount(null).hashCode() != 0) return \"nullable Int\"\n\
     \x20   if (MaybeLabel(null).hashCode() != 0) return \"nullable String\"\n\
     \x20   if (MaybeCells(null).hashCode() != 0) return \"nullable array\"\n\
-    \x20   if (Names(null).hashCode() != 0) return \"nullable reference array\"\n\
+    \x20   if (OwnedRefs(null).hashCode() != 0) return \"nullable reference array\"\n\
     \x20   if (NestedBox(MaybeCountBox(null)).hashCode() != 0) return \"nested boxed hash\"\n\
     \x20   val n: Any = NestedBox(MaybeCountBox(Count(1)))\n\
     \x20   if (n != NestedBox(MaybeCountBox(Count(1)))) return \"nested boxed equals\"\n\
     \x20   if (Slot<Any?>(null).hashCode() != 0) return \"generic\"\n\
+    \x20   val owned = Owned(7)\n\
+    \x20   val chained: Any = Chained<Owned, Owned>(owned)\n\
+    \x20   if (chained != Chained<Owned, Owned>(owned)) return \"bound chain equals\"\n\
+    \x20   if (chained.hashCode() != owned.hashCode()) return \"bound chain hash\"\n\
     \x20   val a: Any = Anything(\"x\")\n\
     \x20   if (a != Anything(\"x\")) return \"equals\"\n\
     \x20   if (a == Anything(null)) return \"not equals\"\n\
@@ -62,19 +69,20 @@ fn assert_same_instructions(class: &str, member: &str) {
     );
 }
 
-const CLASSES: [(&str, &str); 14] = [
+const CLASSES: [(&str, &str); 15] = [
     ("Label", "java.lang.String"),
     ("MaybeLabel", "java.lang.String"),
     ("MaybeCount", "java.lang.Integer"),
     ("Anything", "java.lang.Object"),
     ("Slot", "java.lang.Object"),
-    ("Present", "java.lang.Object"),
+    ("Present", "Owned"),
+    ("Chained", "Owned"),
     ("Cells", "int[]"),
     ("MaybeCells", "int[]"),
     ("Wrapped", "java.lang.String"),
     ("Count", "int"),
-    ("Unsigneds", "kotlin.UInt[]"),
-    ("Names", "java.lang.String[]"),
+    ("OwnedValues", "OwnedId[]"),
+    ("OwnedRefs", "Owned[]"),
     ("MaybeCountBox", "Count"),
     ("NestedBox", "Count"),
 ];
