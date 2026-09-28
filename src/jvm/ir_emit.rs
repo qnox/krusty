@@ -4379,7 +4379,7 @@ fn array_actual_element_matches(receiver: Ty, declared: Ty) -> bool {
     };
     if receiver.is_reference_array() {
         let declared_stored = reference_array_element(ir_ty_to_jvm(&declared));
-        type_descriptor(declared_stored) == type_descriptor(ir_ty_to_jvm(&stored))
+        crate::jvm::names::same_type_descriptor(declared_stored, ir_ty_to_jvm(&stored))
     } else {
         declared == stored
     }

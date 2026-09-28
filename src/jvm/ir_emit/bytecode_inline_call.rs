@@ -747,7 +747,7 @@ impl Emitter<'_> {
         let (slot, local) = self.slots[value];
         let category = Category::of_descriptor(&type_descriptor(local));
         let checkcast = (category == Category::Reference
-            && type_descriptor(local) != type_descriptor(parameter))
+            && !crate::jvm::names::same_type_descriptor(local, parameter))
         .then(|| checkcast_internal(parameter))
         .flatten();
         Binding::CallerLocal {
