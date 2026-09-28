@@ -149,10 +149,18 @@ pub(super) fn reference_enclosure(
         .copied()
 }
 
+/// The file facades the module's references can name: the one this file compiles to, and each
+/// source file's by its stem.
+#[derive(Clone, Copy)]
+pub(super) struct Facades<'a> {
+    pub(super) current: &'a str,
+    pub(super) stems: &'a [String],
+}
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
-    current_facade: &str,
+    facades: Facades<'_>,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
     own_invoke: bool,
@@ -230,14 +238,22 @@ fn realize_adapter_reference(
                 .get(&target)
                 .ok_or(FunctionReferenceRealizationTarget::Module(target))?;
             // A companion-block member is reflected on the class that declared its block, like
-            // any member of it; only a package declaration is owned by a file facade.
-            let owner = match declaration.placement {
-                crate::ir::IrStaticPlacement::CompanionBlock { declaring_class } => {
-                    Some(declaring_class)
+            // any member of it; only a package declaration is owned by a file facade, the one of
+            // the file declaring it.
+            let (owner, top_level) = match (declaration.placement, declaration.owner) {
+                (crate::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
+                    (Some(declaring_class), false)
                 }
-                crate::ir::IrStaticPlacement::Package => declaration.owner,
+                (crate::ir::IrStaticPlacement::Package, Some(owner)) => (Some(owner), false),
+                (crate::ir::IrStaticPlacement::Package, None) => (
+                    Some(
+                        super::module_calls::facade_for(declaration.source, facades.stems)
+                            .ok_or(FunctionReferenceRealizationTarget::Module(target))?,
+                    ),
+                    true,
+                ),
             };
-            (owner, declaration.name.to_string(), owner.is_none(), None)
+            (owner, declaration.name.to_string(), top_level, None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
             (Some(classifier), "<init>".to_string(), false, None)
@@ -296,7 +312,7 @@ fn realize_adapter_reference(
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
     }
-    let internal = reference_class_name(ir, current_facade, expression, "function");
+    let internal = reference_class_name(ir, facades.current, expression, "function");
     let mut class = IrClass::synthetic(internal);
     class.enclosure = reference_enclosure(ir, expression);
     class.superclass = type_name(if adapted {
@@ -653,7 +669,7 @@ fn realize_own_invoke(
 pub(super) fn realize(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
-    current_facade: &str,
+    facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
         .classes
@@ -685,7 +701,7 @@ pub(super) fn realize(
         realize_adapter_reference(
             ir,
             callables,
-            current_facade,
+            facades,
             raw,
             adapter_owner,
             own_invoke,

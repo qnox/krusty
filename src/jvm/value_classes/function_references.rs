@@ -70,7 +70,9 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                     &target_decl_params,
                     &target_decl_ret,
                     callable_under,
-                    fr.owner_class.is_none(),
+                    // A top-level declaration lives on its file facade, which the reference's
+                    // top-level flag records.
+                    fr.flags & 1 != 0,
                     fr.declaration_suspend,
                 ),
             },
