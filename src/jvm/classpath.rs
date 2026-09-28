@@ -399,7 +399,7 @@ mod builtin_members;
 mod inline_plan_cache;
 
 pub(super) use inline_plan_cache::InlinePlanCacheInput;
-use inline_plan_cache::{global_plan_cache, PlanCache, PlanKey};
+use inline_plan_cache::{global_plan_cache, PlanCache, PlanMemo};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
 /// caches are short-lived, so only a process-global tally shows whole-run efficiency).
@@ -1783,9 +1783,9 @@ pub struct Classpath {
     /// Memoized inline-body plans (`(owner, source name, body descriptor) → plan`). A plan is decoded
     /// purely from the owner's compiled bytecode, so it is stable for the classpath this instance
     /// snapshots — but every candidate overload the provider builds asks for one, which without this
-    /// memo re-reads and re-disassembles the same stdlib bodies for every compiled file.
-    inline_plans:
-        RefCell<crate::lru::LruCache<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>>,
+    /// memo re-reads and re-disassembles the same stdlib bodies for every compiled file. A hit
+    /// compares the borrowed provider view and does not allocate the key.
+    inline_plans: RefCell<PlanMemo>,
     /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
     /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
     meta_fns: MetaFnsCache,
@@ -2018,7 +2018,7 @@ impl Classpath {
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
-            inline_plans: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            inline_plans: RefCell::new(PlanMemo::with_cap(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
