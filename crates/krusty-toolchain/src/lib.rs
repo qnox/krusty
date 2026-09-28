@@ -46,14 +46,14 @@ fn execute_build(command: &mut BuildCommand) -> i32 {
         }
     }
     match execute(command) {
-        Ok(report) => {
+        Ok(report) if report.is_success() => {
             print!("{}", report.render());
-            if report.is_success() {
-                println!("Build successful");
-                0
-            } else {
-                1
-            }
+            println!("Build successful");
+            0
+        }
+        Ok(report) => {
+            eprint!("{}", report.failure_output());
+            1
         }
         Err(message) => {
             eprintln!("krusty-toolchain: {message}");

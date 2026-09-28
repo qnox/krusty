@@ -28,9 +28,11 @@ toolchain, like `krusty-lsp` is named for the protocol. `krusty` is already the 
 the driver is not `krusty-kotlin` or the upstream `kotlin` command. It is not a subcommand of the
 compiler. A directory containing `project.yaml`, or a single `module.yaml` that no parent
 `project.yaml` includes, is the project. `jvm/app` and `jvm/lib` modules are compiled by spawning
-`krusty`. `//` dependencies become module edges; an `exported` dependency is visible to dependents,
-and a `runtime-only` dependency is not on the compile classpath. Maven coordinates, version
-catalogs, `settings`, and non-JVM product types fail the command.
+`krusty`. A source error is printed as the compiler printed it, so the diagnostic is the same
+`file:line:column: error: message` kotlinc reports for that source. `//` dependencies become module
+edges; an `exported` dependency is visible to dependents, and a `runtime-only` dependency is not on
+the compile classpath. Maven coordinates, version catalogs, `settings`, and non-JVM product types
+fail the command.
 
 Gradle and `.iml` detection in the language server is unchanged. `krusty-toolchain build` only recognizes
 those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,
