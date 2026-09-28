@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[any_bounded_class_is_byte_identical_to_kotlinc|BanyB|default|plain#app/AnyB]
+2.4.20.. 8549468d4e4bd775f30448ececdb4ab8 2fe2ef34ca1ae063dec35f3d1b73ca92
+
+[bounded_class_is_byte_identical_to_kotlinc|Bcls3|default|plain#app/Bounded]
+2.4.20.. 835e626037e250024840d6f7aab8c9a3 5fc315623859c43d9d6c5d66a0c5a5dc
+
+[null_admitting_bounds_take_no_annotations_and_stay_byte_identical|Bfree2|default|plain#app/Free]
+2.4.20.. 4942e5c0221cc8211e2d2994028ca6c0 02c9868ac772d12308252d669e5d681e
+
+[null_admitting_bounds_take_no_annotations_and_stay_byte_identical|BnAnyB|default|plain#app/NAnyB]
+2.4.20.. 900061d198605cea64297b34a0654b9f c16bad5d5e3f4b6e486ddf042d46b911

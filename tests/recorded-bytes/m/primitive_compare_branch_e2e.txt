@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_primitive_comparison_is_byte_identical_to_kotlinc|PrimitiveCompare|default|plain#PrimitiveCompareKt]
+2.4.20.. f1debc5aee8eceb588ac310dd3848764 0667b2c361419cc1931d5bc85573aff8

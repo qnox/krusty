@@ -1,0 +1,17 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_lambda_result_selects_between_a_function_type_and_a_sam|SamAndLambda|17|68498e8296aeefaa#SamAndLambdaKt]
+2.4.20.. b82aadc5f950d6e064bb29ba180925e9 708589952638a0a1e287d98a002b4af8
+
+[a_lambda_result_selects_between_a_suspend_and_a_plain_function_type|SuspendAndNotSuspend|17|68498e8296aeefaa#SuspendAndNotSuspendKt]
+2.4.20.. 4872401cfe19422e55b4c7e4d6730825 8ca2b02dbdd389291fb9231915e972d8
+
+[a_lambda_result_selects_between_a_suspend_and_a_plain_function_type|SuspendAndNotSuspend|17|68498e8296aeefaa#SuspendAndNotSuspendKt$box$1]
+2.4.20.. 4872401cfe19422e55b4c7e4d6730825 9bd7d65c3d1465169a2be240595b09c7
+
+[a_lambda_result_selects_between_a_suspend_function_type_and_a_sam|SuspendAndSam|17|68498e8296aeefaa#SuspendAndSamKt]
+2.4.20.. 1969328d03aec4b88a559d1abd0f9359 7e572abb0b74263b49cf14845e6da2d6
+
+[a_lambda_result_selects_between_a_suspend_function_type_and_a_sam|SuspendAndSam|17|68498e8296aeefaa#SuspendAndSamKt$box$1]
+2.4.20.. 1969328d03aec4b88a559d1abd0f9359 8bab70cf9fbb0b75f798e664ee700a14

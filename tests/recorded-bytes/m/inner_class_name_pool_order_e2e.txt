@@ -1,0 +1,26 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_deep_nest_interns_each_row_inner_outer_then_name|InnerNameDeepNest|default|plain#Api$Domains$Inbound$Alpha]
+2.4.20.. cece6f0807c6f7b14dfe119f6e9a8200 1d76032ece6f86e375e8e022f5f1664a
+
+[a_deep_nest_interns_each_row_inner_outer_then_name|InnerNameDeepNest|default|plain#Api$Domains$Inbound$Companion]
+2.4.20.. cece6f0807c6f7b14dfe119f6e9a8200 8b250063eacf7d8ce7a9db2d623a5675
+
+[a_facade_interns_an_enclosing_row_its_nested_row_keeps|InnerNameFacadeChain|default|plain#InnerNameFacadeChainKt]
+2.4.20.. 6225d9fc9ba56537f9c0d519ffb22e96 fda0e1a244c7458f183dad65bfff9c3e
+
+[a_local_class_interns_its_enclosing_method_before_its_own_row|InnerNameLocalEnclosing|default|plain#InnerNameLocalEnclosingKt$outer$Local]
+2.4.20.. ec5750c4e88ad2820a377c3123e9bc73 52b9506a469b0274f048b22bd4ebb4c5
+
+[a_nesting_chain_keeps_its_enclosing_row_and_interns_row_by_row|InnerNameChain|default|plain#Outer$Middle$Alpha]
+2.4.20.. c9018fbccb18a62c3cbf8a73615875e1 a67c6ac1f49ee6e5db8d4d8fa2f1d440
+
+[a_nesting_chain_keeps_its_enclosing_row_and_interns_row_by_row|InnerNameChain|default|plain#Outer$Middle$Companion]
+2.4.20.. c9018fbccb18a62c3cbf8a73615875e1 161cf8e3d1762a866d95ef52045fa363
+
+[a_single_row_table_is_unchanged|InnerNameOrderAlpha|default|plain#Outer$Alpha]
+2.4.20.. cdd9d4cfd4567d9e1a83fba0c0612287 0478657d24c92b19b2e5480056acb948
+
+[companion_interns_a_sibling_inner_name_first|InnerNameOrder|default|plain#Outer$Companion]
+2.4.20.. cdd9d4cfd4567d9e1a83fba0c0612287 b80a888a42d875c72a06070f8923c934

@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[the_factory_narrows_its_operands_like_the_reference|ChildSerializerFactoryNarrowing|25|c765081fa3351439#Holder]
+2.4.20.. 64d072c4514505ab5f2e4385fe90505e 7fed76c0a27ae67ca6a0db0d75c0d58f

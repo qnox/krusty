@@ -1,0 +1,23 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[class_annotation_strings_intern_after_nested_names|iarAnnOrder|default|plain#Outer]
+2.4.20.. 14df73018794962f95b62010bafc255a 075392422490777c3040b588cf8da999
+
+[class_annotation_strings_intern_after_the_module_name|iarAnnModOrder|default|de6a61d1886edc48#Outer]
+2.4.20.. a277d120381c9db3e31b34842ba5b68a a39a6d8604db2d9154eb26eed9ce0fd0
+
+[default_stub_line_is_the_declaration_line|iarStubLine|default|plain#IarStubLineKt]
+2.4.20.. 4460998977b0d29e2ff0f4fcd4a6d163 4e9d654942a3d00bcd477542e26bc884
+
+[facade_infix_function_records_is_infix_flag|iarInfixFacade|default|plain#IarInfixFacadeKt]
+2.4.20.. 16756eb6de5d84dc5c473290c9b90de1 f5a740c2ab38c7ad295ba6c96dbb338c
+
+[interface_members_emit_in_source_order|iarIfaceOrder|default|plain#Mix]
+2.4.20.. 7e58ed4e5ac23d6fa984d09455ce5646 e5d4f111b876484c78398033c60492f9
+
+[member_infix_function_records_is_infix_flag|iarInfixMember|default|plain#Modifier]
+2.4.20.. f0a49d8ea4f51044e86af236f9173159 4a1e817542dd1a6637b06fb24ba4d1ab
+
+[short_float_and_double_constants_use_const_ops|iarShortFloat|default|plain#IarShortFloatKt]
+2.4.20.. fd26cf5ced5f3c0cae09a081e0b41099 556b8dc1ae9b112497484176df77665d

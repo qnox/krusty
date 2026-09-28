@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_function_bounded_type_parameter_value_is_invoked_like_kotlinc|FunctionBoundInvoke|default|plain#FunctionBoundInvokeKt]
+2.4.20.. 5ea3c6cae06e79c16962a98a61e01be8 628406539e26f0e712926b0b31757b08
+
+[later_and_chained_function_bounds_are_invoked_like_kotlinc|LaterFunctionBoundInvoke|default|plain#LaterFunctionBoundInvokeKt]
+2.4.20.. 2ead72bed3b94a01c3270f1f308e72d4 e972eccfccde0a201ee3343f5f2cba4f

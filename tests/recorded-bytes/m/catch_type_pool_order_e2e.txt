@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_constant_the_metadata_also_names_follows_the_catch_types|CatchLabel|default|plain#CatchLabelKt]
+2.4.20.. 64a3fcf4b1758d8a763df53438c80abf 42726d962d2ac4ce7260022cf25edd3f
+
+[a_method_interns_its_catch_types_before_its_code|CatchOrder|default|plain#CatchOrderKt]
+2.4.20.. 016eb2ec629fd3890a763dd874d320fc bbe09638fae7f939b7b48d517754fac0

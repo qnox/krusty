@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[annotated_class_ctor_line_table_matches_kotlinc|AnnotatedDeclLine|default|plain#Pair2]
+2.4.20.. 2b4fc0d5d75165d572cabd3070e5d074 2699886d9e6612594e4741e3cef8b340
+
+[unannotated_multiline_header_ctor_line_table_is_unchanged|MultilineHeader|default|plain#Multi]
+2.4.20.. 6cb8cdba6c43cfa13369fd23ae447d80 06707d2c42b7743472185911d58b14a9

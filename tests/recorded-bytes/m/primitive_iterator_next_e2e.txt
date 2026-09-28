@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[primitive_iterator_next_is_byte_identical_to_kotlinc|PrimitiveIteratorNext|default|plain#store/PrimitiveIteratorNextKt]
+2.4.20.. b72d356211bc8132d194fbe79660eeeb 91b5aefbc64d94078482e6eeff361dfa

@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_jvm_field_property_records_no_accessor|Sfield|default|plain#app/S]
+2.4.20.. 5813a7a72bcba4f7c7ce0fd7aa78dfc6 d5c2f2aa9887f818c65b3042bdea5199
+
+[a_plain_property_still_records_its_accessors|Pplain|default|plain#app/P]
+2.4.20.. b82c219690b62c1c04b182f96be0d7b9 77676a2ba9d409a5c0cc81be582d9d50
+
+[constructor_nullable_and_non_public_jvm_fields_record_no_accessor|Gfield|default|plain#app/G]
+2.4.20.. 6a98fee2e65fcfa1d55c2ba5f6579bcc af8d6e2de83fdb6a68dab448bc718307

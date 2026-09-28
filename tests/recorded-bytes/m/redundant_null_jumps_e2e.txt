@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_null_jump_or_instanceof_on_a_known_value_folds_like_kotlincs|NullJumps|17|plain#NullJumpsKt]
+2.4.20.. e3d4de7cc6cf318139e5d88aed525784 b4ae7610e6d703e8f11a21f904fc0313

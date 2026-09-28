@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[extension_guard_fixture_is_byte_identical_to_kotlinc|ExtensionReceiverGuards|default|plain#ExtensionReceiverGuardsKt]
+2.4.20.. 855eade14dc206866ca69cac74fe3a2b e87dba1fd333f67aa9be6855a4f90ebb
+
+[extension_guard_fixture_is_byte_identical_to_kotlinc|ExtensionReceiverGuards|default|plain#H]
+2.4.20.. 855eade14dc206866ca69cac74fe3a2b 7140cf7eb19c81d597892fa675a4b2ec
+
+[extension_guard_fixture_is_byte_identical_to_kotlinc|ExtensionReceiverGuards|default|plain#Host]
+2.4.20.. 855eade14dc206866ca69cac74fe3a2b 35e39108f076c4b7b0b6aaf4950d1b4e

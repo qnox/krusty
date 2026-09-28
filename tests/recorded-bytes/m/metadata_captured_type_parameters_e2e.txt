@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_anonymous_object_addresses_a_captured_function_type_parameter_by_id|CapturedFunction|default|plain#app/CapturedFunctionKt$anon$1]
+2.4.20.. d91a3124794f58eaa63568dcf2b53199 65cb86983da330d97adbd13e27a2cf76
+
+[captured_type_parameters_are_numbered_on_first_use|CapturedFirstUse|default|plain#app/Multi$wrap$1]
+2.4.20.. d91a3124794f58eaa63568dcf2b53199 beb83d6b4492da43c60f669cca74daee

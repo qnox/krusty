@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_null_checked_value_stays_on_the_stack_like_kotlincs|NullCheckFold|25|plain#NullCheckFoldKt]
+2.4.20.. c958395951d5b75b5a2ae587ca66271c 7938b27fa20bbf1055afc903787e5281
+
+[a_printed_value_stays_on_the_stack_like_kotlincs|TemporaryElimination|25|plain#TemporaryEliminationKt]
+2.4.20.. 27cc010d9a2c1a3ead9727e08784f7ef f7ac4521ac04cc19b7e37dceca4bd3ec
+
+[an_elvis_keeps_no_goto_to_the_next_instruction_like_kotlincs|RedundantGoto|25|plain#RedundantGotoKt]
+2.4.20.. 29b52fd35b0fe625f46e57f85210957c 3f0b55805b89c7ec49af436508ea921d

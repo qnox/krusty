@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[comparison_jumps_are_byte_identical_to_kotlinc|ComparisonJumpLine|default|plain#store/ComparisonJumpLineKt]
+2.4.20.. 94fcbe3bbecf2935821e2b3c5382f754 af74cb0c653cd0bc688a252a831d1fa5
+
+[reference_comparisons_are_byte_identical_to_kotlinc|ReferenceComparisonLine|default|plain#store/ReferenceComparisonLineKt]
+2.4.20.. 246123d3d88fc899ae5289e4f5bafde4 f8d553498093e5484791f65cfc6d6209

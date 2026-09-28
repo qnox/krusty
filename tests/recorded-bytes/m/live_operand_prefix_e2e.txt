@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_operand_prefix_stays_on_the_stack_across_a_branch_like_kotlinc|LiveOperandPrefix|default|plain#LiveOperandPrefixKt]
+2.4.20.. aca36546446e2d2fcc4d1e00c5998b66 75bab686f4246527bd2a019f5b2765aa

@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[iterator_protocol_receivers_take_kotlincs_slots|IteratorProtocolSlots|25|plain#IteratorProtocolSlotsKt]
+2.4.20.. daaf4b2545e51423391f806151286402 c14b20fa05da9f11470cfc546c99782e
+
+[iterator_protocol_receivers_take_kotlincs_slots|IteratorProtocolSlots|25|plain#RangeScope]
+2.4.20.. daaf4b2545e51423391f806151286402 7c12ffe402364b4adbac261ff403d08d

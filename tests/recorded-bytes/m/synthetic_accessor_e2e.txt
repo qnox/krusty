@@ -1,0 +1,17 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[private_member_properties_used_from_other_classes_go_through_field_accessors|MemberFieldAccessors|17|plain#Holder]
+2.4.20.. d62e47e8cfcaedd367cd97f98c0356e6 325f753290033ad1acafa47ddbc0d2f6
+
+[private_top_level_declarations_used_from_classes_go_through_facade_accessors|FacadeAccessors|17|plain#D$m$g$1]
+2.4.20.. 50ba873b9212822daee50246df9a096e 10e2c39f57ad70617bf5820a54d9c944
+
+[private_top_level_declarations_used_from_classes_go_through_facade_accessors|FacadeAccessors|17|plain#D$m$h$1]
+2.4.20.. 50ba873b9212822daee50246df9a096e 2771afc9db4a9309ff456f9dc8e1a222
+
+[private_top_level_declarations_used_from_classes_go_through_facade_accessors|FacadeAccessors|17|plain#D$write$k$1]
+2.4.20.. 50ba873b9212822daee50246df9a096e c17aef6e004fbeee7f589c0468fb9e63
+
+[private_top_level_declarations_used_from_classes_go_through_facade_accessors|FacadeAccessors|17|plain#FacadeAccessorsKt]
+2.4.20.. 50ba873b9212822daee50246df9a096e 8211dee364e633c05479db22da91036d

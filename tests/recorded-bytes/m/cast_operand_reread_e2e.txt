@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_high_slot_immutable_cast_uses_kotlincs_wide_reload|HighSlotCastOperandReread|25|plain#HighSlotCastOperandRereadKt]
+2.4.20.. be6bf8333ea24edefde83888e3c7204b 85ae7e7fa3cb4e1fe3b91ed5c402a8b4
+
+[an_immutable_cast_operand_is_read_again_like_kotlincs|CastOperandReread|25|plain#CastOperandRereadKt]
+2.4.20.. 0b77034fadc7f1ea76f2b92e88b522d3 b583d891d2a533b9f7fc4f4c79400d28

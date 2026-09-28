@@ -1,0 +1,68 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_declared_getter_is_not_the_default_accessor|declared_getter|default|plain#app/A]
+2.4.20.. 9a39363c0e8d292a5f0b2717c5fc7f87 35f19337e5e7d9438daf5bd2522d382e
+
+[a_delegated_var_records_its_delegate_field_and_setter_parameter|delegated_var|default|plain#app/A]
+2.4.20.. 926f54f6e5c87f281a6dca06722cf60d 2c6017c04e4e73fe1fe637679a660f59
+
+[a_folded_initializer_is_not_a_constant|FoldedConstants|default|plain#app/FoldedConstantsKt]
+2.4.20.. 788017397b773a068997a5fe1430d7f7 8d5e6689baf52991e2c560595df10e8c
+
+[a_folded_initializer_is_not_a_constant|FoldedConstants|default|plain#app/K]
+2.4.20.. 788017397b773a068997a5fe1430d7f7 84e1d0a90e4fe8b7a30b7e6a28e61198
+
+[a_folded_initializer_is_not_a_constant|FoldedConstants|default|plain#app/K$Companion]
+2.4.20.. 788017397b773a068997a5fe1430d7f7 258c0c87af53f6bbf32f0b09be28ccd6
+
+[a_folded_initializer_is_not_a_constant|FoldedConstants|default|plain#app/O]
+2.4.20.. 788017397b773a068997a5fe1430d7f7 175d810ff7e0a1cf3ee8652abebc5508
+
+[a_lateinit_property_records_lateinit|lateinit_property|default|plain#app/A]
+2.4.20.. 7d02edee9271452ab646fb7bb4cb1757 bb325fd8494d1dd971a92b13bfa4c338
+
+[a_package_accessor_word_carries_the_property_visibility|AccessorWords|default|plain#app/AccessorWordsKt]
+2.4.20.. d12315609391f3080b6ed84adc598623 3bd34cc31a129c78b07fc533e4a19105
+
+[a_package_property_with_one_declared_accessor_names_the_default_other|DefaultOtherAccessor|default|plain#app/DefaultOtherAccessorKt]
+2.4.20.. 66a295848da1e2028d8b5213389708c7 ec4d5be7aaf9b9b428c05356a50dd715
+
+[a_package_property_with_one_declared_accessor_names_the_default_other|DefaultOtherAccessor|default|plain#tree]
+2.4.20.. d17e308c6ebed94abab3139faa906def 8954d2fb42c7d8928082ed6bea00c5f3
+
+[a_private_top_level_property_with_default_accessors_names_none|PrivateAccessors|default|plain#app/PrivateAccessorsKt]
+2.4.20.. 2d7cc49791b2d4a9d559a81585150a74 be012051ab390482acc64beec842127b
+
+[a_public_var_with_a_bodiless_private_set_publishes_only_its_getter|PrivateSet|default|plain#app/PrivateSetKt]
+2.4.20.. 39455fad0438265781bd8fad3dd0186a 6c2baf99d3c454675cbfd17005bdc096
+
+[a_public_var_with_a_bodiless_private_set_publishes_only_its_getter|PrivateSet|default|plain#tree]
+2.4.20.. 03e21296861a07efb33d7c6de0cd4802 b0c85e26d2057a0f716ba5b41f0a676a
+
+[a_public_var_with_an_internal_set_writes_the_setter_visibility|InternalSet|default|plain#app/InternalSetKt]
+2.4.20.. 1406f8c25773a47b0cb9d2b661e61dca 0ce6f2f41b078192aea629e92476fb49
+
+[a_public_var_with_an_internal_set_writes_the_setter_visibility|InternalSet|default|plain#tree]
+2.4.20.. bd6ae498eddc9fd36f3df64326a70662 92c68881676b651ccfb5ae2d7c2950d7
+
+[a_zero_literal_initializer_is_a_constant|ZeroConstants|default|plain#app/K]
+2.4.20.. a8efd2fa84f3b56abbb3a96a3aae9df7 e3c9d74d0dce153757586425be6dde48
+
+[an_abstract_class_property_records_abstract_modality|abstract_property|default|plain#app/B]
+2.4.20.. 9df602a923e2a85d7028ecee84e97fa8 9e15cc1b48bdfdfac3fe8d4131b7c9d7
+
+[an_interface_property_with_a_getter_is_open|interface_property|default|plain#app/I]
+2.4.20.. fea465ed425fa26f36c9c222b7e4bbfe 9344162572b4135c268c658c75713d69
+
+[an_open_property_and_its_non_final_override_record_open_modality|open_property|default|plain#app/B]
+2.4.20.. 1aa76a10af9a969069ca73c279202999 fa84baefd21dd44be2653dceb4be6fca
+
+[an_open_property_and_its_non_final_override_record_open_modality|open_property|default|plain#app/C]
+2.4.20.. 1aa76a10af9a969069ca73c279202999 a6e41034d89b696efa7bb6abb9ee369b
+
+[an_open_property_and_its_non_final_override_record_open_modality|open_property|default|plain#app/D]
+2.4.20.. 1aa76a10af9a969069ca73c279202999 a22c93b5f0ecb0ff7b992d7f8f577386
+
+[only_a_setter_body_makes_a_declared_setter_not_default|declared_setter|default|plain#app/A]
+2.4.20.. d1f7e35a654ec58b553bda41d2438de2 414af8b3e74ea7998b19fbfdee2cfbd2

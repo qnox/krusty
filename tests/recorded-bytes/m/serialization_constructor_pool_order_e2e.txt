@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[the_serialization_constructors_line_table_is_kotlincs|SerializationCtorLines|25|c765081fa3351439#Opt2]
+2.4.20.. 54b6aa66d5e0cbb83e29412eceab9d7d 292d3da41bca14cc7cf8cf2e7e4937e5
+
+[the_serialization_constructors_locals_intern_before_its_frames|SerializationCtorPoolOrder|25|c765081fa3351439#Opt2]
+2.4.20.. db7f04bd1b4b4249c40f79fd71a30454 584c75094b3aab09cc3d6373c52148b8

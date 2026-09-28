@@ -1,0 +1,29 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_bridge_labels_an_anonymous_context_parameter_after_the_overridden_declaration|ValueClassContextBridge|17|plain#Impl]
+2.4.20.. c00834411c00eb22f055b198b604f493 493618c1dda7ac5ac71b8909fde47dd7
+
+[a_bridge_names_both_of_its_parameters|BridgeParamNames|default|plain#NoteStore]
+2.4.20.. 6f94b47590d374361a34db7fe7d7a50b 69f973b91d24e5b4029c797e803eaf21
+
+[a_bridge_names_its_parameters_after_the_overridden_declaration|RenamedBridgeParameter|default|plain#Renamed]
+2.4.20.. fb9744d7808b724748810bb9a61bb86e a9b196f40cde8cdf9df25b0de1f3bad6
+
+[an_annotated_class_bridge_is_rooted_at_its_declaration|AnnotatedBridge|default|plain#StringSink]
+2.4.20.. e09ba84857727dde3fc0c9f475a701d3 dac5435d8367a136437c800221a4e8e3
+
+[an_anonymous_context_parameter_of_a_type_parameter_is_labelled_after_its_bound|TypeParameterContextLabel|17|plain#Holder]
+2.4.20.. 450ad3d6b1e9532a73329332289e1717 ba3628a490fe8c5f1f4fe4e8680fb65a
+
+[an_anonymous_context_parameter_of_a_type_parameter_is_labelled_after_its_bound|TypeParameterContextLabel|17|plain#TypeParameterContextLabelKt]
+2.4.20.. 450ad3d6b1e9532a73329332289e1717 5567b9aad190c2d8f2d0a39f19977ccd
+
+[an_erased_bridge_is_byte_identical_to_kotlinc|ErasedBridge|default|plain#StringSink]
+2.4.20.. f1fe1ab4d447aa4a7f1495ad2b960d0f 154be33fa95dbbaab287b891db327b8f
+
+[an_inherited_bridge_names_its_parameters_after_the_declaring_supertype|InheritedBridgeParameter|default|plain#Leaf]
+2.4.20.. 16ccbea84c6a60bf890311f14cd29c36 66ab88da22b9ff017ba87fd98f48193c
+
+[bridges_to_generated_members_use_their_published_parameter_identities|GeneratedBridgeParameterIdentities|25|c765081fa3351439#LedgerEntry$$serializer]
+2.4.20.. ebcc7ca3d0e2e10568511b816b989ab4 f857a58e46525712e0878fd4341bc6eb

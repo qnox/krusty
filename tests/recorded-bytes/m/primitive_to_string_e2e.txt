@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[primitive_to_string_is_byte_identical_to_kotlinc|PrimitiveToString|default|plain#store/PrimitiveToStringKt]
+2.4.20.. bc836c34f757394b17671b8debd30d1a 7b85d2fc1f2774b1a5795d5a11682380
+
+[primitive_to_string_is_byte_identical_to_kotlinc|PrimitiveToString|default|plain#store/PrimitiveToStringKt$bound$1]
+2.4.20.. bc836c34f757394b17671b8debd30d1a ec0b400d3b5abcd4b412843b7ffe1b3d
+
+[primitive_to_string_is_byte_identical_to_kotlinc|PrimitiveToString|default|plain#store/PrimitiveToStringKt$reference$1]
+2.4.20.. bc836c34f757394b17671b8debd30d1a 74cee3ab412920472a15bb342c598052

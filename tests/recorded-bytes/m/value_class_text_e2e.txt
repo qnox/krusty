@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[value_class_text_matches_kotlinc|ValueClassText|25|plain#Holder]
+2.4.20.. 8b9bb98e73163d85af235cea10578310 eba1788ddaf1054158a7bac4826c3388
+
+[value_class_text_matches_kotlinc|ValueClassText|25|plain#ValueClassTextKt]
+2.4.20.. 8b9bb98e73163d85af235cea10578310 af906bca1c48d02799a6026820ebf49a

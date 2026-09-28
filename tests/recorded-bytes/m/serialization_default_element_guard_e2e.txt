@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_body_property_initializer_is_a_default_the_way_kotlinc_treats_it|BodyInitializerDefault|25|c765081fa3351439#Counted]
+2.4.20.. 49e31107008de5fed85ba99d935760b3 378494dec0939444129b2c57a1ac20cb
+
+[a_body_property_initializer_is_a_default_the_way_kotlinc_treats_it|BodyInitializerDefault|25|c765081fa3351439#Counted$$serializer]
+2.4.20.. 49e31107008de5fed85ba99d935760b3 7f39ee17f84eb68b995b8c27d6289dc6
+
+[a_computed_default_is_guarded_the_way_kotlinc_guards_it|ComputedDefaultGuard|25|c765081fa3351439#Computed]
+2.4.20.. 816de13ec3a1f9ad25098ccc008ccf80 090e2c0e385987d4fb4d1f164698d5f7
+
+[a_defaulted_element_is_guarded_the_way_kotlinc_guards_it|DefaultElementGuard|25|c765081fa3351439#Opt]
+2.4.20.. 3f8c2b02fd8169d91387954e75e195e0 99d9e35ee0c416eef9204711fa38a9af

@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[default_stub_targets_the_selected_hidden_secondary_accessor|HiddenSecondaryDefaultAccessor|25|plain#SecondaryDefault]
+2.4.20.. 4dbdb5de78f0c08aee0c3669b0a7a4fb a3d4ea053b9f029783e6390171de647a
+
+[the_class_matches_kotlinc_around_its_hidden_primary|HiddenPrimaryAccessor|25|plain#Holder]
+2.4.20.. 55acab75ea9446633e72d5050334832e fb74829fc75a9ad430bf665caedc7959

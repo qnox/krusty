@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_bootstrap_method_the_object_only_lambda_needs_stays_out_of_the_caller|Concat|11|plain#tree]
+2.4.20.. 38f4b653fccd3104d37c1e8f923f07e5 e4d16cebb47cdbb7794e462e2e76e482
+
+[a_captured_field_name_the_object_already_has_is_numbered|Nested|default|plain#tree]
+2.4.20.. 72fd5e4cacbeecfad7563c41c1d8becf fbea0136e3686f0c753c4695090a9139
+
+[crossinline_objects_are_the_reference_compilers_classes|Crossinline|default|plain#tree]
+2.4.20.. d9de5289d3fbdef46a99693925c518b5 348406b77fe69ecaa9f31c01a927ea29

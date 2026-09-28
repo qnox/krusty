@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[nullable_value_class_lambdas_stay_boxed_like_the_reference_compiler|NullableValueClassLambdas|default|plain#tree]
+2.4.20.. f5fce0c2b7b311ac2d4af96a7a87cc9d 59494a7bd16920e21ddd1eb21bb14699
+
+[value_class_lambdas_are_the_reference_compilers_classes|ValueClassLambdas|default|plain#tree]
+2.4.20.. 4d7dae1a0f7c1d9629f19f4a52436acf 5e7a8cfdb4395268bfcce776cbfb3765

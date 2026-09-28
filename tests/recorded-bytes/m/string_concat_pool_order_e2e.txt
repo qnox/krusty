@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_template_interns_its_operands_before_its_concat_call_site|Concat|11|plain#ConcatKt]
+2.4.20.. 94ca28f50ac6490427d83068ff130479 06bbc61ceafef3b9815b0f8696e468a8

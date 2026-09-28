@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_try_casts_each_branch_to_its_type_like_kotlinc|TrySubclasses|17|plain#TrySubclassesKt]
+2.4.20.. 77d6ee9a18f2389bb61db98b46c8773a a5c84c37d3424daa39db7e7a8941fce7

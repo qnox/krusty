@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_elvis_over_a_safe_call_chain_joins_its_null_path_like_kotlincs|ElvisChain|25|plain#ElvisChainKt]
+2.4.20.. 6a85e5be7f1a56f349fcc3d7c38a51a2 945735fb587ce32ef85f6c7b2cd0715f
+
+[safe_calls_are_laid_out_like_kotlincs|SafeCallLayout|25|plain#SafeCallLayoutKt]
+2.4.20.. c8aec8e8f9bb9e4f37a47fba02e28a56 9284658b5c4b81bf0a8fda5b3b82e166

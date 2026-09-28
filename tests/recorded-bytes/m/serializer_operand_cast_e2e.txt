@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_decoded_element_narrows_its_serializer_to_the_parameter_type|SerializerOperandCast|25|c765081fa3351439#Bough$$serializer]
+2.4.20.. 9b9a68acce0c1bf5e877a2e7cab34028 210e027934178aff154620fe9ead9dd8
+
+[a_nullable_property_publishes_its_nullable_serializer|SerializerOperandCast|25|c765081fa3351439#Bough$$serializer]
+2.4.20.. 24ebf0e1c3a5b825d34b837111269228 d8ce94324c227fbb1c34f352a7f23b3e
+
+[an_encoded_element_narrows_its_serializer_to_the_parameter_type|SerializerOperandCast|25|c765081fa3351439#Bough]
+2.4.20.. 9b9a68acce0c1bf5e877a2e7cab34028 dabd6e1b94c1f5a9e860df8803c6e5e0

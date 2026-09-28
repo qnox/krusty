@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_nullable_value_class_return_unboxes_a_function_result_like_kotlinc|NullableValueClassFunctionResult|25|plain#NullableValueClassFunctionResultKt]
+2.4.20.. b214d22cd81ff727a9269463891e63b6 ad62aa874b898a167f9cac2ab0cc0ad5

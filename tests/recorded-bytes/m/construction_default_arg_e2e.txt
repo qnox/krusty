@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_non_null_default_keeps_its_narrowing|NonNullDefaultNarrowing|default|plain#Held]
+2.4.20.. b6513455759bb62ec1eafd4ed9c8450f cb89747854142e5cb927dbc7debe3253
+
+[a_null_default_is_stored_without_a_checkcast|NullDefaultNoCheckcast|default|plain#Token]
+2.4.20.. 1d1f26cdd99dc91999e6bbfb9b29f940 2f881e002070415e5f1df6b0398580fd

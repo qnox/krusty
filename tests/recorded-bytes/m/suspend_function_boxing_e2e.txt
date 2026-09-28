@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_member_without_a_suspension_point_builds_its_suspend_lambda_class|SuspendLambdaHost|default|plain#tree]
+2.4.20.. 53891b0ee80d3e3c73dab507abc71425 10e8027d2453db68a9fceeb80e7384d5

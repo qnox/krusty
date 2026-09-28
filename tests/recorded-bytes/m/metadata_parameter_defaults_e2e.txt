@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_implementation_through_a_fake_override_declares_no_default|FakeOverrideDefault|default|plain#app/Impl]
+2.4.20.. 076c0c484a535bef30a8fc31005ffa1e 98a1bcc74e5a5515b1e158de9b5efd58
+
+[an_override_does_not_declare_an_inherited_default|InheritedDefault|default|plain#app/Derived]
+2.4.20.. 607ebc410d9637732c7bfdc65a1a4706 e0095a54fc9ab1a554e0c9e7449b395c
+
+[the_declaring_function_records_its_default|DeclaredDefault|default|plain#app/Base]
+2.4.20.. 607ebc410d9637732c7bfdc65a1a4706 675db0291568e048548be5cf6fead589

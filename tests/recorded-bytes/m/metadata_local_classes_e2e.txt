@@ -1,0 +1,20 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_class_nested_in_a_local_class_is_named_within_it|NestedLocal|default|plain#app/NestedLocalKt$make$Local$Part]
+2.4.20.. 4c9c9633cb0712a0344a23aeaf59caa3 f27271e5dc1e4e5df0450b17db469744
+
+[a_local_class_records_its_members|LocalClass|default|plain#app/LocalClassKt$make$Local]
+2.4.20.. 4c9c9633cb0712a0344a23aeaf59caa3 07ba147f3a0b972c91d1e7de90d2f34d
+
+[an_anonymous_object_naming_a_local_class_records_its_descriptors|LocalObject|default|plain#app/LocalObjectKt$make$o$1]
+2.4.20.. 4c9c9633cb0712a0344a23aeaf59caa3 04e1de648c1ae1ccd041dd9eb46e6ad9
+
+[an_object_extending_a_class_records_no_constructor|BaseObject|default|plain#app/BaseObjectKt$make$b$1]
+2.4.20.. 1fac9c100ed416933123ea7c53053a80 455560afc6519c9561ddaea01557f118
+
+[an_object_implementing_an_interface_records_its_members|InterfaceObject|default|plain#app/InterfaceObjectKt$make$g$1]
+2.4.20.. 1fac9c100ed416933123ea7c53053a80 a7d0d0f8272946e6d745a41ba7ce1e4f
+
+[an_object_without_supertypes_records_any_and_its_members|PlainObject|default|plain#app/PlainObjectKt$make$plain$1]
+2.4.20.. 1fac9c100ed416933123ea7c53053a80 3d75718c84377c6a8d174fcb1960df0f

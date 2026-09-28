@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_primitive_hash_code_calls_the_static_wrapper_method_like_kotlinc|PrimitiveHashCode|default|plain#PrimitiveHashCodeKt]
+2.4.20.. 198c118e40d2e0d65c35e90b5ae72085 b31928854be4417cafb26c313cfbff03
+
+[a_primitive_hash_code_reference_adapter_calls_the_static_wrapper_method_like_kotlinc|PrimitiveHashCode|default|plain#PrimitiveHashCodeKt$booleanReference$1]
+2.4.20.. 198c118e40d2e0d65c35e90b5ae72085 fda4a945f713722b2d995247d8b1c4a4
+
+[a_primitive_hash_code_reference_adapter_calls_the_static_wrapper_method_like_kotlinc|PrimitiveHashCode|default|plain#PrimitiveHashCodeKt$intReference$1]
+2.4.20.. 198c118e40d2e0d65c35e90b5ae72085 2eba4e5d745cb4b5936012d49ae735de

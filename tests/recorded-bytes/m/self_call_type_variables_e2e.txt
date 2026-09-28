@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_enclosing_constructor_call_emits_the_same_class_as_kotlinc|SelfConstructorCell|default|plain#Cell]
+2.4.20.. 9f8dae9ae5546575404f5a25c9ab2844 19023c8e41261a88e5812d76dc37cc75

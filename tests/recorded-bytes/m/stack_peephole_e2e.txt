@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_unit_nothing_reads_is_never_materialized_like_kotlincs|StackPeephole|25|plain#StackPeepholeKt]
+2.4.20.. 1a33974ade997da1827e1be82f7dad76 599264f58ba54131d9be0105a973c474

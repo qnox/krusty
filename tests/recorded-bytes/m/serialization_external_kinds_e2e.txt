@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_dependency_element_is_built_the_way_kotlinc_builds_it|Consumer|25|c765081fa3351439#Holder]
+2.4.20.. 13fff3e9519f69bbcae1603f3be5cb5a 5cb6e8bccfc28afcc1283f95e2591e89
+
+[a_dependency_element_is_built_the_way_kotlinc_builds_it|Consumer|25|c765081fa3351439#Polymorphic]
+2.4.20.. 13fff3e9519f69bbcae1603f3be5cb5a 56203b6c8a2cebee731c8f87b6e51b45

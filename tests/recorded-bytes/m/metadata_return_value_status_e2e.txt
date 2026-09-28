@@ -1,0 +1,32 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_continuation_override_repeats_must_use|continuation_override|default|plain#app/C]
+2.4.20.. 79b2e7a08f4538fdb01afcfaff507330 21bb5eb5b141f594d4a6e4209f3654b9
+
+[a_declared_equals_repeats_any_equals_must_use|declared_equals|default|plain#app/U]
+2.4.20.. a1c301ac76d8e11e6e837adda6255043 fe3eb55354ad23fd11f11860fa29a510
+
+[a_java_collection_override_repeats_the_kotlin_status|java_collection_override|default|plain#app/ML]
+2.4.20.. da43c94761efc7af64ee4db9bddfbeaa 81150e9a628ee72d7617d83f3dc48f1c
+
+[a_java_only_override_records_no_status|java_only_override|default|plain#app/R]
+2.4.20.. 3e48e99192d81c4a645b95397dcecde3 01b9871755e8d4e95322a59564b1121c
+
+[a_local_class_override_inherits_operator_and_infix|local_operator|default|plain#app/Local_operatorKt$make$1]
+2.4.20.. a0838073a37c69cfa123fe4ef293ebee fd7129352c2919212c7ee5dcb0352670
+
+[a_local_class_override_repeats_must_use|local_override|default|plain#app/Local_overrideKt$make$Local]
+2.4.20.. 1fff143be4b93882c6a44291e49da3d3 c5fde97132f32a6ac3978fab3858da0f
+
+[an_abstract_list_override_repeats_must_use|abstract_list|default|plain#app/L]
+2.4.20.. a5432b426bf8a689dcb7a029c68eb180 261297d23ff76c41e5163f6af5fd7214
+
+[an_anonymous_object_override_repeats_must_use|anonymous_override|default|plain#app/Anonymous_overrideKt$make$1]
+2.4.20.. d78b9fddae26596ba08143d73fe51aea 171cfbdbb39ccd1eaf7ac0d98354769d
+
+[an_override_of_a_module_declaration_records_no_status|module_override|default|plain#app/D]
+2.4.20.. 54841af6b67578f243d4a3f6159fdceb fbe1085d7516328b0648b6359794271a
+
+[an_override_of_a_module_override_repeats_the_library_status|module_override_chain|default|plain#app/Leaf]
+2.4.20.. 0bcccf3181c0995cc4080789cd271281 d7fe68ec9c0d56e85f0664cdea0a7789

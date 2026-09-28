@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_collection_round_trip_leaves_no_magic_api_marker|ReifiedCollectionRoundTrip|25|c765081fa3351439#ReifiedCollectionRoundTripKt]
+2.4.20.. 45a3428e147cfc260b4854062780dbcd 90a6f85624e6ed4b5faff2152004077e
+
+[a_decoded_collection_is_cast_back_to_its_type|ReifiedCollectionRoundTrip|25|c765081fa3351439#ReifiedCollectionRoundTripKt]
+2.4.20.. 45a3428e147cfc260b4854062780dbcd 90a6f85624e6ed4b5faff2152004077e
+
+[a_list_type_argument_constructs_the_element_serializer|ReifiedCollectionRoundTrip|25|c765081fa3351439#ReifiedCollectionRoundTripKt]
+2.4.20.. 45a3428e147cfc260b4854062780dbcd 90a6f85624e6ed4b5faff2152004077e

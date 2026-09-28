@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_type_parameter_element_is_built_the_way_kotlinc_builds_it|TypeParameters|25|c765081fa3351439#Bag$$serializer]
+2.4.20.. b519d5e40714e16dd5676fcb1615351c ece0b8c9d87baf3c600b1f28423dd63b
+
+[a_type_parameter_element_is_built_the_way_kotlinc_builds_it|TypeParameters|25|c765081fa3351439#Grid]
+2.4.20.. b519d5e40714e16dd5676fcb1615351c a7a45f5ab796b8d202f058d19bbc8b93
+
+[a_type_parameter_element_is_built_the_way_kotlinc_builds_it|TypeParameters|25|c765081fa3351439#Shelf$$serializer]
+2.4.20.. b519d5e40714e16dd5676fcb1615351c a90b58f624ba7ff9a122cd8fd476bc74

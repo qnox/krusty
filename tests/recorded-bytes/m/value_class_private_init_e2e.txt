@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_value_class_private_init_is_unguarded|ValueClassPrivateInit|25|plain#S]
+2.4.20.. b94b09e6903d2842b689753e96556d1f d64749cf503cdb6c6bd6a9978ab8dd07

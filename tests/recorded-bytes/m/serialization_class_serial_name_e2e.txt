@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_class_serial_name_is_the_constant_kotlinc_loads|ClassSerialName|25|c765081fa3351439#Event$Created$$serializer]
+2.4.20.. 361c98291b5d7e6d10055e5aa56fed02 70f20188c32e741d767e197507a9cc20
+
+[a_class_serial_name_is_the_constant_kotlinc_loads|ClassSerialName|25|c765081fa3351439#Level]
+2.4.20.. 361c98291b5d7e6d10055e5aa56fed02 d2837b0d1433d2df416f5365c1a73772
+
+[a_class_serial_name_is_the_constant_kotlinc_loads|ClassSerialName|25|c765081fa3351439#Point$$serializer]
+2.4.20.. 361c98291b5d7e6d10055e5aa56fed02 3871735ca53b6ec733a780841fa7c8aa
+
+[a_class_serial_name_is_the_constant_kotlinc_loads|ClassSerialName|25|c765081fa3351439#SerialEnvelope]
+2.4.20.. 361c98291b5d7e6d10055e5aa56fed02 4bc1f9121a9b778680e5dcbd7efaa98f

@@ -1,0 +1,23 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_multi_line_construction_is_byte_identical_to_kotlinc|MultiLineConstruction|default|plain#MultiLineConstructionKt]
+2.4.20.. 91305c199894795c80e9344492e4f779 9b329041c657ce2f2688e581e2d58638
+
+[a_multi_line_defaulted_method_call_is_byte_identical_to_kotlinc|MultiLineDefaultedMethodCall|default|plain#MultiLineDefaultedMethodCallKt]
+2.4.20.. 772f4659effb6b038fca58485348c18e da6c3611d1ab5feefe02b2045f2d2df9
+
+[a_multi_line_method_call_is_byte_identical_to_kotlinc|MultiLineMethodCall|default|plain#MultiLineMethodCallKt]
+2.4.20.. 19b683ecc2f8fa2db442c409e40bdc28 993ebb994011422abb5bf6a96d3246bf
+
+[a_same_file_top_level_defaulted_call_is_byte_identical_to_kotlinc|TopLevelDefaultedCall|default|plain#TopLevelDefaultedCallKt]
+2.4.20.. a83b1203bdd2bb456952a202a0d6b6c4 56de74f22e3648eb80b9e6f5c565c6e4
+
+[a_single_line_call_is_unchanged|SingleLineCall|default|plain#SingleLineCallKt]
+2.4.20.. db6269c19fefcd92e9f515609adbe387 cc8bc849debec43688139642e86417b5
+
+[an_explicit_multi_line_return_is_byte_identical_to_kotlinc|ExplicitMultiLineReturn|default|plain#ExplicitMultiLineReturnKt]
+2.4.20.. 6e9dacef31e2b6aa9f5786134409282b c12bdda4d2dd9ee59b99972f4ca67ece
+
+[an_omitted_argument_before_a_supplied_one_is_byte_identical_to_kotlinc|OmittedMiddleArgument|default|plain#OmittedMiddleArgumentKt]
+2.4.20.. ab319d03f5946e1a925213ab9ed14f8f 0d25b2cf8b1ba22a4a1a68cb45a1e585

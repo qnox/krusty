@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_cast_to_the_type_already_on_the_stack_is_dropped_like_kotlincs|RedundantCheckCast|25|plain#RedundantCheckCastKt]
+2.4.20.. 0f3a5be9b4ffde898d4eb28f567f9ce8 5244a318b7cc8b6940f915e04594f874

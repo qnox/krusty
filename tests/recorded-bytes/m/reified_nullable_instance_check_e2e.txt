@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[classpath_reified_nullable_instance_checks_match_kotlinc|ReifiedNullable|25|plain#ReifiedNullableKt]
+2.4.20.. 1bae644075f807ccf30e94628ecb69cd 2a5e59752fafc2a8ad5d5347def8c6d1

@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[member_parameters_record_their_inline_modifiers|InlineModifierMembers|default|plain#app/Host]
+2.4.20.. f86a2a6b3e14f8026647da313e8716ad 071a02ec97d54286a8606babb6873e6b
+
+[package_function_parameters_record_their_inline_modifiers|InlineModifiers|default|plain#app/InlineModifiersKt]
+2.4.20.. f86a2a6b3e14f8026647da313e8716ad a26006f81d8636a954da3721e1d10d00

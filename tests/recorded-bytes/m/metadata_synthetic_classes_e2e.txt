@@ -1,0 +1,26 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_bound_function_reference_class_is_a_local_synthetic_class|BoundFunctionReference|default|plain#app/BoundFunctionReferenceKt$references$7]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 83915dbbe42a3b2b8836674bdd17ce06
+
+[a_bound_property_reference_class_is_a_local_synthetic_class|BoundReference|default|plain#app/BoundReferenceKt$references$3]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 59cb44b59f35e38f25cee4fe37a631aa
+
+[a_function_reference_class_is_a_local_synthetic_class|FunctionReference|default|plain#app/FunctionReferenceKt$references$6]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 7ea00d65b88785bb4a0afc9d479b72c2
+
+[a_mutable_property_reference_class_is_a_local_synthetic_class|MutableReference|default|plain#app/MutableReferenceKt$references$2]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 87e43f20e9e9bb1b901c2c184b0377bc
+
+[a_property_reference_class_is_a_local_synthetic_class|PropertyReference|default|plain#app/PropertyReferenceKt$references$1]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 d14ebbf6d11fa97e846ce045156576eb
+
+[a_top_level_property_reference_class_is_a_local_synthetic_class|TopLevelReference|default|plain#app/TopLevelReferenceKt$references$4]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 7e6111f0e3b6b95d72ebb94869672548
+
+[an_adapted_function_reference_class_is_a_local_synthetic_class|AdaptedReference|default|plain#app/AdaptedReferenceKt$references$adapted$1]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 d60a9f8d6ec0d5be3add6ae6f011dd05
+
+[an_annotation_instantiation_class_is_a_local_synthetic_class|AnnotationInstance|default|plain#app/AnnotationInstanceKt$annotationImpl$app_Tag$0]
+2.4.20.. 92be3e141c4c2e2834e251241f4928e7 eb1e44bdd84a1fc13df46a76f42544c4

@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_reference_carrier_signs_its_object_cell|ObjectCellCarrier|default|plain#ObjectCellCarrierKt$reference$r$1]
+2.4.20.. bd65011b5dcf0e0e41f3a06769f5a523 429ec0058b2688e1887fdef8853854fc

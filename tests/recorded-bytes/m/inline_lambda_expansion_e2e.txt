@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[every_invoke_of_a_lambda_reuses_its_argument_slots|Expansion|default|plain#tree]
+2.4.20.. e835c4bb9a9667d020e49c8a4aba5d23 598ee718c13ca178c7ac6c6434bb0bc9

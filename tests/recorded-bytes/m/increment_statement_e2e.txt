@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[local_increments_are_byte_identical_to_kotlinc|Increments|default|plain#IncrementsKt]
+2.4.20.. fb401e9e91fc27635eed72d5f80b1bb2 f6935c04815ab34eb59be3c347b56047

@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[module_vararg_elements_before_named_argument_are_byte_identical|VarargElementsNamedModule|25|plain#VarargElementsNamedModuleKt]
+2.4.20.. 69968eb44e202e745bee0736bf909715 24fb2b2200bfab46751364fa0d052b09
+
+[packed_vararg_arrays_are_byte_identical|PackedVarargArrays|25|plain#PackedVarargArraysKt]
+2.4.20.. fbcac11934081486314e88ea891fa70b 2878364cd9532b61677660b9c18e1f98

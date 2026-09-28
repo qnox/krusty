@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_for_loop_update_carries_the_loop_line_like_kotlinc|LoopLines|default|plain#store/LoopLinesKt]
+2.4.20.. 754af8873567a43ac301796343618f0b 628622446add97ae3980b109408a4b23

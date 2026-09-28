@@ -1,0 +1,83 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_class_type_parameter_bound_spelled_as_an_alias_is_abbreviated|BoundedClass|default|plain#app/Bounded]
+2.4.20.. cd50d630fe4bc4c9f478e8703cdcea68 aa946d200a642f146bd225cbab79201d
+
+[a_classpath_alias_propagates_its_right_hand_side_spellings|DepRhs|default|plain#app/DepRhsKt]
+2.4.20.. eedbc48790c0c43d958d21403b44dac0 015a1c5f08ed059417b7b3dfb3774c31
+
+[a_classpath_typealias_in_a_declared_type_is_abbreviated|Dep|default|plain#app/DepKt]
+2.4.20.. d3f441c7c86534dbff25e3f83274ad2a 40455ba0a2b86fc89efa491c46cbd4b9
+
+[a_generic_alias_abbreviates_with_its_as_spelled_arity|Boxed|default|plain#app/BoxedKt]
+2.4.20.. e806774707c3f181185958b3060d2348 df48e08a3788f6b452e594ad19748015
+
+[a_generic_class_abbreviates_the_supertype_that_was_spelled|GSuper|default|plain#app/Holder]
+2.4.20.. 7024a87bb2394d47c34ecf0cd63acd96 68caeb868e160a4979b66c761ef04c60
+
+[a_generic_class_with_no_superclass_lists_only_its_interfaces|GAny|default|plain#app/Holder]
+2.4.20.. cfeb54bd69631f581383e4cb502368fd a89f0f3b4a4b0cb709d76881700efdda
+
+[a_nested_alias_expansion_substitutes_its_formal_in_abbreviations|NestedFormal|default|plain#app/NestedFormalKt]
+2.4.20.. 8dad8c281ef8ff1998b4ae3b60bc5404 395fde810bb65f6d9c724db312e0562c
+
+[a_nullable_alias_marks_both_the_expanded_and_the_abbreviated_type|Maybe|default|plain#app/MaybeKt]
+2.4.20.. eb5a7fc25b1611e309350249f4ec28c2 5b410523c3a8d9af51b0d213fb96ef1a
+
+[a_qualified_alias_resolves_to_its_target_and_is_abbreviated|Qualified|default|plain#app/QualifiedKt]
+2.4.20.. 5d1b24f6698ef3ca87d759e6b32fd6a7 f9e1d90f4dc781a11d73b2d964406520
+
+[a_qualified_function_type_alias_resolves|Qfun|default|plain#app/QfunKt]
+2.4.20.. f9914e4f44825aad3e4ecfc446fb16f0 dce66a051add0325f46f5a38e1ac7fdc
+
+[a_supertype_spelled_as_an_alias_is_abbreviated|SubKt|default|plain#app/Sub]
+2.4.20.. cb6617b545295bf39ce50fc8a84cedda 9f8c2550a8ad328ab972a83714c6136b
+
+[a_type_parameter_bound_spelled_as_an_alias_is_abbreviated|Bound|default|plain#app/BoundKt]
+2.4.20.. 46dbca10b69a27054b44ec5201273210 57f2464bf9d6d4023131fad42f20dde9
+
+[a_vararg_of_an_aliased_element_abbreviates_its_element|Many|default|plain#app/ManyKt]
+2.4.20.. 5b37c2aa975606383b64d9d4af15db39 f4b3d0becc58748967770410590d1f96
+
+[aliases_inside_an_inline_function_type_are_abbreviated|Arrow|default|plain#app/ArrowKt]
+2.4.20.. f209fcedf7f66ebf54be6ab935c952b2 a594b7f70af78482f53fe7adbe40e1b7
+
+[an_alias_argument_that_is_itself_an_alias_expands_inside_the_abbreviation|Nestalias|default|plain#app/NestaliasKt]
+2.4.20.. 11a493f2f1d35c65f36ad5129ba844bc 80e90eabad7338f908c64fe697d27d48
+
+[an_alias_chain_records_only_the_spelling_source_used|Chained|default|plain#app/ChainedKt]
+2.4.20.. fa490b64d5b1de0b4789e96bd852bbca e4a0a40448a512506bf449aff5b140fb
+
+[an_alias_for_a_function_type_abbreviates_the_function_classifier|Handled|default|plain#app/HandledKt]
+2.4.20.. 391ab8e8f5ee5ca574743da822c94838 c4ce485f81234221ad013a0aa2cc575c
+
+[an_alias_inside_a_type_argument_abbreviates_that_argument_only|Nested|default|plain#app/NestedKt]
+2.4.20.. 7c0ad704e2622ff71cfb96ff3dcfde8a 8cf6eb8767cddb0e2545b71f1ac59199
+
+[an_alias_right_hand_side_propagates_its_own_spellings_into_the_expansion|Carry|default|plain#app/CarryKt]
+2.4.20.. 9439baaedfad1ed18510df14b6eb0140 742930aa2e94c3dd828bd7c51485f73c
+
+[an_alias_under_a_use_site_projection_is_abbreviated|Projected|default|plain#app/ProjectedKt]
+2.4.20.. c41e144c6c96030d235eb3c322d84d1c ef402787922c6493c19df30ed2c964a0
+
+[an_import_rename_is_not_a_typealias_and_carries_no_abbreviation|Renamed|default|plain#app/RenamedKt]
+2.4.20.. 35708096b7bb242357811cd8a9a31e1a bf4c4a2646a94d62047fbd9723300f99
+
+[class_members_spelled_as_an_alias_are_abbreviated|Holder|default|plain#app/Holder]
+2.4.20.. cb4f09d4cb10230ba540f674865479fe 2bf68df9fa10f2c543b1ec15d90b89e0
+
+[property_types_and_extension_receivers_are_abbreviated|Props|default|plain#app/PropsKt]
+2.4.20.. e0b1bd9a2aa10f501fd4743d77601cf9 63fc3f22d1d1462b35070cdf18634bce
+
+[same_module_typealias_in_declared_type_is_byte_identical|Use|default|plain#app/UseKt]
+2.4.20.. c9d701bf590c3fef24d677e0c991e8ea 38c9f894d0d2289fe634b69fdf1d8932
+
+[the_same_shapes_without_an_alias_are_already_byte_identical|BoundBase|default|plain#app/BoundBaseKt]
+2.4.20.. cdca79ce7cd3780ad1d3fc1281bef667 9b9dad3d3798ede76cf49b6da4a9b59e
+
+[the_same_shapes_without_an_alias_are_already_byte_identical|BoundClassBase|default|plain#app/Bounded]
+2.4.20.. 11d52ed27feb6f4a77b1fedcf3572437 469c850c6eb42038bf87f6f8119d5aa5
+
+[the_same_shapes_without_an_alias_are_already_byte_identical|PropsBase|default|plain#app/PropsBaseKt]
+2.4.20.. 21943b0e1f2c4ee59eda4810317d054c 11e089f92aa6511af2b63294d5518f45

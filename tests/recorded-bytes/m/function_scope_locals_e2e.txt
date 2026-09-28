@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_functions_locals_cover_its_implicit_return|FunctionScopeLocals|default|plain#FunctionScopeLocalsKt]
+2.4.20.. ccc39b9bfdf0175167873c58cbad4000 d110f3a5fb76b878ea17eafebfdbaf81
+
+[a_functions_locals_cover_its_implicit_return|FunctionScopeLocals|default|plain#Owner]
+2.4.20.. ccc39b9bfdf0175167873c58cbad4000 540d877be2c47320b97a2be218075005

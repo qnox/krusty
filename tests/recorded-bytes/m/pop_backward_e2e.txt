@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_discarded_inline_result_is_not_pushed_like_kotlincs|PopBackward|17|plain#PopBackwardKt]
+2.4.20.. c163a0df7af1c66531f549a64d76ad48 4fab2042c339d96b6a1e42157020f1b8

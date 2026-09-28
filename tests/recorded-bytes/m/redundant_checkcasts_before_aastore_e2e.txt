@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_cast_before_an_array_store_is_dropped_like_kotlincs|CastsBeforeAastore|17|plain#store/CastsBeforeAastoreKt]
+2.4.20.. 3c0dbc3c4c9a1af89244064bc8ced8cf 2b8b9a8cf37341630f00c2daf88c2af4

@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_jump_on_constants_folds_like_kotlincs|ConstantConditions|17|plain#ConstantConditionsKt]
+2.4.20.. 954f84f26c16171ed0c5d4c8c3d2f467 ea66af908a508d501f02cc7130f024d5

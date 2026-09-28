@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[class_nested_value_class_bytes_match_kotlinc|class_nested_vc|default|plain#C]
+2.4.20.. 3ebfcdadea3462c2902d1a31a6a39fc3 22dc9e172071d8d8f3de0cdedc6c6185
+
+[interface_nested_value_class_bytes_match_kotlinc|iface_nested_vc|default|plain#I]
+2.4.20.. be94da91abe2cac980a5cf1cfb705afc 489879d7914f4570d0e6e30e61c64441

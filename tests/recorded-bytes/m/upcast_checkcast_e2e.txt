@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_field_write_casts_to_its_declared_storage_type_like_kotlinc|FieldUpcastCheckcast|25|plain#Store]
+2.4.20.. 58c15af1a9428f9d62db18f2d9bf5464 84db572d3a0a083ce69e1c1c01019e7d
+
+[a_value_widened_to_its_consumers_type_is_cast_like_kotlincs|UpcastCheckcast|25|plain#UpcastCheckcastKt]
+2.4.20.. 83c01c74d5d73895630bdd853625f028 4aad215dd1cabf462f777a7115941493
+
+[null_bottom_and_covariant_array_do_not_gain_spurious_casts|UpcastExceptions|25|plain#UpcastExceptionsKt]
+2.4.20.. 67a4c4f396201778c2e22a92b1a61d15 dbc4990953f5629acb9f8cb07069d63f

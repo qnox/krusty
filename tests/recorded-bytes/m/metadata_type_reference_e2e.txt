@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_generic_property_setter_parameter_addresses_its_type_parameter_by_id|generic_property_setter|default|plain#app/Holder]
+2.4.20.. 9038436f1661d99073f8c8bbc810a8d5 5a633b2100068790044f3add7a8fc5b5
+
+[a_member_extension_property_names_its_own_type_parameter|member_generic_property|default|plain#app/Holder]
+2.4.20.. 963c396c872df469b0444b59691ebae8 8542fe0d6b86d06ea37a18feaf1dee5f
+
+[a_member_function_names_its_own_type_parameters|member_generic_function|default|plain#app/Box]
+2.4.20.. d477b87d77ea487a1b9204f6bec3c69b bb10141d19452a912ae458ff4ae85e04
+
+[a_suspend_function_type_writes_its_flags_first|suspend_function_type|default|plain#app/Runner]
+2.4.20.. 31494f7b3ba8f1797d089a4b63b89e28 6040f92d662c21c30c208821ff4bda6e

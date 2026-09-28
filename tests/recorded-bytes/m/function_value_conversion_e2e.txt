@@ -1,0 +1,32 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_already_suspend_value_unit_converts_to_a_suspend_parameter|SuspendUnitValue|17|f2214b64c1949870#SuspendUnitValueKt$pass$1]
+2.4.20.. 9a4b28cc6ff9d36f27baa140cd1a4076 c33a747d7209c17a98f88219f4fb61c9
+
+[suspend_conversion_of_a_value_is_kotlincs_bound_carrier|SuspendValue|17|plain#SuspendValueKt]
+2.4.20.. 0481c785d7d5f98ea9260e1328408c07 bec4eb08eb59bb76df40a4d76f403b8b
+
+[suspend_conversion_of_a_value_is_kotlincs_bound_carrier|SuspendValue|17|plain#SuspendValueKt$pass$1]
+2.4.20.. 0481c785d7d5f98ea9260e1328408c07 2de83ef9d77876633a3a117f8ce71ce4
+
+[suspend_conversion_of_a_value_is_kotlincs_bound_carrier|SuspendValue|17|plain#SuspendValueKt$pass$2]
+2.4.20.. 0481c785d7d5f98ea9260e1328408c07 ac8009c8d16012f82197ec0838915ac7
+
+[unit_and_suspend_conversion_of_a_value_is_one_carrier|UnitSuspendValue|17|f2214b64c1949870#UnitSuspendValueKt]
+2.4.20.. 86dadd0ade4dcd83c60a583d70b59396 be66830517941f9049b600bfb5154267
+
+[unit_and_suspend_conversion_of_a_value_is_one_carrier|UnitSuspendValue|17|f2214b64c1949870#UnitSuspendValueKt$pass$1]
+2.4.20.. 86dadd0ade4dcd83c60a583d70b59396 c946fb12a125368a3f46d9531a685279
+
+[unit_conversion_of_a_function_subtype_converts_its_function_supertype|SubtypeValue|17|f2214b64c1949870#SubtypeValueKt]
+2.4.20.. d3acefc8668b7f85dd30f7801bb59f3a 21915bf17fb4cc59d4413c0abecda3f0
+
+[unit_conversion_of_a_function_subtype_converts_its_function_supertype|SubtypeValue|17|f2214b64c1949870#SubtypeValueKt$box$1]
+2.4.20.. d3acefc8668b7f85dd30f7801bb59f3a aaddabc49e87e84053645da129fdb655
+
+[unit_conversion_of_a_value_is_kotlincs_bound_carrier|UnitValue|17|f2214b64c1949870#UnitValueKt]
+2.4.20.. 200946bb5d30870eb2d3998fa3c01367 0fdcf5da3cdd310d7f4f9f356f4cb684
+
+[unit_conversion_of_a_value_is_kotlincs_bound_carrier|UnitValue|17|f2214b64c1949870#UnitValueKt$pass$1]
+2.4.20.. 200946bb5d30870eb2d3998fa3c01367 3596b78b60bc30a7ae87c4b53313b4a2

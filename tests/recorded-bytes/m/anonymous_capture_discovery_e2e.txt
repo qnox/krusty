@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_object_in_a_builder_lambda_captures_the_inferred_receiver|BuilderLambdaObjectInts|25|plain#BuilderLambdaObjectIntsKt$ints$1$1]
+2.4.20.. 43bde87ccd7ccbe27a547bfdda4501eb 261c7ddef31a0f44c58671ec398ce9e1
+
+[an_object_in_a_builder_lambda_captures_the_inferred_receiver|BuilderLambdaObjectStrings|25|plain#BuilderLambdaObjectStringsKt$strings$1$1]
+2.4.20.. 43bde87ccd7ccbe27a547bfdda4501eb ab5aa3fb56524c615cef972bf8dc4c94
+
+[an_object_in_a_local_class_property_keeps_the_outer_instance|LocalClassPropertyObjectFields|25|plain#Outer$foo$Local$obj$1]
+2.4.20.. 1c3e2c6ec45eeeda2d581b3bc6bb1d5d 020d3436007dbfc3af7387fa241ff920

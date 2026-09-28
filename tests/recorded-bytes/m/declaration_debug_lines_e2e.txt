@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_serializable_declaration_closes_on_its_own_last_line|SiblingDeclarations|25|c765081fa3351439#First$$serializer]
+2.4.20.. bf3ff85e0db85044624e3fa3a80a8a1d 4653b12427d16c03759867f1506cd22e
+
+[a_serializable_declaration_closes_on_its_own_last_line|SiblingDeclarations|25|c765081fa3351439#Second$$serializer]
+2.4.20.. bf3ff85e0db85044624e3fa3a80a8a1d b8e4e94bb3ed7197156d193ed9f6ebb2

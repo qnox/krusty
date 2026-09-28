@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_removed_cast_leaves_no_entry|RemovedCast|default|plain#RemovedCastKt]
+2.4.20.. 701d904a8930135d435f4797e811416c ebdd754133001361f1531ad133cbb184
+
+[a_rewrite_naming_new_constants_is_written|UnboxedCasts|default|plain#UnboxedCastsKt]
+2.4.20.. 51a9551bef7962775eda5e76c13c4b7e cfe4755c68d01e23f3a5775211139466
+
+[an_unboxed_generic_read_is_written|UnboxedGeneric|default|plain#UnboxedGenericKt]
+2.4.20.. acc6b663fa9edfb0bad219339162a0e1 9e59b51cf1647b97b76638a5c00540ae

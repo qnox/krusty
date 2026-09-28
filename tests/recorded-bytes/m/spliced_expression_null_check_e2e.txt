@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_spliced_body_keeps_its_expression_null_checks_like_kotlincs|SplicedExpressionNullCheck|25|plain#SplicedExpressionNullCheckKt]
+2.4.20.. bc469bad9a9bc5ae3c413f60f6edd247 5c73cfc88fdf59dd78848e64e969916c

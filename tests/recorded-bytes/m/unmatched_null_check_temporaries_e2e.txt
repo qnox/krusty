@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[an_unmatched_null_check_leaves_the_temporaries_to_fold|UnmatchedNullCheckTemporaries|25|plain#UnmatchedNullCheckTemporariesKt]
+2.4.20.. 44aac0549f701a8bee02404e97a27602 eab8d9cc570c0ff8713f4a20c3dabc01

@@ -1,0 +1,8 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_boxed_nullable_value_class_member_matches_kotlinc|NullableValuePrimitive|25|plain#NullableTicketEnvelope]
+2.4.20.. ee3ef2c75beaace27faedd3337f3926b ca6699fffc52534b37a5b3e7f3d9ec92
+
+[a_boxed_nullable_value_class_member_matches_kotlinc|NullableValueReference|25|plain#NullableTicketEnvelope]
+2.4.20.. d8014b1082ce25077fb8582beb8cdbae f3d192236a4e0589b3e2de8053733bc8

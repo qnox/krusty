@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_noinline_literal_leaves_the_crossinline_one_inlined|Mixed|default|plain#tree]
+2.4.20.. b82b388d858d1881ada6a4c1fb059428 a47d83a26a7b2861d93fc060d250fa0a
+
+[crossinline_lambdas_are_inlined_where_kotlinc_inlines_them|Crossinline|default|plain#tree]
+2.4.20.. 2cfce705542bfbd8757300315f7d084d 03d8d44c20717ab6551f08b4f82672cf
+
+[the_splice_expands_a_crossinline_literal_like_a_plain_one|Guarded|default|plain#tree]
+2.4.20.. 164c6247e3ce23287932c390d8b0fc5d d5d68b07cf5dd78c8b58d0d3fe555ccd

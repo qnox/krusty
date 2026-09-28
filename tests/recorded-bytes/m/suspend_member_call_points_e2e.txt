@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_defaulted_member_call_matches_kotlinc|DefaultedMember|default|plain#DefaultedMemberKt$useDefault$1]
+2.4.20.. a590cfd274456f1f8ed4ddf18d9a8866 8d9b01aada7578d5bbad26172c311c2c
+
+[a_function_calling_members_keeps_kotlinc_s_continuation_class|MemberPoints|default|plain#Api$twice$1]
+2.4.20.. dd510d7fada2d103301e08cc1b257930 00652c2e5ac1c6db45587c2a56d9f180
+
+[a_function_calling_members_keeps_kotlinc_s_continuation_class|MemberPoints|default|plain#MemberPointsKt$drain$1]
+2.4.20.. dd510d7fada2d103301e08cc1b257930 87176bf99dfc06015271de51d0662c6e
+
+[a_function_calling_members_keeps_kotlinc_s_continuation_class|MemberPoints|default|plain#MemberPointsKt$use$1]
+2.4.20.. dd510d7fada2d103301e08cc1b257930 6bb2084f16e04a9cca9cc7434700c639

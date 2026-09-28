@@ -1,0 +1,14 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_class_type_parameter_bound_writes_every_wildcard_like_kotlinc|GenericArgumentClassBounds|default|plain#Holder]
+2.4.20.. 69e2c84eaa7fd2761295b95559fa0767 2d0a73bd31aeee94d766427d02d3d895
+
+[arguments_below_a_supertype_write_every_wildcard_like_kotlinc|GenericArgumentSupertypes|default|plain#FinalElement]
+2.4.20.. ad3acd0e5d9269366687a9da7953f283 5c70c2114807b05ec088854774330647
+
+[arguments_below_a_supertype_write_every_wildcard_like_kotlinc|GenericArgumentSupertypes|default|plain#OverAny]
+2.4.20.. ad3acd0e5d9269366687a9da7953f283 4adf147eb8856fb889c27a22d55b498d
+
+[type_parameter_bounds_write_every_wildcard_like_kotlinc|GenericArgumentBounds|default|plain#GenericArgumentBoundsKt]
+2.4.20.. b3bd40d4ee2f412fd3dee149182c70d2 b4b97868344255dfab2b4e45c8cc55ca

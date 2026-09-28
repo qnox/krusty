@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_tuple_element_is_built_the_way_kotlinc_builds_it|Tuples|25|c765081fa3351439#Tuples]
+2.4.20.. 251c10bfcb987ad24c5bc13b8aee1017 2e01433d6fb6e2c0d0b7319e108d9e15

@@ -1,0 +1,11 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_tailrec_member_records_tailrec|TailrecMember|default|plain#app/Counter]
+2.4.20.. 28c77d19276e6241eecc8d4d70c5d054 b82a7727cd456ebb19214fcd7da1966e
+
+[a_top_level_tailrec_function_records_tailrec|TailrecFlags|default|plain#app/TailrecFlagsKt]
+2.4.20.. 28c77d19276e6241eecc8d4d70c5d054 545b431ba015798476fc22619d8d09a5
+
+[an_anonymous_object_tailrec_member_records_tailrec|TailrecObject|default|plain#app/TailrecObjectKt$make$1]
+2.4.20.. 28c77d19276e6241eecc8d4d70c5d054 1ed60081209837dda83fafb2e55f08f4

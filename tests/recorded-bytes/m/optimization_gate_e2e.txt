@@ -1,0 +1,5 @@
+# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.
+# RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.
+
+[a_method_past_the_memory_limit_is_not_optimized_like_kotlincs|OptimizationGate|default|plain#gate/OptimizationGateKt]
+2.4.20.. 6290e22350e9641d2e2dab6d49e5c244 5cd223850ec08d5fea0c791180505b1a
