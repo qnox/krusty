@@ -8612,7 +8612,8 @@ fn jvm_type_params(
 }
 
 /// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
-/// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`). `None` for anything else.
+/// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`), and anything else in
+/// kotlinc's generic-argument mode, which writes every declaration-site wildcard.
 fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Option<String> {
     if *bound == Ty::obj("kotlin/Any") {
         return Some("Ljava/lang/Object;".to_string());
@@ -8620,7 +8621,7 @@ fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Op
     if bound.is_jvm_scalar() {
         return bound.nullable_boxed().map(type_descriptor);
     }
-    formatter.ty(bound)
+    formatter.ty_at(bound, Wildcards::Generic)
 }
 
 fn default_mask_count(param_count: usize) -> usize {

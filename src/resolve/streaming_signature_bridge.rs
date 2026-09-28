@@ -5523,15 +5523,24 @@ pub(crate) fn finalized_streamed_signature_index(
                 ordinal,
                 semantic.ty_param_name().unwrap_or(source_name),
             );
-            let has_explicit_bound = declared_bounds
+            let declared_bound_count = declared_bounds
                 .iter()
-                .any(|(owner, _)| owner == source_name);
-            let local_bounds = has_explicit_bound
+                .filter(|(owner, _)| owner == source_name)
+                .count();
+            // `TParams` also carries the constraints inherited through a bare parameter edge
+            // (`T : U` sees `U`'s bounds) for member lookup, after the written ones. The declaration
+            // publishes only what is written on this parameter: kotlinc signs `T extends U`.
+            let local_bounds = (declared_bound_count > 0)
                 .then(|| {
                     let mut bounds = vec![semantic
                         .ty_param_bound()
                         .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
-                    bounds.extend(symbolic.extra_bounds_of(source_name));
+                    bounds.extend(
+                        symbolic
+                            .extra_bounds_of(source_name)
+                            .into_iter()
+                            .take(declared_bound_count - 1),
+                    );
                     bounds
                 })
                 .unwrap_or_default();
@@ -5578,16 +5587,17 @@ pub(crate) fn finalized_streamed_signature_index(
                 .unwrap_or_default()
                 .into_iter()
                 .map(|bound| {
-                    let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                        table
-                            .classes
-                            .get(&owner)
-                            .is_some_and(|classifier| classifier.is_interface())
-                            || table
-                                .libraries
-                                .classifier(owner)
+                    let is_interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            table
+                                .classes
+                                .get(&owner)
                                 .is_some_and(|classifier| classifier.is_interface())
-                    });
+                                || table
+                                    .libraries
+                                    .classifier(owner)
+                                    .is_some_and(|classifier| classifier.is_interface())
+                        });
                     (bound, is_interface)
                 });
             if index
@@ -5744,16 +5754,17 @@ pub(crate) fn finalized_streamed_signature_index(
             // as a classifier-owned captured slot now; waiting for checked body publication would
             // leave the supposedly finalized module index incomplete at the Pass-2 boundary.
             let ordinal = own_count + captured_ordinal;
-            let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                table
-                    .classes
-                    .get(&owner)
-                    .is_some_and(|classifier| classifier.is_interface())
-                    || table
-                        .libraries
-                        .classifier(owner)
+            let is_interface =
+                crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                    table
+                        .classes
+                        .get(&owner)
                         .is_some_and(|classifier| classifier.is_interface())
-            });
+                        || table
+                            .libraries
+                            .classifier(owner)
+                            .is_some_and(|classifier| classifier.is_interface())
+                });
             if index
                 .publish_type_parameter(
                     stub.id,

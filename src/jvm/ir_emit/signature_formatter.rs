@@ -20,7 +20,11 @@ mod type_arguments;
 /// position writes them again, for its whole subtree: a return `Inv<Sink<Source<Open>>>` signs
 /// `LInv<LSink<LSource<+LOpen;>;>;>;`. A supertype writes none on its own arguments and all of them
 /// below, even below an invariant one: `Marker<Inv<Source<Open>>>` signs
-/// `LMarker<LInv<LSource<+LOpen;>;>;>;`.
+/// `LMarker<LInv<LSource<+LOpen;>;>;>;`. Below a supertype's arguments and throughout a type
+/// parameter's bound kotlinc maps in its `GENERIC_ARGUMENT` mode, which writes every declaration-site
+/// wildcard, even one a parameter position would drop as redundant: `class A : Inv<List<Int>>` signs
+/// `LInv<Ljava/util/List<+Ljava/lang/Integer;>;>;` and `<T : Comparable<Any>>` signs
+/// `T::Ljava/lang/Comparable<-Ljava/lang/Object;>;`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wildcards {
     /// A parameter position: realize declaration-site variance as `+`/`-`.
@@ -28,18 +32,27 @@ pub(super) enum Wildcards {
     /// A return or field position, or below an invariant argument of a parameter: declaration-site
     /// variance is not written.
     Suppressed,
-    /// Below a contravariant argument of a return-like position, or below a supertype's own
-    /// arguments: declaration-site variance is written, however the arguments below nest.
+    /// Below a contravariant argument of a return-like position: declaration-site variance is
+    /// written, however the arguments below nest, unless it is redundant.
     Reopened,
     /// A class header's supertype: its own arguments are spelled invariantly, everything below them
-    /// with declaration-site wildcards.
+    /// in [`Self::Generic`] mode.
     Supertype,
+    /// kotlinc's `GENERIC_ARGUMENT` mode, below a supertype's arguments and in a type parameter's
+    /// bound: every declaration-site variance is written, redundant or not, at every depth.
+    Generic,
 }
 
 impl Wildcards {
     /// Whether declaration-site variance is written as a wildcard at this position.
     pub(super) fn writes_declaration_site(self) -> bool {
-        matches!(self, Self::Declared | Self::Reopened)
+        matches!(self, Self::Declared | Self::Reopened | Self::Generic)
+    }
+
+    /// Whether a wildcard that cannot change what the type admits (`out` over a final class, `in`
+    /// over `Any`) is dropped at this position.
+    pub(super) fn drops_redundant(self) -> bool {
+        self != Self::Generic
     }
 
     /// The mode for an argument whose effective variance is `variance` (an array element is
@@ -48,7 +61,7 @@ impl Wildcards {
         match (self, variance) {
             (Self::Declared, TypeVariance::Invariant) => Self::Suppressed,
             (Self::Suppressed, TypeVariance::In) => Self::Reopened,
-            (Self::Supertype, _) => Self::Reopened,
+            (Self::Supertype | Self::Generic, _) => Self::Generic,
             (mode, _) => mode,
         }
     }
