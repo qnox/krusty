@@ -448,7 +448,7 @@ fn emit_bridge(
         if plan.null_preserving {
             // `unbox-impl` is an instance call, so a legal null would throw on the way to a
             // declaration that says this bridge returns null. kotlinc branches around it.
-            let mut locals = vec![VerifType::ObjectName(c.fq_name())];
+            let mut locals = vec![VerifType::ObjectName(c.fq_name().to_owned())];
             locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
             let null_case = code.new_label();
             let done = code.new_label();
