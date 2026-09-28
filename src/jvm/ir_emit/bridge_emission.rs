@@ -6,8 +6,9 @@
 //! boxing and carrier decisions stay in one JVM-owned place.
 
 use super::{
-    box_prim_free, discard, emit_num_conv, emit_return, finish_code, finish_code_sig, ir_ty_to_jvm,
-    jvm_declared_ty, jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
+    box_prim_free, discard, emit_num_conv, emit_return, emit_value_class_box_adapter,
+    emit_value_class_unbox_adapter, finish_code, finish_code_sig, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
     method_descriptor, slot_words, throw_assertion_error, type_descriptor, unbox_prim_from,
     verif_for_jvm_free, ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter,
     VerifType,
@@ -158,7 +159,7 @@ pub(super) fn emit_bridges(
     cw: &mut ClassWriter,
     env: &EmitEnv<'_>,
 ) {
-    let class = ClassBridges::of(ir, c, env);
+    let class = ClassBridges::new(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -172,18 +173,20 @@ pub(super) fn emit_bridges(
 struct ClassBridges<'a> {
     ir: &'a IrFile,
     class: &'a crate::ir::IrClass,
-    return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
+    override_results: &'a crate::jvm::override_results::OverrideResults,
     run: &'a EmitRun,
 }
 
 impl<'a> ClassBridges<'a> {
-    fn of(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &'a EmitEnv<'_>) -> Self {
+    fn new(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &EmitEnv<'a>) -> Self {
         Self {
             ir,
             class,
-            return_adaptations: env.bridge_return_adaptations,
+            adaptations: env.bridge_adaptations,
             argument_arrays: env.function_argument_arrays,
+            override_results: env.override_results,
             run: env.run,
         }
     }
@@ -200,14 +203,21 @@ fn emit_bridge(
     let ClassBridges {
         ir,
         class: c,
-        return_adaptations,
+        adaptations,
         argument_arrays,
+        override_results,
         run,
     } = *class;
     let packs_arguments = argument_arrays.packs(c.fq_name_id(), b);
-    let return_unboxing = u32::try_from(bridge_index)
-        .ok()
-        .and_then(|index| return_adaptations.get(c.fq_name_id(), index));
+    let adapter = adaptations.get(
+        c.fq_name_id(),
+        u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
+    );
+    let result_adapter = adapter.and_then(|adapter| adapter.result);
+    let return_unboxing = match result_adapter {
+        Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Unbox(plan)) => Some(plan),
+        _ => None,
+    };
     let ep = jvm_tys(&b.erased_params);
     let static_target = b.target_function.and_then(|function| {
         let target = ir.functions.get(function as usize)?;
@@ -224,7 +234,7 @@ fn emit_bridge(
     // The target is a declaration, so its result is spelled as declared (`Nothing?` is `Void`).
     let tr = static_target.map_or_else(
         || jvm_declared_ty(&b.target_ret.unwrap_or(b.concrete_ret)),
-        |(_, function)| jvm_declared_ty(&function.ret),
+        |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
     );
     let erased_desc = method_descriptor(&ep, er);
     // A bridge whose (name, descriptor) already names a REAL method on this class would be a
@@ -310,12 +320,9 @@ fn emit_bridge(
         // A boxed value-class param (a generic supertype method `f(Object,…)` delegating to a mangled
         // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
         // then `unbox-impl` it to the underlying `ct` the target expects.
-        if let Some(Some(vc)) = b.unbox_params.get(k) {
-            let vc = vc.render();
-            let ci = cw.class_ref(&vc);
-            code.checkcast(ci);
-            let m = cw.methodref(&vc, "unbox-impl", &format!("(){}", type_descriptor(*ct)));
-            code.invokevirtual(m, 0, slot_words(*ct) as i32);
+        // A carrier that holds null (`X?` over a non-null reference) takes a null past `unbox-impl`.
+        if let Some(plan) = adapter.and_then(|adapter| adapter.parameter(k)) {
+            emit_value_class_unbox_adapter(cw, &mut code, plan.owner, *ct, plan.null_preserving);
         } else if et != ct {
             if et.is_reference() && ct.is_reference() {
                 let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
@@ -407,18 +414,8 @@ fn emit_bridge(
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
     }
-    if let Some(owner) = &b.box_ret {
-        let owner = owner.render();
-        let bi = cw.methodref(
-            &owner,
-            "box-impl",
-            &format!(
-                "({}){}",
-                type_descriptor(cr),
-                type_descriptor(Ty::obj(&owner))
-            ),
-        );
-        code.invokestatic(bi, slot_words(cr) as i32, 1);
+    if let Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Box(plan)) = result_adapter {
+        emit_value_class_box_adapter(cw, &mut code, plan.owner, cr, plan.null_preserving);
     } else if let Some(plan) = return_unboxing.filter(|_| unboxes_result) {
         // The supertype declares a VALUE CLASS in its UNBOXED form, so this bridge returns that
         // class's carrier and the carrier comes out of the class's own `unbox-impl` — whether
@@ -666,7 +663,7 @@ pub(super) fn emit_value_class_interface_entries(
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         let header = EntryHeader::of(ir, formatter, member, &descriptor);
-        let class = ClassBridges::of(ir, c, env);
+        let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
     }

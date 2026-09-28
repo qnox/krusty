@@ -194,6 +194,7 @@ pub(super) fn add_object_serializer(
             descriptor: String::new(),
             params: Some((vec![], class_ty("kotlin/Any"))),
             interface: true,
+            module_target: None,
         },
         dispatch_receiver: Some(read),
         args: vec![],

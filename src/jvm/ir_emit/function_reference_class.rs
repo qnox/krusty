@@ -82,7 +82,7 @@ pub(super) fn emit_func_ref_class(
     });
     // kotlinc's enclosure record: the scope the reference is written in, and an inner-only
     // `InnerClasses` entry for the class itself and each class it names.
-    if let Some((owner, method)) = class_enclosure(ir, c, facade) {
+    if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),

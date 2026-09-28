@@ -921,6 +921,7 @@ pub(super) fn realize(
                             params: semantic_array_declaration
                                 .then_some((semantic_params.clone(), semantic_ret)),
                             interface,
+                            module_target: None,
                         };
                     }
                 }
@@ -964,6 +965,7 @@ pub(super) fn realize(
                                 descriptor: crate::jvm::names::method_descriptor(&[], element),
                                 params: None,
                                 interface: false,
+                                module_target: None,
                             }
                         }
                         None => {
@@ -979,6 +981,7 @@ pub(super) fn realize(
                                 descriptor,
                                 params: None,
                                 interface,
+                                module_target: None,
                             }
                         }
                     };
@@ -1010,6 +1013,7 @@ pub(super) fn realize(
                                 descriptor,
                                 params: None,
                                 interface,
+                                module_target: None,
                             }
                         }
                     };

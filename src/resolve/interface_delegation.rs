@@ -395,6 +395,7 @@ fn function_call(
 }
 
 fn delegated_function_declaration(
+    source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedDelegatedFunctionDeclaration> {
@@ -421,27 +422,16 @@ fn delegated_function_declaration(
             signature.result.get(),
         )
     } else {
-        let target = ResolvedFunctionOverrideTarget::External(function.callable.external_identity?);
-        let parameters = function
-            .callable
-            .declared_params
-            .clone()
-            .or_else(|| {
-                function.generic_sig.as_ref().map(|signature| {
-                    if function.kind == FnKind::Extension {
-                        signature.parameters_with_receiver(function.context_count)
-                    } else {
-                        signature.params.clone().into_boxed_slice()
-                    }
-                })
-            })
-            .unwrap_or_else(|| applied_function_parameters(function).into_boxed_slice());
-        let result = function
-            .callable
-            .declared_ret
-            .or_else(|| function.generic_sig.as_ref().map(|signature| signature.ret))
-            .unwrap_or_else(|| function.ret.apply(function.callable.ret));
-        (target, parameters, result)
+        let identity = function.callable.external_identity?;
+        // The member was found through the applied interface; the declaration it overrides is
+        // spelled as its provider normalized it.
+        let (parameters, result) =
+            super::override_plans::dependency_declaration_signature(source, identity);
+        (
+            ResolvedFunctionOverrideTarget::External(identity),
+            parameters,
+            result,
+        )
     };
     let extension_position = (function.kind == FnKind::Extension
         && parameters.len() == function.call_sig.parameter_identities.len() + 1)
@@ -758,7 +748,7 @@ fn delegation_members(
                 continue;
             }
             let call = function_call(source, index, interface, function);
-            let overridden = delegated_function_declaration(index, function)?;
+            let overridden = delegated_function_declaration(source, index, function)?;
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {

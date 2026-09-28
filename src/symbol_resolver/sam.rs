@@ -15,10 +15,9 @@ use super::{
 
 /// The specialized callable shape of a functional-interface target.
 #[derive(Clone, Debug)]
-pub(crate) struct SamSignature {
+pub struct SamSignature {
     pub(crate) internal: TypeName,
     pub(crate) method: String,
-    pub(crate) descriptor: Option<String>,
     /// Call-site-specialized logical method shape used to type the converted function.
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
@@ -28,7 +27,16 @@ pub(crate) struct SamSignature {
     pub(crate) context_count: usize,
     pub(crate) has_receiver: bool,
     pub(crate) suspend: bool,
+    /// The method's primitive result replaces a non-primitive result of a declaration it
+    /// overrides, at any depth (`override fun f(): Int` of `fun f(): Any`).
+    pub(crate) overrides_non_primitive_result: bool,
 }
+
+/// One declaration of a member slot: its depth in the hierarchy, and its specialized parameters
+/// and result.
+type Declaration = (u32, LibraryMember, Vec<Ty>, Ty);
+/// The declarations, at any depth, that share one name and specialized parameter list.
+type OverrideSlot = ((String, Vec<Ty>), Vec<Declaration>);
 
 pub(crate) fn semantic_sam_signature(
     source: &dyn SymbolSource,
@@ -40,8 +48,6 @@ pub(crate) fn semantic_sam_signature(
         return None;
     }
 
-    type Declaration = (u32, LibraryMember, Vec<Ty>, Ty);
-    type OverrideSlot = ((String, Vec<Ty>), Vec<Declaration>);
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {
         let Some(owner) = applied.obj_internal() else {
@@ -102,6 +108,11 @@ pub(crate) fn semantic_sam_signature(
     let mut abstract_method = None;
     for (_, declarations) in declarations {
         let nearest = declarations.iter().map(|(depth, ..)| *depth).min()?;
+        let overridden_results = declarations
+            .iter()
+            .filter(|(depth, ..)| *depth > nearest)
+            .map(|(_, member, ..)| declared_result(member))
+            .collect::<Vec<_>>();
         let nearest = declarations
             .into_iter()
             .filter(|(depth, ..)| *depth == nearest)
@@ -110,16 +121,21 @@ pub(crate) fn semantic_sam_signature(
             continue;
         }
         let (_, member, params, ret) = nearest.into_iter().next()?;
-        if abstract_method.replace((member, params, ret)).is_some() {
+        let overrides_non_primitive_result = is_primitive(declared_result(&member))
+            && overridden_results
+                .into_iter()
+                .any(|result| !is_primitive(result));
+        if abstract_method
+            .replace((member, params, ret, overrides_non_primitive_result))
+            .is_some()
+        {
             return None;
         }
     }
-    let (sam, params, ret) = abstract_method?;
-    let descriptor = (!sam.descriptor.is_empty()).then(|| sam.descriptor.clone());
+    let (sam, params, ret, overrides_non_primitive_result) = abstract_method?;
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
-        descriptor,
         params,
         ret,
         declared_params: sam.params.clone(),
@@ -127,7 +143,21 @@ pub(crate) fn semantic_sam_signature(
         context_count: sam.context_count,
         has_receiver: sam.is_member_extension(),
         suspend: sam.suspend(),
+        overrides_non_primitive_result,
     })
+}
+
+/// The result a member is declared with, before any substitution.
+fn declared_result(member: &LibraryMember) -> Ty {
+    member
+        .generic_sig
+        .as_ref()
+        .map_or(member.ret, |signature| signature.ret)
+}
+
+/// Kotlin's primitive types: the results a JVM override boxes when it replaces another result.
+fn is_primitive(ty: Ty) -> bool {
+    ty.is_numeric_or_char() || ty == Ty::Boolean
 }
 
 fn collect_member(
@@ -136,7 +166,7 @@ fn collect_member(
     retain_direct_kotlin_object_method: bool,
     classifier_bindings: &GSigBinds,
     classifier_occurrence_bounds: &std::collections::HashMap<String, Ty>,
-    declarations: &mut Vec<((String, Vec<Ty>), Vec<(u32, LibraryMember, Vec<Ty>, Ty)>)>,
+    declarations: &mut Vec<OverrideSlot>,
 ) {
     // A public `Any`-shaped member inherited by the interface does not create a SAM method.
     // Kotlin does, however, allow the fun interface itself to redeclare that shape abstractly
@@ -162,10 +192,7 @@ fn collect_member(
         .map_or(member.params.as_slice(), |signature| {
             signature.params.as_slice()
         });
-    let declared_ret = member
-        .generic_sig
-        .as_ref()
-        .map_or(member.ret, |signature| signature.ret);
+    let declared_ret = declared_result(member);
     let params = declared_params
         .iter()
         .map(|parameter| sam_substitute(*parameter, &occurrence_bounds, &bindings))

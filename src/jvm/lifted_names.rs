@@ -57,7 +57,10 @@ pub(crate) fn number(ir: &mut IrFile) {
 /// whose lifted name and descriptor another method of the same class already has keeps its name:
 /// kotlinc's names are distinct within the class it places them in, and a callable placed
 /// elsewhere must not collide.
-pub(crate) fn realize(ir: &mut IrFile) {
+pub(crate) fn realize(
+    ir: &mut IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) {
     let mut renames = ir.lifted_names.clone();
     let owners = ir
         .classes
@@ -71,7 +74,7 @@ pub(crate) fn realize(ir: &mut IrFile) {
         })
         .collect::<HashMap<_, _>>();
     let descriptors = (0..ir.functions.len())
-        .map(|function| super::ir_emit::function_descriptor(ir, function as u32))
+        .map(|function| super::ir_emit::function_descriptor(ir, override_results, function as u32))
         .collect::<Vec<_>>();
     loop {
         let mut holders = HashMap::<(Option<usize>, &str, &str), Vec<u32>>::new();

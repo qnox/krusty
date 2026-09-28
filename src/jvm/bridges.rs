@@ -18,9 +18,10 @@ use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
-pub(crate) fn derive_bridges(
+pub(super) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
@@ -33,7 +34,14 @@ pub(crate) fn derive_bridges(
         }
         let first = ir.classes[cid].bridges.len();
         let mut order = Vec::new();
-        superclass_method_bridges(ir, cid, classpath, argument_arrays, &mut order)?;
+        superclass_method_bridges(
+            ir,
+            cid,
+            classpath,
+            override_results,
+            argument_arrays,
+            &mut order,
+        )?;
         property_bridges(ir, cid, classpath, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
@@ -127,6 +135,21 @@ fn external_method_name(
     .to_owned())
 }
 
+/// The common-IR function implementing `edge`: a compiler-generated forwarder's own function, or the
+/// function lowered from the selected source declaration.
+pub(super) fn implementation_function(
+    ir: &IrFile,
+    edge: &crate::ir::IrFunctionOverride,
+) -> Option<crate::ir::FunId> {
+    edge.implementation_function
+        .or_else(|| match edge.implementation {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) => {
+                ir.checked_callable_functions.get(&declaration).copied()
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+        })
+}
+
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
 /// override) needs an `ACC_BRIDGE` method carrying the SUPERCLASS's descriptor that delegates to the
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
@@ -134,6 +157,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
@@ -144,53 +168,26 @@ fn superclass_method_bridges(
         .cloned()
         .unwrap_or_default();
     for edge in edges {
-        let own_fid = edge
-            .implementation_function
-            .or_else(|| match edge.implementation {
-                crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) => {
-                    ir.checked_callable_functions.get(&declaration).copied()
-                }
-                crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
-            });
+        let own_fid = implementation_function(ir, &edge);
         if edge.implementation_owner == internal_name
             && own_fid.is_none_or(|function| !ir.classes[cid].methods.contains(&function))
         {
             continue;
         }
-        // Common IR records the selected declaration and its call-site semantic signature. For an
-        // external declaration, recover the provider's canonical UNAPPLIED source signature by the
-        // opaque identity: the edge may say `Echo<String>.echo: String`, while the declaration still
-        // says `Echo<T>.echo: T`. Only then apply JVM bridge erasure. Using the physical descriptor
-        // here is too early: it would manufacture a bridge for semantic value-class parameters such
-        // as `Continuation.resumeWith(Result<T>)` before the value-class pass realizes their carrier.
-        let (mut declared_parameters, declared_result) = match edge.overridden {
-            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => {
-                (edge.declared_parameters.to_vec(), edge.declared_result)
+        // The overridden declaration's own shape, unapplied, as the frontend recorded it on the
+        // edge: bridge erasure applies to that, not to the call-site view through this class.
+        let mut declared_parameters = edge.declared_parameters.clone();
+        let mut declared_result = edge.declared_result;
+        // An overridden declaration whose primitive result is realized as its wrapper is reached
+        // through that wrapper.
+        if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {
+            if override_results
+                .boxed_callable_result(ir, callable)
+                .is_some()
+            {
+                declared_result = Ty::nullable(declared_result);
             }
-            crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                let realization = classpath
-                    .external_callable(target)
-                    .ok_or(SkipReason::Bridges)?;
-                if realization.kind != crate::jvm::classpath::ExternalCallableKind::Member {
-                    return Err(SkipReason::Bridges);
-                }
-                let callable = realization.callable;
-                let declared_parameters = callable
-                    .declared_params
-                    .or_else(|| {
-                        callable
-                            .generic_sig
-                            .as_ref()
-                            .map(|signature| signature.params.clone().into_boxed_slice())
-                    })
-                    .unwrap_or_else(|| callable.params.into_boxed_slice());
-                let declared_result = callable
-                    .declared_ret
-                    .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
-                    .unwrap_or(callable.ret);
-                (declared_parameters.to_vec(), declared_result)
-            }
-        };
+        }
         let mut base_params = declared_parameters
             .iter()
             .copied()
@@ -200,9 +197,19 @@ fn superclass_method_bridges(
         let mut concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());
-        let mut concrete_ret = own_fid
-            .map(|function| ir.functions[function as usize].ret)
-            .unwrap_or(edge.implementation_result);
+        // The implementation's JVM result: the wrapper where its primitive result is boxed, as it
+        // is for an implementation inherited from another file's declaration.
+        let mut concrete_ret = match (own_fid, edge.implementation) {
+            (Some(function), _) => override_results.physical_result(ir, function),
+            (None, crate::fir::ResolvedFunctionOverrideTarget::Module(callable))
+                if override_results
+                    .boxed_callable_result(ir, callable)
+                    .is_some() =>
+            {
+                Ty::nullable(edge.implementation_result)
+            }
+            (None, _) => edge.implementation_result,
+        };
         // A bridge carries the overridden declaration's signature, so kotlinc names its parameters
         // after that declaration's, not the override's.
         let mut parameter_identities = edge.overridden_parameter_identities.clone();
@@ -347,8 +354,6 @@ fn superclass_method_bridges(
             type_safe_barrier: false,
             special,
             target_name,
-            box_ret: None,
-            unbox_params: Vec::new(),
         });
         if packed_arguments {
             let class = &ir.classes[cid];
@@ -503,8 +508,6 @@ fn push_member_extension_accessor_bridges(
         type_safe_barrier: false,
         special: false,
         target_name: None,
-        box_ret: None,
-        unbox_params: Vec::new(),
     };
     let mut accessors = vec![accessor(
         property_getter_name(&edge.name),
@@ -566,8 +569,6 @@ fn push_property_bridge(
             type_safe_barrier: false,
             special,
             target_name,
-            box_ret: None,
-            unbox_params: Vec::new(),
         });
     }
     if !needs_setter {
@@ -595,8 +596,6 @@ fn push_property_bridge(
             type_safe_barrier: false,
             special: false,
             target_name: None,
-            box_ret: None,
-            unbox_params: Vec::new(),
         });
     }
 }

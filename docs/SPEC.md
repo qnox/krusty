@@ -4460,6 +4460,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   regenerates those in every overriding class. The custom accessors of an overriding property are
   also emitted without `final`, like the default accessors of a backing-field one. Tests:
   `tests/renamed_builtin_bridge_owner_e2e.rs`.
+- **A bridge erases the overridden declaration's own signature, which the override edge carries.**
+  The supertype side of an erasure bridge is the overridden declaration as declared, before the
+  implementing class's type arguments are applied: `Echo<T>.echo(x: T): T` bridges as
+  `echo(Object)Object` even where the class implements `Echo<String>`. The frontend, which owns
+  declaration lookup, records that shape on each function override edge (`declared_parameters`,
+  `declared_result`): for a dependency declaration its value-class spelling, else its generic
+  signature, else the shape its provider published — the same rule an interface-delegation
+  forwarder's target uses. The JVM bridge pass erases what the edge says and never reopens the
+  dependency provider. Taking the physical descriptor instead would be too early: a semantic
+  value-class parameter (`Continuation.resumeWith(Result<T>)`) is erased by the value-class pass
+  later, and a bridge made from its descriptor would duplicate the method. Tests:
+  `tests/superclass_bridge_e2e.rs`, `tests/suspend_class_implements_interface_e2e.rs`,
+  `src/fir/index_tests.rs::a_dependency_override_edge_carries_the_declarations_own_signature`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type
@@ -7449,6 +7462,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
   like the supertype's member that casts the argument and calls the override. Tests:
   `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **A generic bridge over `X?` keeps null when `X?` is erased to its carrier.** `X?` over a
+  non-null reference is `X`'s carrier holding the null, so an override `echo(t: Tag?): Tag?` of
+  `Echo<T>.echo(t: T): T` is `echo-<hash>(String)String`. Its bridge `echo(Object)Object` unboxes
+  the argument with `dup; ifnull; unbox-impl; goto; pop; aconst_null`, calls the override by the
+  carrier descriptor, and boxes the result the same null-safe way with `box-impl`. krusty called
+  `echo-<hash>(LTag;)LTag;`, which does not exist. A boxed `X?` (over a primitive or a nullable
+  underlying) is the reference the bridge already has. Only the Kotlin type decides the null
+  guard, never the carrier's: a non-null `X(val any: Any?)` returned where `X?` is declared boxes
+  its carrier whatever it holds, since `X(null)` is a value. Tests:
+  `tests/value_class_nullable_bridge_e2e.rs`. Corpus:
+  `inlineClasses/boxReturnValueOnOverride/overrideNullableInlineClassWithNonNullNullableAnyNull`.
+- **A primitive override of a non-primitive result returns the wrapper.** kotlinc's signature
+  mapper boxes a function's primitive result when any declaration it overrides, at any depth,
+  returns something else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is
+  `echo(I)Ljava/lang/Integer;`, and `invoke` of a `() -> Boolean` object is
+  `invoke()Ljava/lang/Boolean;`. Each return boxes, a call through the class (a `super` call too)
+  unboxes with `intValue()` where its value is used as the primitive, keeps the wrapper where a
+  reference is wanted, and pops it when discarded; the bridge to the erased declaration returns the
+  box without converting it; a value class's member is realized as a static `-impl` that returns
+  the wrapper too, as does its instance entry. This holds wherever the class is declared. The
+  Kotlin result is unchanged: common IR keeps the primitive result, returns and calls, and the JVM backend records
+  the wrapper per function (`jvm::override_results`) for its descriptors, returns and calls. A
+  declaration's other files see the choice through the module record of the callable
+  (`IrModuleCallable::overrides_non_primitive_result`, derived from the override edges its
+  classifier published), so a caller, a `super` call or a subclass in another file names the
+  wrapper exactly as the declaring file does. A fun interface whose method returns the wrapper
+  (`fun interface Child : Base { override fun f(): Int }` over `fun f(): Any`) is converted
+  through a class of its own, never `invokedynamic`, as kotlinc does: the SAM selection publishes
+  the fact on the conversion (`FirSamConversion::overrides_non_primitive_result`, from the
+  overridden declarations of the selected method's slot), so a dependency's interface takes the
+  same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
+  `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
+  `tests/module_override_boxed_result_e2e.rs`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
@@ -8708,9 +8754,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed form takes the carrier out of that class's own `unbox-impl` (`checkcast IC;
   IC.unbox-impl()I`) — the class identity is unknowable from the bridge at emission time, because the
   value-class pass rewrites `erased_ret` to the carrier in the same step, so the JVM pass records it
-  in `bridge_return_adaptations` — a backend-owned physical realization plan passed directly to
-  bridge emission and keyed by the owning class and bridge ordinal. No classifier identity for a JVM
-  boxing decision sits on common `Bridge` or `IrFile`. That holds for a
+  in `bridge_adaptations` — a backend-owned physical realization plan passed directly to bridge
+  emission and keyed by the owning class and bridge ordinal. The same plan holds the rest of a
+  bridge's value-class adapters: boxing the target's carrier result (`box-impl`) and unboxing each
+  argument that arrives boxed in an erased slot, each with whether a null passes it by. The plan
+  follows a bridge the pass drops as a duplicate of a real method, so every later ordinal still
+  names its own plan. No classifier identity for a JVM boxing decision sits on common `Bridge` or
+  `IrFile`. That holds for a
   REFERENCE carrier too (`checkcast Text; Text.unbox-impl()Ljava/lang/String;`): keying the adapter
   on the carrier alone sent a reference carrier down the ordinary `Object`-to-`String` narrowing,
   which never unboxed and handed the caller a `Text` where a `String` was declared. Nor may the two

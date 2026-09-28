@@ -63,11 +63,16 @@ pub(super) fn signature_function_params(ir: &IrFile, function: crate::ir::FunId)
         .collect()
 }
 
-/// The JVM descriptor a common-IR function is declared with.
-pub(in crate::jvm) fn function_descriptor(ir: &IrFile, function: crate::ir::FunId) -> String {
+/// The JVM descriptor a common-IR function is declared with: its result is the wrapper where
+/// `override_results` boxes it.
+pub(in crate::jvm) fn function_descriptor(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    function: crate::ir::FunId,
+) -> String {
     method_descriptor(
         &jvm_function_params(ir, function),
-        jvm_declared_ty(&ir.functions[function as usize].ret),
+        jvm_declared_ty(&override_results.physical_result(ir, function)),
     )
 }
 

@@ -418,35 +418,9 @@ impl BodyFirChecker<'_> {
         let Some(sam) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
             return Ok(None);
         };
-        let span = self.file.expr_span(argument);
-        let resolved = |ty| {
-            ResolvedTy::new(ty)
-                .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
-        };
-        let parameters = sam
-            .params
-            .into_iter()
-            .map(resolved)
-            .collect::<Result<Vec<_>, _>>()?;
-        let declared_parameters = sam
-            .declared_params
-            .into_iter()
-            .map(resolved)
-            .collect::<Result<Vec<_>, _>>()?;
-        let context_count = u32::try_from(sam.context_count)
-            .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        let conversion = self.body.add_sam_conversion(FirSamConversion {
-            classifier: sam.internal,
-            method: sam.method.into_boxed_str(),
-            parameters: parameters.into_boxed_slice(),
-            result: resolved(sam.ret)?,
-            declared_parameters: declared_parameters.into_boxed_slice(),
-            declared_result: resolved(sam.declared_ret)?,
-            context_count,
-            has_receiver: sam.has_receiver,
-            suspend: sam.suspend,
-            nullable: self.info.semantic_ty(argument).is_nullable(),
-        });
+        let nullable = self.info.semantic_ty(argument).is_nullable();
+        let conversion = self.fir_sam_conversion(self.file.expr_span(argument), sam, nullable)?;
+        let conversion = self.body.add_sam_conversion(conversion);
         Ok(Some(FirConversion {
             origin: cause,
             kind: FirConversionKind::Sam(conversion),
@@ -1036,19 +1010,8 @@ impl BodyFirChecker<'_> {
         args: &[ExprId],
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
-        let Some(ExprLowering::SamConstructor {
-            internal,
-            result: _,
-            method,
-            params,
-            ret,
-            declared_params,
-            declared_ret,
-            context_count,
-            has_receiver,
-            suspend,
-            ..
-        }) = self.info.expr_lowers.get(&expression).cloned()
+        let Some(ExprLowering::SamConstructor { sam, .. }) =
+            self.info.expr_lowers.get(&expression).cloned()
         else {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
@@ -1056,38 +1019,8 @@ impl BodyFirChecker<'_> {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
         let cause = self.expression_origin(expression)?;
-        let mut resolved = |ty: crate::types::Ty| {
-            ResolvedTy::new(ty)
-                .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
-        };
-        let parameters = params
-            .iter()
-            .copied()
-            .map(&mut resolved)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
-        let result = resolved(ret)?;
-        let declared_parameters = declared_params
-            .iter()
-            .copied()
-            .map(&mut resolved)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
-        let declared_result = resolved(declared_ret)?;
-        let context_count = u32::try_from(context_count)
-            .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        let conversion = self.body.add_sam_conversion(FirSamConversion {
-            classifier: internal,
-            method: method.into_boxed_str(),
-            parameters: parameters.clone(),
-            result,
-            declared_parameters,
-            declared_result,
-            context_count,
-            has_receiver,
-            suspend,
-            nullable: false,
-        });
+        let conversion = self.fir_sam_conversion(span, *sam, false)?;
+        let conversion = self.body.add_sam_conversion(conversion);
         let value = self.expression(*operand)?;
         Ok(FirExprKind::ImplicitConversion {
             value,
@@ -1095,6 +1028,39 @@ impl BodyFirChecker<'_> {
                 origin: cause,
                 kind: FirConversionKind::Sam(conversion),
             },
+        })
+    }
+
+    /// Publish a selected functional-interface method as the FIR conversion to that interface.
+    pub(super) fn fir_sam_conversion(
+        &self,
+        span: Option<Span>,
+        sam: crate::symbol_resolver::SamSignature,
+        nullable: bool,
+    ) -> Result<FirSamConversion, BodyCheckFailure> {
+        let resolved = |ty| {
+            ResolvedTy::new(ty)
+                .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
+        };
+        let resolved_all = |types: Vec<Ty>| {
+            types
+                .into_iter()
+                .map(resolved)
+                .collect::<Result<Box<[_]>, _>>()
+        };
+        Ok(FirSamConversion {
+            classifier: sam.internal,
+            method: sam.method.into_boxed_str(),
+            parameters: resolved_all(sam.params)?,
+            result: resolved(sam.ret)?,
+            declared_parameters: resolved_all(sam.declared_params)?,
+            declared_result: resolved(sam.declared_ret)?,
+            context_count: u32::try_from(sam.context_count)
+                .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
+            has_receiver: sam.has_receiver,
+            suspend: sam.suspend,
+            overrides_non_primitive_result: sam.overrides_non_primitive_result,
+            nullable,
         })
     }
 }

@@ -324,6 +324,14 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
+    /// The compiled platform assigns every dependency identity this federation hands out.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.platform.external_callable(identity)
+    }
+
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source()
             .generated_serializer_singleton(classifier)

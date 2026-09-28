@@ -117,47 +117,18 @@ impl BodyFirChecker<'_> {
             };
         }
 
-        if let Some(ExprLowering::SamConstructorReference {
-            signature,
-            internal,
-            method,
-            params,
-            ret,
-            declared_params,
-            declared_ret,
-            context_count,
-            has_receiver,
-            suspend,
-        }) = self.info.expr_lowers.get(&expression).cloned()
+        if let Some(ExprLowering::SamConstructorReference { signature, sam }) =
+            self.info.expr_lowers.get(&expression).cloned()
         {
             let Ty::Fun(function) = signature.non_null() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
+            let internal = sam.internal;
+            let conversion = self.fir_sam_conversion(span, *sam, false)?;
             let mut resolved = |ty| {
                 ResolvedTy::new(ty).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                 })
-            };
-            let conversion = FirSamConversion {
-                classifier: internal,
-                method: method.into_boxed_str(),
-                parameters: params
-                    .into_iter()
-                    .map(&mut resolved)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-                result: resolved(ret)?,
-                declared_parameters: declared_params
-                    .into_iter()
-                    .map(&mut resolved)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-                declared_result: resolved(declared_ret)?,
-                context_count: u32::try_from(context_count)
-                    .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
-                has_receiver,
-                suspend,
-                nullable: false,
             };
             let parameters = function
                 .params

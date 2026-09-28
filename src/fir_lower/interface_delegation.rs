@@ -545,6 +545,7 @@ fn delegated_call(
                         result.get(),
                     )),
                     interface: *interface,
+                    module_target: None,
                 },
                 arguments,
                 result.get(),

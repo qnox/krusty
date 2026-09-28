@@ -63,6 +63,17 @@ fn publish_callable(
                 ))
         })
         .transpose()?;
+    // Only the edges the owner publishes for its own declaration say what this one overrides: a
+    // subclass's edge for an inherited implementation belongs to the subclass.
+    let overrides_non_primitive_result = owner.is_some_and(|classifier| {
+        index
+            .function_overrides(classifier.declaration)
+            .iter()
+            .any(|edge| {
+                edge.implementation == crate::fir::ResolvedFunctionOverrideTarget::Module(target)
+                    && !crate::ir::is_kotlin_primitive(edge.declared_result.get())
+            })
+    });
     let owner = owner.map(|classifier| classifier.classifier);
     let placement = super::companion_blocks::static_placement(
         flags,
@@ -131,6 +142,7 @@ fn publish_callable(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             placement,
+            overrides_non_primitive_result,
         },
     );
     Ok(())
@@ -303,6 +315,21 @@ pub(super) fn publish_referenced(
                     callables.insert(*default_provider);
                 }
             }
+            // A member call or `super` call a target may realize from the declaration's own facts.
+            IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        module_target: Some(target),
+                        ..
+                    }
+                    | Callee::Super {
+                        source: Some(target),
+                        ..
+                    },
+                ..
+            } => {
+                callables.insert(*target);
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
             | IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. }) => {
                 properties.insert(*target);
@@ -347,6 +374,13 @@ pub(super) fn publish_referenced(
             callables.insert(target);
         }
     }
+    // A declaration this file's classes override, which a target realizes an override against.
+    callables.extend(ir.function_overrides.values().flatten().filter_map(|edge| {
+        match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+        }
+    }));
     for callable in callables {
         publish_callable(index, ir, callable)?;
     }

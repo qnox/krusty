@@ -254,6 +254,7 @@ fn unbox(ir: &mut IrFile, receiver: ExprId, owner: TypeName, carrier: &Ty) -> Ex
             descriptor: format!("(){}", desc(carrier)),
             params: None,
             interface: false,
+            module_target: None,
         },
         dispatch_receiver: Some(receiver),
         args: vec![],

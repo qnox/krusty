@@ -85,6 +85,8 @@ pub struct FirSamConversion {
     pub context_count: u32,
     pub has_receiver: bool,
     pub suspend: bool,
+    /// The method's primitive result replaces a non-primitive result it overrides.
+    pub overrides_non_primitive_result: bool,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,

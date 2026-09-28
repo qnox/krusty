@@ -951,6 +951,7 @@ fn realize_property(
                     descriptor: String::new(),
                     params: Some((parameters.clone(), ret)),
                     interface: owner_is_jvm_interface(property),
+                    module_target: None,
                 },
                 dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
                 args: arguments,

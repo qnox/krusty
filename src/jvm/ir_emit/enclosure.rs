@@ -18,24 +18,31 @@ use super::{
 /// holds, and so its outer class).
 pub(super) fn class_enclosure(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     c: &crate::ir::IrClass,
     facade: &str,
 ) -> Option<(String, Option<(String, String)>)> {
-    scope_enclosure(ir, c.enclosure?, facade)
+    scope_enclosure(ir, override_results, c.enclosure?, facade)
 }
 
 fn scope_enclosure(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     enclosure: crate::ir::IrEnclosure,
     facade: &str,
 ) -> Option<(String, Option<(String, String)>)> {
     match enclosure {
-        crate::ir::IrEnclosure::Function(function) => function_enclosure(ir, function, facade),
+        crate::ir::IrEnclosure::Function(function) => {
+            function_enclosure(ir, override_results, function, facade)
+        }
         // A suspend lambda realized as a class of its own became `Function` when its class was
         // declared; any other lambda belongs to the scope it is written in.
-        crate::ir::IrEnclosure::Lambda(function) => {
-            scope_enclosure(ir, *ir.lambda_enclosures.get(&function)?, facade)
-        }
+        crate::ir::IrEnclosure::Lambda(function) => scope_enclosure(
+            ir,
+            override_results,
+            *ir.lambda_enclosures.get(&function)?,
+            facade,
+        ),
         crate::ir::IrEnclosure::PropertyAccessor {
             property,
             setter: is_setter,
@@ -90,7 +97,7 @@ fn scope_enclosure(
                 }
             }
             .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"));
-            function_enclosure(ir, function, facade)
+            function_enclosure(ir, override_results, function, facade)
         }
         crate::ir::IrEnclosure::Constructor { class, ordinal } => {
             let declaration = &ir.classes[class as usize];
@@ -162,6 +169,7 @@ fn scope_enclosure(
 
 fn function_enclosure(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     function: crate::ir::FunId,
     facade: &str,
 ) -> Option<(String, Option<(String, String)>)> {
@@ -176,6 +184,6 @@ fn function_enclosure(
         })
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
-    let descriptor = function_descriptor(ir, function);
+    let descriptor = function_descriptor(ir, override_results, function);
     Some((owner, Some((declaration.name.clone(), descriptor))))
 }

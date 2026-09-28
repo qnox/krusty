@@ -9,6 +9,7 @@ use crate::jvm::classfile::ClassWriter;
 /// publication contract. Both paths reject incomplete parameter identities.
 pub(super) fn attach_declared_function_debug(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     fid: u32,
     owner: &str,
     cw: &mut ClassWriter,
@@ -42,7 +43,10 @@ pub(super) fn attach_declared_function_debug(
             function.name,
         );
     }
-    let descriptor = method_descriptor(&param_tys, jvm_declared_ty(&function.ret));
+    let descriptor = method_descriptor(
+        &param_tys,
+        jvm_declared_ty(&override_results.physical_result(ir, fid)),
+    );
     let assertion_names = crate::jvm::parameter_names::function_assertions(ir, fid, &param_tys);
     let mut locals = Vec::new();
     let mut slot = 0u16;

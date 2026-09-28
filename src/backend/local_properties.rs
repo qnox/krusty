@@ -216,6 +216,7 @@ fn property_read(
                         *ty,
                     )),
                     interface: *interface,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(dispatch),
                 args,
@@ -258,6 +259,7 @@ fn property_read(
                     interface: *interface
                         || class_declaration.is_interface
                         || class_declaration.is_annotation,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments.to_vec(),
@@ -372,6 +374,7 @@ fn property_write(
                         Ty::Unit,
                     )),
                     interface: *interface,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments
@@ -413,6 +416,7 @@ fn property_write(
                         Ty::Unit,
                     )),
                     interface: *interface,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(dispatch),
                 args: context_arguments
