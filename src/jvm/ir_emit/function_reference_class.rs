@@ -39,11 +39,9 @@ pub(super) fn emit_func_ref_class(
     let capture_signatures = capture_signatures(ir, env, fr);
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
-    let owner_class = fr.owner_class_or_facade(facade);
-    let owner_class = crate::jvm::jvm_class_map::to_jvm_internal(&owner_class).to_string();
+    let owner_class = jvm_owner_or_facade(fr.owner_class, facade);
     let call_owner_identity = fr.call_owner;
-    let call_owner = fr.call_owner_or_facade(facade);
-    let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();
+    let call_owner = jvm_owner_or_facade(fr.call_owner, facade);
     let fq = c.fq_name();
     let superclass = if fr.adapted {
         "kotlin/jvm/internal/AdaptedFunctionReference".to_string()
@@ -573,6 +571,15 @@ pub(super) fn emit_func_ref_class(
     finish_local_synthetic_class(cw, env)
 }
 
+/// The JVM class a function reference reflects or invokes. A recorded owner maps from its
+/// classifier identity; a missing owner is the file facade, which is already a physical name.
+fn jvm_owner_or_facade(owner: Option<crate::types::TypeName>, facade: &str) -> &str {
+    match owner {
+        Some(owner) => crate::jvm::jvm_class_map::jvm_internal_name(owner),
+        None => facade,
+    }
+}
+
 /// Push the `Class` a carrier reflects its declaration's owner as, the way kotlinc's
 /// `FunctionReferenceLowering` does: a primitive's `TYPE` for a member of a signed scalar
 /// classifier, and the compiler's own `Intrinsics.Kotlin` symbol (a final nested class to kotlinc,
@@ -646,5 +653,39 @@ impl CaptureSignatures {
         }
         signature.push_str(")V");
         Some(signature)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jvm_owner_or_facade;
+    use crate::types::type_name;
+
+    #[test]
+    fn function_reference_owner_borrows_the_mapped_jvm_name() {
+        let string = type_name("kotlin/String");
+        let host = type_name("sample/ref6044/Host");
+        let function = type_name("kotlin/Function1");
+        assert_eq!(
+            jvm_owner_or_facade(Some(string), "unused/Facade"),
+            "java/lang/String"
+        );
+        assert_eq!(
+            jvm_owner_or_facade(Some(host), "unused/Facade"),
+            "sample/ref6044/Host"
+        );
+        assert_eq!(
+            jvm_owner_or_facade(Some(function), "unused/Facade"),
+            "kotlin/jvm/functions/Function1"
+        );
+        assert_eq!(jvm_owner_or_facade(None, "sample/FileKt"), "sample/FileKt");
+        assert!(std::ptr::eq(
+            jvm_owner_or_facade(Some(string), "unused/Facade"),
+            jvm_owner_or_facade(Some(string), "other/Facade"),
+        ));
+        assert!(std::ptr::eq(
+            jvm_owner_or_facade(Some(host), "unused/Facade"),
+            jvm_owner_or_facade(Some(host), "other/Facade"),
+        ));
     }
 }
