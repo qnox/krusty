@@ -27,6 +27,8 @@ mod construction_target_tests;
 mod constructors;
 mod data_classes;
 mod delegated_properties;
+#[cfg(test)]
+mod entry_point_tests;
 mod erased_parameters;
 mod error;
 mod expression;

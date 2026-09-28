@@ -55,6 +55,8 @@ pub enum FirFileLoweringFailure {
     },
     UndeterminedType(crate::ir::UndeterminedIrType),
     ValueIdentityOverflow,
+    /// The frontend's selected entry point has no realization in this file's function arena.
+    UnmappedEntryPoint(CallableId),
 }
 
 fn lower_property_override_plans(

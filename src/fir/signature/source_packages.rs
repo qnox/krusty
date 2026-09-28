@@ -3,6 +3,10 @@
 use super::{ResolvedModuleIndex, SourceFileId, TypeName};
 
 impl ResolvedModuleIndex {
+    pub fn source_package(&self, source: SourceFileId) -> Option<TypeName> {
+        self.source_packages.get(&source).copied()
+    }
+
     /// Whether the finalized source module contributes the direct package child `name` below
     /// `parent`.
     ///

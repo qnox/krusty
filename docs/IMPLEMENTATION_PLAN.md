@@ -4877,3 +4877,20 @@ fit both the primary and a secondary select the primary, constructed with and wi
 arguments and through a constructor reference. Constructions the compiler synthesizes for a class
 with no constructor to choose (an anonymous object, a data class's `copy`, an annotation instance,
 plugin-generated serializers) record no selection.
+
+## Checked facts at the IR/backend boundary  ◐
+
+A backend emits from checked IR and the frozen facts beside it; it does not reconstruct a frontend
+decision from a spelling or query a symbol provider again. These are additive IR contracts that the
+JVM backend does not need to read, and that a program-producing backend (the native one) consumes.
+- ✅ The program entry point: the resolver selects each source unit's Kotlin `main` once, where it
+  classifies top-level conflicts (`fir::MainEntryShape`, preferring `main(args)` over a parameterless
+  `main()`), and records it in the module index (`source_entry_point`); common lowering maps that
+  identity to `IrFile::entry_point`. A harness's `box()` is a driver choice, not a Kotlin rule, so it is not in IR: the
+  driver passes its checked `CallableId`, which a backend maps through
+  `IrFile::checked_callable_functions`. The JVM facade's launcher bridge for a parameterless `main`
+  still tests the function's spelling (`jvm/ir_emit.rs`). That test diverges from kotlinc today: it
+  adds a bridge to `fun <T> main()`, which kotlinc does not, and a file declaring both `main()` and
+  `main(args)` gets a second `main([Ljava/lang/String;)V` and panics in frame computation. Moving it
+  to `entry_point` fixes both but changes JVM output, so it is a separate change checked against
+  kotlinc.

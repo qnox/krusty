@@ -8,7 +8,7 @@ use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId,
 };
 use crate::ir::{
-    IrFile, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, IrTypeAlias,
+    IrEntryPoint, IrFile, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, IrTypeAlias,
 };
 
 use super::FirFileLoweringFailure;
@@ -283,5 +283,19 @@ pub(super) fn publish(
         .sort_by_key(|declaration| declaration.source_order);
     ir.package_type_aliases
         .sort_by_key(|declaration| declaration.source_order);
+    ir.entry_point = index
+        .source_entry_point(source)
+        .map(|entry| {
+            let function = ir
+                .checked_callable_functions
+                .get(&entry.callable)
+                .copied()
+                .ok_or(FirFileLoweringFailure::UnmappedEntryPoint(entry.callable))?;
+            Ok(IrEntryPoint {
+                function,
+                parameters: entry.parameters,
+            })
+        })
+        .transpose()?;
     Ok(())
 }
