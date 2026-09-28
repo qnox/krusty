@@ -280,7 +280,12 @@ impl BodyFirChecker<'_> {
         let ty = ResolvedTy::new(Ty::obj_name(classifier.classifier))
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
 
-        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span, true)?
+        let private_member = self
+            .index
+            .property(target)
+            .and_then(|property| self.index.declaration_header(property.declaration))
+            .is_some_and(|header| header.visibility == crate::types::Visibility::Private);
+        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span, !private_member)?
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
             .map(Some)
     }
@@ -296,7 +301,8 @@ impl BodyFirChecker<'_> {
     /// supertype. `inner class Inner : Outer` makes `Inner` a subtype of the enclosing `Outer`, but
     /// `this@Outer` is the captured enclosing instance. A superclass-constructor argument is the same
     /// split (`object : A(b)` inside `A`): the instance under construction cannot stand in for that
-    /// enclosing value.
+    /// enclosing value. A private member is not inherited, so a nested subclass reads it on the
+    /// enclosing instance (`object : X("inner") { fun print() = n }`) and the flag stays false.
     fn materialize_classifier_dispatch_receiver(
         &mut self,
         owner: DeclarationId,

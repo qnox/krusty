@@ -64,3 +64,18 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "Main");
 }
+
+/// Official box `objects/kt3684.kt`: an anonymous subclass of its enclosing class still reads the
+/// enclosing instance's private property, not the value passed to its own super constructor.
+#[test]
+fn anonymous_subclass_reads_enclosing_private_property() {
+    const SRC: &str = "open class X(private val n: String) {\n\
+    fun foo(): String {\n\
+        return object : X(\"inner\") {\n\
+            fun print(): String = n\n\
+        }.print()\n\
+    }\n\
+}\n\
+fun box(): String = X(\"OK\").foo()\n";
+    common::expect_box_ok_with_stdlib(SRC, "kt3684");
+}

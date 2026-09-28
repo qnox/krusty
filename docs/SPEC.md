@@ -9675,6 +9675,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` (whose data-class half
   is the per-class record described under "`@Metadata` writer — the CLASS round-trip").
 
+- **A private member is not a member of a subclass.** Lexical nesting still sees it on the
+  declaring instance. `object : X("inner") { fun print() = n }` inside `open class X(private val n:
+  String)` reads the enclosing `X`, so `X("OK").foo()` is `OK`. The subclass receiver does not
+  inherit `n`; an explicit `this.n` or a `Y` receiver where `Y : X` is inaccessible. Test:
+  `tests/labeled_this_e2e.rs::anonymous_subclass_reads_enclosing_private_property` (official box
+  `objects/kt3684.kt`).
+
 - **A companion object's `private` members are in scope throughout the containing class.** Member
   access is decided on the LEXICAL enclosing chain, not the receiver chain — a nested (non-`inner`)
   class has no outer receiver at all, yet sits inside its outer class's body. On top of that, a member

@@ -210,7 +210,6 @@ nothingValue/nothingValueException.kt
 nullCheckOptimization/kt22410.kt
 objects/flist.kt
 objects/interfaceCompanionObjectReference.kt
-objects/kt3684.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
