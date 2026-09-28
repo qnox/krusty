@@ -2050,7 +2050,7 @@ impl Classpath {
         if tree.catalog_complete() {
             return false;
         }
-        self.physical_class_entry(&internal.render())
+        self.physical_class_entry(crate::jvm::names::classfile_internal_name_of(internal))
             .and_then(|(index, _)| self.friend_entries.get(index))
             .copied()
             .unwrap_or(false)
@@ -3742,7 +3742,7 @@ impl Classpath {
         let needs_textual_erasure =
             super::jvm_class_map::maps_to_distinct_jvm_internal(internal) && mapped == internal;
         if needs_textual_erasure {
-            return self.class_exists(&internal.render());
+            return self.class_exists(crate::jvm::names::classfile_internal_name_of(internal));
         }
         if self.stub_overlay.borrow().contains_key(&mapped) {
             return true;
@@ -3754,7 +3754,7 @@ impl Classpath {
         if tree.incomplete_entries.is_empty() {
             return false;
         }
-        self.class_exists(&mapped.render())
+        self.class_exists(crate::jvm::names::classfile_internal_name_of(mapped))
     }
 
     fn class_entry_indices(&self, tree: &PackageTree, internal: &str) -> Vec<usize> {
@@ -3799,7 +3799,7 @@ impl Classpath {
         cache_stat!(l1_class, false);
         // The classfile spelling is a zip/directory key. An L2 hit already holds the parsed class,
         // so the render waits until this entry actually has to read bytes.
-        let mut classfile_name: Option<(String, String)> = None;
+        let mut classfile_name: Option<(&'static str, String)> = None;
         let mut found = None;
         let mut all_cached = true;
         for i in self.class_entry_indices_name(&tree, internal_id) {
@@ -3820,7 +3820,7 @@ impl Classpath {
             }
             all_cached = false;
             if classfile_name.is_none() {
-                let internal = internal_id.render();
+                let internal = crate::jvm::names::classfile_internal_name_of(internal_id);
                 let name = format!("{internal}.class");
                 classfile_name = Some((internal, name));
             }
@@ -4001,12 +4001,21 @@ impl Classpath {
     }
 
     /// Return the jar containing `internal`, if its first classpath definition is in a jar.
+    /// A complete catalog answers from the classfile spelling, so the class bytes are not read.
     pub fn owning_jar(&self, internal: &str) -> Option<PathBuf> {
         let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
         if self.stub_overlay.borrow().contains_key(&internal_id) {
             return None;
         }
-        let (index, _) = self.physical_class_entry(&internal_id.render())?;
+        let spelling = crate::jvm::names::classfile_internal_name_of(internal_id);
+        let tree = self.package_tree();
+        let index = if let Some(index) = tree.first_jar_for_spelling(spelling) {
+            index
+        } else if tree.catalog_complete() {
+            return None;
+        } else {
+            self.physical_class_entry(spelling)?.0
+        };
         match self.entries.get(index)? {
             Entry::Jar(path) => Some(path.clone()),
             Entry::Dir(_) | Entry::Jimage(_) | Entry::CtSym { .. } => None,
@@ -5075,6 +5084,16 @@ impl PackageTree {
     /// [`Self::jars_for_class_name`].
     fn first_class_jar(&self, internal: TypeName) -> Option<JarId> {
         let class = crate::types::existing_type_name_in(&self.names, internal)?;
+        self.first_jar_for_id(class)
+    }
+
+    /// The first classpath entry whose class file is stored as `internal`. The spelling is the
+    /// zip entry without `.class`. A miss does not intern it.
+    fn first_jar_for_spelling(&self, internal: &str) -> Option<JarId> {
+        self.first_jar_for_id(self.names.get(internal)?)
+    }
+
+    fn first_jar_for_id(&self, class: NameId) -> Option<JarId> {
         let start = self
             .classes
             .partition_point(|&(candidate, _)| candidate.0 < class.0);
@@ -6331,6 +6350,11 @@ mod fq_tests {
         let cp = Classpath::new(vec![jar.clone()]);
         let owner = cp.owning_jar("kotlin/collections/CollectionsKt");
         assert_eq!(owner.as_deref(), Some(jar.as_path()));
+        assert_eq!(
+            cp.owning_jar("kotlin/Function1").as_deref(),
+            Some(jar.as_path()),
+            "Function1's bytes live in kotlin/jvm/functions/Function1.class"
+        );
         let present = type_name("kotlin/collections/CollectionsKt");
         let absent = type_name("kotlin/collections/NoSuchKt");
         assert!(cp.class_exists_name(present));
@@ -6343,6 +6367,39 @@ mod fq_tests {
             cp.class_exists("kotlin/Function1"),
             cp.class_exists_name(type_name("kotlin/Function1"))
         );
+    }
+
+    // The catalog records the physical class-file name. `kotlin/Function1` and `kotlin/String`
+    // are not those names, and the entry bytes are not a class; the jar is still the owner.
+    #[test]
+    fn owning_jar_finds_a_mapped_classfile_without_parsing_it() {
+        let directory = test_temp_dir("owning-jar-classfile");
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        let jar = directory.join("mapped.jar");
+        write_test_archive_entries(
+            &jar,
+            &[
+                ("kotlin/jvm/functions/Function1.class", b"not-a-class"),
+                ("java/lang/String.class", b"not-a-class"),
+            ],
+        );
+        let classpath = Classpath::new(vec![jar.clone()]);
+        assert_eq!(
+            classpath.owning_jar("kotlin/Function1").as_deref(),
+            Some(jar.as_path())
+        );
+        assert_eq!(
+            classpath.owning_jar("kotlin/String").as_deref(),
+            Some(jar.as_path())
+        );
+        assert!(classpath.owning_jar("kotlin/NoSuch").is_none());
+        assert!(
+            classpath.find_name(type_name("kotlin/Function1")).is_none(),
+            "the metadata name is not the catalog key of the physical class"
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove temp dir");
     }
 
     fn write_test_jar_entry(path: &Path, name: &str, contents: &[u8]) {
