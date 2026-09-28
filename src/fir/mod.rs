@@ -25,6 +25,7 @@ mod parameters;
 mod retained_bodies;
 mod signature;
 mod signature_extract;
+mod signature_source;
 mod source_lambda;
 mod source_map;
 mod type_parameters;

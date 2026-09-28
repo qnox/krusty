@@ -506,6 +506,35 @@ fn companion_extensions_with_context_parameters_see_their_classifier_scope() {
 }
 
 #[test]
+fn several_context_parameters_reach_a_companion_extension() {
+    const SRC: &str = "class C1 { val o = \"O\" }\n\
+        class C2 { val k = \"K\" }\n\
+        class E { class I }\n\
+        context(c1: C1, c2: C2)\n\
+        companion fun E.foo() = c1.o + c2.k\n\
+        context(c1: C1, c2: C2)\n\
+        companion val E.a\n\
+        \x20   get() = c1.o + c2.k\n\
+        context(c1: C1, c2: C2)\n\
+        companion fun E.I.bar() = c1.o + c2.k\n\
+        context(c1: C1, c2: C2)\n\
+        companion fun C2.baz() = c1.o + c2.k\n\
+        fun box(): String {\n\
+        \x20   with(C1()) {\n\
+        \x20       with(C2()) {\n\
+        \x20           if (E.foo() == \"OK\" && E.I.bar() == \"OK\" && C2.baz() == \"OK\")\n\
+        \x20               return E.a\n\
+        \x20           else return \"FAIL\"\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&format!("{LANGUAGE}{SRC}"), "Main"),
+        "OK"
+    );
+}
+
+#[test]
 fn references_inside_a_block_name_block_members() {
     const SRC: &str = "class C {\n\
         \x20   companion {\n\
