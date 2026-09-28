@@ -44,6 +44,8 @@ mod field_flags;
 mod function_scope;
 mod intrinsic;
 mod jvm_static_realization;
+mod lambda_classes;
+mod lifting;
 mod local_class_names;
 mod module_records;
 mod operators;
@@ -72,6 +74,8 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
+pub use lambda_classes::{IrInvokeBridge, IrLambdaClass};
+pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use module_records::{
     IrClassifierKind, IrHeaderAnnotation, IrModuleCallable, IrModuleClassifier, IrModuleProperty,
@@ -1558,6 +1562,9 @@ pub struct IrClass {
     /// `emit_func_ref_class`. Gives callable references real Kotlin reference EQUALITY (the base class
     /// compares owner/name/signature/boundReceiver) — `::f == ::f`, `a::m != b::m`.
     pub func_ref: Option<FuncRef>,
+    /// Set when this class is a lambda realized as a class of its own (a target that cannot build
+    /// the lambda at run time); see [`IrLambdaClass`].
+    pub lambda: Option<IrLambdaClass>,
     /// JVM declaration adapters. Most are synthetic bridges for generic/covariant overrides; a boxed
     /// value class also needs ordinary instance entries for interface methods whose implementation is
     /// realized as a static carrier function.
@@ -1783,6 +1790,7 @@ impl IrClass {
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
+            lambda: None,
             bridges: Vec::new(),
             interfaces: Default::default(),
             is_object: false,
@@ -1897,6 +1905,7 @@ impl IrClass {
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
+            lambda: None,
             bridges: Vec::new(),
             interfaces,
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
@@ -2060,22 +2069,6 @@ impl IrStatic {
     }
 }
 
-/// One sequence of lifted local callables: the source file that declares it, the lexical owner,
-/// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct IrLiftingSequence {
-    pub source: crate::fir::SourceFileId,
-    pub owner: Box<str>,
-    pub container: Box<str>,
-}
-
-/// One position of an [`IrLiftingSequence`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLiftingEntry {
-    pub name: Option<Box<str>>,
-    pub lifted: bool,
-}
-
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2136,12 +2129,12 @@ pub struct IrFile {
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
     pub(crate) local_class_name_provenance:
         std::collections::HashMap<ClassId, IrLocalClassNameProvenance>,
-    /// The same naming context for each source callable-reference node and each suspend-lambda
-    /// node, by expression id. A target that realizes one as a class of its own names that class
+    /// The same naming context for each source callable-reference node and each lambda node, by
+    /// expression id. A target that realizes one as a class of its own names that class
     /// from it.
     pub(crate) callable_reference_provenance:
         std::collections::HashMap<u32, IrLocalClassNameProvenance>,
-    /// The executable scope each source callable-reference and suspend-lambda node is written in,
+    /// The executable scope each source callable-reference and lambda node is written in,
     /// by expression id. A target that realizes one as a class of its own records that class's
     /// enclosure.
     pub(crate) callable_reference_enclosures: std::collections::HashMap<u32, IrEnclosure>,
@@ -2157,7 +2150,7 @@ pub struct IrFile {
     /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
     /// callables are all lifted, once a target has numbered the sequences.
     pub(crate) lifted_names: std::collections::HashMap<FunId, String>,
-    /// The class name a target chose for each source callable reference and suspend lambda, by
+    /// The class name a target chose for each source callable reference and lambda, by
     /// expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
     /// The declaration path a target sorts each class it named from provenance by, keyed by that

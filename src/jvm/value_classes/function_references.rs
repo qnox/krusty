@@ -10,6 +10,10 @@ use super::*;
 
 pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions: &HashSet<u32>) {
     for c in &mut ir.classes {
+        if let Some(lambda) = &mut c.lambda {
+            complete_lambda_bridge(lambda, callable_under, renamed_functions);
+            continue;
+        }
         let owner_fq = c.fq_name();
         let Some(fr) = &mut c.func_ref else {
             continue;
@@ -168,4 +172,27 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             fr.box_ret
         );
     }
+}
+
+/// A lambda class's `invoke` takes and returns each value class as its carrier, erased as any
+/// function's signature is; its bridge unboxes each such argument and boxes such a result. A
+/// nullable value class the JVM keeps boxed passes through as it is.
+fn complete_lambda_bridge(
+    lambda: &mut crate::ir::IrLambdaClass,
+    callable_under: &Under,
+    renamed_functions: &HashSet<u32>,
+) {
+    let bridge = &mut lambda.bridge;
+    bridge.unbox_params = bridge
+        .param_tys
+        .iter()
+        .map(|parameter| super::bridge_parameters::carried_value_class(parameter, callable_under))
+        .collect();
+    bridge.unbox_param_nullable = bridge
+        .param_tys
+        .iter()
+        .map(|parameter| parameter.is_nullable())
+        .collect();
+    bridge.box_ret = super::bridge_parameters::carried_value_class(&bridge.ret_ty, callable_under);
+    bridge.invoke_renamed = renamed_functions.contains(&lambda.invoke);
 }
