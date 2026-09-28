@@ -44,6 +44,9 @@ pub(super) struct RewriteSource {
     /// The pool's size once the method was added: the entries past the previous method's are the
     /// ones its emission and addition interned.
     pub pool_end: Option<u16>,
+    /// The pool entries the coroutine transformer interned for the body it put in place of this
+    /// one. That body is final, and no rewrite reads the emitter's labels for it.
+    pub transformed: Option<std::ops::Range<u16>>,
 }
 
 impl RewriteSource {
@@ -55,6 +58,7 @@ impl RewriteSource {
             builder: builder.clone(),
             decided: None,
             pool_end: None,
+            transformed: None,
         })
     }
 }
@@ -185,6 +189,15 @@ impl ClassWriter {
             };
             let added_after = previous_end;
             previous_end = source.pool_end.unwrap_or(previous_end);
+            // A transformed body's constants are laid out like a rewrite's.
+            if let Some(interned) = source.transformed.take() {
+                relaid.push(RelaidMethod {
+                    index,
+                    added: added_after + 1..previous_end.max(added_after) + 1,
+                    interned,
+                });
+                continue;
+            }
             let decided = source
                 .decided
                 .take()

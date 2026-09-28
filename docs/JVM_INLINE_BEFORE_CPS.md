@@ -120,7 +120,9 @@ Each step reports box passes, byte-identical files and divergent classes before 
   continuation class goes, privacy, the declaration line and spliced inline lines its
   `@DebugMetadata` reads) apply only when there is a point, so a private, local or interface-default
   function, or one whose result comes from an inline call, is taken as well. Tested in
-  `tests/suspend_function_boxing_e2e.rs`, which compares call targets as well as instructions.
+  `tests/suspend_function_boxing_e2e.rs`. A tail-call forward (`suspend fun f() = g(1)`) is taken
+  before the IR path's own forward, so its operands box through the helpers as well, and the
+  constants the transformer interns are laid out where kotlinc's writer interns them.
 * The transformed method then goes through the same optimizer passes as every other method
   (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
   removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after

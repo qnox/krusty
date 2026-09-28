@@ -78,6 +78,11 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
     realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
     for suspension in &suspensions {
         let continuation = ir.add_expr(IrExpr::CurrentContinuation);
+        // A generated call that enters its line only where its operands begin (a reference
+        // carrier's `invoke`) enters it at the continuation it now reads too.
+        if let Some(line) = ir.dispatch_line(suspension.call) {
+            ir.expr_source_lines.insert(continuation, line);
+        }
         if !append_continuation(
             ir,
             suspension.call,

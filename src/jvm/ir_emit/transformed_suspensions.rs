@@ -54,7 +54,8 @@ impl Emitter<'_> {
         if target != Ty::obj("java/lang/Object") {
             return false;
         }
-        // An implicit coercion to a reference type between them narrows nothing kotlinc writes.
+        // An implicit coercion to a reference type between them narrows nothing kotlinc writes, nor
+        // does the one narrowing a dependency's erased result to its declared type.
         let mut e = e;
         while let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -62,7 +63,9 @@ impl Emitter<'_> {
             type_operand,
         } = self.ir.expr(e)
         {
-            if !super::ir_ty_to_jvm(type_operand).is_reference() {
+            if !super::ir_ty_to_jvm(type_operand).is_reference()
+                && self.transformed_result(*arg).is_none()
+            {
                 break;
             }
             e = *arg;
