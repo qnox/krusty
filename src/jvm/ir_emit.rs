@@ -8793,14 +8793,13 @@ fn suspend_method_sig(
     // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
     // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
     // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
-    let ret_arg = formatter.ty_at(ret, Wildcards::Declared)?;
+    let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
     let mut s = String::from("(");
     for p in params {
         s.push_str(&formatter.method_ty(p, Wildcards::Declared)?);
     }
-    s.push_str("Lkotlin/coroutines/Continuation<-");
-    s.push_str(&ret_arg);
-    s.push_str(">;)Ljava/lang/Object;");
+    s.push_str(&continuation);
+    s.push_str(")Ljava/lang/Object;");
     Some(s)
 }
 

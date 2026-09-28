@@ -312,6 +312,20 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
     }
 
+    /// `Continuation<in result>`, the continuation a suspend function takes. Its `in` projection is
+    /// written unless it is redundant, as over `Any`: kotlinc signs `Continuation<Object>` there.
+    pub(super) fn continuation(&self, result: Ty, wildcards: Wildcards) -> Option<String> {
+        let wildcard = if self.wildcard_is_redundant(TypeVariance::In, result)? {
+            ""
+        } else {
+            "-"
+        };
+        Some(format!(
+            "Lkotlin/coroutines/Continuation<{wildcard}{}>;",
+            self.ty_at(&result, wildcards)?
+        ))
+    }
+
     fn function_ty(&self, signature: &crate::types::FnSig, wildcards: Wildcards) -> Option<String> {
         let arity = signature.params.len() + usize::from(signature.suspend);
         if arity > 22 {
@@ -338,11 +352,9 @@ impl<'a> JvmSignatureFormatter<'a> {
                 rendered.push('-');
             }
             let continuation = wildcards.for_argument(TypeVariance::In);
-            rendered.push_str("Lkotlin/coroutines/Continuation<-");
             rendered.push_str(
-                &self.ty_at(&signature.ret, continuation.for_argument(TypeVariance::In))?,
+                &self.continuation(signature.ret, continuation.for_argument(TypeVariance::In))?,
             );
-            rendered.push_str(">;");
             if wildcards.writes_declaration_site() {
                 rendered.push('+');
             }
