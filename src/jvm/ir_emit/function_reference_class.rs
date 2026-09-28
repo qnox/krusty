@@ -343,7 +343,8 @@ pub(super) fn emit_func_ref_class(
             ir,
             &mut cw,
             &fq,
-            fr,
+            &function_reference_invoke::reference_invoke_bridge(fr),
+            fr.is_suspend,
             invoke,
             physical_arity,
         );

@@ -338,6 +338,7 @@ fn blank_class(fq: &str) -> IrClass {
         enum_entry_of: None,
         prop_ref: None,
         func_ref: None,
+        lambda: None,
         bridges: Vec::new(),
         interfaces: Default::default(),
         is_object: false,
