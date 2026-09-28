@@ -2514,6 +2514,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `i` is lowered with `try_finally_stack` truncated to `finallys[..i]`. Inlining a finally with itself
   still on the stack used to re-inline it at its own `return` and recurse until the stack overflowed.
   `finally_return_overrides_try_return` in `tests/finally_e2e.rs`; box corpus `try/finally6.kt`.
+- **A `do`/`while` body that leaves the function on every path makes the loop leave the function.**
+  The body runs before the condition. A `finally` that `return`s or `throw`s covers a `break` or
+  `continue` in its `try`, so that transfer does not reach the code after the loop. A transfer that
+  reaches the loop's exit keeps the loop from counting as a function exit. A `while` condition
+  belongs to the enclosing loop; a `do`/`while` condition belongs to that loop.
+  `finally_return_overrides_break_in_catch` in `tests/finally_e2e.rs`; box corpus `try/finally12.kt`.
 - **`when (subject)` with `in`/`!in` range branches** (`when (x) { in 4..6 -> … }`): the parser builds
   the structural `Is`/`InRange` node for an `is`/`in`-range condition (same as the infix `is`/`in`
   operator); the checker and lowering treat that node as a complete boolean test of the subject, not a
