@@ -8073,6 +8073,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Anonymous-object capture** (`object : I { … }`): captured parameters, read-only locals, and
   initialized immutable enclosing properties become synthetic constructor properties. Property
   initializers and delegates see constructor properties and earlier backing properties, not later ones.
+  Those capture fields are stored ahead of a predeclared interface delegate (`object : A by b { fun
+  bar() = x }`). The delegate field index moves with them, so a local function's captures stay the
+  values they closed over. Test:
+  `tests/interface_delegation_e2e.rs::anonymous_object_delegates_to_a_parameter` (official box
+  `classes/kt2224.kt`).
 
 - **Captured-`var` boxing rule** (precise): a captured `var` is boxed into a `Ref$XxxRef` iff it is
   *reassigned somewhere in the function* (`fn_reassigned`, scanned over the whole body including nested

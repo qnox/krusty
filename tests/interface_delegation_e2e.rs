@@ -602,3 +602,38 @@ class Forwarding(named: Named) : Named by named
 ";
     common::assert_class_code_matches_kotlinc("forwarder_locals", source, "Forwarding");
 }
+
+/// Official box `classes/kt2224.kt`: an anonymous object delegates to a parameter, to a fresh
+/// instance, and through a body that captures locals it does not call.
+#[test]
+fn anonymous_object_delegates_to_a_parameter() {
+    const SRC: &str = "interface A { fun foo(): Int }\n\
+class B1 : A { override fun foo() = 10 }\n\
+class B2(val z: Int) : A { override fun foo() = z }\n\
+fun f1(b: B1): Int {\n\
+    val o = object : A by b { }\n\
+    return o.foo()\n\
+}\n\
+fun f2(b: B2): Int {\n\
+    val o = object : A by B2(b.z) { }\n\
+    return o.foo()\n\
+}\n\
+fun f3(b: B2, mult: Int): Int {\n\
+    val o = object : A by B2(mult * b.z) { }\n\
+    return o.foo()\n\
+}\n\
+fun f4(b: B1, x: Int, y: Int, z: Int): Int {\n\
+    val o = object : A by b {\n\
+        fun bar() = x + y + z\n\
+    }\n\
+    return o.foo()\n\
+}\n\
+fun box(): String {\n\
+    if (f1(B1()) != 10) return \"fail #1\"\n\
+    if (f2(B2(239)) != 239) return \"fail #2\"\n\
+    if (f3(B2(239), 2) != 478) return \"fail #3\"\n\
+    if (f4(B1(), 1, 2, 3) != 10) return \"fail #4\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "kt2224");
+}

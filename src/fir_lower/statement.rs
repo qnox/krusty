@@ -395,6 +395,8 @@ impl BodyLowering<'_> {
         class.ctor_param_count += captures.len() as u32;
         class.constructor_prefix_count += captures.len() as u32;
         class.is_local_class = true;
+        // Capture fields are spliced in front of predeclared storage, including `$$delegate_N`.
+        super::interface_delegation::shift_predeclared_field_indices(self.ir, declaration, shifted);
         Ok((classifier, values))
     }
 }
