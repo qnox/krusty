@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn enum_entry_init_may_assign_a_deferred_val_after_a_local_function() {

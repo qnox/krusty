@@ -157,6 +157,20 @@ fails instead of recording.
 `KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
 output is ever recorded, so a recorded value stays an oracle for krusty.
 
+Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`,
+`compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
+same rule with class-file dumps under `tests/recorded-bytes/<build.txt>/`. A dump is used when its
+fingerprint still matches the fixture; otherwise the check runs kotlinc and, outside CI, writes the
+dump. Dependency libraries kotlinc builds for a classpath are stored once per source fingerprint
+under `tests/recorded-bytes/<build.txt>/_libs/`, including their `.kotlin_module` files. The key is
+kotlinc's `build.txt` line. A release (`2.4.20`, `2.4.20-release-482`) and an RC tag (`2.4.20-RC`,
+`2.4.20-RC2`, `2.4.0-RC-137`) are immutable, so their dumps are reused. A snapshot, dev, or beta
+build never reads or writes a dump — that version string is not a stable artifact.
+`KRUSTY_RECORD=1` recompiles and rewrites the dumps the run reaches. The files are read at runtime
+and are not compiled into the test binary. The corpus byte-diff cache under
+`target/cache/ref-classes/` follows the same release/RC rule and stays uncached for any other
+compiler.
+
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
 defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.

@@ -18,34 +18,59 @@ pub fn compare_with_kotlinc_plugin(
     jvm_target: &str,
     kotlinc_extra: &[String],
 ) -> Option<ReferenceComparison> {
+    let inputs =
+        super::common_core::byte_dump::class_dump_inputs(src, jvm_target, kotlinc_extra, cp_jars);
+    let reference_bytes = super::common_core::byte_dump::kotlinc_class_dumps(
+        name,
+        jvm_target,
+        &inputs.variant,
+        inputs.fingerprint,
+        &[class],
+        || {
+            let dir = super::common_core::scratch_dir()?;
+            let reference_dir = dir.join("ref");
+            std::fs::create_dir_all(&reference_dir).ok()?;
+            let source = dir.join(format!("{name}.kt"));
+            std::fs::write(&source, src).ok()?;
+            let mut arguments = vec![
+                "-d".to_string(),
+                reference_dir.to_string_lossy().into_owned(),
+                "-jvm-target".to_string(),
+                jvm_target.to_string(),
+            ];
+            if !cp_jars.is_empty() {
+                arguments.push("-classpath".to_string());
+                arguments.push(
+                    cp_jars
+                        .iter()
+                        .map(|jar| jar.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(":"),
+                );
+            }
+            arguments.extend(kotlinc_extra.iter().cloned());
+            arguments.push(source.to_string_lossy().into_owned());
+            let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
+            assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+            let bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut produced = std::collections::BTreeMap::new();
+            produced.insert(class.to_string(), bytes);
+            Some(produced)
+        },
+    )?
+    .pop()?;
+
     let dir = super::common_core::scratch_dir()?;
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
     std::fs::create_dir_all(&reference_dir).ok()?;
     std::fs::create_dir_all(&krusty_dir).ok()?;
-    let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
-
-    let mut arguments = vec![
-        "-d".to_string(),
-        reference_dir.to_string_lossy().into_owned(),
-        "-jvm-target".to_string(),
-        jvm_target.to_string(),
-    ];
-    if !cp_jars.is_empty() {
-        arguments.push("-classpath".to_string());
-        arguments.push(
-            cp_jars
-                .iter()
-                .map(|jar| jar.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(":"),
-        );
+    let reference_path = reference_dir.join(format!("{class}.class"));
+    if let Some(parent) = reference_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
     }
-    arguments.extend(kotlinc_extra.iter().cloned());
-    arguments.push(source.to_string_lossy().into_owned());
-    let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
-    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    std::fs::write(&reference_path, &reference_bytes).ok()?;
 
     let class_major = jvm_target
         .parse::<u16>()
@@ -85,7 +110,6 @@ pub fn compare_with_kotlinc_plugin(
         &krusty_dir.to_string_lossy(),
         class,
     ])?;
-    let reference_bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
     let krusty_bytes = std::fs::read(krusty_dir.join(format!("{class}.class"))).ok()?;
     let _ = std::fs::remove_dir_all(dir);
     Some(ReferenceComparison {
@@ -307,26 +331,46 @@ pub fn classes_against_kotlinc_lib_target(
     jvm_target: Option<u16>,
 ) -> Option<ClassSets> {
     let library = super::common_core::kotlinc_lib_out(lib)?;
-    let dir = super::common_core::scratch_dir()?;
-    let reference_dir = dir.join("ref");
-    std::fs::create_dir_all(&reference_dir).ok()?;
-    let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
-    let mut arguments = vec![
-        "-d".to_string(),
-        reference_dir.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        library.to_string_lossy().into_owned(),
-    ];
-    if let Some(target) = jvm_target {
-        arguments.push("-jvm-target".to_string());
-        arguments.push(target.to_string());
-    }
-    arguments.push(source.to_string_lossy().into_owned());
-    let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
-    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let mut reference = std::collections::BTreeMap::new();
-    collect_classes(&reference_dir, &reference_dir, &mut reference);
+    let target = match jvm_target {
+        Some(target) => target.to_string(),
+        None => "default".to_string(),
+    };
+    let inputs = super::common_core::byte_dump::class_dump_inputs(
+        src,
+        &target,
+        &[],
+        std::slice::from_ref(&library),
+    );
+    let reference = super::common_core::byte_dump::kotlinc_class_tree(
+        name,
+        &target,
+        &inputs.variant,
+        inputs.fingerprint,
+        || {
+            let dir = super::common_core::scratch_dir()?;
+            let reference_dir = dir.join("ref");
+            std::fs::create_dir_all(&reference_dir).ok()?;
+            let source = dir.join(format!("{name}.kt"));
+            std::fs::write(&source, src).ok()?;
+            let mut arguments = vec![
+                "-d".to_string(),
+                reference_dir.to_string_lossy().into_owned(),
+                "-cp".to_string(),
+                library.to_string_lossy().into_owned(),
+            ];
+            if let Some(target) = jvm_target {
+                arguments.push("-jvm-target".to_string());
+                arguments.push(target.to_string());
+            }
+            arguments.push(source.to_string_lossy().into_owned());
+            let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
+            assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+            let mut reference = std::collections::BTreeMap::new();
+            collect_classes(&reference_dir, &reference_dir, &mut reference);
+            let _ = std::fs::remove_dir_all(&dir);
+            Some(reference)
+        },
+    )?;
     let classpath = [library, super::common_core::stdlib_jar()];
     let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
         src,
@@ -338,7 +382,6 @@ pub fn classes_against_kotlinc_lib_target(
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
     .into_iter()
     .collect();
-    let _ = std::fs::remove_dir_all(dir);
     Some(ClassSets { reference, krusty })
 }
 

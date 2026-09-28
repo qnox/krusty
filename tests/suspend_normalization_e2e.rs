@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn suspending_conditional_can_initialize_a_captured_var() {

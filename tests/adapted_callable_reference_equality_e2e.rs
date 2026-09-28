@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn adapted_member_references_keep_cross_file_equality_identity() {
