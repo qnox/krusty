@@ -122,6 +122,9 @@ pub(crate) struct PropertyReferenceRealization {
     /// owner declares in its synthetic-accessor plan.
     pub protected_getter_bridge: Option<ProtectedReferenceBridgeMethod>,
     pub protected_setter_bridge: Option<ProtectedReferenceBridgeMethod>,
+    /// The private member property whose owner's `access$get<X>$p`/`access$set<X>$p` the carrier
+    /// calls, which that owner declares in its synthetic-accessor plan.
+    pub member_access_bridge: Option<crate::fir::PropertyId>,
 }
 
 #[derive(Clone, Debug)]

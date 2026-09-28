@@ -109,3 +109,59 @@ fn private_top_level_declarations_used_from_classes_go_through_facade_accessors(
     }
     common::expect_box_same_as_kotlinc(SRC, "FacadeAccessors");
 }
+
+/// Private member properties read and written from an inner class and an anonymous object go
+/// through the owner's `access$get<X>$p`/`access$set<X>$p`: `public static final synthetic`, after
+/// the owner's members in first-use order, one per accessor a use needs, with kotlinc's bodies and
+/// debug tables.
+#[test]
+fn private_member_properties_used_from_other_classes_go_through_field_accessors() {
+    const SRC: &str = "class Holder {\n\
+        \x20   private var mark: String = \"O\"\n\
+        \x20   private var only: Int = 1\n\
+        \x20   private val fixed: Long = 2L\n\
+        \x20   fun viaObject(): String {\n\
+        \x20       val probe = object { fun look() = fixed + only }\n\
+        \x20       return mark + probe.look()\n\
+        \x20   }\n\
+        \x20   inner class Inner {\n\
+        \x20       fun read(): String = mark\n\
+        \x20       fun write() { mark = \"K\" }\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val holder = Holder()\n\
+        \x20   holder.Inner().write()\n\
+        \x20   val r = holder.Inner().read() + holder.viaObject()\n\
+        \x20   return if (r == \"KK3\") \"OK\" else \"fail \" + r\n\
+        }\n";
+    let owner = common::compare_with_kotlinc_plugin(
+        "MemberFieldAccessors",
+        SRC,
+        "Holder",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    assert_eq!(
+        common::member_table(&owner.krusty_bytes),
+        common::member_table(&owner.reference_bytes),
+        "Holder: kotlinc's member table"
+    );
+    for header in [
+        "public static final long access$getFixed$p(Holder);",
+        "public static final int access$getOnly$p(Holder);",
+        "public static final java.lang.String access$getMark$p(Holder);",
+        "public static final void access$setMark$p(Holder, java.lang.String);",
+    ] {
+        let accessor = common::method_block(&owner.reference, header);
+        assert!(!accessor.is_empty(), "kotlinc declares {header}");
+        assert_eq!(
+            common::method_block(&owner.krusty, header),
+            accessor,
+            "{header}"
+        );
+    }
+    common::expect_box_same_as_kotlinc(SRC, "MemberFieldAccessors");
+}
