@@ -122,6 +122,9 @@ pub struct ResolvedFunctionOverride {
     /// The frontend has already selected the declaration; a backend only erases this shape.
     pub implementation_parameters: Box<[ResolvedTy]>,
     pub implementation_parameter_identities: Box<[ResolvedParameterIdentity]>,
+    /// The overridden declaration's own parameter identities, one per `declared_parameters` entry.
+    /// A bridge realizing this edge takes the overridden declaration's signature, names included.
+    pub overridden_parameter_identities: Box<[ResolvedParameterIdentity]>,
     pub implementation_result: ResolvedTy,
     /// Default availability exposed by the overridden declaration at this exact applied edge.
     /// Kept beside the stable provider identity so module-to-dependency inheritance never has to
