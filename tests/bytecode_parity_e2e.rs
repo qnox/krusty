@@ -368,6 +368,27 @@ fn unsigned_long_equality_tests_lcmp_without_materialized_zero() {
 }
 
 #[test]
+fn ulong_literal_on_the_left_uses_lcmp() {
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "ulleft",
+        "fun eq(n: ULong?): Boolean = 0UL == n!!\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    let n = normalize(&d);
+    assert!(
+        n.contains("lcmp\nifne"),
+        "a ULong literal on the left compares with `lcmp`, not `if_icmp*`:\n{n}"
+    );
+    assert!(
+        !n.contains("if_icmp"),
+        "a ULong literal on the left must not use an int compare:\n{n}"
+    );
+}
+
+#[test]
 fn value_position_comparison_polarity_matches_kotlinc() {
     // kotlinc materializes a comparison's Boolean by branching on the NEGATED condition to the
     // `false` arm and falling through to `iconst_1`; the taken branch pushes `iconst_0`. Holds for
