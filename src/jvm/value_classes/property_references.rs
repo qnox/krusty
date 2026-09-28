@@ -426,6 +426,8 @@ mod tests {
                 setter_bridge_owner: None,
                 protected_reflection_getter: None,
                 protected_bridge: None,
+                protected_getter_bridge: None,
+                protected_setter_bridge: None,
             },
         );
         let under = Under::from_iter([(vault, Ty::Int)]);

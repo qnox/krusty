@@ -14,8 +14,10 @@
 //! are [`StaticOwner`] identities throughout; an interface owner's accessors are not `final` and
 //! are named by `InterfaceMethodref`s.
 
+use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
 use crate::jvm::private_static_access::{bridged_storage, StaticOwner};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// One synthetic accessor a static owner declares.
@@ -27,12 +29,16 @@ pub(super) enum StaticAccessor {
     Getter(u32),
     /// `access$set<X>$p`, writing static storage `index`.
     Setter(u32),
+    /// `access$<name>(<receiver>, …)`, calling a protected member of a class in another package:
+    /// an index into the plan's protected accessors.
+    Protected(u32),
 }
 
 /// Every static owner's accessors, in first-use order.
 #[derive(Default)]
 pub(super) struct StaticAccessorPlan {
     by_owner: HashMap<StaticOwner, Vec<StaticAccessor>>,
+    protected: Vec<ProtectedMemberAccessBridge>,
 }
 
 impl StaticAccessorPlan {
@@ -160,9 +166,12 @@ pub(super) fn plan(
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
 ) -> StaticAccessorPlan {
+    let protected_calls = env.run.protected_member_access_bridges.borrow();
     let walk = Walk {
         ir,
         class_member_fids,
+        protected_calls: &protected_calls,
+        protected: RefCell::default(),
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::new();
     for context in contexts {
@@ -177,7 +186,7 @@ pub(super) fn plan(
         for &root in &context.roots {
             walk.collect(context.owner, root, 0, &HashMap::new(), &mut uses);
         }
-        uses.extend(synthesized_carrier_uses(ir, env, class));
+        uses.extend(synthesized_carrier_uses(&walk, env, class));
         carriers.insert(class.fq_name, uses);
     }
     let reference_lines = ir
@@ -210,7 +219,10 @@ pub(super) fn plan(
     }
     // A stable sort keeps the traversal order among uses on one line.
     uses.sort_by_key(|found| found.line);
-    let mut plan = StaticAccessorPlan::default();
+    let mut plan = StaticAccessorPlan {
+        protected: walk.protected.into_inner(),
+        ..StaticAccessorPlan::default()
+    };
     let mut seen = HashSet::new();
     for Use {
         owner, accessor, ..
@@ -232,8 +244,10 @@ struct Use {
 }
 
 /// The uses a carrier's synthesized body makes: a function reference whose `invoke` is not
-/// lowered calls its target itself, and a property reference reads and writes bridged storage.
-fn synthesized_carrier_uses(ir: &IrFile, env: &EmitEnv, class: &IrClass) -> Vec<Use> {
+/// lowered calls its target itself, and a property reference reads and writes bridged storage or
+/// calls protected accessors.
+fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<Use> {
+    let ir = walk.ir;
     let context = StaticOwner::Class(class.fq_name);
     let mut uses = Vec::new();
     if let Some(reference) = class.func_ref.as_ref().filter(|reference| {
@@ -274,12 +288,53 @@ fn synthesized_carrier_uses(ir: &IrFile, env: &EmitEnv, class: &IrClass) -> Vec<
             });
         }
     }
+    if let Some(realization) = class
+        .prop_ref
+        .as_ref()
+        .and_then(|_| env.property_reference_realizations.get(class.fq_name))
+    {
+        for bridge in [
+            &realization.protected_getter_bridge,
+            &realization.protected_setter_bridge,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            uses.push(walk.protected_use(0, ProtectedMemberAccessBridge::of_reference(bridge)));
+        }
+    }
     uses
 }
 
 struct Walk<'a> {
     ir: &'a IrFile,
     class_member_fids: &'a HashSet<u32>,
+    /// The protected member calls emitted outside the class that may make them, by call.
+    protected_calls: &'a HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
+    /// Each protected-member accessor found, once per owner and signature.
+    protected: RefCell<Vec<ProtectedMemberAccessBridge>>,
+}
+
+impl Walk<'_> {
+    /// The use of protected-member accessor `bridge`, which its owner declares once whichever
+    /// call or reference carrier needs it.
+    fn protected_use(&self, line: u32, bridge: ProtectedMemberAccessBridge) -> Use {
+        let owner = StaticOwner::Class(bridge.owner);
+        let signature = bridge.signature();
+        let mut known = self.protected.borrow_mut();
+        let index = known
+            .iter()
+            .position(|found| found.owner == bridge.owner && found.signature() == signature)
+            .unwrap_or_else(|| {
+                known.push(bridge);
+                known.len() - 1
+            });
+        Use {
+            line,
+            owner,
+            accessor: StaticAccessor::Protected(index as u32),
+        }
+    }
 }
 
 impl Walk<'_> {
@@ -322,6 +377,10 @@ impl Walk<'_> {
                 }));
                 continue;
             }
+            if let Some(bridge) = self.protected_calls.get(&expression) {
+                uses.push(self.protected_use(line, bridge.clone()));
+                continue;
+            }
             let Some((owner, accessor)) = self.target(expression) else {
                 continue;
             };
@@ -330,6 +389,7 @@ impl Walk<'_> {
                     routes_through_accessor(ir, context == owner, function)
                 }
                 StaticAccessor::Getter(_) | StaticAccessor::Setter(_) => context != owner,
+                StaticAccessor::Protected(_) => true,
             };
             if needed {
                 uses.push(Use {
@@ -394,6 +454,16 @@ pub(super) fn emit(
             StaticAccessor::Function(function) => accessor.function(function, cw),
             StaticAccessor::Getter(index) => accessor.getter(index, cw),
             StaticAccessor::Setter(index) => accessor.setter(index, cw),
+            StaticAccessor::Protected(index) => {
+                let bridge = &plan.protected[index as usize];
+                let owner = bridge.owner.render();
+                super::access_bridges::emit_protected_member_access_bridge(
+                    bridge,
+                    &owner,
+                    cw,
+                    declaration_line,
+                );
+            }
         }
     }
 }

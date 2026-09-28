@@ -118,15 +118,21 @@ pub(crate) struct PropertyReferenceRealization {
     /// cannot issue the protected call. Getter and setter are independent because Kotlin permits a
     /// public property with a protected setter.
     pub protected_bridge: Option<ProtectedReferenceBridgeIntent>,
+    /// The bridges the carrier calls in place of the protected getter and setter, which the bridge
+    /// owner declares in its synthetic-accessor plan.
+    pub protected_getter_bridge: Option<ProtectedReferenceBridgeMethod>,
+    pub protected_setter_bridge: Option<ProtectedReferenceBridgeMethod>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ProtectedReferenceBridgeIntent {
     pub bridge_owner: TypeName,
     pub target_owner: TypeName,
     pub target_owner_is_interface: bool,
     pub getter: bool,
     pub setter: bool,
+    /// The local-variable name of the setter's value parameter, as its declaration names it.
+    pub setter_value_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +144,8 @@ pub(crate) struct ProtectedReferenceBridgeMethod {
     pub target_name: String,
     pub target_descriptor: String,
     pub target_owner_is_interface: bool,
+    /// The local-variable names of the target's parameters.
+    pub target_parameter_names: Vec<Option<String>>,
 }
 
 /// A field a property reference accesses directly.
@@ -154,7 +162,6 @@ pub(crate) struct PropertyFieldAccess {
 #[derive(Default)]
 pub(crate) struct PropertyReferenceRealizations {
     by_reference: HashMap<TypeName, PropertyReferenceRealization>,
-    protected_bridges: Vec<ProtectedReferenceBridgeMethod>,
 }
 
 impl PropertyReferenceRealizations {
@@ -188,15 +195,6 @@ impl PropertyReferenceRealizations {
             .values()
             .flat_map(|realization| [realization.getter_function, realization.setter_function])
             .flatten()
-    }
-
-    pub(crate) fn protected_bridges(
-        &self,
-        owner: TypeName,
-    ) -> impl Iterator<Item = &ProtectedReferenceBridgeMethod> {
-        self.protected_bridges
-            .iter()
-            .filter(move |bridge| bridge.owner == owner)
     }
 
     /// Freeze cross-package protected-reference bridges after value-class realization has fixed
@@ -240,10 +238,9 @@ impl PropertyReferenceRealizations {
                     target_name: target_name.clone(),
                     target_descriptor: target_descriptor.clone(),
                     target_owner_is_interface: intent.target_owner_is_interface,
+                    target_parameter_names: Vec::new(),
                 };
-                if !self.protected_bridges.contains(&bridge) {
-                    self.protected_bridges.push(bridge);
-                }
+                realization.protected_getter_bridge = Some(bridge);
                 reference.getter_name = bridge_name;
                 reference.getter_descriptor = Some(bridge_descriptor);
                 realization.getter_bridge_owner = Some(intent.bridge_owner);
@@ -269,10 +266,9 @@ impl PropertyReferenceRealizations {
                     target_name,
                     target_descriptor,
                     target_owner_is_interface: intent.target_owner_is_interface,
+                    target_parameter_names: vec![intent.setter_value_name.clone()],
                 };
-                if !self.protected_bridges.contains(&bridge) {
-                    self.protected_bridges.push(bridge);
-                }
+                realization.protected_setter_bridge = Some(bridge);
                 reference.setter_name = Some(bridge_name);
                 reference.setter_descriptor = Some(bridge_descriptor);
                 realization.setter_bridge_owner = Some(intent.bridge_owner);

@@ -120,3 +120,32 @@ pub struct IrProperty {
     /// silently degrading the `inline` call instead would change what the program does.
     pub needs_access_bridge: bool,
 }
+
+/// A property declared by another file of the module, as the file's code selects it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrModuleProperty {
+    pub source: IrModuleSource,
+    pub name: String,
+    pub ty: Ty,
+    pub context_parameters: Vec<Ty>,
+    pub extension_receiver: Option<Ty>,
+    pub mutable: bool,
+    pub owner: Option<TypeName>,
+    /// Source-level kind of `owner`. Common IR retains the Kotlin declaration fact; a target backend
+    /// decides whether that kind uses interface dispatch, singleton storage, or another physical form.
+    pub owner_kind: Option<IrClassifierKind>,
+    pub companion_associated: bool,
+    /// Outer classifier whose companion object owns this declaration. This is the Kotlin
+    /// singleton-association edge; it says nothing about target storage.
+    pub companion_owner: Option<TypeName>,
+    pub visibility: crate::types::Visibility,
+    pub setter_visibility: crate::types::Visibility,
+    /// The setter's value parameter, as the declaration names it; `None` for a `val`.
+    pub setter_parameter: Option<crate::fir::ResolvedParameterIdentity>,
+    /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
+    /// namespace; common lowering never turns one into a physical access kind.
+    pub annotations: Box<[TypeName]>,
+    pub flags: crate::fir::DeclarationFlags,
+    /// Where the property lives when `owner` is absent.
+    pub placement: IrStaticPlacement,
+}

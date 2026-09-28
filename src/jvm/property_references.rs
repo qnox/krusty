@@ -4,7 +4,7 @@ mod realization;
 
 pub(crate) use realization::{
     PropertyAccessorRole, PropertyFieldAccess, PropertyReferenceRealization,
-    PropertyReferenceRealizations,
+    PropertyReferenceRealizations, ProtectedReferenceBridgeMethod,
 };
 
 use super::classpath::{Classpath, ExternalCallableKind, ExternalCallableRealization};
@@ -385,6 +385,8 @@ fn classifier_property(
             setter_bridge_owner: None,
             protected_reflection_getter: None,
             protected_bridge: None,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
         },
     )
 }
@@ -569,6 +571,8 @@ fn external_property(
             setter_bridge_owner: None,
             protected_reflection_getter: None,
             protected_bridge: None,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
         },
     ))
 }
@@ -663,6 +667,12 @@ fn module_property(
                 target_owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
                 getter,
                 setter,
+                setter_value_name: property.setter_parameter.as_ref().and_then(|identity| {
+                    super::parameter_names::resolved_local_variable(
+                        identity,
+                        selected_accessor_names.1?,
+                    )
+                }),
             })
         });
     // A PRIVATE static property's field has no public accessor, and the reference is a class of
@@ -788,6 +798,8 @@ fn module_property(
             setter_bridge_owner: None,
             protected_reflection_getter: None,
             protected_bridge,
+            protected_getter_bridge: None,
+            protected_setter_bridge: None,
         },
     ))
 }

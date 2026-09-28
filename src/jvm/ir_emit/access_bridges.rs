@@ -102,6 +102,37 @@ pub(super) struct ProtectedMemberAccessBridge {
     parameter_names: Vec<Option<String>>,
 }
 
+impl ProtectedMemberAccessBridge {
+    /// The accessor of a protected property accessor that a reference carrier calls: named after
+    /// the accessor, over its own erased descriptor.
+    pub(super) fn of_reference(
+        bridge: &crate::jvm::property_references::ProtectedReferenceBridgeMethod,
+    ) -> Self {
+        let (parameters, result) = parse_physical_method_desc(&bridge.target_descriptor)
+            .expect("a protected reference bridge retains a selected accessor descriptor");
+        let target_parameters = parameters.iter().map(ir_ty_to_jvm).collect::<Vec<_>>();
+        Self {
+            owner: bridge.owner,
+            name: bridge.target_name.clone(),
+            parameter_names: bridge.target_parameter_names.clone(),
+            bridge_parameters: target_parameters.clone(),
+            target_parameters,
+            result: ir_ty_to_jvm(&result),
+        }
+    }
+
+    /// The accessor's name and descriptor, which identify it in its owner.
+    pub(super) fn signature(&self) -> (String, String) {
+        let mut parameters = Vec::with_capacity(self.bridge_parameters.len() + 1);
+        parameters.push(Ty::obj_name(self.owner));
+        parameters.extend(self.bridge_parameters.iter().copied());
+        (
+            format!("access${}", self.name),
+            method_descriptor(&parameters, self.result),
+        )
+    }
+}
+
 pub(super) struct MemberAccessBridges {
     pub private: std::collections::HashSet<u32>,
     pub protected: std::collections::HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
@@ -135,6 +166,30 @@ fn protected_bridge_owner(
         })
 }
 
+/// The local-variable names of a protected property accessor's parameters: the setter's value is
+/// named as its declaration names it.
+fn protected_property_parameter_names(
+    property: &crate::ir::IrModuleProperty,
+    write: bool,
+    accessor: &str,
+) -> Vec<Option<String>> {
+    let mut names = vec![None; property.context_parameters.len()];
+    names.extend(property.extension_receiver.map(|_| None));
+    if write {
+        let setter = property.setter_parameter.as_ref().map(std::slice::from_ref);
+        names.push(setter.and_then(|identity| {
+            crate::jvm::parameter_names::resolved_local_variables(
+                identity,
+                &[property.ty],
+                accessor,
+            )
+            .pop()
+            .flatten()
+        }));
+    }
+    names
+}
+
 /// Find private instance calls whose caller and declaration are different JVM classes, and
 /// protected calls physically emitted outside the checked receiver subclass that grants access.
 ///
@@ -144,7 +199,7 @@ fn protected_bridge_owner(
 pub(super) fn cross_owner_member_calls(
     ir: &IrFile,
     facade: &str,
-    class_member_fids: &std::collections::HashSet<u32>,
+    contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
@@ -431,6 +486,8 @@ pub(super) fn cross_owner_member_calls(
                         if *write {
                             target_parameters.push(property.ty);
                         }
+                        let parameter_names =
+                            protected_property_parameter_names(property, *write, &name);
                         protected.insert(
                             expression,
                             ProtectedMemberAccessBridge {
@@ -445,7 +502,7 @@ pub(super) fn cross_owner_member_calls(
                                     .map(jvm_declared_ty)
                                     .collect(),
                                 result: jvm_declared_ty(&result),
-                                parameter_names: vec![None; target_parameters.len()],
+                                parameter_names,
                             },
                         );
                     }
@@ -455,68 +512,8 @@ pub(super) fn cross_owner_member_calls(
         }
     };
 
-    let facade_roots = ir
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(fid, function)| {
-            !class_member_fids.contains(&(*fid as u32)) && function.dispatch_receiver.is_none()
-        })
-        .filter_map(|(_, function)| function.body)
-        .chain(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner.is_none())
-                .map(|property| property.init),
-        )
-        .collect();
-    scan(facade, facade_roots);
-
-    for class in &ir.classes {
-        let owner = class.fq_name();
-        let mut roots = class
-            .methods
-            .iter()
-            .filter_map(|fid| {
-                ir.functions
-                    .get(*fid as usize)
-                    .and_then(|function| function.body)
-            })
-            .collect::<Vec<_>>();
-        for fid in &class.methods {
-            if let Some(defaults) = ir
-                .fn_params
-                .get(fid)
-                .and_then(|parameters| parameters.defaults.as_ref())
-            {
-                roots.extend(defaults.iter().flatten().copied());
-            }
-        }
-        roots.extend(class.init_body);
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        roots.extend(
-            class
-                .properties
-                .iter()
-                .filter_map(|property| property.initializer),
-        );
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body);
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-        }
-        for entry in &class.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
-        roots.extend(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner_matches(&owner))
-                .map(|property| property.init),
-        );
-        scan(&owner, roots);
+    for context in contexts {
+        scan(&context.owner.internal_name(facade), context.roots.clone());
     }
     MemberAccessBridges { private, protected }
 }
@@ -541,29 +538,9 @@ pub(super) fn emit_private_member_access_bridges(
     }
 }
 
-/// Emit the static forwarders that let a nested/generated class call a protected member through
-/// the exact checked receiver subclass. The bridge lives on that subclass, which is the JVM class
-/// legally allowed to issue the inherited protected invocation.
-pub(super) fn emit_protected_member_access_bridges(
-    class: &IrClass,
-    owner: &str,
-    cw: &mut ClassWriter,
-    run: &EmitRun,
-) {
-    let bridges = run.protected_member_access_bridges.borrow();
-    let mut emitted = std::collections::HashSet::new();
-    for bridge in bridges
-        .values()
-        .filter(|bridge| bridge.owner == class.fq_name_id())
-    {
-        let descriptor = method_descriptor(&bridge.bridge_parameters, bridge.result);
-        if emitted.insert((bridge.name.clone(), descriptor)) {
-            emit_protected_member_access_bridge(bridge, owner, cw, class.decl_line);
-        }
-    }
-}
-
-fn emit_protected_member_access_bridge(
+/// Emit protected-member accessor `bridge` into its owner `owner`'s class: load `$this` and each
+/// parameter, adapt each to the member's own descriptor, and call the member on `$this`.
+pub(super) fn emit_protected_member_access_bridge(
     bridge: &ProtectedMemberAccessBridge,
     owner: &str,
     cw: &mut ClassWriter,
