@@ -52,6 +52,13 @@ names! {
     double_iterator => "kotlin/collections/DoubleIterator",
 }
 
+/// `kotlin/Any` and `java/lang/Object`, compared as interned identities. A supertype walk stops on
+/// these two; it does not re-walk their spellings.
+#[inline]
+pub fn is_any_or_object(name: TypeName) -> bool {
+    name == any() || name == java_object()
+}
+
 /// The element type of the `kotlin.collections` primitive iterator class `name`
 /// (`IntIterator` iterates `Int`), if `name` is one.
 pub fn primitive_iterator_element(name: TypeName) -> Option<super::Ty> {
@@ -161,3 +168,17 @@ pub fn progression_builder(package: TypeName, name: &str) -> Option<ProgressionB
 /// element a stepped progression reaches (`getProgressionLastElementByReturnType`). Its overloads
 /// come from the provider's declarations.
 pub const PROGRESSION_LAST_ELEMENT: &str = "getProgressionLastElement";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_and_object_compare_as_interned_identities() {
+        assert!(is_any_or_object(type_name("kotlin/Any")));
+        assert!(is_any_or_object(type_name("java/lang/Object")));
+        assert!(!is_any_or_object(type_name("kotlin/String")));
+        assert_eq!(any(), type_name("kotlin/Any"));
+        assert_eq!(java_object(), type_name("java/lang/Object"));
+    }
+}

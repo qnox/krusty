@@ -743,7 +743,7 @@ pub(crate) fn lower_value_classes(
                     let supertype_generic = ep
                         .non_null()
                         .obj_internal()
-                        .is_some_and(|n| n.matches("kotlin/Any") || n.matches("java/lang/Object"));
+                        .is_some_and(crate::types::wk::is_any_or_object);
                     if under.contains_key(&x) && supertype_generic && !generic_vcs.contains(&x) {
                         // Mark BOXED in both the body's slot repr AND the call-boundary target
                         // (`orig_params`), so a CALLER boxes its arg into this generic-`Object` slot and the
@@ -3762,7 +3762,7 @@ pub(crate) fn lower_value_classes(
             .non_null()
             .obj_internal()
             .is_some_and(|fq_name| {
-                fq_name.matches("kotlin/Any") || vc_interfaces.contains(&fq_name)
+                fq_name == crate::types::wk::any() || vc_interfaces.contains(&fq_name)
             })
         {
             // A function declared to return `Any` or an interface a value class implements (NOT the
@@ -4186,7 +4186,7 @@ fn record_value_boundary(
                         && underlying
                             .as_ref()
                             .and_then(|ty| ty.obj_internal())
-                            .is_none_or(|name| !name.matches("java/lang/Object"));
+                            .is_none_or(|name| name != crate::types::wk::java_object());
                     parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
                 }
                 Repr::NotVc => false,
@@ -4363,7 +4363,7 @@ fn value_class_equals_argument(exprs: &[IrExpr], argument: ExprId) -> ExprId {
         } if type_operand
             .non_null()
             .obj_internal()
-            .is_some_and(|classifier| classifier.matches("kotlin/Any")) =>
+            .is_some_and(|classifier| classifier == crate::types::wk::any()) =>
         {
             *arg
         }
@@ -4381,7 +4381,7 @@ fn target(t: &Ty, under: &Under) -> Target {
                 Target::UnboxedX(fq_name)
             };
         }
-        if fq_name.matches("kotlin/Any") {
+        if fq_name == crate::types::wk::any() {
             return Target::Boxed;
         }
     }
