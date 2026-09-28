@@ -992,13 +992,18 @@ fn realize_property(
         }
         Ok((
             IrExpr::Call {
-                callee: Callee::realized_virtual(
-                    classifier,
-                    accessor,
-                    String::new(),
-                    Some((parameters.clone(), ret)),
-                    owner_is_jvm_interface(property),
-                ),
+                callee: Callee::Virtual {
+                    owner: classifier,
+                    name: accessor,
+                    descriptor: String::new(),
+                    params: Some((parameters.clone(), ret)),
+                    interface: owner_is_jvm_interface(property),
+                    target: Some(if value.is_some() {
+                        crate::ir::IrVirtualTarget::PropertySetter(target)
+                    } else {
+                        crate::ir::IrVirtualTarget::PropertyGetter(target)
+                    }),
+                },
                 dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
                 args: arguments,
             },

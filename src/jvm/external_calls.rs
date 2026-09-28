@@ -836,6 +836,10 @@ pub(super) fn realize(
             bridge_external_result(ir, index, physical_result, semantic_ret);
             continue;
         }
+        // A member dispatch realizes the dependency declaration the frontend selected.
+        let selected = crate::ir::IrVirtualTarget::Function(
+            crate::fir::ResolvedFunctionOverrideTarget::External(target),
+        );
         match kind {
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {
@@ -933,7 +937,7 @@ pub(super) fn realize(
                                 .then_some((semantic_params.clone(), semantic_ret)),
                             interface,
                             module_target: None,
-                            target: None,
+                            target: Some(selected),
                         };
                     }
                 }
@@ -971,13 +975,14 @@ pub(super) fn realize(
                     *callee = match primitive_iterator_next(callable.owner, receiver) {
                         Some((name, element)) => {
                             physical_result = element;
-                            Callee::realized_virtual(
-                                callable.owner,
+                            Callee::Virtual {
+                                owner: callable.owner,
                                 name,
-                                crate::jvm::names::method_descriptor(&[], element),
-                                None,
-                                false,
-                            )
+                                descriptor: crate::jvm::names::method_descriptor(&[], element),
+                                params: None,
+                                interface: false,
+                                target: Some(selected),
+                            }
                         }
                         None => {
                             let (owner, interface) = call_site_owner(
@@ -986,13 +991,14 @@ pub(super) fn realize(
                                 callable.owner_is_interface,
                                 receiver,
                             );
-                            Callee::realized_virtual(
+                            Callee::Virtual {
                                 owner,
-                                callable.name,
+                                name: callable.name,
                                 descriptor,
-                                None,
+                                params: None,
                                 interface,
-                            )
+                                target: Some(selected),
+                            }
                         }
                     };
                 }
@@ -1017,13 +1023,14 @@ pub(super) fn realize(
                                 callable.owner_is_interface,
                                 receiver,
                             );
-                            Callee::realized_virtual(
+                            Callee::Virtual {
                                 owner,
-                                callable.name,
+                                name: callable.name,
                                 descriptor,
-                                None,
+                                params: None,
                                 interface,
-                            )
+                                target: Some(selected),
+                            }
                         }
                     };
                 }
