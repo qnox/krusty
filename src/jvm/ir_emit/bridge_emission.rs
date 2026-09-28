@@ -97,7 +97,10 @@ fn attach_interface_entry_debug_tables(
 
 fn is_extension_receiver(bridge: &crate::ir::Bridge, index: usize) -> bool {
     matches!(
-        bridge.parameter_identities.get(index),
+        bridge
+            .parameters
+            .get(index)
+            .map(|parameter| &parameter.identity),
         Some(crate::fir::ResolvedParameterIdentity::ExtensionReceiver)
     )
 }
@@ -570,15 +573,21 @@ fn attach_bridge_debug_tables(
     let this_desc = format!("L{};", c.fq_name());
     {
         assert_eq!(
-            bridge.parameter_identities.len(),
+            bridge.parameters.len(),
             bridge.erased_params.len(),
-            "bridge debug identities exactly match physical arity"
+            "bridge debug parameters exactly match physical arity"
         );
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
+        // Named and labelled after the overridden declaration the bridge's signature comes from.
+        let (identities, semantic_types): (Vec<_>, Vec<_>) = bridge
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.identity.clone(), parameter.semantic))
+            .unzip();
         let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
-            &bridge.parameter_identities,
-            &bridge.concrete_params,
+            &identities,
+            &semantic_types,
             &bridge.name,
         );
         for (parameter, spelling) in jvm_tys(&bridge.erased_params).iter().zip(parameter_names) {

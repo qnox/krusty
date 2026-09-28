@@ -312,3 +312,32 @@ fn a_bridge_names_its_context_parameter_after_the_overridden_declaration() {
                }\n";
     assert_code_and_debug_identical("RenamedContextBridgeParameter", src, "Upper");
 }
+
+/// A bridge's anonymous context parameter is labelled after the OVERRIDDEN declaration's type, not
+/// the override's. Here the override's context is a value class over `Int`, realized as an `int`
+/// carrier, while the bridge carries `Base<T>`'s `T` and kotlinc labels it `$context-Any`.
+#[test]
+fn a_bridge_labels_an_anonymous_context_parameter_after_the_overridden_declaration() {
+    const SRC: &str = "@JvmInline value class Id(val raw: Int)\n\
+interface Base<T> {\n\
+    context(_: T) fun label(x: Int): String\n\
+}\n\
+class Impl : Base<Id> {\n\
+    context(_: Id) override fun label(x: Int): String = \"OK\"\n\
+}\n";
+    common::assert_class_code_matches_kotlinc("ValueClassContextBridge", SRC, "Impl");
+}
+
+/// An anonymous context parameter of a type-parameter type is labelled after the parameter's upper
+/// bound: `$context-Any` unbounded, `$context-CharSequence` under `T : CharSequence`.
+#[test]
+fn an_anonymous_context_parameter_of_a_type_parameter_is_labelled_after_its_bound() {
+    const SRC: &str = "class Holder<T> {\n\
+    context(_: T) fun held(): String = \"held\"\n\
+}\n\
+context(_: T) fun <T> free(): String = \"free\"\n\
+context(_: T?) fun <T : CharSequence> bounded(): String = \"bounded\"\n";
+    for class in ["Holder", "TypeParameterContextLabelKt"] {
+        common::assert_class_code_matches_kotlinc("TypeParameterContextLabel", SRC, class);
+    }
+}
