@@ -5,8 +5,10 @@
 //! decide which field contains the encoded type.
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::metadata::{protobuf::Pb, serialize_string_table_types};
@@ -66,7 +68,9 @@ pub(crate) const PREDEFINED_STRINGS: &[&str] = &[
 pub(crate) struct StringTable {
     strings: Vec<String>,
     records: Vec<Pb>,
-    dedup: HashMap<(String, Vec<u8>), u32>,
+    /// Indices sharing a `(string, record bytes)` hash, oldest first. A hit compares the stored
+    /// entry, so the table does not keep a second copy of the text or the record.
+    dedup: HashMap<u64, Vec<u32>>,
     /// Classifiers already interned with `DESC_TO_CLASS_ID`. A repeat does not render `Lname;`.
     descriptor_ids: HashMap<TypeName, u32>,
     /// Times this table prepared a class id from the classifier instead of reusing `descriptor_ids`.
@@ -98,15 +102,26 @@ impl StringTable {
     }
 
     fn intern(&mut self, string: String, record: Pb) -> u32 {
-        let key = (string.clone(), record.as_bytes().to_vec());
-        if let Some(&index) = self.dedup.get(&key) {
+        let hash = string_record_hash(&string, record.as_bytes());
+        if let Some(index) = self.latest_match(hash, &string, record.as_bytes()) {
             return index;
         }
         let index = self.strings.len() as u32;
         self.strings.push(string);
         self.records.push(record);
-        self.dedup.insert(key, index);
+        self.dedup.entry(hash).or_default().push(index);
         index
+    }
+
+    /// The newest table index whose string and record bytes equal the key. `class_literal`
+    /// replaces the map entry when locality differs, so a later intern must see that replacement.
+    fn latest_match(&self, hash: u64, string: &str, record: &[u8]) -> Option<u32> {
+        let indices = self.dedup.get(&hash)?;
+        indices.iter().rev().find_map(|&index| {
+            let stored = index as usize;
+            (self.strings[stored] == string && self.records[stored].as_bytes() == record)
+                .then_some(index)
+        })
     }
 
     pub(crate) fn local(&mut self, string: &str) -> u32 {
@@ -183,16 +198,16 @@ impl StringTable {
     /// local classifier, or a name with a `$`): it reuses an equal string only when that string's
     /// locality matches, and always opens a new record, which the plain strings after it extend.
     fn class_literal(&mut self, literal: String, local: bool) -> u32 {
-        let key = (literal, Vec::new());
-        if let Some(&index) = self.dedup.get(&key) {
+        let hash = string_record_hash(&literal, &[]);
+        if let Some(index) = self.latest_match(hash, &literal, &[]) {
             if local == self.local_names.contains(&index) {
                 return index;
             }
         }
         let index = self.strings.len() as u32;
-        self.strings.push(key.0.clone());
+        self.strings.push(literal);
         self.records.push(Pb::new());
-        self.dedup.insert(key, index);
+        self.dedup.entry(hash).or_default().push(index);
         if local {
             self.local_names.push(index);
         }
@@ -207,6 +222,13 @@ impl StringTable {
     pub(crate) fn into_strings(self) -> Vec<String> {
         self.strings
     }
+}
+
+fn string_record_hash(string: &str, record: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    string.hash(&mut hasher);
+    record.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn predefined_index(classifier: TypeName) -> Option<usize> {
@@ -964,6 +986,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(encoded.as_bytes(), &[0x08, 0x02, 0x38, 0x00]);
+    }
+
+    #[test]
+    fn repeated_string_intern_does_not_copy_the_table() {
+        let mut strings = StringTable::default();
+        let first = strings.local("sample/Box");
+        let len = strings.strings.len();
+        assert_eq!(strings.local("sample/Box"), first);
+        assert_eq!(strings.strings.len(), len);
+        let again = strings.class_literal("sample/Box".to_owned(), false);
+        assert_eq!(again, first);
+        assert_eq!(strings.strings.len(), len);
+
+        let local_id = strings.class_literal("app/Local".into(), true);
+        assert_eq!(strings.class_literal("app/Local".into(), true), local_id);
+        assert_ne!(strings.class_literal("app/Local".into(), false), local_id);
+
+        let recorded = strings.class_id(crate::types::type_name("sample/Box"));
+        assert_ne!(recorded, strings.local("Lsample/Box;"));
+        assert_eq!(strings.strings[recorded as usize], "Lsample/Box;");
     }
 
     #[test]
