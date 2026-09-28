@@ -15,14 +15,16 @@ pub struct ResolvedTypeParameterBound {
 }
 
 impl ResolvedTypeParameterBound {
-    /// Whether an upper bound is an interface type. A function type is a `kotlin.FunctionN`
-    /// interface type; a classifier type is one when its declaration is an interface.
+    /// Whether an upper bound is an interface-like bound rather than the one class bound. A
+    /// function type is a `kotlin.FunctionN` interface type; a classifier type is one when its
+    /// declaration is an interface; another type parameter is a type variable, never the class
+    /// bound, whatever its own bound is (kotlinc signs `<U : Base, T : U>` as `T::TU;`).
     pub fn is_interface_type(
         bound: Ty,
         classifier_is_interface: impl FnOnce(crate::types::TypeName) -> bool,
     ) -> bool {
         match bound.non_null() {
-            Ty::Fun(_) => true,
+            Ty::Fun(_) | Ty::TyParam(..) => true,
             bound => bound.obj_internal().is_some_and(classifier_is_interface),
         }
     }

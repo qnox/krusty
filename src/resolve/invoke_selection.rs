@@ -60,21 +60,43 @@ impl SelectedInvokePlan {
 
 impl Checker<'_> {
     /// The function types a value of `nominal` type can be invoked as: the function supertypes of
-    /// its classifier, and for a type parameter those of every bound (`T : (Int) -> Int` makes a
-    /// `T` value callable exactly like a `(Int) -> Int` one).
+    /// its classifier, and for a type parameter those of every bound, followed through bounds that
+    /// are themselves type parameters (`T : (Int) -> Int` and `<U : (Int) -> Int, T : U>` both make
+    /// a `T` value callable exactly like a `(Int) -> Int` one). These are the callable views of a
+    /// non-null value: whether the value itself may be null is [`Self::invoke_receiver_admits_null`].
     pub(super) fn nominal_function_types(&self, scope: &CheckerScope<'_>, nominal: Ty) -> Vec<Ty> {
         let mut functions = self.stable_classifier_callable_signatures(nominal);
-        for bound in nominal
-            .non_null()
+        let mut visited = std::collections::HashSet::new();
+        self.collect_bound_function_types(scope, nominal.non_null(), &mut visited, &mut functions);
+        functions
+    }
+
+    fn collect_bound_function_types(
+        &self,
+        scope: &CheckerScope<'_>,
+        parameter: Ty,
+        visited: &mut std::collections::HashSet<&'static str>,
+        functions: &mut Vec<Ty>,
+    ) {
+        let Some(name) = parameter.ty_param_name() else {
+            return;
+        };
+        if !visited.insert(name) {
+            return;
+        }
+        for bound in parameter
             .ty_param_bound()
             .into_iter()
-            .chain(self.semantic_tparam_extra_bounds(scope, nominal.non_null()))
+            .chain(self.semantic_tparam_extra_bounds(scope, parameter))
         {
             let bound = bound.non_null();
-            let callable_bounds = if matches!(bound, Ty::Fun(_)) {
-                vec![bound]
-            } else {
-                self.stable_classifier_callable_signatures(bound)
+            let callable_bounds = match bound {
+                Ty::Fun(_) => vec![bound],
+                Ty::TyParam(..) => {
+                    self.collect_bound_function_types(scope, bound, visited, functions);
+                    Vec::new()
+                }
+                _ => self.stable_classifier_callable_signatures(bound),
             };
             for callable in callable_bounds {
                 if !functions.contains(&callable) {
@@ -82,7 +104,76 @@ impl Checker<'_> {
                 }
             }
         }
-        functions
+    }
+
+    /// Whether invoking a type-parameter value selects a function constituent other than the one its
+    /// first bound (followed through bounds that are type parameters) already denotes. The value is
+    /// then viewed as that constituent, as a member declared only on a later bound is
+    /// (`where T : Base, T : (Int) -> Int` invokes `t` as its `(Int) -> Int` bound).
+    fn invoke_projects_type_parameter(&self, receiver: Ty, function: Ty) -> bool {
+        let mut first_bound = receiver.non_null();
+        let mut visited = std::collections::HashSet::new();
+        while let Ty::TyParam(name, bound) = first_bound {
+            if !visited.insert(name) {
+                return false;
+            }
+            first_bound = bound.non_null();
+        }
+        !visited.is_empty() && first_bound != function
+    }
+
+    /// The flow type of an invoked property value. A property read keeps its declared type as the
+    /// receiver, so a smart cast reaches the nullability check here: a proof on its access path
+    /// (`if (func != null) func()`), or the narrowing shadow a class-body property's lexical
+    /// binding carries for this very dispatch receiver (`func = {}; func()` in `init`), as a bare
+    /// read of the same property sees it.
+    fn invoke_receiver_flow_ty(&self, scope: &CheckerScope<'_>, receiver: ExprId, ty: Ty) -> Ty {
+        if let (Expr::Name(name), Some(identity)) = (
+            self.file.expr(receiver),
+            self.implicit_receiver_identities.get(&receiver),
+        ) {
+            if let Some(local) = self.lookup(scope, name) {
+                if let ReceiverFnValueOrigin::DispatchProperty {
+                    receiver_identity,
+                    declared_ty,
+                    ..
+                } = local.origin
+                {
+                    if receiver_identity == *identity && local.ty != declared_ty {
+                        return local.ty;
+                    }
+                }
+            }
+        }
+        self.path_narrowed_read_ty(scope, receiver, receiver, ty)
+    }
+
+    /// Whether a value of type `ty` may be null, so the invoke convention cannot be applied to it
+    /// directly: a nullable type, or a type parameter whose every bound admits null, followed
+    /// through bounds that are type parameters (`<U : (() -> Unit)?, T : U>`). A flexible platform
+    /// type stays callable, as kotlinc allows.
+    pub(super) fn invoke_receiver_admits_null(&self, scope: &CheckerScope<'_>, ty: Ty) -> bool {
+        self.receiver_admits_null_through_bounds(scope, ty, &mut std::collections::HashSet::new())
+    }
+
+    fn receiver_admits_null_through_bounds(
+        &self,
+        scope: &CheckerScope<'_>,
+        ty: Ty,
+        visited: &mut std::collections::HashSet<&'static str>,
+    ) -> bool {
+        match ty {
+            Ty::Nullable(_) | Ty::Null => true,
+            Ty::TyParam(name, bound) => {
+                visited.insert(name)
+                    && std::iter::once(*bound)
+                        .chain(self.semantic_tparam_extra_bounds(scope, ty))
+                        .all(|bound| {
+                            self.receiver_admits_null_through_bounds(scope, bound, visited)
+                        })
+            }
+            _ => false,
+        }
     }
 
     /// Select the property and its value's invoke operator once, while non-contextual arguments are
@@ -849,7 +940,26 @@ impl Checker<'_> {
             "invoke selection call={call:?} receiver={receiver:?} nominal={receiver_ty:?} semantic={semantic_receiver_ty:?} args={arg_tys:?}",
         );
         let (params, ret, kind, arguments_already_mapped) = match semantic_receiver_ty {
+            Ty::Fun(_)
+                if self.invoke_receiver_admits_null(
+                    scope,
+                    self.invoke_receiver_flow_ty(scope, receiver, receiver_ty),
+                ) =>
+            {
+                self.diags.error(
+                    span,
+                    format!(
+                        "reference has a nullable type '{}'. Use explicit '?.invoke' to make a \
+                         function-like call instead.",
+                        self.diagnostic_type_name(receiver_ty, &[receiver_ty])
+                    ),
+                );
+                return InvokeResolution::Selected(Ty::Error);
+            }
             Ty::Fun(sig) => {
+                if self.invoke_projects_type_parameter(receiver_ty, semantic_receiver_ty) {
+                    self.set(receiver, semantic_receiver_ty);
+                }
                 let context_count = sig.context_count.min(sig.params.len());
                 // Context-function values support both invocation forms: callers may pass the
                 // context slots explicitly (`f(context, value)`), or omit the leading slots and let

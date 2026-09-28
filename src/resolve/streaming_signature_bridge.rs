@@ -5520,15 +5520,24 @@ pub(crate) fn finalized_streamed_signature_index(
                 ordinal,
                 semantic.ty_param_name().unwrap_or(source_name),
             );
-            let has_explicit_bound = declared_bounds
+            let declared_bound_count = declared_bounds
                 .iter()
-                .any(|(owner, _)| owner == source_name);
-            let local_bounds = has_explicit_bound
+                .filter(|(owner, _)| owner == source_name)
+                .count();
+            // `TParams` also carries the constraints inherited through a bare parameter edge
+            // (`T : U` sees `U`'s bounds) for member lookup, after the written ones. The declaration
+            // publishes only what is written on this parameter: kotlinc signs `T extends U`.
+            let local_bounds = (declared_bound_count > 0)
                 .then(|| {
                     let mut bounds = vec![semantic
                         .ty_param_bound()
                         .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
-                    bounds.extend(symbolic.extra_bounds_of(source_name));
+                    bounds.extend(
+                        symbolic
+                            .extra_bounds_of(source_name)
+                            .into_iter()
+                            .take(declared_bound_count - 1),
+                    );
                     bounds
                 })
                 .unwrap_or_default();

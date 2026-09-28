@@ -126,6 +126,7 @@ mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod tailrec_declarations;
 mod type_join;
+mod type_parameter_owners;
 mod when_exhaustiveness;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
@@ -25437,6 +25438,22 @@ impl<'a> Checker<'a> {
                 receiver_identity, ..
             }) = scoped.map(|binding| binding.origin)
             {
+                // Initializing a `val` in `init` is a stable write: later reads through the same
+                // dispatch receiver see the assigned value's type (`func = {}; func()`).
+                if enum_entry_property.is_none() {
+                    let path = NarrowPath::root_only(scope::PathRoot::Receiver(receiver_identity))
+                        .then(scope::PathProperty {
+                            owner,
+                            name: name.clone(),
+                            ty,
+                            stable: true,
+                        });
+                    if let Some(narrowed) =
+                        self.assignment_narrowing(&name, ty, vt, self.span(value))
+                    {
+                        self.record_path_narrowing(scope, path, narrowed);
+                    }
+                }
                 if let Some(selected) = self
                     .implicit_receivers(scope)
                     .into_iter()
@@ -26890,6 +26907,7 @@ impl<'a> Checker<'a> {
             scope.declare_tparams(&f.type_params, &semantic_tparams, |name| {
                 f.reified_type_params.contains(name)
             });
+            let owned_type_parameters = c.publish_function_type_parameter_owner(scope, f);
             for (index, (p, &ty)) in f.params.iter().zip(&semantic_params).enumerate() {
                 if p.name != "_" {
                     c.declare_function_parameter(scope, p, ty, None, index < f.context_count);
@@ -26913,6 +26931,7 @@ impl<'a> Checker<'a> {
                 c.this_labels.pop();
             }
             c.this_extension_receiver = previous_extension_receiver;
+            c.retire_type_parameter_owners(&owned_type_parameters);
         });
 
         // A statement-position local class is emitted as its own body unit, so the generic AST child
@@ -37449,7 +37468,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         class_literal_targets: HashMap::new(),
         applied_annotations: HashMap::new(),
         ret_ty: Ty::Unit,
-        diagnostic_function: None,
+        type_parameter_owners: HashMap::new(),
         expected: None,
         callable_reference_literal_constraints: HashMap::new(),
         active_callable_reference: None,
@@ -40305,8 +40324,9 @@ struct Checker<'a> {
     class_literal_targets: HashMap<ExprId, TypeName>,
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     ret_ty: Ty,
-    /// Current declaration solely for kotlinc-compatible type-parameter wording in diagnostics.
-    diagnostic_function: Option<(String, Vec<String>)>,
+    /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
+    /// so far, keyed by semantic identity, solely for diagnostics.
+    type_parameter_owners: HashMap<&'static str, String>,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
     expected: Option<Ty>,
@@ -55357,19 +55377,7 @@ impl<'a> Checker<'a> {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
-        let previous_diagnostic_function = self.diagnostic_function.replace((
-            f.name.clone(),
-            f.type_params
-                .iter()
-                .map(|name| {
-                    scope
-                        .tparam_bound(name)
-                        .ty_param_name()
-                        .unwrap_or(name)
-                        .to_string()
-                })
-                .collect(),
-        ));
+        let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         for (_, bound) in &f.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
         }
@@ -55698,7 +55706,7 @@ impl<'a> Checker<'a> {
         self.allow_lambda_mutation = prev_allow;
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.diagnostic_function = previous_diagnostic_function;
+        self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }
@@ -57271,6 +57279,7 @@ impl<'a> Checker<'a> {
             scope.declare_tparams(&cl.type_params, &class_tparams, |name| {
                 inherited_reified_type_parameters.contains(name)
             });
+            self.publish_class_type_parameter_owner(scope, cl);
             scope.declare_context_receivers(&class_context_receivers);
             let mut context_names = std::collections::HashSet::new();
             for receiver in &class_context_receivers {
@@ -59798,6 +59807,7 @@ impl<'a> Checker<'a> {
         scope.declare_tparams(&f.type_params, &method_tparams, |name| {
             f.reified_type_params.contains(name)
         });
+        let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         for (_, bound) in &f.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
@@ -60097,6 +60107,7 @@ impl<'a> Checker<'a> {
         }
         self.this_extension_receiver = dispatch_extension_receiver;
         self.lambda_returns.leave_function(enclosing_return_frame);
+        self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }
@@ -62670,21 +62681,8 @@ impl<'a> Checker<'a> {
             "assignability failure context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
         );
         let context = [expected, actual];
-        let render = |ty: Ty| {
-            ty.source_name_with_type_parameter_in(&context, &|parameter| {
-                let source = crate::types::type_parameter_source_name(parameter);
-                match &self.diagnostic_function {
-                    Some((function, parameters))
-                        if parameters.iter().any(|candidate| candidate == parameter) =>
-                    {
-                        format!("{source} (of fun <{source}> {function})")
-                    }
-                    _ => source.to_string(),
-                }
-            })
-        };
-        let expected = render(expected);
-        let actual = render(actual);
+        let expected = self.diagnostic_type_name(expected, &context);
+        let actual = self.diagnostic_type_name(actual, &context);
         if actual == "Null" {
             self.diags.error(
                 span,
