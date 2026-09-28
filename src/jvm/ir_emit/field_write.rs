@@ -1,7 +1,7 @@
 //! JVM realization of checked instance-field writes.
 
 use super::{
-    emit_num_conv, instance_field_jvm_name, jvm_declared_ty, load, slot_words, static_storage,
+    emit_num_conv, instance_field_jvm_name, jvm_declared_ty, slot_words, static_storage,
     type_descriptor, Emitter,
 };
 use crate::ir::{ClassId, IrBinOp, IrExpr};
@@ -35,10 +35,10 @@ impl Emitter<'_> {
             return;
         }
         if self.diverges(value) {
-            // Kotlin still evaluates the receiver before the RHS. A branchy divergent RHS must
-            // start from a clean operand stack, so preserve an effectful receiver through a
-            // temporary before emitting the non-returning value.
-            if self.emits_control_flow(value) {
+            // Kotlin still evaluates the receiver before the RHS. A divergent RHS that cannot
+            // carry the operand stack must start from a clean one, so preserve an effectful
+            // receiver through a temporary before emitting the non-returning value.
+            if self.spills_operand_prefix(value) {
                 let temps = self.spill_to_temps(&[receiver], code);
                 self.emit_value(value, code);
                 self.release_temporary(temps[0].2);
@@ -48,18 +48,10 @@ impl Emitter<'_> {
             }
             return;
         }
-        // A branchy value emits a merge frame; spill it before loading the receiver so those frames
-        // begin with a clean operand stack. Plain values retain direct receiver/value order.
-        if self.emits_control_flow(value) {
-            let temps = self.spill_to_temps(&[value], code);
-            self.emit_value(receiver, code);
-            let (slot, ty, lease) = temps[0];
-            load(ty, slot, code);
-            self.release_temporary(lease);
-        } else {
-            self.emit_value(receiver, code);
-            self.emit_value(value, code);
-        }
+        // Receiver, then value, as Kotlin evaluates them. A value that cannot carry the operand
+        // stack has both evaluated into temporaries in that order and reloaded; every other value,
+        // branchy or not, runs with the receiver left on the stack, as kotlinc does.
+        self.emit_operands(&[receiver, value], code);
         self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
@@ -150,5 +142,98 @@ impl Emitter<'_> {
         code.isub();
         code.putfield(field_ref, 1);
         true
+    }
+}
+
+/// Source lowering binds an effectful field-write receiver to a temporary before the write, so a
+/// `SetField` whose receiver is itself a call is built directly here. The receiver still runs before
+/// a value that needs a clean operand stack: its call sits ahead of the value's guarded range.
+#[cfg(test)]
+mod tests {
+    use crate::ir::test_support::blank_class;
+    use crate::ir::{Callee, IrCatch, IrConst, IrExpr, IrField, IrFile, IrFunction};
+    use crate::jvm::classreader::read_method_code;
+    use crate::jvm::ir_emit::invariant_tests::emit_for_test;
+    use crate::jvm::ir_emit::EmitRun;
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn an_effectful_receiver_runs_before_a_value_that_spills() {
+        let mut ir = IrFile::default();
+        let mut node = blank_class("demo/Node");
+        node.fields.push(IrField::new("count".into(), Ty::Int));
+        let class = ir.add_class(node);
+        let node_ty = Ty::obj("demo/Node");
+
+        let read = ir.add_expr(IrExpr::GetValue(0));
+        let passed = ir.add_expr(IrExpr::Return(Some(read)));
+        let pass = ir.add_fun(IrFunction {
+            name: "pass".into(),
+            params: vec![node_ty],
+            ret: node_ty,
+            body: Some(passed),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let receiver = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(pass),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let attempt = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let recovered = ir.add_expr(IrExpr::Const(IrConst::Int(2)));
+        let value = ir.add_expr(IrExpr::Try {
+            body: attempt,
+            catches: vec![IrCatch::generated(
+                1,
+                type_name("java/lang/Throwable"),
+                recovered,
+            )],
+            finally: None,
+            result: Ty::Int,
+        });
+        let write = ir.add_expr(IrExpr::SetField {
+            receiver,
+            class,
+            index: 0,
+            value,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![write],
+            value: None,
+        });
+        ir.add_fun(IrFunction {
+            name: "bump".into(),
+            params: vec![node_ty],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+
+        let run = EmitRun::default();
+        let classes = emit_for_test(&ir, "demo/FacadeKt", &run)
+            .unwrap_or_else(|| panic!("emission bailed: {:?}", run.inline_bail()));
+        let (_, facade) = classes
+            .iter()
+            .find(|(name, _)| name == "demo/FacadeKt")
+            .expect("the facade class is emitted");
+        let bump = read_method_code(facade, "bump", "(Ldemo/Node;)V").expect("bump has a body");
+        const INVOKESTATIC: u8 = 0xb8;
+        let receiver_call = bump
+            .code
+            .iter()
+            .position(|&op| op == INVOKESTATIC)
+            .expect("the receiver call is emitted");
+        let guarded = bump.handlers.first().expect("the value keeps its handler");
+        assert!(
+            receiver_call < guarded.start_pc as usize,
+            "receiver call at {receiver_call}, value guarded from {}",
+            guarded.start_pc
+        );
     }
 }
