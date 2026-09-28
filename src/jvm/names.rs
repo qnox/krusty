@@ -506,8 +506,8 @@ pub(crate) fn boxed_descriptor(ty: Ty) -> &'static str {
 }
 
 /// `Lname;` for an interned classfile internal name. The first use formats it; later uses return
-/// that same spelling.
-fn reference_descriptor(classfile_name: &'static str) -> &'static str {
+/// that same spelling. `classfile_name` must already be the physical class spelling.
+pub(crate) fn reference_descriptor(classfile_name: &'static str) -> &'static str {
     remembered_descriptor(DescriptorSpell::Reference, classfile_name, |name| {
         format!("L{name};")
     })
