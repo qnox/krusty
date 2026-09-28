@@ -115,7 +115,7 @@ impl Emitter<'_> {
             return;
         }
         let expected = ir_ty_to_jvm(&expected);
-        if !expected.is_reference() || type_descriptor(source) == type_descriptor(expected) {
+        if !expected.is_reference() || crate::jvm::names::same_type_descriptor(source, expected) {
             return;
         }
         let internal = crate::jvm::names::instanceof_internal_name(expected);
@@ -165,7 +165,7 @@ impl Emitter<'_> {
                     destination.non_null().obj_internal() == Some(classifier)
                 });
             if destination_is_concrete_value_class
-                && type_descriptor(carrier) == type_descriptor(physical)
+                && crate::jvm::names::same_type_descriptor(carrier, physical)
             {
                 let descriptor = format!("(){}", type_descriptor(carrier));
                 let method = self

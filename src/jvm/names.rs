@@ -410,6 +410,105 @@ pub fn type_descriptor(ty: Ty) -> String {
     }
 }
 
+/// Whether `left` and `right` emit the same JVM descriptor.
+///
+/// `type_descriptor` builds that spelling for the class file. A comparison only needs the shape:
+/// primitive tags, the interned classfile name, or one array dimension. Equal types return before
+/// any of that work.
+pub(crate) fn same_type_descriptor(left: Ty, right: Ty) -> bool {
+    left == right || descriptor_shapes_match(left, right)
+}
+
+enum DescriptorShape {
+    Primitive(u8),
+    Class(&'static str),
+    Array(Ty),
+}
+
+fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
+    match (descriptor_shape(left), descriptor_shape(right)) {
+        (DescriptorShape::Primitive(left), DescriptorShape::Primitive(right)) => left == right,
+        (DescriptorShape::Class(left), DescriptorShape::Class(right)) => left == right,
+        (DescriptorShape::Array(left), DescriptorShape::Array(right)) => {
+            descriptor_shapes_match(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn descriptor_shape(ty: Ty) -> DescriptorShape {
+    match ty {
+        Ty::Pending => unreachable!("a not-determined type reached {}", "a JVM descriptor"),
+        Ty::Int | Ty::UInt => DescriptorShape::Primitive(b'I'),
+        Ty::Byte | Ty::UByte => DescriptorShape::Primitive(b'B'),
+        Ty::Short | Ty::UShort => DescriptorShape::Primitive(b'S'),
+        Ty::Long | Ty::ULong => DescriptorShape::Primitive(b'J'),
+        Ty::Float => DescriptorShape::Primitive(b'F'),
+        Ty::Double => DescriptorShape::Primitive(b'D'),
+        Ty::Boolean => DescriptorShape::Primitive(b'Z'),
+        Ty::Char => DescriptorShape::Primitive(b'C'),
+        Ty::Unit => DescriptorShape::Primitive(b'V'),
+        Ty::String => DescriptorShape::Class(classfile_internal_name_of(crate::types::type_name(
+            "kotlin/String",
+        ))),
+        Ty::Obj(name, args) => {
+            if name.matches("kotlin/Array") {
+                let element = args
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                return DescriptorShape::Array(reference_array_element(element));
+            }
+            if let Some(element) = crate::types::prim_array_element(name) {
+                return DescriptorShape::Array(element);
+            }
+            DescriptorShape::Class(classfile_internal_name_of(name))
+        }
+        Ty::Nothing => DescriptorShape::Class(classfile_internal_name_of(crate::types::type_name(
+            "java/lang/Void",
+        ))),
+        Ty::Null | Ty::Error => DescriptorShape::Class(classfile_internal_name_of(
+            crate::types::type_name("kotlin/Any"),
+        )),
+        Ty::Fun(signature) => DescriptorShape::Class(function_classfile_name(
+            signature.params.len() + usize::from(signature.suspend),
+        )),
+        Ty::Nullable(inner) => match *inner {
+            Ty::Unit => DescriptorShape::Class(classfile_internal_name_of(
+                crate::types::type_name("kotlin/Unit"),
+            )),
+            Ty::UByte => DescriptorShape::Class(classfile_internal_name_of(
+                crate::types::type_name("kotlin/UByte"),
+            )),
+            Ty::UShort => DescriptorShape::Class(classfile_internal_name_of(
+                crate::types::type_name("kotlin/UShort"),
+            )),
+            Ty::UInt => DescriptorShape::Class(classfile_internal_name_of(
+                crate::types::type_name("kotlin/UInt"),
+            )),
+            Ty::ULong => DescriptorShape::Class(classfile_internal_name_of(
+                crate::types::type_name("kotlin/ULong"),
+            )),
+            other => descriptor_shape(other.boxed_ref().unwrap_or(other)),
+        },
+        Ty::TyParam(_, bound)
+        | Ty::PlatformNullable(bound)
+        | Ty::OutProjection(bound)
+        | Ty::StarProjection(bound) => descriptor_shape(*bound),
+        Ty::InProjection(_) => DescriptorShape::Class(classfile_internal_name_of(
+            crate::types::type_name("java/lang/Object"),
+        )),
+    }
+}
+
+fn function_classfile_name(arity: usize) -> &'static str {
+    if uses_function_n(arity) {
+        "kotlin/jvm/functions/FunctionN"
+    } else {
+        FUNCTION_N_INTERNAL[arity]
+    }
+}
+
 /// The class an `instanceof`/`checkcast` names for `t`.
 ///
 /// One mapping, because the two instructions must agree: a value that passes the check is exactly a
@@ -760,5 +859,54 @@ mod tests {
 
         let p = Ty::obj("demo/Point");
         assert_eq!(type_descriptor(Ty::nullable(p)), type_descriptor(p));
+    }
+
+    #[test]
+    fn descriptor_equality_matches_the_emitted_spelling() {
+        let types = vec![
+            Ty::Int,
+            Ty::UInt,
+            Ty::Byte,
+            Ty::UByte,
+            Ty::Long,
+            Ty::ULong,
+            Ty::nullable(Ty::Int),
+            Ty::nullable(Ty::UInt),
+            Ty::nullable(Ty::Boolean),
+            Ty::String,
+            Ty::obj("kotlin/String"),
+            Ty::obj("java/lang/String"),
+            Ty::obj("kotlin/Any"),
+            Ty::obj("java/lang/Object"),
+            Ty::Null,
+            Ty::Error,
+            Ty::Nothing,
+            Ty::Unit,
+            Ty::nullable(Ty::Unit),
+            Ty::array(Ty::Int),
+            Ty::obj("kotlin/IntArray"),
+            Ty::obj("kotlin/UIntArray"),
+            Ty::array(Ty::String),
+            Ty::array(Ty::array(Ty::Int)),
+            Ty::fun(vec![Ty::Int], Ty::String),
+            Ty::fun(vec![Ty::String], Ty::Int),
+            Ty::fun(vec![Ty::Int, Ty::Int], Ty::Unit),
+            Ty::obj("kotlin/Function1"),
+            Ty::obj("kotlin/jvm/functions/Function1"),
+            Ty::ty_param("T", Ty::obj("kotlin/CharSequence")),
+            Ty::nullable(Ty::obj("demo/Point")),
+            Ty::obj("demo/Point"),
+            Ty::obj("kotlin/collections/Map.Entry"),
+            Ty::obj("sample/pkg/Outer.Middle.Inner"),
+        ];
+        for &left in &types {
+            for &right in &types {
+                assert_eq!(
+                    same_type_descriptor(left, right),
+                    type_descriptor(left) == type_descriptor(right),
+                    "{left:?} vs {right:?}"
+                );
+            }
+        }
     }
 }

@@ -222,7 +222,7 @@ impl Emitter<'_> {
         } else if exact_field
             && physical.is_reference()
             && logical.is_reference()
-            && type_descriptor(physical) != type_descriptor(logical)
+            && !crate::jvm::names::same_type_descriptor(physical, logical)
             && !value_class
         {
             // A generic Java field's descriptor erases to its formal bound (`CharSequence` for
