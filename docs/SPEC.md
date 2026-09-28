@@ -7611,6 +7611,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   construction, so the receiver is boxed (`Tag.box-impl`) even when the value class's carrier is
   `Any?` and shares the JVM type `Object` with the box.
   Tests: `tests/value_class_bound_reference_receiver_e2e.rs`.
+- **A value recorded as a carrier stays that value class.** A sole-property read of a nested value
+  class (`o` in `Outer(val o: Inner)`) yields `Inner`'s carrier; it keeps `Inner`'s unboxed
+  representation, so `o.toString()` calls `Inner.toString-impl` over the carrier, as kotlinc does.
+  Tests: `tests/value_class_nested_property_to_string_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
