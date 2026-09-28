@@ -106,7 +106,10 @@ fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)>
             &c.ctor_args,
         ))
         .filter_map(|(argument, name)| {
-            Some((name?, crate::jvm::names::type_descriptor(argument.ty)))
+            Some((
+                name?,
+                crate::jvm::names::type_descriptor(argument.ty).to_owned(),
+            ))
         })
         .collect()
 }

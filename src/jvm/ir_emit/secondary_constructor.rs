@@ -396,7 +396,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 .iter()
                 .zip(&sc_param_tys[owner_prefix_tys.len()..])
             {
-                locals.push((name.clone(), type_descriptor(*physical), slot));
+                locals.push((name.clone(), type_descriptor(*physical).to_owned(), slot));
                 slot += slot_words(*physical);
             }
             locals
