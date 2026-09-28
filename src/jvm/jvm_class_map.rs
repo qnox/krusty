@@ -426,6 +426,27 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     internal
 }
 
+/// [`to_jvm_internal`] for a classifier the caller already holds. Mapped builtins, boxed primitives,
+/// and function interfaces return their static JVM spelling. Every other classifier borrows its
+/// remembered internal name.
+pub fn jvm_internal_name(internal: TypeName) -> &'static str {
+    if let Some(wrapper) = wrapper_internal(Ty::obj_name(internal)) {
+        return wrapper;
+    }
+    if let Some(jvm) = type_name_to_jvm_builtin_internal(internal) {
+        return jvm;
+    }
+    if super::function_classifiers::is_reflective_function_classifier(internal) {
+        return crate::types::KFUNCTION_INTERNAL;
+    }
+    if let Some(function) = super::function_classifiers::classifier(internal) {
+        if function.identity() == internal && !function.is_suspend() {
+            return super::names::function_interface_internal_name(function.arity());
+        }
+    }
+    internal.rendered()
+}
+
 /// Which declaration supplies a mapped builtin's SOURCE member/supertype scope. This is part of the
 /// Kotlin↔JVM mapping itself, not a classpath-loading heuristic: `KotlinDeclaration` means the JVM class
 /// is only the physical realization and its Java API must not be joined into the Kotlin source scope.
@@ -1415,5 +1436,28 @@ mod tests {
             super::class_mapper_lite_function_descriptor(1, true),
             "Lkotlin/coroutines/SuspendFunction1;"
         );
+    }
+
+    #[test]
+    fn jvm_internal_name_matches_the_string_mapping() {
+        for spelling in [
+            "kotlin/Any",
+            "kotlin/Int",
+            "kotlin/UInt",
+            "kotlin/String",
+            "kotlin/collections/MutableList",
+            "kotlin/Function1",
+            "kotlin/Function23",
+            "kotlin/reflect/KFunction1",
+            "kotlin/reflect/KSuspendFunction0",
+            "kotlin/coroutines/SuspendFunction1",
+            "sample/Host",
+            "app/Outer.Inner",
+        ] {
+            let identity = type_name(spelling);
+            let mapped = super::jvm_internal_name(identity);
+            assert_eq!(mapped, to_jvm_internal(&identity.render()), "{spelling}");
+            assert!(std::ptr::eq(mapped, super::jvm_internal_name(identity)));
+        }
     }
 }
