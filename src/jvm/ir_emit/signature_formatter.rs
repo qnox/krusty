@@ -470,7 +470,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
                 "L{};",
-                crate::jvm::names::classfile_internal_name(&owner.render())
+                crate::jvm::names::classfile_internal_name_of(owner)
             )),
             Ty::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
@@ -479,8 +479,7 @@ impl<'a> JvmSignatureFormatter<'a> {
                 let arguments =
                     self.classifier_usage_arguments(owner, arguments, declared_arguments)?;
                 let (outer, _) = chain.first()?;
-                let outer_internal = outer.render();
-                let jvm = crate::jvm::names::classfile_internal_name(&outer_internal);
+                let jvm = crate::jvm::names::classfile_internal_name_of(*outer);
                 let mut signature = format!("L{jvm}");
                 let mut argument_index = 0;
                 for (segment_index, (classifier, variances)) in chain.iter().enumerate() {
