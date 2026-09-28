@@ -57,8 +57,10 @@ pub(crate) struct PropertyReferenceRealization {
     pub facade_storage: bool,
     pub accessor_role: PropertyAccessorRole,
     /// The PRIVATE static storage whose synthetic `access$…$p` bridges on its static owner the
-    /// accessors are; the reference still reflects the declared accessor names.
-    pub bridged_storage: Option<crate::jvm::private_static_access::BridgedStorage>,
+    /// getter and setter are, each side on its own; the reference still reflects the declared
+    /// accessor names.
+    pub bridged_getter: Option<crate::jvm::private_static_access::BridgedStorage>,
+    pub bridged_setter: Option<crate::jvm::private_static_access::BridgedStorage>,
     /// The reflected owner is a package (a file facade), which kotlinc flags as top-level. A
     /// companion-block property is a static member of its declaring class instead.
     pub package_owner: bool,

@@ -167,28 +167,60 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     }
 }
 
-/// The public `getX`/`setX` of one plain static property stored on `owner`, emitted at the
-/// property's place among its owner's declared members: kotlinc's JvmPropertiesLowering replaces each
-/// property with its accessors in place. The owner is the file facade for a top-level property and
-/// the declaring class for a `companion { … }` block property. A `const val`, a `@JvmField`, a
-/// custom-accessor property (its accessors are ordinary functions) and a private property (reached
-/// only through `access$…$p` bridges or its field) publish none here.
-pub(super) fn emit_static_accessors(
+/// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
+/// the companion has no field for it, so field-driven attribute passes need this lookup instead.
+pub(super) fn hoisted_static_for<'a>(
+    ir: &'a IrFile,
+    c: &crate::ir::IrClass,
+    property: usize,
+) -> Option<&'a crate::ir::IrStatic> {
+    if !c.is_companion {
+        return None;
+    }
+    let static_id = ir.jvm_companion_property_static(c.fq_name_id(), property as u32)?;
+    ir.statics.get(static_id as usize)
+}
+
+/// Whether this companion property's hoisted static is the `@JvmField` realization — a public owner
+/// field with NO companion accessors, so accessor-shaped emission must skip it entirely.
+pub(super) fn jvm_field_static_for(ir: &IrFile, c: &crate::ir::IrClass, property: usize) -> bool {
+    c.is_companion
+        && ir
+            .jvm_companion_property_static(c.fq_name_id(), property as u32)
+            .is_some_and(|static_id| ir.is_jvm_field_static(static_id))
+}
+
+/// One of a static property's two accessors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StaticAccessor {
+    Getter,
+    Setter,
+}
+
+/// The compiler-default public `getX` or `setX` of one static property stored on `owner`, emitted
+/// at the property's place among its owner's declared members: kotlinc's JvmPropertiesLowering
+/// replaces each property with its accessors in place. The owner is the file facade for a top-level
+/// property and the declaring class for a `companion { … }` block property. A `const val`, a
+/// `@JvmField` and a private property (reached only through `access$…$p` bridges or its field)
+/// publish none, and an accessor source declared is an ordinary function; the other one is still
+/// the default.
+pub(super) fn emit_default_static_accessor(
     ir: &IrFile,
     owner: &str,
     cw: &mut ClassWriter,
     env: &EmitEnv,
     param_assertions: bool,
     static_index: u32,
+    accessor: StaticAccessor,
 ) {
-    let s = &ir.statics[static_index as usize];
-    if s.is_const
-        || s.custom_accessor
-        || ir.is_jvm_field_static(static_index)
-        || s.visibility.is_private()
-    {
+    let present = match accessor {
+        StaticAccessor::Getter => ir.has_jvm_default_static_getter(static_index),
+        StaticAccessor::Setter => ir.has_jvm_default_static_setter(static_index),
+    };
+    if !present {
         return;
     }
+    let s = &ir.statics[static_index as usize];
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let jt = jvm_declared_ty(&s.ty);
     let desc = type_descriptor(jt);
@@ -206,6 +238,17 @@ pub(super) fn emit_static_accessors(
     // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
     let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+    if accessor == StaticAccessor::Setter {
+        emit_default_static_setter(
+            cw,
+            owner,
+            s,
+            &signatures,
+            acc_ann,
+            param_assertions && nullability == 1,
+        );
+        return;
+    }
     let gname = property_getter_name(&s.name);
     cw.reserve_method_name(&gname);
     cw.seed_utf8(&format!("(){desc}"));
@@ -233,57 +276,68 @@ pub(super) fn emit_static_accessors(
         signatures.getter.as_deref(),
     );
     cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
-    if s.is_var {
-        // A value-class-typed property's setter carries the value-class mangle: the parameter
-        // it takes is the carrier, and a value-class PARAMETER always mangles.
-        let sname = s
-            .setter_jvm_name
-            .clone()
-            .unwrap_or_else(|| property_setter_name(&s.name));
-        cw.reserve_method_name(&sname);
-        cw.seed_utf8(&format!("({desc})V"));
-        if let Some(signature) = &signatures.setter {
-            cw.seed_utf8(signature);
-        }
-        let words = slot_words(jt);
-        let mut st = CodeBuilder::new(words);
-        // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
-        // `-Xno-param-assertions` removes it, like every other parameter guard.
-        if param_assertions && jt.is_reference() && nullability == 1 {
-            st.aload(0);
-            st.push_string("<set-?>", cw);
-            let m = cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "checkNotNullParameter",
-                "(Ljava/lang/Object;Ljava/lang/String;)V",
-            );
-            st.invokestatic(m, 2, 0);
-        }
-        // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
-        if s.line != 0 {
-            st.mark_line(s.line);
-        }
-        load(jt, 0, &mut st);
-        let fref = cw.fieldref(owner, &s.name, &desc);
-        st.putstatic(fref, slot_words(jt) as i32);
-        st.ret_void();
-        finish_code_sig::<0x0019>(
-            cw,
-            &sname,
-            &format!("({desc})V"),
-            &mut st,
-            words,
-            signatures.setter.as_deref(),
-        );
-        cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
-        // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
-        cw.set_method_debug(
-            &sname,
-            &format!("({desc})V"),
-            None,
-            &[("<set-?>".to_string(), desc.clone(), 0)],
-        );
+}
+
+/// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
+fn emit_default_static_setter(
+    cw: &mut ClassWriter,
+    owner: &str,
+    s: &crate::ir::IrStatic,
+    signatures: &JvmPropertySignatures,
+    acc_ann: Option<&str>,
+    checks_parameter: bool,
+) {
+    let jt = jvm_declared_ty(&s.ty);
+    let desc = type_descriptor(jt);
+    // A value-class-typed property's setter carries the value-class mangle: the parameter
+    // it takes is the carrier, and a value-class PARAMETER always mangles.
+    let sname = s
+        .setter_jvm_name
+        .clone()
+        .unwrap_or_else(|| property_setter_name(&s.name));
+    cw.reserve_method_name(&sname);
+    cw.seed_utf8(&format!("({desc})V"));
+    if let Some(signature) = &signatures.setter {
+        cw.seed_utf8(signature);
     }
+    let words = slot_words(jt);
+    let mut st = CodeBuilder::new(words);
+    // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
+    // `-Xno-param-assertions` removes it, like every other parameter guard.
+    if checks_parameter && jt.is_reference() {
+        st.aload(0);
+        st.push_string("<set-?>", cw);
+        let m = cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "checkNotNullParameter",
+            "(Ljava/lang/Object;Ljava/lang/String;)V",
+        );
+        st.invokestatic(m, 2, 0);
+    }
+    // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
+    if s.line != 0 {
+        st.mark_line(s.line);
+    }
+    load(jt, 0, &mut st);
+    let fref = cw.fieldref(owner, &s.name, &desc);
+    st.putstatic(fref, slot_words(jt) as i32);
+    st.ret_void();
+    finish_code_sig::<0x0019>(
+        cw,
+        &sname,
+        &format!("({desc})V"),
+        &mut st,
+        words,
+        signatures.setter.as_deref(),
+    );
+    cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
+    // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
+    cw.set_method_debug(
+        &sname,
+        &format!("({desc})V"),
+        None,
+        &[("<set-?>".to_string(), desc.clone(), 0)],
+    );
 }
 
 /// A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
@@ -517,7 +571,7 @@ impl Emitter<'_> {
         let is_const = s.is_const;
         let facade = self.facade.clone();
         // A PRIVATE property's field, read from another class, goes through its owner's accessor.
-        if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, i)
+        if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
             .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(
@@ -541,7 +595,7 @@ impl Emitter<'_> {
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
-            if !emitted_by_owner && companion_blocks::accessor_owned(self.ir, i) {
+            if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
                 let m = self.cw.methodref(
                     &owner_name,
                     &property_getter_name(&name),
@@ -601,7 +655,7 @@ impl Emitter<'_> {
         }
         // A PRIVATE property's field, written from another class, goes through its owner's
         // accessor.
-        if let Some(storage) = crate::jvm::private_static_access::bridged_storage(self.ir, index)
+        if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
             .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(
@@ -625,7 +679,7 @@ impl Emitter<'_> {
         if let Some(owner) = self.ir.statics[index as usize].owner {
             let owner_name = owner.render();
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
-            if !emitted_by_owner && companion_blocks::accessor_owned(self.ir, index) {
+            if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
                 let setter = self.ir.statics[index as usize]
                     .setter_jvm_name
                     .clone()

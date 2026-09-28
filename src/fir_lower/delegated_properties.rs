@@ -717,7 +717,7 @@ fn push_delegate_static(
         visibility: crate::types::Visibility::Private,
         setter_jvm_name: None,
         erased_declared_ty: None,
-        custom_accessor: true,
+        accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
         source_order,
     });

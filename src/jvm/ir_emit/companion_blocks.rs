@@ -19,14 +19,16 @@ pub(super) fn storage_is_private(ir: &IrFile, index: u32) -> bool {
     ir.companion_blocks.is_storage(index) && !ir.statics[index as usize].is_const
 }
 
-/// Whether static `index` is a block property that other classes reach through its class's
-/// generated public accessors (see `SourceOrderedMember::StaticProperty`).
-pub(super) fn accessor_owned(ir: &IrFile, index: u32) -> bool {
-    let property = &ir.statics[index as usize];
-    ir.companion_blocks.is_storage(index)
-        && !property.is_const
-        && !property.custom_accessor
-        && !property.visibility.is_private()
+/// Whether other classes read block property `index` through its class's compiler-default
+/// public `getX` (see `SourceOrderedMember::StaticDefaultAccessor`).
+pub(super) fn getter_owned(ir: &IrFile, index: u32) -> bool {
+    ir.companion_blocks.is_storage(index) && ir.has_jvm_default_static_getter(index)
+}
+
+/// Whether other classes write block property `index` through its class's compiler-default
+/// public `setX`; each accessor is decided on its own.
+pub(super) fn setter_owned(ir: &IrFile, index: u32) -> bool {
+    ir.companion_blocks.is_storage(index) && ir.has_jvm_default_static_setter(index)
 }
 
 /// Record class `c`'s block properties among its declared `@Metadata` properties.
@@ -73,8 +75,8 @@ pub(super) fn push_property_metadata(
                 visibility: property.visibility,
                 has_constant: property.has_constant,
                 is_const: property.is_const,
-                modifiers: Default::default(),
-                setter_visibility: property.visibility,
+                modifiers: property.modifiers,
+                setter_visibility: property.setter_visibility,
                 has_backing_field: storage.is_some(),
                 tparam: None,
                 receiver: None,

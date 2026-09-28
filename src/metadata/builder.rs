@@ -615,7 +615,9 @@ pub struct PropMeta {
     /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
     /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
     pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
-    pub getter: (String, String),
+    /// The accessors the facade declares, by JVM name and descriptor. A private property with
+    /// default accessors has none, and its `JvmPropertySignature` names neither.
+    pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore leaves `Property.setter_value_parameter`
@@ -641,10 +643,13 @@ pub struct PropMeta {
     /// every extension property have none, and kotlinc then omits the `JvmPropertySignature.field`
     /// entry entirely rather than recording an empty (derived) one.
     pub has_backing_field: bool,
-    /// Whether the getter is DECLARED rather than compiler-default. kotlinc records
-    /// `Property.getter_flags` (f7) = 70 — public·final·`isNotDefault` — for a declared getter and
-    /// omits the field for a default one.
-    pub has_declared_getter: bool,
+    /// How the accessors are declared. kotlinc writes an accessor's flags word (`getter_flags` f7,
+    /// `setter_flags` f8) only when it differs from the default one derived from the property: a
+    /// declared or delegated accessor sets `isNotDefault`.
+    pub modifiers: crate::ir::IrPropertyModifiers,
+    /// The setter's own visibility; one narrower than the property's (`internal set`,
+    /// `private set`) makes the setter's word non-default.
+    pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
 }
@@ -670,9 +675,9 @@ pub struct TypeAliasMeta {
     pub decl_order: usize,
 }
 
-pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
-    let mut p = Pb::new();
-    let vis: u64 = match alias.visibility {
+/// A declaration's visibility as the flag words' bits 1-3 hold it (before the shift).
+fn visibility_bits(visibility: crate::types::Visibility) -> u64 {
+    match visibility {
         crate::types::Visibility::Internal => 0,
         crate::types::Visibility::Private => 1,
         crate::types::Visibility::Protected => 2,
@@ -682,7 +687,12 @@ pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
                 "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
             )
         }
-    };
+    }
+}
+
+pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
+    let mut p = Pb::new();
+    let vis = visibility_bits(alias.visibility);
     if vis != 3 {
         p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
     }
@@ -724,6 +734,42 @@ pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
     p
 }
 
+/// A package property's accessor flag words (`getter_flags` f7, `setter_flags` f8), each `None`
+/// when it equals the default word the property implies: its visibility, final modality. A
+/// declared or delegated accessor sets `isNotDefault`, and a `private set` narrows the setter, so a
+/// private property's declared getter writes 66 and a public one's 70.
+struct AccessorWords {
+    getter: Option<u64>,
+    setter: Option<u64>,
+    setter_not_default: bool,
+}
+
+impl AccessorWords {
+    fn of(m: &PropMeta) -> Self {
+        let default_word = visibility_bits(m.visibility) << 1;
+        let not_default = |declared: bool| {
+            if declared {
+                property_flags::ACCESSOR_IS_NOT_DEFAULT
+            } else {
+                0
+            }
+        };
+        let getter =
+            default_word | not_default(m.modifiers.declared_getter || m.modifiers.delegated);
+        let narrowed = m.setter_visibility != m.visibility;
+        let setter_not_default =
+            m.is_var && (m.modifiers.declared_setter || m.modifiers.delegated || narrowed);
+        let setter = m
+            .is_var
+            .then(|| (visibility_bits(m.setter_visibility) << 1) | not_default(setter_not_default));
+        Self {
+            getter: (getter != default_word).then_some(getter),
+            setter: setter.filter(|&word| word != default_word),
+            setter_not_default,
+        }
+    }
+}
+
 /// Package properties use the same schema word as class properties. A `var` adds mutability and a
 /// setter; a `val` gains `HAS_CONSTANT` only when its initializer is a compile-time constant
 /// (kotlinc: `val counter = 7` yes; a constructor call or the `null` literal no).
@@ -740,7 +786,6 @@ fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
 
 fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
-    p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     assert_eq!(
         m.semantic_type_params.len(),
         m.type_params.len(),
@@ -750,6 +795,27 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         m.type_params.iter().map(String::as_str),
         m.semantic_type_params.iter().map(String::as_str),
     );
+    let words = AccessorWords::of(m);
+    // kotlinc records the setter's value parameter exactly when the setter is not the default one,
+    // and serializes it before the property's own name, so its strings come first in `d2`. An
+    // unnamed parameter is `value` on a source-declared setter (`private set`) and `<set-?>` on a
+    // delegated property's generated one.
+    let setter_parameter = words.setter_not_default.then(|| {
+        let name = m
+            .setter_parameter_name
+            .as_deref()
+            .unwrap_or(if m.modifiers.delegated {
+                "<set-?>"
+            } else {
+                "value"
+            });
+        let mut parameter = Pb::new();
+        parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+        let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
+        parameter.field_message(3, &ty); // ValueParameter.type = 3
+        parameter
+    });
+    p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let ret = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
     p.field_message(3, &ret); // Property.return_type = 3
     for (id, name) in m.type_params.iter().enumerate() {
@@ -777,11 +843,8 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
-    if let Some(name) = &m.setter_parameter_name {
-        let mut parameter = Pb::new();
-        parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-        parameter.field_message(3, &ret); // ValueParameter.type = 3
-        p.field_message(6, &parameter); // Property.setter_value_parameter = 6
+    if let Some(parameter) = &setter_parameter {
+        p.field_message(6, parameter); // Property.setter_value_parameter = 6
     }
     for (name, kind, ty) in &m.context_params {
         if *kind == crate::types::ContextParameterKind::LegacyReceiver {
@@ -800,17 +863,7 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         parameter.field_message(3, &ty); // ValueParameter.type = 3
         p.repeated_message(17, &parameter); // Property.context_parameter = 17
     }
-    let vis: u64 = match m.visibility {
-        crate::types::Visibility::Internal => 0,
-        crate::types::Visibility::Private => 1,
-        crate::types::Visibility::Protected => 2,
-        crate::types::Visibility::Public => 3,
-        crate::types::Visibility::PackagePrivate => {
-            unreachable!(
-                "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
-            )
-        }
-    };
+    let vis = visibility_bits(m.visibility);
     let base = if m.is_var {
         PKG_VAR_FLAGS
     } else {
@@ -834,10 +887,11 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     if pflags != property_flags::DEFAULT {
         p.field_varint(11, pflags); // Property.flags = 11
     }
-    // Property.getter_flags = 7 — emitted only for a DECLARED getter (`isNotDefault`), where it
-    // reads 70 = public·final·isNotDefault. A compiler-default getter omits the field.
-    if m.has_declared_getter {
-        p.field_varint(7, property_flags::DECLARED_ACCESSOR);
+    if let Some(getter_flags) = words.getter {
+        p.field_varint(7, getter_flags); // Property.getter_flags = 7
+    }
+    if let Some(setter_flags) = words.setter {
+        p.field_varint(8, setter_flags); // Property.setter_flags = 8
     }
     let mut jvm = Pb::new();
     // `field` (empty → derived) only when a backing field EXISTS: a computed or extension property
@@ -848,8 +902,10 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     if !m.is_const {
-        let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
-        jvm.field_message(3, &getter);
+        if let Some((gn, gd)) = &m.getter {
+            let getter = jvm_method_sig(st, gn, gd);
+            jvm.field_message(3, &getter);
+        }
         if let Some((sn, sd)) = &m.setter {
             let setter = jvm_method_sig(st, sn, sd);
             jvm.field_message(4, &setter);
@@ -1022,13 +1078,14 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: None,
                 context_params: Vec::new(),
-                getter: ("getAnswer".into(), "()I".into()),
+                getter: Some(("getAnswer".into(), "()I".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
                 has_constant,
                 has_backing_field: true,
-                has_declared_getter: false,
+                modifiers: crate::ir::IrPropertyModifiers::default(),
+                setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 decl_order: 0,
             }
@@ -1070,15 +1127,19 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: Some(Ty::String),
                 context_params: Vec::new(),
-                getter: (
+                getter: Some((
                     "getDoubled".into(),
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
-                ),
+                )),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: false,
-                has_declared_getter: true,
+                modifiers: crate::ir::IrPropertyModifiers {
+                    declared_getter: true,
+                    ..Default::default()
+                },
+                setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 has_constant: false,
                 decl_order: 0,
@@ -1126,12 +1187,16 @@ mod tests {
                     crate::types::ContextParameterKind::LegacyReceiver,
                     Ty::Int,
                 )],
-                getter: ("getAnswer".into(), "(I)I".into()),
+                getter: Some(("getAnswer".into(), "(I)I".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: false,
-                has_declared_getter: true,
+                modifiers: crate::ir::IrPropertyModifiers {
+                    declared_getter: true,
+                    ..Default::default()
+                },
+                setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 has_constant: false,
                 decl_order: 0,
@@ -1181,12 +1246,13 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 receiver: None,
                 context_params: Vec::new(),
-                getter: ("getRef".into(), "()Lkotlin/reflect/KProperty0;".into()),
+                getter: Some(("getRef".into(), "()Lkotlin/reflect/KProperty0;".into())),
                 setter: None,
                 setter_parameter_name: None,
                 is_const: false,
                 has_backing_field: true,
-                has_declared_getter: false,
+                modifiers: crate::ir::IrPropertyModifiers::default(),
+                setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 has_constant: false,
                 decl_order: 0,
@@ -1224,13 +1290,18 @@ mod tests {
                 type_param_bounds: vec![Vec::new()],
                 receiver: Some(receiver),
                 context_params: Vec::new(),
-                getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
+                getter: Some(("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into())),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 setter_parameter_name: Some("replacement".into()),
                 is_const: false,
                 has_constant: false,
                 has_backing_field: false,
-                has_declared_getter: true,
+                modifiers: crate::ir::IrPropertyModifiers {
+                    declared_getter: true,
+                    declared_setter: true,
+                    ..Default::default()
+                },
+                setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 decl_order: 0,
             }],

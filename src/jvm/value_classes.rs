@@ -265,7 +265,7 @@ pub(crate) fn lower_value_classes(
     // only the top-level one lives on the file facade kotlinc erases, and holding both under one
     // rule is what named a `getTopLevel()LZ;` no declaration had.
     for property in &mut ir.statics {
-        if !property.is_facade_owned() || property.custom_accessor {
+        if !property.is_facade_owned() || property.accessors.any_declared() {
             continue;
         }
         // Derived from the erasure that actually happens, never from stripping nullability. `erase`
@@ -3943,7 +3943,7 @@ pub(crate) fn lower_value_classes(
         // `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left unmangled.
         // (The getter keeps its plain name: a value-class RESULT alone contributes no hash inside a
         // file class.)
-        if property.is_var && property.is_facade_owned() && !property.custom_accessor {
+        if property.is_var && property.is_facade_owned() && !property.accessors.any_declared() {
             property.setter_jvm_name = Some(vc_mangle(
                 &crate::names::property_setter_name(&property.name),
                 std::slice::from_ref(&declared),
