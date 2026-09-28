@@ -686,6 +686,8 @@ fn add_forwarder(
     ir.classes[class as usize].methods.push(function);
     // A delegated member is an overridable override, whatever the delegating class's modality.
     ir.open_methods.insert(function);
+    // kotlinc's forwarder has no source line, yet it names its receiver and parameters.
+    ir.fn_debug_locals.insert(function);
     function
 }
 

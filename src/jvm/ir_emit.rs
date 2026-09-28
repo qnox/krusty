@@ -2712,11 +2712,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     };
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
-    // prefix's fields (the outer instance, lexical captures) are the compiler's own: kotlinc
-    // annotates no synthetic declaration.
-    let prefix = c.constructor_prefix_count as usize;
+    // prefix's fields and other compiler-generated storage are not annotated.
     if !c.is_interface {
-        for f in c.fields.iter().skip(prefix) {
+        for (index, f) in c.fields.iter().enumerate() {
+            if !field_visibility::publishes_field_nullability(c, index) {
+                continue;
+            }
             if let Some(a) = ann(&f.name, f.ty) {
                 cw.set_field_nullability(&instance_field_jvm_name(ir, c, f), a);
             }
@@ -4929,9 +4930,7 @@ fn emit_class(
             // field's TYPE PARAMETER (and that parameter's bound) rather than the erased descriptor —
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
-            // The constructor prefix's fields (the outer instance, lexical captures) are the
-            // compiler's own, and kotlinc annotates no synthetic declaration.
-            let field_ann = (field_index >= c.constructor_prefix_count as usize)
+            let field_ann = field_visibility::publishes_field_nullability(c, field_index)
                 .then(|| nullability_annotation(field_nullability_kind(ir, &fq_name, name, *ty)))
                 .flatten();
             cw.add_field_late_sig(
