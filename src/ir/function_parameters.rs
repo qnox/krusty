@@ -68,6 +68,8 @@ pub enum IrGeneratedParameterRole {
     },
     Continuation,
     HolderReceiver,
+    /// The enclosing instance an inner class's constructor takes first.
+    OuterInstance,
     ValueClassCarrier,
     ValueClassEqualsOperand {
         ordinal: u8,
