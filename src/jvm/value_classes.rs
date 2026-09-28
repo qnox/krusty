@@ -4502,13 +4502,11 @@ fn repr(
             field_getters,
             *v,
         ),
-        // A `when`/safe-call selects one of its branch values (`s?.foo()` → `when { s!=null -> foo(s);
-        // else -> null }`): its representation is a value-producing branch's — the FIRST branch that is a
-        // value class, so a boxed value-class result flowing out of a `?.` is recognized (the `null`
-        // default branch is `NotVc` and skipped).
-        IrExpr::When { branches } => branches
-            .iter()
-            .map(|(_, v)| {
+        // A `when`/safe-call or a `try` selects one of its branch values (`s?.foo()` → `when {
+        // s!=null -> foo(s); else -> null }`): its representation is the FIRST value-class branch's,
+        // so a boxed result out of a `?.` is recognized and a diverging `try` body is skipped.
+        IrExpr::When { .. } | IrExpr::Try { .. } => crate::ir::selected_values(&exprs[id as usize])
+            .map(|v| {
                 repr(
                     exprs,
                     rets,
@@ -4518,7 +4516,7 @@ fn repr(
                     types,
                     physical,
                     field_getters,
-                    *v,
+                    v,
                 )
             })
             .find(|r| !matches!(r, Repr::NotVc))

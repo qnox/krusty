@@ -1359,6 +1359,8 @@ mod value_class_secondary_constructor_default_e2e;
 mod value_class_secondary_constructor_return_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
+#[path = "value_class_try_value_e2e.rs"]
+mod value_class_try_value_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
