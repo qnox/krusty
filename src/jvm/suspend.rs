@@ -4546,7 +4546,7 @@ fn typed_suspension_operands(
         } => {
             let c = &ir.classes[*class as usize];
             let f = &ir.functions[*c.methods.get(*index as usize)? as usize];
-            out.push((*receiver, Ty::obj(&c.fq_name())));
+            out.push((*receiver, Ty::obj_name(c.fq_name)));
             let args: Vec<ExprId> = args.iter().copied().collect::<Option<Vec<_>>>()?;
             zip(&args, &f.params, &mut out)?;
         }

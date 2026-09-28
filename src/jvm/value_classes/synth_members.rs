@@ -38,9 +38,8 @@ pub(super) fn synth_value_members(
     constructor_default: Option<ExprId>,
     realized: &mut SynthesizedValueMembers,
 ) -> bool {
-    let internal = ir.classes[class_id as usize].fq_name();
+    let internal_name = ir.classes[class_id as usize].fq_name;
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
-    let internal_name = type_name(&internal);
     let u_ir = under.get(&internal_name).copied().unwrap_or(Ty::Error);
     // The FULLY-ERASED underlying: a NESTED value class erases through its chain to the first type that
     // stops unboxing — `NZ2(NZ1)` where `NZ1(Z?)` erases to a BOXED `Z` (`LZ;`), not `LNZ1;`. The static
@@ -50,7 +49,7 @@ pub(super) fn synth_value_members(
     // The underlying JVM descriptor (`Ljava/lang/String;`, `I`, `LZ;`, …) — the argument type of the
     // static `-impl` members, which the instance methods delegate to (matching kotlinc's value-class shape).
     let udesc = type_descriptor(ir_ty_to_jvm(&eu));
-    let x_ir = Ty::obj(&internal);
+    let x_ir = Ty::obj_name(internal_name);
     let bool_ir = Ty::Boolean;
     let int_ir = Ty::Int;
     let str_ir = Ty::String;
@@ -364,7 +363,7 @@ pub(super) fn synth_value_members(
                 callee: Callee::Static {
                     owner: internal_name,
                     name: "box-impl".to_string(),
-                    descriptor: format!("({udesc})L{internal};"),
+                    descriptor: format!("({udesc})L{};", internal_name.render()),
                     inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
@@ -408,11 +407,7 @@ pub(super) fn synth_value_members(
     // and the `-impl` statics are all `open` (non-`final`).
     // toString-impl(U v): "X(field=" + v + ")" ; toString(): return toString-impl(this.field)
     {
-        let simple = internal
-            .rsplit('/')
-            .next()
-            .unwrap_or(&internal)
-            .replace('$', ".");
+        let simple = internal_name.segment_ref().replace('$', ".");
         if !custom_to_string {
             let v = ir.add_expr(IrExpr::GetValue(0));
             // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
