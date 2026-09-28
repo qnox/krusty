@@ -63,6 +63,7 @@ mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
+mod context_receiver_priority;
 mod context_sensitive_resolution;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
@@ -15090,84 +15091,6 @@ impl<'a> Checker<'a> {
         Some(self.demanded_member_read(t, rt, name))
     }
 
-    /// Probe one already-ordered implicit receiver for a bare property name. Scope-tower ordering
-    /// stays at the caller; this operation only commits the selected declaration and receiver-local
-    /// constant/accessor handoff.
-    fn read_implicit_receiver_name(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        name: &str,
-        receiver: ImplicitReceiver,
-    ) -> Option<Ty> {
-        // A member read through an IMPLICIT receiver — a companion's property named unqualified
-        // from the class body or a nested class — resolves straight out of the member records, so
-        // it reaches neither the bare-name nor the explicit-receiver seam. An undetermined member
-        // read here would otherwise be taken as the answer.
-        if let Some(resolved) = self
-            .demand_member
-            .filter(|_| {
-                self.lookup_prop_name(receiver.ty, name)
-                    .is_some_and(|property| property.0 == Ty::Pending)
-            })
-            .and_then(|demand| demand(receiver.ty, name, &[]))
-        {
-            return Some(self.set(expression, resolved));
-        }
-        if let Ty::Obj(_, _) = receiver.ty {
-            if self.lookup_prop_name(receiver.ty, name).is_some() {
-                match self.select_property_read(scope, receiver.ty, name) {
-                    Ok(Some(selection)) => {
-                        if selection.access().is_some_and(|(visibility, owner)| {
-                            !self.receiver_property_accessible(visibility, owner, receiver.ty)
-                        }) {
-                            return None;
-                        }
-                        return Some(self.record_property_read(scope, Some(expression), selection));
-                    }
-                    Err(PropertyReadAmbiguity::MissingContext) => {
-                        self.diags.error(
-                            self.span(expression),
-                            format!("No context argument for '{name}' found."),
-                        );
-                        return Some(Ty::Error);
-                    }
-                    Err(_) => {
-                        self.diags.error(
-                            self.span(expression),
-                            format!("overload resolution ambiguity for member '{name}'"),
-                        );
-                        return Some(Ty::Error);
-                    }
-                    Ok(None) => {}
-                }
-            }
-        }
-        // A provider may expose a compile-time constant without an accessor candidate (primitive
-        // companion constants are the important case). Consult that payload only after an ordinary
-        // property declaration had its chance to resolve and pass accessibility checks. Otherwise a
-        // source `const val` could bypass its private/protected property declaration merely because
-        // the same declaration also published a foldable value.
-        if let Some(owner) = receiver.ty.non_null().obj_internal() {
-            if let Some(constant) = self
-                .fed_source()
-                .classifier(owner)
-                .and_then(|classifier| classifier.constants.get(name).cloned())
-            {
-                let ty = constant.ty;
-                self.resolved_constants.insert(expression, constant);
-                return Some(ty);
-            }
-        }
-        self.try_member_read(
-            scope,
-            receiver.ty,
-            name,
-            self.span(expression),
-            Some(expression),
-        )
-    }
-
     fn record_member_call_with_slots(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -23464,6 +23387,17 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         implicit_rungs::ImplicitRung::Receiver(_) if receivers_closed => continue,
+                        // Context-parameter receivers follow top-level callables. Trying them here
+                        // would bind `foo()` inside `context(A) { }` to `A.foo` ahead of the
+                        // contextual top-level `foo`.
+                        implicit_rungs::ImplicitRung::Receiver(receiver)
+                            if context_receiver_priority::is_context_parameter_receiver(
+                                scope,
+                                receiver.identity,
+                            ) =>
+                        {
+                            continue;
+                        }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
                     };
                     let receiver = implicit_receiver.ty;
@@ -23715,7 +23649,20 @@ impl<'a> Checker<'a> {
                 // dependency. Applicability within the receiver tower is evaluated one implicit
                 // receiver at a time.
                 let mut retained_receiver_call_failure = None;
+                let top_level_owns_the_name = matches!(
+                    &top_level,
+                    Some(CallableCandidateSelection::Selected(_))
+                        | Some(CallableCandidateSelection::Ambiguous(_))
+                );
                 for implicit_receiver in self.implicit_receivers(scope) {
+                    if top_level_owns_the_name
+                        && context_receiver_priority::is_context_parameter_receiver(
+                            scope,
+                            implicit_receiver.identity,
+                        )
+                    {
+                        continue;
+                    }
                     if let Some(ret) = self.this_member_call_ret(
                         scope,
                         CallArgs {
@@ -23769,6 +23716,14 @@ impl<'a> Checker<'a> {
                 // opportunity above. A non-callable property contributes no call candidate and does
                 // not shadow a function at a later rung.
                 for implicit_receiver in self.implicit_receivers(scope) {
+                    if top_level_owns_the_name
+                        && context_receiver_priority::is_context_parameter_receiver(
+                            scope,
+                            implicit_receiver.identity,
+                        )
+                    {
+                        continue;
+                    }
                     let Ok(Some(selection)) =
                         self.select_property_read(scope, implicit_receiver.ty, &fname)
                     else {
@@ -66830,8 +66785,11 @@ impl<'a> Checker<'a> {
                         .and_then(|class| class.companion_object.as_ref().map(|(_, owner)| *owner))
                 });
                 let mut deferred_receivers = Vec::new();
+                let mut context_parameter_receivers = Vec::new();
                 let implicit_receivers = self.implicit_receivers(scope);
                 // A class's static scope directly follows its own receiver; see the call tower.
+                // Context-parameter receivers are held until after a top-level property: they are
+                // the tower group after package and top-level names.
                 for rung in self.implicit_rungs(scope) {
                     let implicit_receiver = match rung {
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
@@ -66846,6 +66804,13 @@ impl<'a> Checker<'a> {
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
                     };
+                    if context_receiver_priority::is_context_parameter_receiver(
+                        scope,
+                        implicit_receiver.identity,
+                    ) {
+                        context_parameter_receivers.push(implicit_receiver);
+                        continue;
+                    }
                     if !implicit_receiver.current
                         && implicit_receiver.ty.obj_internal() == deferred_companion
                     {
@@ -66962,18 +66927,34 @@ impl<'a> Checker<'a> {
                             Ty::Error
                         }
                         TopLevelPropertySelection::None => {
-                            match self.demand_name.and_then(|demand| demand(&n)) {
-                                Some(ty) => ty,
-                                None => {
-                                    self.diags.error(
-                                        self.span(e),
-                                        format!("unresolved reference '{n}'."),
-                                    );
-                                    Ty::Error
+                            if let Some(ty) = self.read_context_parameter_receiver(
+                                scope,
+                                e,
+                                &n,
+                                &context_parameter_receivers,
+                            ) {
+                                ty
+                            } else {
+                                match self.demand_name.and_then(|demand| demand(&n)) {
+                                    Some(ty) => ty,
+                                    None => {
+                                        self.diags.error(
+                                            self.span(e),
+                                            format!("unresolved reference '{n}'."),
+                                        );
+                                        Ty::Error
+                                    }
                                 }
                             }
                         }
                     }
+                } else if let Some(ty) = self.read_context_parameter_receiver(
+                    scope,
+                    e,
+                    &n,
+                    &context_parameter_receivers,
+                ) {
+                    ty
                 } else if let Some((receiver, declared_name, _)) =
                     self.imported_singleton_member(&n)
                 {
@@ -72642,7 +72623,15 @@ impl<'a> Checker<'a> {
                     .with_lambda_label(receiver_label.map(str::to_string))
                     .with_current_receiver_context(current_context);
                 let scope = &lambda_scope;
-                for receiver in implicit_types.iter().rev() {
+                // Only an extension receiver's properties are lexical dispatch bindings. A
+                // context-parameter receiver's members follow top-level names, so installing them
+                // here would hide `context(a: A) val b` behind `A.b`.
+                let context_receiver_properties =
+                    implicit_types.len() - usize::from(extension_receiver.is_some());
+                for (index, receiver) in implicit_types.iter().enumerate().rev() {
+                    if index < context_receiver_properties {
+                        continue;
+                    }
                     if let Some(internal) = receiver.obj_internal() {
                         for property in self.scoped_properties(scope, internal) {
                             if self.lookup(scope, &property.name).is_none() {

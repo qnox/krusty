@@ -2193,6 +2193,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   known captured-`Ref` initialization residue. Test: `tests/local_shadows_receiver_member_e2e.rs`
   (a local, parameter, materialized local-class capture, and outer property, each pinned by the
   value the box run reads).
+- **A top-level callable beats a context-parameter receiver's member.** kotlinc's tower puts
+  `ImplicitOrNonLocal` before `ContextReceiverGroup`, and a dispatch or extension receiver stays in
+  `Member`, ahead of both. Inside `context(A) { foo(); b }`, unqualified `foo` and `b` are the
+  contextual top-level declarations, while `A().foo()` and `A().b` stay the class members.
+  `with(Scope) { tag() }` still binds the member. A context-receiver member such as `substring` on
+  `context(String) () -> String` is used only when no top-level candidate applies. Test:
+  `tests/context_parameters_e2e.rs::class_member_and_top_level_with_context`.
 - **The signature evaluator's acyclicity guard clears on every exit, not only on success.** The
   solver guards against a cyclic compact graph by marking each expression while it is being
   evaluated. Inside the evaluation arms every `?` returned early WITHOUT unmarking, so a node that
