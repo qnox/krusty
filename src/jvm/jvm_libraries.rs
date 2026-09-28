@@ -2254,7 +2254,6 @@ impl JvmLibraries {
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
-                    let internal = internal_name.render();
                     ci.fields.iter().find_map(|f| {
                         // A Kotlin companion-object instance field is always `public static final`, typed as the
                         // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
@@ -2265,9 +2264,17 @@ impl JvmLibraries {
                         if !public_static_final {
                             return None;
                         }
-                        let nested = format!("{internal}${}", f.name);
-                        (f.descriptor == format!("L{nested};"))
-                            .then(|| (f.name.clone(), type_name(&nested)))
+                        super::names::descriptor_is_nested_class(
+                            &f.descriptor,
+                            internal_name,
+                            &f.name,
+                        )
+                        .then(|| {
+                            (
+                                f.name.clone(),
+                                crate::types::type_name_nested_child(internal_name, &f.name),
+                            )
+                        })
                     })
                 })
                 .flatten();
