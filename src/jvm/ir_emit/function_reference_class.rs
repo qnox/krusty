@@ -2,6 +2,7 @@
 //! superclass, constructor, `invoke` dispatch and singleton instance.
 
 use super::*;
+use crate::jvm::names::mapped_builtin_virtual_name;
 
 /// Emit a synthesized function-reference subclass (`<Owner>$ref$N extends FunctionReferenceImpl
 /// implements Function<arity>`): an UNBOUND ref gets a `public static final INSTANCE` + a no-arg ctor

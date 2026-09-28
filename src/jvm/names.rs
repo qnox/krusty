@@ -213,7 +213,7 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &
 
 /// Identity form of [`mapped_builtin_virtual_name`]. The owner is already interned, so the rename
 /// table does not render it or look the spelling up again.
-pub fn mapped_builtin_virtual_name_of<'a>(
+pub(super) fn mapped_builtin_virtual_name_of<'a>(
     owner: TypeName,
     name: &'a str,
     descriptor: &str,
