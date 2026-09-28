@@ -972,6 +972,7 @@ fn fn_info(
             infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
             is_final: sig.is_final(),
+            inherited_by_delegation: false,
             return_value_status: None,
         },
         visibility: sig.visibility,

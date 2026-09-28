@@ -3296,7 +3296,14 @@ impl Classpath {
                             .with_is_interface(is_iface)
                             .with_is_operator(m.is_operator)
                             .with_is_infix(m.is_infix)
-                            .with_is_abstract(m.is_abstract),
+                            .with_is_abstract(m.is_abstract)
+                            .with_inherited_by_delegation(
+                                super::jvm_libraries::inherited_by_delegation(
+                                    m.is_abstract,
+                                    true,
+                                    &m.annotations,
+                                ),
+                            ),
                         inline: crate::libraries::InlineKind::None,
                         reified: false,
                         inline_body_plan: None,

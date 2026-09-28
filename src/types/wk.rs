@@ -23,6 +23,7 @@ names! {
     kotlin_ranges_package => "kotlin/ranges",
     kotlin_internal_package => "kotlin/internal",
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
+    platform_dependent => "kotlin/internal/PlatformDependent",
     continuation => "kotlin/coroutines/Continuation",
     any => "kotlin/Any",
     java_object => "java/lang/Object",

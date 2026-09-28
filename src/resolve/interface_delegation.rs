@@ -754,6 +754,9 @@ fn delegation_members(
                 continue;
             }
             let function = effective_function(source, index, interface, candidates)?;
+            if function.flags.inherited_by_delegation {
+                continue;
+            }
             let call = function_call(source, index, interface, function);
             let overridden = delegated_function_declaration(index, function)?;
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
