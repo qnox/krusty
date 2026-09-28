@@ -26,16 +26,13 @@ enum InlineDependency<T> {
     Unavailable,
 }
 
-fn inline_body_descriptor(callable: &LibraryCallable) -> Option<String> {
-    if !callable.suspend {
-        return Some(callable.descriptor.clone());
-    }
-    let close = callable.descriptor.rfind(')')?;
+fn suspend_body_descriptor(descriptor: &str) -> Option<String> {
+    let close = descriptor.rfind(')')?;
     Some(format!(
         "({}{}){}",
-        &callable.descriptor[1..close],
+        &descriptor[1..close],
         CONTINUATION_PARAM_DESCRIPTOR,
-        &callable.descriptor[close + 1..]
+        &descriptor[close + 1..]
     ))
 }
 
@@ -713,10 +710,16 @@ impl JvmLibraries {
         if !callable.inline.can_inline() {
             return None;
         }
-        let body_descriptor = inline_body_descriptor(callable)?;
-        // Every candidate overload the provider builds computes a plan, so the decode below is
-        // memoized per declaration. The key carries every physical input read by the decoder.
-        let parameter_slots = callable_parameter_slots(&callable.physical_params);
+        // A non-suspend body is already described by the callable. Only a suspend body grows a
+        // continuation parameter, and parameter slots are the widths of the physical parameters, so
+        // a cache hit builds neither.
+        let suspend_descriptor;
+        let body_descriptor = if callable.suspend {
+            suspend_descriptor = suspend_body_descriptor(&callable.descriptor)?;
+            suspend_descriptor.as_str()
+        } else {
+            callable.descriptor.as_str()
+        };
         let generic_signature = callable
             .generic_sig
             .as_deref()
@@ -724,8 +727,7 @@ impl JvmLibraries {
         let cache_input = crate::jvm::classpath::InlinePlanCacheInput {
             owner: callable.owner,
             name: &callable.name,
-            body_descriptor: &body_descriptor,
-            parameter_slots: &parameter_slots,
+            body_descriptor,
             physical_parameters: &callable.physical_params,
             context_count: callable.context_count,
             source_receiver: callable.source_receiver,
@@ -738,10 +740,11 @@ impl JvmLibraries {
         if let Some(plan) = self.cp.cached_inline_plan(cache_input) {
             return plan.map(|boxed| *boxed);
         }
+        let parameter_slots = callable_parameter_slots(&callable.physical_params);
         let mut decode_unavailable = false;
         let plan = self.inline_body_plan_uncached(
             callable,
-            &body_descriptor,
+            body_descriptor,
             &parameter_slots,
             &mut decode_unavailable,
         );
@@ -1320,7 +1323,14 @@ mod tests {
         );
         assert_eq!(cleanup.arguments.as_slice(), [InlineBodyValue::Cause]);
         assert!(cleanup.callable.external_identity.is_some());
-        let descriptor = inline_body_descriptor(callable).expect("use body descriptor");
+        let suspend_descriptor;
+        let descriptor = if callable.suspend {
+            suspend_descriptor =
+                suspend_body_descriptor(&callable.descriptor).expect("use body descriptor");
+            suspend_descriptor.as_str()
+        } else {
+            callable.descriptor.as_str()
+        };
         let body = libraries
             .cp
             .method_code_name(callable.owner, "use$$forInline", &descriptor)
