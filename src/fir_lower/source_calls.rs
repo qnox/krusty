@@ -1591,6 +1591,7 @@ impl BodyLowering<'_> {
                         descriptor: String::new(),
                         params: Some((declaration_parameter_types, declaration_result)),
                         interface: flags.has(crate::fir::DeclarationFlags::INTERFACE),
+                        module_target: Some(target),
                     },
                     dispatch_receiver: Some(receiver),
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,

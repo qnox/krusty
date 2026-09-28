@@ -508,6 +508,7 @@ mod tests {
                 descriptor: "(Ljava/lang/String;I)V".into(),
                 params: None,
                 interface: false,
+                module_target: None,
             },
             dispatch_receiver: Some(receiver),
             args: vec![],

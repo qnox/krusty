@@ -2,8 +2,8 @@
 //! kotlinc's signature mapper makes it: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is
 //! `echo(I)Ljava/lang/Integer;`, and `invoke` of a `() -> Boolean` object is
 //! `invoke()Ljava/lang/Boolean;`. The body boxes its result once, a call through the class
-//! (a `super` call included) unboxes it, and the erased bridge returns the box as it is. Only a
-//! class declared in executable code takes it yet, because every caller is in its file.
+//! (a `super` call included) unboxes it, and the erased bridge returns the box as it is.
+//! `module_override_boxed_result_e2e.rs` covers a public class and its callers in other files.
 
 use super::common;
 

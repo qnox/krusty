@@ -46,6 +46,8 @@ pub(crate) struct BackendPassFacts {
     unit_result_tail_forwards: crate::jvm::suspend::UnitResultTailForwards,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
+    /// The overrides whose primitive result is realized as its wrapper.
+    override_results: crate::jvm::override_results::OverrideResults,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -168,8 +170,8 @@ fn run_backend_passes_after_plugins(
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
     // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
-    let boxed_results = crate::jvm::override_results::box_primitive_override_results(ir);
-    crate::jvm::bridges::derive_bridges(ir, classpath, &boxed_results)?;
+    facts.override_results = crate::jvm::override_results::box_primitive_override_results(ir);
+    crate::jvm::bridges::derive_bridges(ir, classpath, &facts.override_results)?;
     apply_collection_bridge_barriers(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
@@ -181,6 +183,7 @@ fn run_backend_passes_after_plugins(
         module_value_classes,
         module_readable_value_classes,
         &mut facts.bridge_adaptations,
+        &mut facts.override_results,
         &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
@@ -219,7 +222,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
-    crate::jvm::lifted_names::realize(ir);
+    crate::jvm::lifted_names::realize(ir, &facts.override_results);
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
@@ -849,6 +852,7 @@ impl JvmBackend {
             emit_time_machines: &pass_facts.emit_time_machines,
             unit_result_tail_forwards: &pass_facts.unit_result_tail_forwards,
             bridge_adaptations: &pass_facts.bridge_adaptations,
+            override_results: &pass_facts.override_results,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,

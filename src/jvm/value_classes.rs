@@ -38,6 +38,7 @@ mod result_tail_boxing;
 mod return_unboxing;
 mod substitution_coercions;
 mod synth_members;
+mod unboxing_rewrites;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -54,6 +55,7 @@ pub(crate) use representation::{
 };
 use result_tail_boxing::box_vc_tail;
 use std::collections::{HashMap, HashSet};
+use unboxing_rewrites::{narrow_wrap, unbox_wrap, unbox_wrap_nullable};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -140,6 +142,7 @@ pub(crate) fn lower_value_classes(
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
     module_readable_value_classes: &std::collections::HashSet<TypeName>,
     bridge_adaptations: &mut crate::jvm::bridge_adaptations::BridgeAdaptations,
+    override_results: &mut crate::jvm::override_results::OverrideResults,
     // What the property-reference pass already selected for each synthesized reference class.
     // Realizing those accessors over a carrier is the one thing left to decide about them, and it
     // is decided from these recorded facts rather than from the reference's spelling.
@@ -1172,6 +1175,7 @@ pub(crate) fn lower_value_classes(
                     descriptor: format!("(){}", desc(&u)),
                     params: None,
                     interface: false,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(get),
                 args: vec![],
@@ -1445,8 +1449,11 @@ pub(crate) fn lower_value_classes(
         }
     }
     function_references::realize(ir, &callable_under, &renamed_functions);
-    let interface_entries =
-        interface_entries::materialize(ir, &lowered_value_members, |ir: &IrFile, member: u32| {
+    let interface_entries = interface_entries::materialize(
+        ir,
+        &lowered_value_members,
+        override_results,
+        |ir: &IrFile, member: u32| {
             let (name, params, ret) = ir
                 .vc_declared_sigs
                 .get(&member)
@@ -1458,7 +1465,8 @@ pub(crate) fn lower_value_classes(
                 &callable_under,
                 suspend_fids.contains(&member),
             )
-        });
+        },
+    );
 
     // Exact user value-class members have now been rewritten to static carrier functions. Snapshot
     // those physical signatures before borrowing the class bridge lists; a bridge keeps the stable
@@ -1467,9 +1475,10 @@ pub(crate) fn lower_value_classes(
         .iter()
         .map(|&function| {
             let target = &ir.functions[function as usize];
+            let result = override_results.physical_result(ir, function);
             (
                 function,
-                (target.name.clone(), target.params.clone(), target.ret),
+                (target.name.clone(), target.params.clone(), result),
             )
         })
         .collect::<HashMap<_, _>>();
@@ -2007,6 +2016,8 @@ pub(crate) fn lower_value_classes(
                 extension_receiver: bool,
                 /// The selected `-impl` in this file; a sibling file's has none here.
                 function: Option<u32>,
+                /// The sibling file's declaration, when the call selected one.
+                module_target: Option<crate::fir::CallableId>,
             },
             /// Same-value-class non-null `==`/`!=` → `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's ABI).
             VcEq {
@@ -2258,6 +2269,7 @@ pub(crate) fn lower_value_classes(
                         owner,
                         name,
                         params,
+                        module_target,
                         ..
                     },
                 dispatch_receiver: Some(receiver),
@@ -2278,6 +2290,7 @@ pub(crate) fn lower_value_classes(
                                 args: args.iter().copied().map(Some).collect(),
                                 extension_receiver: ir.extension_receiver_fns.contains(&fid),
                                 function: Some(fid),
+                                module_target: None,
                             })
                     })
                 }
@@ -2299,6 +2312,7 @@ pub(crate) fn lower_value_classes(
                         args: args.iter().copied().map(Some).collect(),
                         extension_receiver: false,
                         function: None,
+                        module_target: *module_target,
                     }
                 }),
             },
@@ -2425,6 +2439,7 @@ pub(crate) fn lower_value_classes(
                     args: args.clone(),
                     extension_receiver: ir.extension_receiver_fns.contains(&fid),
                     function: Some(fid),
+                    module_target: None,
                 })
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -2511,6 +2526,7 @@ pub(crate) fn lower_value_classes(
                 args,
                 extension_receiver,
                 function,
+                module_target,
             }) => {
                 let default_boxed_parameters = function
                     .and_then(|function| ir.default_stub_boxed_params.get(&function))
@@ -2555,6 +2571,7 @@ pub(crate) fn lower_value_classes(
                             descriptor: format!("(){}", desc(&underlying)),
                             params: None,
                             interface: false,
+                            module_target: None,
                         },
                         dispatch_receiver: Some(receiver),
                         args: Vec::new(),
@@ -2592,6 +2609,17 @@ pub(crate) fn lower_value_classes(
                 }
                 if let Some(function) = function.filter(|_| !uses_default_stub) {
                     ir.jvm_member_targets.insert(id, function);
+                }
+                // The `-impl` of an override whose primitive result is boxed returns the wrapper.
+                let boxed_result = match (function, module_target) {
+                    (Some(function), _) => override_results
+                        .boxes(function)
+                        .then(|| ir.functions[function as usize].ret),
+                    (None, Some(callable)) => override_results.boxed_callable_result(ir, callable),
+                    (None, None) => None,
+                };
+                if let Some(primitive) = boxed_result.filter(|_| !uses_default_stub) {
+                    override_results.record_static_member_call(id, primitive);
                 }
                 let descriptor = if uses_default_stub {
                     name.push_str("$default");
@@ -4629,93 +4657,6 @@ fn repr(
     }
 }
 
-/// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
-fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_below_representation_wrapper(ir, id);
-    let cast = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg: new_id,
-        type_operand: boxed_value_ty(x),
-    });
-    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let d = desc(&u);
-    ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: x,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){d}"),
-            params: None,
-            interface: false,
-        },
-        dispatch_receiver: Some(cast),
-        args: vec![],
-    };
-    // `id` used to denote the erased reference call cloned above. It now denotes the result of
-    // `unbox-impl`, so its physical fact must change with the node instead of continuing to claim
-    // that the primitive carrier on the operand stack is `Object`.
-    ir.physical_types.insert(id, u);
-}
-
-/// Replace an erased-reference expression with an explicit cast to its known boxed value class.
-fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
-    let arg = clone_below_representation_wrapper(ir, id);
-    ir.exprs[id as usize] = IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg,
-        type_operand: boxed_value_ty(x),
-    };
-}
-
-fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig_id = clone_below_representation_wrapper(ir, id);
-    let boxed_ty = Ty::nullable(Ty::obj_name(x));
-    let var = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Variable {
-        index: slot,
-        ty: boxed_ty,
-        init: Some(orig_id),
-        named: false,
-    });
-    let get_for_test = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::GetValue(slot));
-    let null1 = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
-    let is_null = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::PrimitiveBinOp {
-        op: crate::ir::IrBinOp::Eq,
-        lhs: get_for_test,
-        rhs: null1,
-    });
-    let null2 = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
-    let get_for_unbox = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::GetValue(slot));
-    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let d = desc(&u);
-    let unboxed = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: x,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){d}"),
-            params: None,
-            interface: false,
-        },
-        dispatch_receiver: Some(get_for_unbox),
-        args: vec![],
-    });
-    let when = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::When {
-        branches: vec![(Some(is_null), null2), (None, unboxed)],
-    });
-    ir.null_guards.insert(when);
-    ir.exprs[id as usize] = IrExpr::Block {
-        stmts: vec![var],
-        value: Some(when),
-    };
-}
-
 /// Build a sole-property access `x.v`: identity (`Block` yielding the receiver) when the receiver is an
 /// unboxed value, or `receiver.unbox-impl()` when it is a boxed `X` (e.g. from a nullable-returning
 /// function).
@@ -4769,6 +4710,7 @@ fn prop_access(
                 descriptor: format!("(){d}"),
                 params: None,
                 interface: false,
+                module_target: None,
             },
             dispatch_receiver: Some(dispatch),
             args: vec![],

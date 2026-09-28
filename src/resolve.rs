@@ -11644,15 +11644,7 @@ pub enum ExprLowering {
     /// specialization. Checked FIR consumes this complete semantic method shape directly.
     SamConstructorReference {
         signature: Ty,
-        internal: TypeName,
-        method: String,
-        params: Vec<Ty>,
-        ret: Ty,
-        declared_params: Vec<Ty>,
-        declared_ret: Ty,
-        context_count: usize,
-        has_receiver: bool,
-        suspend: bool,
+        sam: Box<crate::symbol_resolver::SamSignature>,
     },
     /// A constructor reference selected from the classifier's shared declaration record. The exact
     /// declaration is independent of whether that record came from this module or a dependency;
@@ -11745,17 +11737,8 @@ pub enum ExprLowering {
     /// selected the classifier and validated the argument against its abstract method; lowering only
     /// realizes that exact interface target.
     SamConstructor {
-        internal: TypeName,
         result: Ty,
-        method: String,
-        descriptor: Option<String>,
-        params: Vec<Ty>,
-        ret: Ty,
-        declared_params: Vec<Ty>,
-        declared_ret: Ty,
-        context_count: usize,
-        has_receiver: bool,
-        suspend: bool,
+        sam: Box<crate::symbol_resolver::SamSignature>,
     },
     /// Lambda literal resolution facts: receiver-function closure receiver, if any, and whether capture
     /// collection must stay shallow because the lambda is spliced by an inline call.
@@ -61409,17 +61392,8 @@ impl<'a> Checker<'a> {
         self.expr_lowers.insert(
             call,
             ExprLowering::SamConstructor {
-                internal: selected.signature.internal,
                 result: selected.result,
-                method: selected.signature.method,
-                descriptor: selected.signature.descriptor,
-                params: selected.signature.params,
-                ret: selected.signature.ret,
-                declared_params: selected.signature.declared_params,
-                declared_ret: selected.signature.declared_ret,
-                context_count: selected.signature.context_count,
-                has_receiver: selected.signature.has_receiver,
-                suspend: selected.signature.suspend,
+                sam: Box::new(selected.signature),
             },
         );
         Some(self.set(call, selected.result))
@@ -62243,8 +62217,8 @@ impl<'a> Checker<'a> {
         } else if self.call_result_can_bind_expected(argument, expected)
             || matches!(
                 self.expr_lowers.get(&argument),
-                Some(ExprLowering::SamConstructor { internal, .. })
-                    if expected.non_null().obj_internal() == Some(*internal)
+                Some(ExprLowering::SamConstructor { sam, .. })
+                    if expected.non_null().obj_internal() == Some(sam.internal)
             )
         {
             // Synthetic convention calls (`plusAssign`, `set`, `contains`, …) do not own a source
@@ -70190,15 +70164,7 @@ impl<'a> Checker<'a> {
                 expression,
                 ExprLowering::SamConstructorReference {
                     signature,
-                    internal,
-                    method: sam.method,
-                    params: sam.params,
-                    ret: sam.ret,
-                    declared_params: sam.declared_params,
-                    declared_ret: sam.declared_ret,
-                    context_count: sam.context_count,
-                    has_receiver: sam.has_receiver,
-                    suspend: sam.suspend,
+                    sam: Box::new(sam),
                 },
             );
             return Some(signature);

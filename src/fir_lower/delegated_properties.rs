@@ -814,6 +814,7 @@ fn delegated_call(
                             interface: index.declaration_header(owner.declaration).is_some_and(
                                 |header| header.flags.has(DeclarationFlags::INTERFACE),
                             ),
+                            module_target: Some(*target),
                         },
                         dispatch_receiver: Some(receiver),
                         args: arguments,

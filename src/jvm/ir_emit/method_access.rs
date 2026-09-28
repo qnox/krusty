@@ -6,7 +6,7 @@ use crate::jvm::classfile::{
     ACC_VARARGS,
 };
 
-use super::{is_high_arity_function, IrExpr, LambdaMode, LambdaModes};
+use super::{IrExpr, LambdaMode, LambdaModes};
 
 /// The access word of the method emitted for `fid`. `holder_static` is an interface member's body
 /// realized as a static on its holder class, which takes the receiver as its first parameter.
@@ -128,10 +128,7 @@ fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) ->
         else {
             return false;
         };
-        *impl_fn == fid
-            && (sam.as_ref().is_some_and(|target| target.function_adapter)
-                || modes.for_sam(sam.is_some()) == LambdaMode::Class
-                || (sam.is_none() && is_high_arity_function(*arity)))
+        *impl_fn == fid && modes.for_lambda(sam.as_ref(), *arity) == LambdaMode::Class
     })
 }
 

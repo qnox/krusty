@@ -86,6 +86,9 @@ impl Emitter<'_> {
                 _ => {}
             }
         }
+        if self.emit_discarded_boxed_call(expression, node, code) {
+            return;
+        }
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);

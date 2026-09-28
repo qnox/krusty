@@ -500,6 +500,7 @@ pub(super) fn synth_value_members(
                     descriptor: format!("(){udesc}"),
                     params: None,
                     interface: false,
+                    module_target: None,
                 },
                 dispatch_receiver: Some(ocast),
                 args: vec![],

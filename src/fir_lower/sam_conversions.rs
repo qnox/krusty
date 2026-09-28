@@ -114,6 +114,7 @@ impl BodyLowering<'_> {
                     context_count: conversion.context_count,
                     has_receiver: conversion.has_receiver,
                     suspend: conversion.suspend,
+                    overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                     function_adapter,
                 }),
                 inline_body: None,

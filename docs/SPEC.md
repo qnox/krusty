@@ -7364,14 +7364,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/value_class_nullable_bridge_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/overrideNullableInlineClassWithNonNullNullableAnyNull`.
 - **A primitive override of a non-primitive result returns the wrapper.** kotlinc's signature
-  mapper boxes a function's primitive result when any declaration it overrides returns something
-  else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is `echo(I)Ljava/lang/Integer;`, and
-  `invoke` of a `() -> Boolean` object is `invoke()Ljava/lang/Boolean;`. Each return boxes, a call
-  through the class (a `super` call too) unboxes with `intValue()`, and the bridge to the erased
-  declaration returns the box without converting it. krusty takes this only for classes declared in
-  executable code (local classes, anonymous objects), whose callers and subclasses are all in the
-  same file; a member other files can see keeps its primitive result until they can see the
-  choice. Tests: `tests/local_override_boxed_result_e2e.rs`.
+  mapper boxes a function's primitive result when any declaration it overrides, at any depth,
+  returns something else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is
+  `echo(I)Ljava/lang/Integer;`, and `invoke` of a `() -> Boolean` object is
+  `invoke()Ljava/lang/Boolean;`. Each return boxes, a call through the class (a `super` call too)
+  unboxes with `intValue()` where its value is used as the primitive, keeps the wrapper where a
+  reference is wanted, and pops it when discarded; the bridge to the erased declaration returns the
+  box without converting it; a value class's member is realized as a static `-impl` that returns
+  the wrapper too, as does its instance entry. This holds wherever the class is declared. The
+  Kotlin result is unchanged: common IR keeps the primitive result, returns and calls, and the JVM backend records
+  the wrapper per function (`jvm::override_results`) for its descriptors, returns and calls. A
+  declaration's other files see the choice through the module record of the callable
+  (`IrModuleCallable::overrides_non_primitive_result`, derived from the override edges its
+  classifier published), so a caller, a `super` call or a subclass in another file names the
+  wrapper exactly as the declaring file does. A fun interface whose method returns the wrapper
+  (`fun interface Child : Base { override fun f(): Int }` over `fun f(): Any`) is converted
+  through a class of its own, never `invokedynamic`, as kotlinc does: the SAM selection publishes
+  the fact on the conversion (`FirSamConversion::overrides_non_primitive_result`, from the
+  overridden declarations of the selected method's slot), so a dependency's interface takes the
+  same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
+  `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
+  `tests/module_override_boxed_result_e2e.rs`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
