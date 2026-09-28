@@ -1,11 +1,16 @@
 //! Kotlinc class-file dumps for byte-equality checks.
 //!
 //! A check compares krusty against a dump recorded from kotlinc for this fixture, and runs kotlinc
-//! only when the dump is missing or its fingerprint no longer matches the fixture. The dump is
-//! keyed by the compiler's `build.txt` identity. A release (`2.4.20`, `2.4.20-release-482`) and an
-//! RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) are immutable published builds, so their
-//! dumps are safe to reuse. A snapshot, dev, or beta build is not: the same version string moves,
-//! and those compilers always compile for real and never read or write a dump.
+//! only when the dump is missing or its fingerprint no longer matches the fixture. A release
+//! (`2.4.20`, `2.4.20-release-482`) and an RC tag (`2.4.20-RC`, `2.4.20-RC2`) may read and write
+//! dumps. A snapshot, dev, or beta build never does: that version string is not an immutable
+//! artifact.
+//!
+//! What is stored is an open version range, not a copy per compiler build. `2.4.20..` covers that
+//! release and every newer one until a later recording disagrees, so adding a Kotlin version does
+//! not rewrite the dumps. RC tags of one release share `2.4.20-RC..` and do not share the release
+//! range. The bytes themselves are zlib blobs addressed by their content, one blob per distinct
+//! output, referenced from a small text index per test module.
 //!
 //! `KRUSTY_RECORD=1` ignores a stored dump and recompiles. Under CI a missing dump still compiles
 //! with kotlinc, and the result is not written: CI does not bless dumps nobody committed.
@@ -14,15 +19,22 @@
 //! into the test binary.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use krusty::kotlin_version::KotlinVersion;
+
 /// The published compiler identity, when this process's kotlinc is a release or an RC tag.
 ///
 /// `None` for a missing dist, a snapshot, a dev build, a beta, or any other non-release string.
-/// The value is `build.txt`'s first line, unchanged, so two builds of one version do not share
-/// dumps.
+/// The value is `build.txt`'s first line, unchanged. Dump lookup then folds that identity into an
+/// open version range: a release build and `release-N` of the same version share one range, and
+/// RC tags of that version share a separate one.
 pub fn published_compiler_id() -> Option<String> {
     static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
@@ -242,160 +254,23 @@ pub fn kotlinc_class_dumps(
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<Vec<Vec<u8>>> {
     let (module, case) = running_test();
-    let build_id = published_compiler_id();
-    cached_at(
-        CacheQuery {
+    let produced = recall(
+        Recall {
             root: &dumps_root(),
-            build_id: build_id.as_deref(),
             module: &module,
-            case: &case,
-            stem,
-            jvm_target,
-            variant,
+            key: &entry_key(&case, stem, jvm_target, variant, ""),
+            compiler: compiler_dump_version(),
             fingerprint,
-            classes,
             force: record_forced(),
             write: ci_allows_write(),
         },
+        |hit| classes.iter().all(|class| hit.contains_key(*class)),
         compile,
-    )
-}
-
-struct CacheQuery<'a> {
-    root: &'a Path,
-    build_id: Option<&'a str>,
-    module: &'a str,
-    case: &'a str,
-    stem: &'a str,
-    jvm_target: &'a str,
-    variant: &'a str,
-    fingerprint: u128,
-    classes: &'a [&'a str],
-    force: bool,
-    write: bool,
-}
-
-fn cached_at(
-    mut query: CacheQuery<'_>,
-    compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
-) -> Option<Vec<Vec<u8>>> {
-    query.write = query.write && query.build_id.is_some();
-    if query.build_id.is_some() && !query.force {
-        if let Some(hit) = load_all(&query) {
-            return Some(hit);
-        }
-    }
-    let produced = compile()?;
-    let owned = query
-        .classes
+    )?;
+    classes
         .iter()
         .map(|class| produced.get(*class).cloned())
-        .collect::<Option<Vec<_>>>()?;
-    if query.write {
-        for (class, bytes) in query.classes.iter().zip(&owned) {
-            write_dump(&query, class, bytes);
-        }
-    }
-    Some(owned)
-}
-
-fn load_all(query: &CacheQuery<'_>) -> Option<Vec<Vec<u8>>> {
-    let mut loaded = Vec::with_capacity(query.classes.len());
-    for class in query.classes {
-        loaded.push(read_dump(&class_path(query, class), query.fingerprint)?);
-    }
-    Some(loaded)
-}
-
-fn read_dump(class_path: &Path, fingerprint: u128) -> Option<Vec<u8>> {
-    let recorded = std::fs::read_to_string(class_path.with_extension("fp")).ok()?;
-    let recorded = recorded.trim();
-    if recorded != format!("{fingerprint:032x}") {
-        return None;
-    }
-    std::fs::read(class_path).ok()
-}
-
-fn write_dump(query: &CacheQuery<'_>, class: &str, bytes: &[u8]) {
-    let class_path = class_path(query, class);
-    let dir = class_path
-        .parent()
-        .expect("a class dump path has a parent")
-        .to_path_buf();
-    std::fs::create_dir_all(&dir).expect("create tests/recorded-bytes");
-    let lock = std::fs::File::open(&dir).expect("open class-dump directory");
-    // SAFETY: `flock` on a descriptor this function owns for the duration of the call.
-    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "lock class-dump directory");
-    static TEMP: AtomicU64 = AtomicU64::new(0);
-    let stamp = format!(
-        "{}.{}",
-        std::process::id(),
-        TEMP.fetch_add(1, Ordering::Relaxed)
-    );
-    let tmp_class = class_path.with_extension(format!("class.{stamp}.tmp"));
-    let fp_path = class_path.with_extension("fp");
-    let tmp_fp = class_path.with_extension(format!("fp.{stamp}.tmp"));
-    std::fs::write(&tmp_class, bytes).expect("write class dump");
-    std::fs::write(&tmp_fp, format!("{:032x}\n", query.fingerprint))
-        .expect("write class fingerprint");
-    std::fs::rename(&tmp_class, &class_path).expect("replace class dump");
-    std::fs::rename(&tmp_fp, &fp_path).expect("replace class fingerprint");
-}
-
-fn class_path(query: &CacheQuery<'_>, class: &str) -> PathBuf {
-    let mut path = query.root.join(sanitize(
-        query.build_id.expect("a dump path requires a build id"),
-    ));
-    path.push(sanitize(query.module));
-    path.push(sanitize(&query.case.replace("::", "__")));
-    path.push(sanitize(query.stem));
-    path.push(sanitize(query.jvm_target));
-    path.push(variant_component(query.variant));
-    for part in class.split('/') {
-        path.push(sanitize(part));
-    }
-    path.set_extension("class");
-    path
-}
-
-fn variant_component(variant: &str) -> String {
-    if variant.is_empty() {
-        "plain".to_string()
-    } else {
-        format!("{:016x}", fnv64(0xcbf29ce484222325, variant.as_bytes()))
-    }
-}
-
-fn sanitize(component: &str) -> String {
-    let mut text: String = component
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' | '$' => ch,
-            _ => '_',
-        })
-        .collect();
-    if text.is_empty() || text == "." || text == ".." {
-        text = format!("_{:016x}", fnv64(0xcbf29ce484222325, component.as_bytes()));
-    }
-    if text.len() > 120 {
-        let hash = fnv64(0xcbf29ce484222325, component.as_bytes());
-        text.truncate(100);
-        text.push_str(&format!("_{hash:016x}"));
-    }
-    text
-}
-
-fn dumps_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded-bytes")
-}
-
-fn record_forced() -> bool {
-    std::env::var_os("KRUSTY_RECORD").is_some_and(|flag| flag == "1")
-}
-
-fn ci_allows_write() -> bool {
-    std::env::var_os("CI").is_none()
+        .collect()
 }
 
 /// Every class kotlinc emits for one fixture, from the recorded tree or from `compile`.
@@ -411,22 +286,17 @@ pub fn kotlinc_class_tree(
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<BTreeMap<String, Vec<u8>>> {
     let (module, case) = running_test();
-    let Some(build_id) = published_compiler_id() else {
-        return compile();
-    };
-    let dir = dumps_root()
-        .join(sanitize(&build_id))
-        .join(sanitize(&module))
-        .join(sanitize(&case.replace("::", "__")))
-        .join(sanitize(stem))
-        .join(sanitize(jvm_target))
-        .join(variant_component(variant))
-        .join("all");
-    let files = cached_tree(
-        &dir,
-        fingerprint,
-        record_forced(),
-        ci_allows_write(),
+    let files = recall(
+        Recall {
+            root: &dumps_root(),
+            module: &module,
+            key: &entry_key(&case, stem, jvm_target, variant, "#tree"),
+            compiler: compiler_dump_version(),
+            fingerprint,
+            force: record_forced(),
+            write: ci_allows_write(),
+        },
+        |_| true,
         || {
             let classes = compile()?;
             Some(
@@ -450,123 +320,488 @@ pub fn kotlinc_class_tree(
     )
 }
 
-/// A content-addressed dump shared by every test that builds the same kotlinc output.
+/// A dump shared by every test that builds the same kotlinc library output.
 ///
-/// `None` when this compiler is not a release or RC, when `KRUSTY_RECORD=1`, or when the slot
-/// has no complete dump. The slot is one path component under `<build.txt>/_libs/`.
+/// `None` when this compiler is not a release or RC, when `KRUSTY_RECORD=1`, or when no open
+/// range covers this compiler's version at `fingerprint`.
 pub fn load_shared_files(slot: &str, fingerprint: u128) -> Option<BTreeMap<String, Vec<u8>>> {
     if record_forced() {
         return None;
     }
-    let build_id = published_compiler_id()?;
-    load_tree(&shared_dir(&build_id, slot), fingerprint)
+    let compiler = compiler_dump_version()?;
+    load_files(&dumps_root(), "_libs", slot, compiler, fingerprint)
 }
 
 /// Record `files` (relative path → bytes, including `META-INF` entries) for [`load_shared_files`].
 ///
-/// A no-op for a snapshot, dev, or beta compiler, and under CI.
+/// A no-op for a snapshot, dev, or beta compiler, and under CI. A newer release covered by an open
+/// range whose bytes already match does not rewrite the index.
 pub fn store_shared_files(slot: &str, fingerprint: u128, files: &BTreeMap<String, Vec<u8>>) {
-    let Some(build_id) = published_compiler_id() else {
+    let Some(compiler) = compiler_dump_version() else {
         return;
     };
     if !ci_allows_write() {
         return;
     }
-    publish_tree(&shared_dir(&build_id, slot), fingerprint, files);
+    store_files(&dumps_root(), "_libs", slot, compiler, fingerprint, files);
 }
 
-fn shared_dir(build_id: &str, slot: &str) -> PathBuf {
-    dumps_root()
-        .join(sanitize(build_id))
-        .join("_libs")
-        .join(sanitize(slot))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    Release,
+    Rc,
 }
 
-fn cached_tree(
-    dir: &Path,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DumpVersion {
+    version: KotlinVersion,
+    channel: Channel,
+}
+
+fn compiler_dump_version() -> Option<DumpVersion> {
+    parse_dump_version(&published_compiler_id()?)
+}
+
+fn parse_dump_version(identity: &str) -> Option<DumpVersion> {
+    let (version, rest) = match identity.split_once('-') {
+        Some((version, rest)) => (version, rest),
+        None => (identity, ""),
+    };
+    let version = KotlinVersion::parse(version)?;
+    let channel = if rest.starts_with("RC") {
+        Channel::Rc
+    } else {
+        Channel::Release
+    };
+    Some(DumpVersion { version, channel })
+}
+
+#[derive(Clone, Copy)]
+struct Recall<'a> {
+    root: &'a Path,
+    module: &'a str,
+    key: &'a str,
+    compiler: Option<DumpVersion>,
     fingerprint: u128,
     force: bool,
     write: bool,
+}
+
+fn recall(
+    query: Recall<'_>,
+    accept: impl Fn(&BTreeMap<String, Vec<u8>>) -> bool,
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<BTreeMap<String, Vec<u8>>> {
-    if !force {
-        if let Some(hit) = load_tree(dir, fingerprint) {
-            return Some(hit);
-        }
+    let Some(compiler) = query.compiler else {
+        return compile();
+    };
+    let cached = if query.force {
+        None
+    } else {
+        load_files(
+            query.root,
+            query.module,
+            query.key,
+            compiler,
+            query.fingerprint,
+        )
+        .filter(|hit| accept(hit))
+    };
+    if let Some(hit) = cached {
+        return Some(hit);
     }
     let produced = compile()?;
-    if write {
-        publish_tree(dir, fingerprint, &produced);
+    if query.write {
+        store_files(
+            query.root,
+            query.module,
+            query.key,
+            compiler,
+            query.fingerprint,
+            &produced,
+        );
     }
     Some(produced)
 }
 
-fn load_tree(dir: &Path, fingerprint: u128) -> Option<BTreeMap<String, Vec<u8>>> {
-    let recorded = std::fs::read_to_string(dir.join("dump.fp")).ok()?;
-    if recorded.trim() != format!("{fingerprint:032x}") {
-        return None;
+fn entry_key(case: &str, stem: &str, jvm_target: &str, variant: &str, suffix: &str) -> String {
+    format!(
+        "{case}|{stem}|{jvm_target}|{}{suffix}",
+        variant_component(variant)
+    )
+}
+
+fn variant_component(variant: &str) -> String {
+    if variant.is_empty() {
+        "plain".to_string()
+    } else {
+        format!("{:016x}", fnv64(0xcbf29ce484222325, variant.as_bytes()))
     }
-    let manifest = std::fs::read_to_string(dir.join("dump.manifest")).ok()?;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    lo: KotlinVersion,
+    hi: Option<KotlinVersion>,
+    channel: Channel,
+    fingerprint: u128,
+    blob: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Recorded {
+    fingerprint: u128,
+    blob: u128,
+}
+
+fn load_files(
+    root: &Path,
+    module: &str,
+    key: &str,
+    compiler: DumpVersion,
+    fingerprint: u128,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    let text = std::fs::read_to_string(index_path(root, module)).ok()?;
+    let entries = parse_index(&text);
+    let span = entries.get(key).and_then(|spans| {
+        spans
+            .iter()
+            .filter(|span| {
+                span.channel == compiler.channel
+                    && span.fingerprint == fingerprint
+                    && span_contains(span, compiler.version)
+            })
+            .max_by_key(|span| span.lo)
+    })?;
+    decode_files(&std::fs::read(blob_path(root, span.blob)).ok()?)
+}
+
+fn store_files(
+    root: &Path,
+    module: &str,
+    key: &str,
+    compiler: DumpVersion,
+    fingerprint: u128,
+    files: &BTreeMap<String, Vec<u8>>,
+) {
+    let blob = blob_id(files);
+    write_blob(root, blob, files);
+    let dir = dumps_root_of(root);
+    std::fs::create_dir_all(&dir).expect("create tests/recorded-bytes");
+    let lock = std::fs::File::open(&dir).expect("open class-dump directory");
+    // SAFETY: `flock` on a descriptor this function owns until it returns.
+    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(locked, 0, "lock class-dump directory");
+
+    let path = index_path(root, module);
+    let previous = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut entries = parse_index(&previous);
+    let spans = entries.entry(key.to_string()).or_default();
+    let mut versions = KotlinVersion::supported();
+    if !versions.contains(&compiler.version) {
+        versions.push(compiler.version);
+        versions.sort();
+    }
+    let mut projected: Vec<Option<Recorded>> = versions
+        .iter()
+        .map(|version| {
+            spans
+                .iter()
+                .find(|span| span.channel == compiler.channel && span_contains(span, *version))
+                .map(|span| Recorded {
+                    fingerprint: span.fingerprint,
+                    blob: span.blob,
+                })
+        })
+        .collect();
+    let position = versions
+        .iter()
+        .position(|version| *version == compiler.version)
+        .expect("the recorded version is in the version list");
+    projected[position] = Some(Recorded { fingerprint, blob });
+    let updated = merge_spans(&versions, &projected, compiler.channel);
+    let retained = spans
+        .iter()
+        .copied()
+        .filter(|span| span.channel != compiler.channel)
+        .chain(updated)
+        .collect();
+    *spans = retained;
+    let rendered = render_index(&entries);
+    if rendered != previous {
+        static TEMP: AtomicU64 = AtomicU64::new(0);
+        let staging = path.with_extension(format!(
+            "txt.{}.{}",
+            std::process::id(),
+            TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        if let Some(parent) = staging.parent() {
+            std::fs::create_dir_all(parent).expect("create class-dump index directory");
+        }
+        std::fs::write(&staging, &rendered).expect("write class-dump index");
+        std::fs::rename(&staging, &path).expect("replace class-dump index");
+    }
+    drop(lock);
+}
+
+fn span_contains(span: &Span, version: KotlinVersion) -> bool {
+    span.lo <= version && span.hi.is_none_or(|hi| version <= hi)
+}
+
+fn merge_spans(
+    versions: &[KotlinVersion],
+    values: &[Option<Recorded>],
+    channel: Channel,
+) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut previous: Option<Recorded> = None;
+    for (&version, value) in versions.iter().zip(values) {
+        match value {
+            Some(value) if previous == Some(*value) => {
+                spans.last_mut().expect("an open run").hi = Some(version);
+            }
+            Some(value) => spans.push(Span {
+                lo: version,
+                hi: Some(version),
+                channel,
+                fingerprint: value.fingerprint,
+                blob: value.blob,
+            }),
+            None => {}
+        }
+        previous = *value;
+    }
+    if let Some(last) = spans.last_mut() {
+        if last.hi == versions.last().copied() {
+            last.hi = None;
+        }
+    }
+    spans
+}
+
+fn index_path(root: &Path, module: &str) -> PathBuf {
+    dumps_root_of(root)
+        .join("m")
+        .join(format!("{}.txt", sanitize(module)))
+}
+
+fn dumps_root_of(root: &Path) -> PathBuf {
+    root.to_path_buf()
+}
+
+fn dumps_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded-bytes")
+}
+
+fn blob_path(root: &Path, blob: u128) -> PathBuf {
+    let hex = hex128(blob);
+    dumps_root_of(root)
+        .join("b")
+        .join(&hex[..2])
+        .join(format!("{}.zz", &hex[2..]))
+}
+
+fn write_blob(root: &Path, blob: u128, files: &BTreeMap<String, Vec<u8>>) {
+    let path = blob_path(root, blob);
+    if path.is_file() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create class-dump blob directory");
+    }
+    let compressed = encode_files(files);
+    let staging = path.with_extension("zz.tmp");
+    std::fs::write(&staging, compressed).expect("write class-dump blob");
+    match std::fs::rename(&staging, &path) {
+        Ok(()) => {}
+        Err(_) if path.is_file() => {
+            let _ = std::fs::remove_file(&staging);
+        }
+        Err(error) => panic!("publish class-dump blob: {error}"),
+    }
+}
+
+fn blob_id(files: &BTreeMap<String, Vec<u8>>) -> u128 {
+    fingerprint_parts(&[&encode_raw(files)])
+}
+
+fn encode_files(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(9));
+    encoder
+        .write_all(&encode_raw(files))
+        .expect("compress class dump");
+    encoder.finish().expect("finish class dump")
+}
+
+fn encode_raw(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for (name, bytes) in files {
+        raw.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        raw.extend_from_slice(name.as_bytes());
+        raw.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        raw.extend_from_slice(bytes);
+    }
+    raw
+}
+
+fn decode_files(compressed: &[u8]) -> Option<BTreeMap<String, Vec<u8>>> {
+    let mut raw = Vec::new();
+    ZlibDecoder::new(compressed).read_to_end(&mut raw).ok()?;
     let mut files = BTreeMap::new();
-    for relative in manifest.lines().filter(|line| !line.is_empty()) {
-        files.insert(
-            relative.to_string(),
-            std::fs::read(stored_path(dir, relative)).ok()?,
-        );
+    let mut offset = 0;
+    while offset < raw.len() {
+        let name_len = read_u32(&raw, &mut offset)? as usize;
+        let name = std::str::from_utf8(read_bytes(&raw, &mut offset, name_len)?).ok()?;
+        let data_len = read_u32(&raw, &mut offset)? as usize;
+        let data = read_bytes(&raw, &mut offset, data_len)?.to_vec();
+        files.insert(name.to_string(), data);
     }
     Some(files)
 }
 
-fn stored_path(dir: &Path, relative: &str) -> PathBuf {
-    let mut path = dir.to_path_buf();
-    for part in relative.split('/') {
-        path.push(sanitize(part));
-    }
-    path
+fn read_u32(raw: &[u8], offset: &mut usize) -> Option<u32> {
+    let bytes = read_bytes(raw, offset, 4)?;
+    Some(u32::from_be_bytes(bytes.try_into().ok()?))
 }
 
-fn publish_tree(dir: &Path, fingerprint: u128, files: &BTreeMap<String, Vec<u8>>) {
-    let parent = dir
-        .parent()
-        .expect("a class-dump tree has a parent")
-        .to_path_buf();
-    std::fs::create_dir_all(&parent).expect("create class-dump parent");
-    let lock = std::fs::File::open(&parent).expect("open class-dump parent");
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "lock class-dump parent");
-    static TEMP: AtomicU64 = AtomicU64::new(0);
-    let staging = parent.join(format!(
-        ".staging-{}-{}",
-        std::process::id(),
-        TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    write_tree_files(&staging, fingerprint, files);
-    if dir.exists() {
-        std::fs::remove_dir_all(dir).expect("replace class-dump tree");
-    }
-    if let Err(error) = std::fs::rename(&staging, dir) {
-        let _ = std::fs::remove_dir_all(&staging);
-        panic!("publish class-dump tree: {error}");
-    }
+fn read_bytes<'a>(raw: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = offset.checked_add(len)?;
+    let bytes = raw.get(*offset..end)?;
+    *offset = end;
+    Some(bytes)
 }
 
-fn write_tree_files(dir: &Path, fingerprint: u128, files: &BTreeMap<String, Vec<u8>>) {
-    std::fs::create_dir_all(dir).expect("create class-dump staging");
-    let mut manifest = String::new();
-    for (relative, bytes) in files {
-        let path = stored_path(dir, relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create class-dump package");
+fn parse_index(text: &str) -> BTreeMap<String, Vec<Span>> {
+    let mut entries: BTreeMap<String, Vec<Span>> = BTreeMap::new();
+    let mut key: Option<String> = None;
+    for (index, line) in text.lines().enumerate() {
+        let malformed =
+            || -> ! { panic!("malformed class-dump index line {}: {line:?}", index + 1) };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
         }
-        std::fs::write(&path, bytes).expect("write class dump");
-        manifest.push_str(relative);
-        manifest.push('\n');
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            entries.entry(name.to_string()).or_default();
+            key = Some(name.to_string());
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let range = parts.next().unwrap_or_else(|| malformed());
+        let fingerprint = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
+            .unwrap_or_else(|| malformed());
+        let blob = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
+            .unwrap_or_else(|| malformed());
+        if parts.next().is_some() {
+            malformed();
+        }
+        let (channel, lo, hi) = parse_range(range).unwrap_or_else(|| malformed());
+        match key.as_ref().and_then(|key| entries.get_mut(key)) {
+            Some(spans) => spans.push(Span {
+                lo,
+                hi,
+                channel,
+                fingerprint,
+                blob,
+            }),
+            None => malformed(),
+        }
     }
-    std::fs::write(dir.join("dump.manifest"), manifest).expect("write class-dump manifest");
-    std::fs::write(dir.join("dump.fp"), format!("{fingerprint:032x}\n"))
-        .expect("write class-dump fingerprint");
+    entries
+}
+
+fn parse_range(token: &str) -> Option<(Channel, KotlinVersion, Option<KotlinVersion>)> {
+    let (lo, hi) = match token.split_once("..") {
+        Some((lo, hi)) if hi.is_empty() => (lo, None),
+        Some((lo, hi)) => (lo, Some(hi)),
+        None => (token, Some(token)),
+    };
+    let (channel, lo) = parse_bound(lo)?;
+    let hi = match hi {
+        None => None,
+        Some(hi) => {
+            let (hi_channel, hi) = parse_bound(hi)?;
+            if hi_channel != channel {
+                return None;
+            }
+            Some(hi)
+        }
+    };
+    Some((channel, lo, hi))
+}
+
+fn parse_bound(token: &str) -> Option<(Channel, KotlinVersion)> {
+    match token.strip_suffix("-RC") {
+        Some(version) => Some((Channel::Rc, KotlinVersion::parse(version)?)),
+        None => Some((Channel::Release, KotlinVersion::parse(token)?)),
+    }
+}
+
+fn parse_hex128(text: &str) -> Option<u128> {
+    u128::from_str_radix(text, 16).ok()
+}
+
+fn render_index(entries: &BTreeMap<String, Vec<Span>>) -> String {
+    let mut text = String::from(
+        "# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.\n\
+         # RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.\n",
+    );
+    for (key, spans) in entries {
+        text.push_str(&format!("\n[{key}]\n"));
+        let mut ordered = spans.clone();
+        ordered.sort_by_key(|span| (span.channel == Channel::Rc, span.lo));
+        for span in ordered {
+            text.push_str(&render_span(span));
+            text.push('\n');
+        }
+    }
+    text
+}
+
+fn render_span(span: Span) -> String {
+    let bound = |version: KotlinVersion| match span.channel {
+        Channel::Release => version.to_string(),
+        Channel::Rc => format!("{version}-RC"),
+    };
+    let range = match span.hi {
+        None => format!("{}..", bound(span.lo)),
+        Some(hi) if hi == span.lo => bound(span.lo),
+        Some(hi) => format!("{}..{}", bound(span.lo), bound(hi)),
+    };
+    format!("{range} {} {}", hex128(span.fingerprint), hex128(span.blob))
+}
+
+fn hex128(value: u128) -> String {
+    format!("{value:032x}")
+}
+
+fn sanitize(component: &str) -> String {
+    let mut text: String = component
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' | '$' => ch,
+            _ => '_',
+        })
+        .collect();
+    if text.is_empty() || text == "." || text == ".." {
+        text = format!("_{:016x}", fnv64(0xcbf29ce484222325, component.as_bytes()));
+    }
+    if text.len() > 120 {
+        let hash = fnv64(0xcbf29ce484222325, component.as_bytes());
+        text.truncate(100);
+        text.push_str(&format!("_{hash:016x}"));
+    }
+    text
+}
+
+fn record_forced() -> bool {
+    std::env::var_os("KRUSTY_RECORD").is_some_and(|flag| flag == "1")
+}
+
+fn ci_allows_write() -> bool {
+    std::env::var_os("CI").is_none()
 }
 
 fn running_test() -> (String, String) {
@@ -584,6 +819,16 @@ fn running_test() -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version(text: &str) -> DumpVersion {
+        parse_dump_version(text).unwrap_or_else(|| panic!("dump version {text}"))
+    }
+
+    fn files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut map = BTreeMap::new();
+        map.insert("pkg/A".to_string(), bytes.to_vec());
+        map
+    }
 
     #[test]
     fn only_releases_and_rc_tags_are_cached() {
@@ -616,58 +861,140 @@ mod tests {
         ] {
             assert_eq!(cacheable_build_identity(text), None, "{text}");
         }
+        assert_eq!(
+            parse_dump_version("2.4.20-release-482"),
+            Some(DumpVersion {
+                version: KotlinVersion::new(2, 4, 20),
+                channel: Channel::Release,
+            })
+        );
+        assert_eq!(
+            parse_dump_version("2.4.20-RC2"),
+            Some(DumpVersion {
+                version: KotlinVersion::new(2, 4, 20),
+                channel: Channel::Rc,
+            })
+        );
+    }
+
+    #[test]
+    fn an_open_range_covers_a_newer_release_without_rewriting() {
+        let root = temp_root("open");
+        let fingerprint = fingerprint_parts(&[b"source"]);
+        let release = version("2.4.20");
+        store_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain",
+            release,
+            fingerprint,
+            &files(b"one"),
+        );
+        let index = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        assert!(index.contains("2.4.20.. "), "{index}");
+        assert!(!index.contains("2.4.10"), "{index}");
+        let newer = DumpVersion {
+            version: KotlinVersion::new(2, 4, 30),
+            channel: Channel::Release,
+        };
+        let hit = load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint);
+        assert_eq!(hit.unwrap().get("pkg/A").unwrap(), b"one");
+        store_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain",
+            newer,
+            fingerprint,
+            &files(b"one"),
+        );
+        let again = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        assert_eq!(
+            again, index,
+            "matching bytes leave the open range untouched"
+        );
+
+        store_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain",
+            newer,
+            fingerprint,
+            &files(b"two"),
+        );
+        let split = std::fs::read_to_string(index_path(&root, "mod")).unwrap();
+        assert!(split.contains("2.4.20 "), "{split}");
+        assert!(split.contains("2.4.30.. "), "{split}");
+        assert_eq!(
+            load_files(
+                &root,
+                "mod",
+                "case|Stem|default|plain",
+                release,
+                fingerprint
+            )
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"two"
+        );
+        let rc = version("2.4.20-RC2");
+        assert!(load_files(&root, "mod", "case|Stem|default|plain", rc, fingerprint).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_release_dump_is_reused_and_a_snapshot_never_is() {
-        let root = std::env::temp_dir().join(format!(
-            "krusty-byte-dump-{}-{}",
-            std::process::id(),
-            fingerprint_parts(&[b"byte-dump-test"])
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("reuse");
         let fingerprint = fingerprint_parts(&[b"source"]);
-        let classes = ["pkg/A"];
         let mut compiles = 0u32;
         let compile = |compiles: &mut u32| {
             *compiles += 1;
-            let mut map = BTreeMap::new();
-            map.insert("pkg/A".to_string(), b"class-a".to_vec());
-            Some(map)
+            Some(files(b"class-a"))
         };
-        let query = |fingerprint| CacheQuery {
+        let query = |compiler, fingerprint| Recall {
             root: &root,
-            build_id: Some("2.4.20-RC2"),
             module: "mod",
-            case: "case",
-            stem: "Stem",
-            jvm_target: "default",
-            variant: "",
+            key: "case|Stem|default|plain",
+            compiler,
             fingerprint,
-            classes: &classes,
             force: false,
             write: true,
         };
-        let first = cached_at(query(fingerprint), || compile(&mut compiles));
-        assert_eq!(first.unwrap(), vec![b"class-a".to_vec()]);
+        let first = recall(
+            query(Some(version("2.4.20-RC2")), fingerprint),
+            |_| true,
+            || compile(&mut compiles),
+        );
+        assert_eq!(first.unwrap().get("pkg/A").unwrap(), b"class-a");
         assert_eq!(compiles, 1);
-        let second = cached_at(query(fingerprint), || compile(&mut compiles));
-        assert_eq!(second.unwrap(), vec![b"class-a".to_vec()]);
+        let second = recall(
+            query(Some(version("2.4.20-RC")), fingerprint),
+            |_| true,
+            || compile(&mut compiles),
+        );
+        assert_eq!(second.unwrap().get("pkg/A").unwrap(), b"class-a");
         assert_eq!(compiles, 1, "a matching dump skips kotlinc");
 
         let changed = fingerprint_parts(&[b"source-v2"]);
-        let third = cached_at(query(changed), || compile(&mut compiles));
-        assert_eq!(third.unwrap(), vec![b"class-a".to_vec()]);
+        let third = recall(
+            query(Some(version("2.4.20-RC2")), changed),
+            |_| true,
+            || compile(&mut compiles),
+        );
+        assert_eq!(third.unwrap().get("pkg/A").unwrap(), b"class-a");
         assert_eq!(compiles, 2, "a new fingerprint recompiles");
 
-        let mut snapshot_query = query(changed);
-        snapshot_query.build_id = None;
-        let snapshot = cached_at(snapshot_query, || compile(&mut compiles));
+        let snapshot = recall(query(None, changed), |_| true, || compile(&mut compiles));
         assert!(snapshot.is_some());
         assert_eq!(compiles, 3);
-        let mut again_query = query(changed);
-        again_query.build_id = None;
-        let again = cached_at(again_query, || compile(&mut compiles));
+        let again = recall(query(None, changed), |_| true, || compile(&mut compiles));
         assert!(again.is_some());
         assert_eq!(compiles, 4, "a snapshot never reuses a dump");
         let _ = std::fs::remove_dir_all(&root);
@@ -675,49 +1002,74 @@ mod tests {
 
     #[test]
     fn ci_does_not_write_a_missing_dump() {
-        let root = std::env::temp_dir().join(format!(
-            "krusty-byte-dump-ci-{}-{}",
-            std::process::id(),
-            fingerprint_parts(&[b"byte-dump-ci"])
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("ci");
         let fingerprint = fingerprint_parts(&[b"source"]);
-        let classes = ["A"];
-        let got = cached_at(
-            CacheQuery {
+        let got = recall(
+            Recall {
                 root: &root,
-                build_id: Some("2.4.20-release-1"),
                 module: "mod",
-                case: "case",
-                stem: "Stem",
-                jvm_target: "default",
-                variant: "",
+                key: "case|Stem|default|plain",
+                compiler: Some(version("2.4.20-release-1")),
                 fingerprint,
-                classes: &classes,
                 force: false,
                 write: false,
             },
+            |_| true,
+            || Some(files(b"bytes")),
+        );
+        assert_eq!(got.unwrap().get("pkg/A").unwrap(), b"bytes");
+        assert!(
+            !index_path(&root, "mod").exists(),
+            "a miss that is not allowed to record leaves no dump"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_hit_missing_a_requested_class_is_recompiled() {
+        let root = temp_root("missing");
+        let fingerprint = fingerprint_parts(&[b"source"]);
+        let release = version("2.4.20");
+        let key = "case|Stem|default|plain";
+        store_files(&root, "mod", key, release, fingerprint, &files(b"one"));
+        let mut compiles = 0u32;
+        let query = Recall {
+            root: &root,
+            module: "mod",
+            key,
+            compiler: Some(release),
+            fingerprint,
+            force: false,
+            write: true,
+        };
+        let replaced = recall(
+            query,
+            |hit| hit.contains_key("pkg/Missing"),
             || {
-                let mut map = BTreeMap::new();
-                map.insert("A".to_string(), b"bytes".to_vec());
+                compiles += 1;
+                let mut map = files(b"two");
+                map.insert("pkg/Missing".to_string(), b"present".to_vec());
                 Some(map)
             },
         );
-        assert_eq!(got.unwrap(), vec![b"bytes".to_vec()]);
-        assert!(
-            !root.exists(),
-            "a miss that is not allowed to record leaves no dump"
+        assert_eq!(compiles, 1, "an incomplete dump is not a hit");
+        assert_eq!(replaced.unwrap().get("pkg/Missing").unwrap(), b"present");
+        let reused = recall(
+            query,
+            |hit| hit.contains_key("pkg/Missing"),
+            || {
+                compiles += 1;
+                Some(files(b"three"))
+            },
         );
+        assert_eq!(compiles, 1, "the completed dump is reused");
+        assert_eq!(reused.unwrap().get("pkg/A").unwrap(), b"two");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_directory_classpath_ignores_its_own_name() {
-        let root = std::env::temp_dir().join(format!(
-            "krusty-byte-dump-cp-{}-{}",
-            std::process::id(),
-            fingerprint_parts(&[b"cp-name"])
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("cp");
         for name in ["pid-111", "pid-222"] {
             let class = root.join(name).join("pkg").join("A.class");
             std::fs::create_dir_all(class.parent().unwrap()).unwrap();
@@ -738,42 +1090,26 @@ mod tests {
     }
 
     #[test]
-    fn a_class_tree_is_reused_until_its_fingerprint_changes() {
+    fn a_blob_round_trips_and_is_smaller_than_the_class_bytes() {
+        let mut map = BTreeMap::new();
+        map.insert("pkg/A.class".to_string(), vec![0u8; 4096]);
+        map.insert(
+            "META-INF/main.kotlin_module".to_string(),
+            b"module".to_vec(),
+        );
+        let compressed = encode_files(&map);
+        assert!(compressed.len() < 4096);
+        assert_eq!(decode_files(&compressed), Some(map));
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "krusty-byte-dump-tree-{}-{}",
+            "krusty-byte-dump-{label}-{}-{}",
             std::process::id(),
-            fingerprint_parts(&[b"tree"])
+            fingerprint_parts(&[label.as_bytes()])
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let dir = root.join("tree");
-        let fingerprint = fingerprint_parts(&[b"tree-source"]);
-        let mut compiles = 0u32;
-        let compile = |compiles: &mut u32, bytes: &[u8]| {
-            *compiles += 1;
-            let mut map = BTreeMap::new();
-            map.insert("pkg/A.class".to_string(), bytes.to_vec());
-            map.insert(
-                "META-INF/main.kotlin_module".to_string(),
-                b"module".to_vec(),
-            );
-            Some(map)
-        };
-        let first = cached_tree(&dir, fingerprint, false, true, || {
-            compile(&mut compiles, b"one")
-        });
-        assert_eq!(first.unwrap().get("pkg/A.class").unwrap(), b"one");
-        assert_eq!(compiles, 1);
-        let second = cached_tree(&dir, fingerprint, false, true, || {
-            compile(&mut compiles, b"two")
-        });
-        assert_eq!(second.unwrap().get("pkg/A.class").unwrap(), b"one");
-        assert_eq!(compiles, 1, "a matching tree skips kotlinc");
-        let changed = fingerprint_parts(&[b"tree-source-v2"]);
-        let third = cached_tree(&dir, changed, false, true, || {
-            compile(&mut compiles, b"two")
-        });
-        assert_eq!(third.unwrap().get("pkg/A.class").unwrap(), b"two");
-        assert_eq!(compiles, 2, "a new fingerprint recompiles");
-        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 }
