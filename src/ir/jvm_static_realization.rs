@@ -4,7 +4,7 @@
 //! [`IrStatic`](super::IrStatic), prevents a physical JVM layout fact from becoming part of an
 //! ordinary common-IR static declaration.
 
-use super::{IrFile, TypeName};
+use super::{IrFile, IrStaticAccessor, TypeName};
 
 impl IrFile {
     /// Record/query the JVM-only companion backing-storage realization selected after common
@@ -59,5 +59,27 @@ impl IrFile {
 
     pub(crate) fn is_jvm_field_static(&self, index: u32) -> bool {
         self.jvm_field_statics.contains(&index)
+    }
+
+    /// Whether static `index` is published through a compiler-default `getX`. A `const val`
+    /// inlines, a `@JvmField` is its own surface, and a private property is reached only through
+    /// its field or `access$…$p` bridges, so none of those has default accessors; a declared getter
+    /// is an ordinary function.
+    pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {
+        self.publishes_jvm_default_static_accessors(index)
+            && self.statics[index as usize].accessors.getter == IrStaticAccessor::Default
+    }
+
+    /// [`Self::has_jvm_default_static_getter`] for a `var`'s `setX`.
+    pub(crate) fn has_jvm_default_static_setter(&self, index: u32) -> bool {
+        let storage = &self.statics[index as usize];
+        storage.is_var
+            && self.publishes_jvm_default_static_accessors(index)
+            && storage.accessors.setter == IrStaticAccessor::Default
+    }
+
+    fn publishes_jvm_default_static_accessors(&self, index: u32) -> bool {
+        let storage = &self.statics[index as usize];
+        !(storage.is_const || self.is_jvm_field_static(index) || storage.visibility.is_private())
     }
 }

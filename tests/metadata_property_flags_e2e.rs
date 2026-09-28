@@ -20,6 +20,19 @@ fn assert_identical(stem: &str, src: &str, class_internal: &str) {
         .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
+/// Each of `classes` declares the same methods, in the same order, from both compilers.
+fn assert_members_identical(stem: &str, src: &str, classes: &[&str]) {
+    let compiled =
+        common::classes_against_kotlinc_lib(stem, &[("Lib.kt", "package lib\n\nclass Lib\n")], src)
+            .expect("reference kotlinc is provisioned");
+    for class in classes {
+        let (kotlinc, krusty) = compiled
+            .method_declarations(class)
+            .unwrap_or_else(|| panic!("both compilers write {class}"));
+        assert_eq!(krusty, kotlinc, "{class} members");
+    }
+}
+
 #[test]
 fn an_open_property_and_its_non_final_override_record_open_modality() {
     const SRC: &str = "package app\n\
@@ -153,4 +166,100 @@ fn a_folded_initializer_is_not_a_constant() {
     assert_identical("FoldedConstants", SRC, "app/K");
     assert_identical("FoldedConstants", SRC, "app/K$Companion");
     assert_identical("FoldedConstants", SRC, "app/O");
+}
+
+#[test]
+fn a_private_top_level_property_with_default_accessors_names_none() {
+    const SRC: &str = "package app\n\
+        \n\
+        private var log = \"\"\n\
+        private val fixed = 1\n\
+        var shared = 0\n\
+        \n\
+        fun touch(): Int {\n\
+        \x20   log = log + \"x\"\n\
+        \x20   shared = 2\n\
+        \x20   return fixed + log.length\n\
+        }\n";
+    assert_identical("PrivateAccessors", SRC, "app/PrivateAccessorsKt");
+}
+
+#[test]
+fn a_package_accessor_word_carries_the_property_visibility() {
+    const SRC: &str = "package app\n\
+        \n\
+        private val computed: Int get() = 2\n\
+        private var guarded = 0\n\
+        \x20   set(value) { field = value + 1 }\n\
+        private val Int.twice: Int get() = this * 2\n\
+        internal val scoped: Int get() = 3\n\
+        val open: Int get() = 4\n\
+        \n\
+        fun touch(): Int {\n\
+        \x20   guarded = 1\n\
+        \x20   return computed + 3.twice\n\
+        }\n";
+    assert_identical("AccessorWords", SRC, "app/AccessorWordsKt");
+}
+
+#[test]
+fn a_package_property_with_one_declared_accessor_names_the_default_other() {
+    const SRC: &str = "package app\n\
+        \n\
+        var written = 0\n\
+        \x20   set(value) { field = value + 1 }\n\
+        internal var read = 0\n\
+        \x20   get() = field\n\
+        var narrowed = 0\n\
+        \x20   private set(value) { field = value }\n\
+        \n\
+        fun touch() {\n\
+        \x20   narrowed = 1\n\
+        }\n";
+    assert_identical("DefaultOtherAccessor", SRC, "app/DefaultOtherAccessorKt");
+    assert_members_identical("DefaultOtherAccessor", SRC, &["app/DefaultOtherAccessorKt"]);
+}
+
+#[test]
+fn a_public_var_with_an_internal_set_writes_the_setter_visibility() {
+    // The setter is narrowed but not private: `setX` still exists, and the property's setter
+    // flags carry `internal` rather than the property's own `public`.
+    const SRC: &str = "package app\n\
+        \n\
+        var narrowed = 0\n\
+        \x20   internal set\n\
+        var declared = 0\n\
+        \x20   internal set(value) { field = value + 1 }\n\
+        \n\
+        fun touch() {\n\
+        \x20   narrowed = 1\n\
+        \x20   declared = 2\n\
+        }\n";
+    assert_identical("InternalSet", SRC, "app/InternalSetKt");
+    assert_members_identical("InternalSet", SRC, &["app/InternalSetKt"]);
+}
+
+#[test]
+fn a_public_var_with_a_bodiless_private_set_publishes_only_its_getter() {
+    // The default setter of a bodiless `private set` is private, so kotlinc generates no `setX`
+    // and names none in the property's signature; another class in the file writes through the
+    // facade's `access$set<X>$p` bridge. `a_private_top_level_property_with_default_accessors_names_none`
+    // and `a_package_property_with_one_declared_accessor_names_the_default_other` are the controls.
+    const SRC: &str = "package app\n\
+        \n\
+        var counter = 1\n\
+        \x20   private set\n\
+        \n\
+        fun bump(): Int {\n\
+        \x20   counter = counter + 1\n\
+        \x20   return counter\n\
+        }\n\
+        \n\
+        class Resetter {\n\
+        \x20   fun reset() {\n\
+        \x20       counter = 0\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("PrivateSet", SRC, "app/PrivateSetKt");
+    assert_members_identical("PrivateSet", SRC, &["app/PrivateSetKt", "app/Resetter"]);
 }

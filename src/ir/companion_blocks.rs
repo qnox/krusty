@@ -32,6 +32,10 @@ pub struct IrCompanionBlockProperty {
     pub is_const: bool,
     pub has_constant: bool,
     pub visibility: crate::types::Visibility,
+    /// The setter's own visibility: its declaration's (`internal set`), else the property's.
+    pub setter_visibility: crate::types::Visibility,
+    /// Which accessors source declared; a declared one's metadata word is not the default.
+    pub modifiers: crate::ir::IrPropertyModifiers,
     pub storage: Option<u32>,
     pub getter: Option<FunId>,
     pub setter: Option<FunId>,

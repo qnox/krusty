@@ -7,7 +7,7 @@
 //! accessors. The owner travels as an identity from planning to emission and becomes text only in
 //! a class-file constant.
 
-use crate::ir::IrFile;
+use crate::ir::{IrFile, IrStaticAccessor};
 use crate::types::TypeName;
 
 /// The JVM class a static declaration is a member of.
@@ -55,16 +55,34 @@ pub(crate) struct BridgedStorage {
     pub(crate) owner: StaticOwner,
 }
 
-/// The selection, made here for every consumer: static storage `index` is bridged when it is a
-/// PRIVATE plain field — no constant value, no accessor of its own, no `@JvmField` — of a file
-/// facade or of the class whose `companion { … }` block declared it.
-pub(crate) fn bridged_storage(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
+/// The selection, made here for every consumer: another class reads static storage `index`
+/// through `access$get<X>$p` when it is a PRIVATE bridgeable field whose getter the compiler
+/// supplies, so no `getX` method exists to call.
+pub(crate) fn bridged_getter(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
     let property = &ir.statics[index as usize];
-    if property.is_const
-        || property.custom_accessor
-        || ir.is_jvm_field_static(index)
-        || !property.visibility.is_private()
-    {
+    (property.visibility.is_private() && property.accessors.getter != IrStaticAccessor::Declared)
+        .then(|| bridgeable(ir, index))
+        .flatten()
+}
+
+/// Another class writes static storage `index` through `access$set<X>$p` when the `var`'s setter
+/// is a private default one, or the absent setter of a bodiless `private set`.
+pub(crate) fn bridged_setter(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
+    let property = &ir.statics[index as usize];
+    let bridged = property.is_var
+        && match property.accessors.setter {
+            IrStaticAccessor::Absent => true,
+            IrStaticAccessor::Default => property.visibility.is_private(),
+            IrStaticAccessor::Declared => false,
+        };
+    bridged.then(|| bridgeable(ir, index)).flatten()
+}
+
+/// Storage whose accessors may be bridged: a plain field (no constant value, no `@JvmField`) of a
+/// file facade or of the class whose `companion { … }` block declared it.
+fn bridgeable(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
+    let property = &ir.statics[index as usize];
+    if property.is_const || ir.is_jvm_field_static(index) {
         return None;
     }
     let owner = match property.owner {

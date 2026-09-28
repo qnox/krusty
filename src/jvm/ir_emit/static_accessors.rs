@@ -18,7 +18,7 @@
 
 use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
-use crate::jvm::private_static_access::{bridged_storage, StaticOwner};
+use crate::jvm::private_static_access::{bridged_getter, bridged_setter, StaticOwner};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -275,19 +275,20 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
             });
         }
     }
-    let storage = class.prop_ref.as_ref().and_then(|reference| {
+    let realization = class.prop_ref.as_ref().and_then(|reference| {
         env.property_reference_realizations
             .get(class.fq_name)
-            .and_then(|realization| realization.bridged_storage)
-            .map(|storage| (reference.mutable, storage))
+            .map(|realization| (reference.mutable, realization))
     });
-    if let Some((mutable, storage)) = storage {
-        uses.push(Use {
-            line: 0,
-            owner: storage.owner,
-            accessor: StaticAccessor::Getter(storage.index),
-        });
-        if mutable {
+    if let Some((mutable, realization)) = realization {
+        if let Some(storage) = realization.bridged_getter {
+            uses.push(Use {
+                line: 0,
+                owner: storage.owner,
+                accessor: StaticAccessor::Getter(storage.index),
+            });
+        }
+        if let Some(storage) = realization.bridged_setter.filter(|_| mutable) {
             uses.push(Use {
                 line: 0,
                 owner: storage.owner,
@@ -472,9 +473,9 @@ impl Walk<'_> {
                 StaticOwner::Class(*owner),
                 StaticAccessor::Function(*function),
             )),
-            IrExpr::GetStatic(index) => bridged_storage(self.ir, *index)
+            IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index))),
-            IrExpr::SetStatic { index, .. } => bridged_storage(self.ir, *index)
+            IrExpr::SetStatic { index, .. } => bridged_setter(self.ir, *index)
                 .map(|storage| (storage.owner, StaticAccessor::Setter(*index))),
             IrExpr::PropertyRead { .. } => self.private_member_property(expression, true),
             IrExpr::PropertyWrite { .. } => self.private_member_property(expression, false),

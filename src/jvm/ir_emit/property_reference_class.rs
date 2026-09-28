@@ -556,7 +556,7 @@ fn emit_toplevel_prop_ref_class(
         prop_jvm
     };
     // e.g. "getFoo()LBox;". A bridged private property reflects the accessor it declares.
-    let reflected_getter = if realization.bridged_storage.is_some() {
+    let reflected_getter = if realization.bridged_getter.is_some() {
         &realization.declared_getter_name
     } else {
         &pr.getter_name

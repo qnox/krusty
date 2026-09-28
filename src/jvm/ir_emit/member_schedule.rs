@@ -7,8 +7,8 @@ use crate::ir::{IrClass, IrFile, IrProperty, IrSecondaryCtor};
 #[derive(Clone, Copy)]
 pub(super) enum FacadeMember {
     Function(u32),
-    /// The generated accessors of the facade-owned static at this index.
-    PropertyAccessors(u32),
+    /// A compiler-default accessor of the facade-owned static at this index.
+    DefaultAccessor(u32, super::static_fields::StaticAccessor),
 }
 
 /// Order a file facade's methods as kotlinc's `FileClassLowering` collects them: the file's
@@ -19,35 +19,66 @@ pub(super) fn facade_source_ordered_members(
     ir: &IrFile,
     functions: impl Iterator<Item = u32>,
 ) -> Vec<FacadeMember> {
-    let mut ordered: Vec<(u32, FacadeMember)> = functions
+    use super::static_fields::StaticAccessor;
+    // A property's getter precedes its setter, whichever of them source declared.
+    let declared_setters: std::collections::HashSet<u32> = ir
+        .local_property_layouts
+        .values()
+        .filter_map(|layout| match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { setter, .. }
+            | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. } => *setter,
+            _ => None,
+        })
+        .collect();
+    let slot = |accessor: StaticAccessor| match accessor {
+        StaticAccessor::Getter => 0,
+        StaticAccessor::Setter => 1,
+    };
+    let mut ordered: Vec<((u32, u8), FacadeMember)> = functions
         .map(|function| {
             let order = ir
                 .fn_source_order
                 .get(&function)
                 .copied()
                 .unwrap_or(u32::MAX);
-            (order, FacadeMember::Function(function))
+            let accessor = if declared_setters.contains(&function) {
+                StaticAccessor::Setter
+            } else {
+                StaticAccessor::Getter
+            };
+            ((order, slot(accessor)), FacadeMember::Function(function))
         })
         .collect();
-    ordered.extend(
-        ir.statics
-            .iter()
-            .enumerate()
-            .filter(|(_, property)| property.is_facade_owned())
-            .map(|(index, property)| {
-                (
-                    property.source_order,
-                    FacadeMember::PropertyAccessors(index as u32),
-                )
-            }),
-    );
+    for (index, property) in ir.statics.iter().enumerate() {
+        if !property.is_facade_owned() {
+            continue;
+        }
+        let index = index as u32;
+        for (accessor, present) in [
+            (
+                StaticAccessor::Getter,
+                ir.has_jvm_default_static_getter(index),
+            ),
+            (
+                StaticAccessor::Setter,
+                ir.has_jvm_default_static_setter(index),
+            ),
+        ] {
+            if present {
+                ordered.push((
+                    (property.source_order, slot(accessor)),
+                    FacadeMember::DefaultAccessor(index, accessor),
+                ));
+            }
+        }
+    }
     ordered.sort_by_key(|(order, _)| *order);
     let mut members: Vec<FacadeMember> = ordered.into_iter().map(|(_, member)| member).collect();
     let mut functions: Vec<u32> = members
         .iter()
         .filter_map(|member| match member {
             FacadeMember::Function(function) => Some(*function),
-            FacadeMember::PropertyAccessors(_) => None,
+            FacadeMember::DefaultAccessor(..) => None,
         })
         .collect();
     order_lifted_functions(ir, &mut functions);
@@ -62,9 +93,9 @@ pub(super) fn facade_source_ordered_members(
 
 pub(super) enum SourceOrderedMember<'a> {
     Property(&'a IrProperty),
-    /// A `companion { … }` block property stored in one of this class's static fields; its
-    /// generated public accessors take the property's place among the class's members.
-    StaticProperty(u32),
+    /// The compiler-default public accessor of a `companion { … }` block property stored in one
+    /// of this class's static fields, at the property's place among the class's members.
+    StaticDefaultAccessor(u32, super::static_fields::StaticAccessor),
     Function(u32),
     SecondaryConstructor(usize, &'a IrSecondaryCtor),
 }
@@ -93,7 +124,29 @@ pub(super) fn source_ordered_members<'a>(
             .find(|property| property.getter == Some(function) || property.setter == Some(function))
     };
     let first_accessor = |property: &IrProperty| property.getter.or(property.setter);
-    let mut ordered: Vec<(u32, SourceOrderedMember<'a>)> = Vec::with_capacity(
+    use super::static_fields::StaticAccessor;
+    let slot = |accessor: StaticAccessor| match accessor {
+        StaticAccessor::Getter => 0,
+        StaticAccessor::Setter => 1,
+    };
+    // A stored block property's accessors are one unit at the property's position, getter before
+    // setter, whichever of them source declared.
+    let block_accessor_slots: std::collections::HashMap<u32, (u32, u8)> = ir
+        .companion_blocks
+        .properties_of(class.fq_name_id())
+        .filter(|property| property.storage.is_some())
+        .flat_map(|property| {
+            [
+                (property.getter, StaticAccessor::Getter),
+                (property.setter, StaticAccessor::Setter),
+            ]
+            .into_iter()
+            .filter_map(move |(function, accessor)| {
+                function.map(|function| (function, (property.source_order, slot(accessor))))
+            })
+        })
+        .collect();
+    let mut ordered: Vec<((u32, u8), SourceOrderedMember<'a>)> = Vec::with_capacity(
         class.properties.len() + class.methods.len() + class.secondary_ctors.len(),
     );
     ordered.extend(
@@ -103,26 +156,34 @@ pub(super) fn source_ordered_members<'a>(
             .filter(|property| first_accessor(property).is_none())
             .map(|property| {
                 (
-                    property.source_order,
+                    (property.source_order, 0),
                     SourceOrderedMember::Property(property),
                 )
             }),
     );
-    ordered.extend(
-        ir.statics
-            .iter()
-            .enumerate()
-            .filter(|(index, property)| {
-                ir.companion_blocks.is_storage(*index as u32)
-                    && property.owner == Some(class.fq_name_id())
-            })
-            .map(|(index, property)| {
-                (
-                    property.source_order,
-                    SourceOrderedMember::StaticProperty(index as u32),
-                )
-            }),
-    );
+    for (index, property) in ir.statics.iter().enumerate() {
+        let index = index as u32;
+        if !ir.companion_blocks.is_storage(index) || property.owner != Some(class.fq_name_id()) {
+            continue;
+        }
+        for (accessor, present) in [
+            (
+                StaticAccessor::Getter,
+                ir.has_jvm_default_static_getter(index),
+            ),
+            (
+                StaticAccessor::Setter,
+                ir.has_jvm_default_static_setter(index),
+            ),
+        ] {
+            if present {
+                ordered.push((
+                    (property.source_order, slot(accessor)),
+                    SourceOrderedMember::StaticDefaultAccessor(index, accessor),
+                ));
+            }
+        }
+    }
     ordered.extend(
         class
             .methods
@@ -132,12 +193,15 @@ pub(super) fn source_ordered_members<'a>(
             .filter_map(|function| match accessor_owner(function) {
                 Some(property) => (first_accessor(property) == Some(function)).then(|| {
                     (
-                        function_order(function),
+                        (function_order(function), 0),
                         SourceOrderedMember::Property(property),
                     )
                 }),
                 None => Some((
-                    function_order(function),
+                    block_accessor_slots
+                        .get(&function)
+                        .copied()
+                        .unwrap_or((function_order(function), 0)),
                     SourceOrderedMember::Function(function),
                 )),
             }),
@@ -152,7 +216,7 @@ pub(super) fn source_ordered_members<'a>(
             })
             .map(|(ordinal, constructor)| {
                 (
-                    constructor.source_order,
+                    (constructor.source_order, 0),
                     SourceOrderedMember::SecondaryConstructor(ordinal, constructor),
                 )
             }),

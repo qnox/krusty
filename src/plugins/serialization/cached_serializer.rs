@@ -103,7 +103,7 @@ pub(super) fn add_cached_serializer_delegate(
         visibility: crate::types::Visibility::Private,
         setter_jvm_name: None,
         erased_declared_ty: None,
-        custom_accessor: true,
+        accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: owner_line,
         source_order: u32::MAX,
     });

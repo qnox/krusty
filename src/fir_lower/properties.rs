@@ -272,14 +272,16 @@ pub(super) fn finalize_properties(
                 &mut realizations,
                 &mut initialization,
             )?,
-            Some(class) => materialize_member_property(
+            Some(class_id) => materialize_member_property(
                 index,
-                anchor,
-                source_order,
-                property_id,
-                property,
-                class,
-                context_parameters,
+                MemberProperty {
+                    anchor,
+                    source_order,
+                    property_id,
+                    property,
+                    class_id,
+                    context_parameters,
+                },
                 ir,
                 &mut realizations,
                 &mut initialization,
@@ -585,7 +587,7 @@ fn materialize_top_level_property(
             visibility: property.visibility,
             setter_jvm_name: None,
             erased_declared_ty: None,
-            custom_accessor: property.getter.is_some() || property.setter.is_some(),
+            accessors: top_level_accessors(index, &property),
             line: 0,
             source_order,
         });
@@ -826,6 +828,8 @@ fn record_companion_block_property(
             is_const: property.flags.has(DeclarationFlags::CONST),
             has_constant,
             visibility: property.visibility,
+            setter_visibility: setter_visibility(index, property.declaration, property.visibility),
+            modifiers: member_property_modifiers(property.flags, false),
             storage,
             getter,
             setter,
@@ -851,19 +855,31 @@ pub(super) fn stamp_generated_property_nodes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn materialize_member_property(
-    index: &ResolvedModuleIndex,
+/// One checked class member property, with where it sits in its class.
+struct MemberProperty {
     anchor: crate::fir::StableDeclarationAnchor,
     source_order: u32,
     property_id: crate::fir::PropertyId,
     property: IrCheckedProperty,
     class_id: crate::ir::ClassId,
     context_parameters: Vec<Ty>,
+}
+
+fn materialize_member_property(
+    index: &ResolvedModuleIndex,
+    member: MemberProperty,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let MemberProperty {
+        anchor,
+        source_order,
+        property_id,
+        property,
+        class_id,
+        context_parameters,
+    } = member;
     let owner = ir.classes[class_id as usize].fq_name;
     let needs_property_reference_bridge = (property.visibility.is_private()
         || setter_visibility(index, property.declaration, property.visibility).is_private())
@@ -926,7 +942,7 @@ fn materialize_member_property(
             visibility: property.visibility,
             setter_jvm_name: None,
             erased_declared_ty: None,
-            custom_accessor: false,
+            accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
             source_order,
         });
@@ -1391,12 +1407,11 @@ pub(super) fn member_property_modifiers(
     }
 }
 
-/// A property's setter visibility: the setter declaration's own, else the property's.
-pub(super) fn setter_visibility(
+/// The setter declaration source wrote for `declaration`, if any.
+fn setter_declaration(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
-    property_visibility: crate::types::Visibility,
-) -> crate::types::Visibility {
+) -> Option<DeclarationId> {
     (0..index.declaration_count())
         .map(|raw| DeclarationId::from_raw(raw as u32))
         .find(|accessor| {
@@ -1406,6 +1421,15 @@ pub(super) fn setter_visibility(
                     && anchor.sibling == 1
             })
         })
+}
+
+/// A property's setter visibility: the setter declaration's own, else the property's.
+pub(super) fn setter_visibility(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    property_visibility: crate::types::Visibility,
+) -> crate::types::Visibility {
+    setter_declaration(index, declaration)
         .and_then(|setter| index.declaration_header(setter))
         .map_or(property_visibility, |header| header.visibility)
 }
@@ -1429,6 +1453,31 @@ pub(super) fn record_accessor_visibilities(
             setter_visibility(index, declaration, property_visibility),
         );
     }
+}
+
+/// Where each accessor of a top-level (or companion-block) stored property comes from. A bodiless
+/// `private set` keeps the compiler's default setter, which is private and so never generated:
+/// kotlinc writes no `setX` method and names none in the property's signature.
+fn top_level_accessors(
+    index: &ResolvedModuleIndex,
+    property: &IrCheckedProperty,
+) -> crate::ir::IrStaticAccessors {
+    use crate::ir::IrStaticAccessor;
+    let getter = if property.getter.is_some() {
+        IrStaticAccessor::Declared
+    } else {
+        IrStaticAccessor::Default
+    };
+    let setter = if property.setter.is_some() {
+        IrStaticAccessor::Declared
+    } else if !property.visibility.is_private()
+        && setter_visibility(index, property.declaration, property.visibility).is_private()
+    {
+        IrStaticAccessor::Absent
+    } else {
+        IrStaticAccessor::Default
+    };
+    crate::ir::IrStaticAccessors { getter, setter }
 }
 
 fn merge_class_initialization(
