@@ -232,6 +232,10 @@ mod tests {
             Parsed::Help(BUILD_HELP)
         );
         assert_eq!(
+            parse(&args(&["build", "--help"])).unwrap(),
+            Parsed::Help(BUILD_HELP)
+        );
+        assert_eq!(
             parse(&args(&[])).unwrap_err(),
             format!("a command is required\n\n{ROOT_HELP}")
         );
@@ -251,6 +255,57 @@ mod tests {
             parse(&args(&["build", "--clean"])).unwrap_err(),
             "unrecognized option '--clean'"
         );
+        assert_eq!(parse(&args(&["-h"])).unwrap(), Parsed::Help(ROOT_HELP));
+        assert_eq!(
+            parse(&args(&["build", "--variant"])).unwrap_err(),
+            "--variant requires a value"
+        );
+        assert_eq!(
+            parse(&args(&["build", "-p"])).unwrap_err(),
+            "--platform requires a value"
+        );
+        assert_eq!(
+            parse(&args(&["build", "-m", "-v"])).unwrap_err(),
+            "module name expected, found '-v'"
+        );
+        assert_eq!(
+            parse(&args(&["build", "--module="])).unwrap_err(),
+            "module name expected, found ''"
+        );
+        assert_eq!(
+            parse(&args(&["build", "--platform="])).unwrap_err(),
+            "platform name expected, found ''"
+        );
+        assert_eq!(
+            parse(&args(&["build", "--variant="])).unwrap_err(),
+            "variant name expected, found ''"
+        );
+        assert_eq!(
+            parse(&args(&["build", "--module", ""])).unwrap_err(),
+            "--module requires a value"
+        );
+    }
+
+    #[test]
+    fn inline_flags_and_repeated_modules_collapse_to_one_command() {
+        let command = command(
+            parse(&args(&[
+                "build",
+                "--platform=jvm",
+                "-p=jvm",
+                "--variant=debug",
+                "-m",
+                "app",
+                "--module",
+                "app",
+                "-v",
+                "debug",
+            ]))
+            .expect("parse"),
+        );
+        assert_eq!(command.modules, vec!["app".to_string()]);
+        assert_eq!(command.platforms, vec!["jvm".to_string()]);
+        assert_eq!(command.variants, vec!["debug".to_string()]);
     }
 
     #[test]
