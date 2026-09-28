@@ -452,6 +452,32 @@ fn block_property_with_one_declared_accessor_keeps_the_default_other() {
     assert_eq!(run(SRC).expect("one declared block accessor"), "OK");
 }
 
+/// A stored block property's declared accessors read and write its static backing field through
+/// `field`, like a top-level property's.
+#[test]
+fn block_property_accessors_use_their_backing_field() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       var written: Int = 0\n\
+        \x20           set(value) { field = value + 1 }\n\
+        \x20       var read: Int = 0\n\
+        \x20           get() = field + 10\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   C.written = 1\n\
+        \x20   C.read = 2\n\
+        \x20   val r = C.written + C.read\n\
+        \x20   return if (r == 14) \"OK\" else r.toString()\n\
+        }\n";
+    assert_members_and_metadata_match_kotlinc(
+        "BlockBackingField",
+        SRC,
+        &["C", "BlockBackingFieldKt"],
+    );
+    assert_eq!(run(SRC).expect("block accessor backing field"), "OK");
+}
+
 #[test]
 fn bare_classifier_call_invokes_block_and_extension_operators() {
     const SRC: &str = "class C(val s: String) {\n\
