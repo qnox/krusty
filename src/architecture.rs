@@ -225,6 +225,10 @@ mod tests {
             // the dump was written to.
             if path.ends_with("worker.rs") {
                 allowed.push("dump");
+                // `begin_compilation_epoch` is a crate-root function, so the path scan records its
+                // name. The worker calls it between requests, after the previous compilation is
+                // gone, so declaration identities reuse interned strings.
+                allowed.push("begin_compilation_epoch");
             }
             assert_allowed_external_crate_modules_in_file(&path, &allowed);
         }
