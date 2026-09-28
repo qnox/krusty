@@ -84,6 +84,7 @@ mod function_reference_invoke;
 mod generated_property_operations;
 mod implicit_reference_coercion;
 mod in_place_arguments;
+mod initializer_lines;
 mod inline_body_emission;
 mod inline_call;
 mod inline_frame_marker;
@@ -3074,6 +3075,7 @@ fn emit_class(
     // is written so an unused local's store is not removed as a temporary.
     let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
     let mut primary_ctor_debug = None;
+    let mut ctor_body_locals = None;
     let param_tys = class_ctor_jvm_tys(c);
     crate::trace_compiler!(
         "lower",
@@ -3156,6 +3158,7 @@ fn emit_class(
                     .chain(c.init_body),
             );
             e.this_uninitialized = true;
+            e.record_locals = byte_parity;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
             e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
             for (vi, t) in param_tys.iter().enumerate() {
@@ -3322,6 +3325,8 @@ fn emit_class(
         if !init_diverges {
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
             if !ctor_lines.is_empty() {
+                // A closing `init` line still pending owns a `nop` before the return's line.
+                ctor.mark_line(c.decl_line);
                 ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
             }
             ctor.ret_void();
@@ -3336,6 +3341,7 @@ fn emit_class(
             ctor_signature.as_deref(),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+        ctor_body_locals = Some(cw.intern_body_locals(&ctor));
         if byte_parity {
             seed_plain_constructor_tail(pool_seed(), &mut cw);
         }
@@ -3612,6 +3618,9 @@ fn emit_class(
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
+    }
+    if let (Some((descriptor, _)), Some(locals)) = (&primary_ctor_debug, ctor_body_locals) {
+        cw.prepend_body_locals("<init>", descriptor, locals);
     }
     if continuation_metadata.is_some() {
         let self_desc = format!("L{fq_name};");
@@ -7802,32 +7811,6 @@ impl<'a> Emitter<'a> {
             return self.inline_value_used_lambda_call(&inline_call, code);
         }
         self.try_inline_classpath_body(&inline_call, code).is_some()
-    }
-
-    /// Emit a constructor's lowered initializer block while retaining the start pc and declared
-    /// source line of each property store. Lowering represents both explicit constructor-parameter
-    /// stores and body-property initializers as a pure `SetField` block when it can preserve this
-    /// correspondence; a mixed block is emitted atomically and contributes no reconstructed lines.
-    fn emit_constructor_init_body(
-        &mut self,
-        class: &crate::ir::IrClass,
-        init_body: crate::ir::ExprId,
-        code: &mut CodeBuilder,
-        lines: &mut Vec<(u16, u32)>,
-    ) {
-        let Some(stores) =
-            crate::jvm::constructor_debug::initializer_property_stores(self.ir, class, init_body)
-        else {
-            self.emit(init_body, code);
-            return;
-        };
-        for store in stores {
-            let pc = code.bytes.len() as u16;
-            if let Some(line) = store.line {
-                lines.push((pc, line));
-            }
-            self.emit(store.expression, code);
-        }
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {

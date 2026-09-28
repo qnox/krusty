@@ -139,7 +139,13 @@ pub(super) fn emit(
                     emitter.emit(statement, &mut clinit);
                 }
             }
-            None => emitter.emit(init_body, &mut clinit),
+            // A block with `init` statements marks its own lines as it goes; keep them.
+            None => {
+                let first = clinit.line_marks().len();
+                emitter.emit(init_body, &mut clinit);
+                let marks = clinit.line_marks()[first..].iter();
+                clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
+            }
         }
         clinit_line_entries.dedup_by_key(|(_, line)| *line);
         if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {

@@ -23,16 +23,19 @@ impl Emitter<'_> {
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let boundary = self.constructor_initializer_block_lines(block);
-        if let Some((start, _)) = boundary {
+        let marked_initializer = self.ir.initializer_blocks.contains(&block);
+        if let Some((start, _)) = boundary.filter(|_| !marked_initializer) {
             code.mark_line(start);
             code.nop();
         }
+        self.mark_initializer_line(block, false, code);
         self.emit_open_block(stmts, value, terminal_target, code);
+        self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
-            self.close_scope_locals(code, boundary.is_some());
+            self.close_scope_locals(code, boundary.is_some() || marked_initializer);
             self.close_spliced_lambda_frame(block, code);
         }
-        if let Some((_, end)) = boundary {
+        if let Some((_, end)) = boundary.filter(|_| !marked_initializer) {
             code.mark_line(end);
             code.nop();
         }

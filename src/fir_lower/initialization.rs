@@ -41,7 +41,13 @@ pub(super) fn accept_non_callable_body(
                         declaration,
                     ))?;
             let class = class_for(class_declaration, ir)?;
-            let body = effect_block(lowered.roots.into_vec(), origin, ir);
+            let roots = lowered.roots.into_vec();
+            for &root in &roots {
+                if matches!(ir.expr(root), IrExpr::Block { .. }) {
+                    ir.initializer_blocks.insert(root);
+                }
+            }
+            let body = effect_block(roots, origin, ir);
             ir.checked_class_initializers
                 .push(IrCheckedClassInitializer {
                     declaration,
