@@ -11,48 +11,53 @@ use super::{JvmSignatureFormatter, Wildcards};
 use crate::types::{Ty, TypeName, TypeVariance};
 
 impl JvmSignatureFormatter<'_> {
-    pub(super) fn type_argument(
+    pub(super) fn write_type_argument(
         &self,
+        out: &mut String,
         declaration: TypeVariance,
         argument: Ty,
         wildcards: Wildcards,
-    ) -> Option<String> {
+    ) -> Option<()> {
         // In a return-like position a projection that only restates the parameter's declared
         // variance is declaration-site variance too, and is not written.
         let restated = |projection: TypeVariance| {
             wildcards == Wildcards::Suppressed && declaration == projection
         };
         match argument {
-            Ty::StarProjection(_) => Some("*".to_string()),
-            argument if is_star(declaration, argument) => Some("*".to_string()),
+            Ty::StarProjection(_) => {
+                out.push('*');
+                Some(())
+            }
+            argument if is_star(declaration, argument) => {
+                out.push('*');
+                Some(())
+            }
             Ty::InProjection(inner) if restated(TypeVariance::In) => {
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))
+                self.write_ty_at(out, inner, wildcards.for_argument(TypeVariance::In))
             }
             Ty::OutProjection(inner) if restated(TypeVariance::Out) => {
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))
+                self.write_ty_at(out, inner, wildcards.for_argument(TypeVariance::Out))
             }
-            Ty::InProjection(inner) => Some(format!(
-                "-{}",
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))?
-            )),
-            Ty::OutProjection(inner) => Some(format!(
-                "+{}",
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))?
-            )),
+            Ty::InProjection(inner) => {
+                out.push('-');
+                self.write_ty_at(out, inner, wildcards.for_argument(TypeVariance::In))
+            }
+            Ty::OutProjection(inner) => {
+                out.push('+');
+                self.write_ty_at(out, inner, wildcards.for_argument(TypeVariance::Out))
+            }
             argument => {
-                let mut signature = String::new();
                 if wildcards.writes_declaration_site()
                     && !(wildcards.drops_redundant()
                         && self.wildcard_is_redundant(declaration, argument)?)
                 {
                     match declaration {
-                        TypeVariance::In => signature.push('-'),
-                        TypeVariance::Out => signature.push('+'),
+                        TypeVariance::In => out.push('-'),
+                        TypeVariance::Out => out.push('+'),
                         TypeVariance::Invariant => {}
                     }
                 }
-                signature.push_str(&self.ty_at(&argument, wildcards.for_argument(declaration))?);
-                Some(signature)
+                self.write_ty_at(out, &argument, wildcards.for_argument(declaration))
             }
         }
     }
