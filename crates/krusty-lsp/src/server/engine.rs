@@ -469,8 +469,8 @@ impl CommandState {
                 generation,
                 candidates,
             } => {
-                // Latency-sensitive but not interactive: a query already answered without these,
-                // and the next keystroke picks them up.
+                // The query already returned. `take` runs an edit, dump, or project change ahead of
+                // this, and queued location does not keep the workspace sweep from being admitted.
                 self.pending.push_back(EngineCommand::LocateDependencies {
                     generation,
                     candidates,
@@ -555,9 +555,10 @@ impl CommandState {
     }
 
     /// Interactive work first, then the neighbourhood, then the sweep. The levels are the
-    /// priority, so there is no comparator and no heap.
+    /// priority, so there is no comparator and no heap. Dependency location shares the pending
+    /// deque but yields: a queue of class materializations must not sit in front of an edit.
     fn take(&mut self) -> Option<EngineCommand> {
-        if let Some(command) = self.pending.pop_front() {
+        if let Some(command) = self.take_pending() {
             return Some(command);
         }
         loop {
@@ -580,6 +581,28 @@ impl CommandState {
             self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
             return Some(EngineCommand::Index(job));
         }
+    }
+
+    /// The earliest edit, dump, materialization, or project change. Location stays in place until
+    /// none of those are waiting, and two location commands keep the order they were queued in.
+    fn take_pending(&mut self) -> Option<EngineCommand> {
+        let interactive = self
+            .pending
+            .iter()
+            .position(|command| !matches!(command, EngineCommand::LocateDependencies { .. }));
+        match interactive {
+            Some(index) => self.pending.remove(index),
+            None => self.pending.pop_front(),
+        }
+    }
+
+    /// True when an edit, dump, materialization, or project change is waiting. Queued dependency
+    /// location is absent from this check, so serving an edit still admits the workspace sweep
+    /// while those classes are written afterwards.
+    fn interactive_work_queued(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|command| !matches!(command, EngineCommand::LocateDependencies { .. }))
     }
 
     fn take_symbol_chunk(&mut self) -> Option<EngineCommand> {
@@ -778,13 +801,11 @@ impl CommandReceiver {
     }
 
     fn interactive_pending(&self) -> bool {
-        !self
-            .queue
+        self.queue
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pending
-            .is_empty()
+            .interactive_work_queued()
     }
 
     fn indexing_outstanding(&self) -> bool {
@@ -1098,6 +1119,7 @@ fn run<A: Analysis>(
                 // Raised only after an interactive analysis has been served, and only while no
                 // further interactive work is waiting. Enumerating a large workspace ahead of the
                 // first open document delayed its diagnostics past two minutes on a 64k-file tree.
+                // Queued dependency location is not that wait: the query already returned.
                 if !commands.interactive_pending() {
                     let neighborhood = analyze.neighborhood_index_candidates(&open);
                     if !neighborhood.is_empty() {
@@ -1460,6 +1482,68 @@ mod tests {
             state.pending.pop_front(),
             Some(EngineCommand::Analyze(_))
         ));
+    }
+
+    fn located(name: &str) -> EngineCommand {
+        EngineCommand::LocateDependencies {
+            generation: 1,
+            candidates: vec![DependencyCandidate {
+                internal: format!("vendor/{name}"),
+                package: "vendor".to_string(),
+                name: name.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn an_edit_runs_ahead_of_queued_dependency_location() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Dump(DumpJob {
+            token: 7,
+            uri: "file:///a.kt".into(),
+        }));
+        state.enqueue(located("First"));
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            open_uris: Vec::new(),
+        }));
+        state.enqueue(located("Second"));
+
+        assert!(state.interactive_work_queued());
+        assert!(matches!(state.take(), Some(EngineCommand::Dump(_))));
+        assert!(matches!(state.take(), Some(EngineCommand::Analyze(_))));
+        assert!(
+            !state.interactive_work_queued(),
+            "the two location commands still queued are not interactive work"
+        );
+        match state.take() {
+            Some(EngineCommand::LocateDependencies { candidates, .. }) => {
+                assert_eq!(candidates[0].name, "First");
+            }
+            other => panic!("expected the earlier location, got {other:?}"),
+        }
+        match state.take() {
+            Some(EngineCommand::LocateDependencies { candidates, .. }) => {
+                assert_eq!(candidates[0].name, "Second");
+            }
+            other => panic!("expected the later location, got {other:?}"),
+        }
+        assert!(state.take().is_none());
+    }
+
+    #[test]
+    fn queued_dependency_location_does_not_hold_back_the_sweep() {
+        let mut state = CommandState::default();
+        state.enqueue(located("Pending"));
+        assert!(
+            !state.interactive_work_queued(),
+            "location is not interactive work, so an edit that just finished can admit the sweep"
+        );
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), String::new(), 1)],
+            open_uris: Vec::new(),
+        }));
+        assert!(state.interactive_work_queued());
     }
 
     #[test]
