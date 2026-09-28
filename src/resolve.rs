@@ -1479,9 +1479,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     })
                 }) || (import_scope.is_none()
                     && packages.is_some_and(|packages| {
-                        packages
-                            .iter()
-                            .any(|package| *package == signature.package)
+                        packages.iter().any(|package| *package == signature.package)
                     }))
                     || (import_scope.is_none() && packages.is_none())
             })
