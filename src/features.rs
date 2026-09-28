@@ -93,7 +93,8 @@ impl LangFeatures {
 
     /// Apply a single CLI argument, mirroring the reference compiler's flags. Returns `true` if the
     /// argument was a recognized language flag (the caller should then not treat it as a source file).
-    /// Handles `-XXLanguage:+Foo,-Bar` and the `-Xname-based-destructuring[=mode]` alias.
+    /// Handles `-XXLanguage:+Foo,-Bar`, the `-Xname-based-destructuring[=mode]` alias, and each
+    /// one-feature flag in `FEATURE_ALIASES`.
     pub fn apply_cli_arg(&mut self, arg: &str) -> bool {
         if let Some(rest) = arg.strip_prefix("-XXLanguage:") {
             self.apply_directive(rest);
@@ -117,28 +118,30 @@ impl LangFeatures {
             }
             return true;
         }
-        if arg == "-Xmulti-dollar-interpolation" {
-            self.enable("MultiDollarInterpolation");
-            return true;
-        }
-        if arg == "-Xconsistent-data-class-copy-visibility" {
-            self.enable("DataClassCopyRespectsConstructorVisibility");
-            return true;
-        }
-        // JetBrains/kotlin 2.4.20 passes these on every compilation
-        // (`common-configuration.gradle.kts`). Context parameters are already on at this
-        // language level; recognizing the flag keeps it from being reported as ignored.
-        // Explicit backing fields are not on unless the build asks for them.
-        if arg == "-Xcontext-parameters" {
-            self.enable("ContextParameters");
-            return true;
-        }
-        if arg == "-Xexplicit-backing-fields" {
-            self.enable("ExplicitBackingFields");
+        if let Some(feature) = feature_alias(arg) {
+            self.enable(feature);
             return true;
         }
         false
     }
+}
+
+/// Flags that enable exactly one language feature. A mode (`-Xname-based-destructuring=…`) or a
+/// list (`-XXLanguage:`) is not an entry: those change more than one feature.
+const FEATURE_ALIASES: &[(&str, &str)] = &[
+    ("-Xcontext-parameters", "ContextParameters"),
+    (
+        "-Xconsistent-data-class-copy-visibility",
+        "DataClassCopyRespectsConstructorVisibility",
+    ),
+    ("-Xexplicit-backing-fields", "ExplicitBackingFields"),
+    ("-Xmulti-dollar-interpolation", "MultiDollarInterpolation"),
+];
+
+fn feature_alias(arg: &str) -> Option<&'static str> {
+    FEATURE_ALIASES
+        .iter()
+        .find_map(|&(flag, feature)| (flag == arg).then_some(feature))
 }
 
 #[cfg(test)]
@@ -185,17 +188,18 @@ mod tests {
         assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
         assert!(!g.has("NameBasedDestructuring"));
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));
-        assert!(g.apply_cli_arg("-Xmulti-dollar-interpolation"));
-        assert!(g.has("MultiDollarInterpolation"));
-        assert!(g.apply_cli_arg("-Xconsistent-data-class-copy-visibility"));
-        assert!(g.has("DataClassCopyRespectsConstructorVisibility"));
-        assert!(g.apply_cli_arg("-Xcontext-parameters"));
-        assert!(g.has("ContextParameters"));
-        let mut backing = LangFeatures::new();
-        assert!(!backing.has("ExplicitBackingFields"));
-        assert!(backing.apply_cli_arg("-Xexplicit-backing-fields"));
-        assert!(backing.has("ExplicitBackingFields"));
         assert!(!g.apply_cli_arg("foo.kt"));
+    }
+
+    #[test]
+    fn each_cli_feature_alias_enables_its_feature() {
+        assert!(!LangFeatures::new().has("ExplicitBackingFields"));
+        assert!(!LangFeatures::new().has("DataClassCopyRespectsConstructorVisibility"));
+        for &(flag, feature) in super::FEATURE_ALIASES {
+            let mut features = LangFeatures::new();
+            assert!(features.apply_cli_arg(flag), "{flag}");
+            assert!(features.has(feature), "{flag} enables {feature}");
+        }
     }
 
     #[test]

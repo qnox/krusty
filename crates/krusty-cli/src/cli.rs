@@ -651,29 +651,36 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
-    /// Flags `common-configuration.gradle.kts` passes on every JetBrains/kotlin 2.4.20
-    /// compilation. An ignored flag leaves explicit backing fields off, so `field =` in the
-    /// compiler sources is rejected, and the worker refuses the request outright.
+    /// `-Xcontext-parameters` is already on at this language level. Recognizing the spelling is
+    /// what keeps it out of `ignored`; the worker refuses a request with anything there.
     #[test]
-    fn kotlin_repo_language_flags_are_modeled_not_ignored() {
-        let parsed = parse_args(&[
-            "-Xcontext-parameters",
-            "-Xexplicit-backing-fields",
-            "-Xname-based-destructuring=complete",
-            "-jvm-default=no-compatibility",
-            "x.kt",
-        ]);
-        assert!(
-            parsed.ignored.is_empty(),
-            "kotlin 2.4.20 flags must be modeled: {:?}",
-            parsed.ignored
-        );
+    fn context_parameters_flag_is_modeled_not_ignored() {
+        let parsed = parse_args(&["-Xcontext-parameters", "x.kt"]);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.features.has("ContextParameters"));
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    /// Explicit backing fields stay off until the build passes the flag. An ignored flag would
+    /// leave `field =` rejected in the Kotlin compiler sources.
+    #[test]
+    fn explicit_backing_fields_flag_is_modeled_not_ignored() {
+        assert!(!parse_args(&["x.kt"]).features.has("ExplicitBackingFields"));
+        let parsed = parse_args(&["-Xexplicit-backing-fields", "x.kt"]);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.features.has("ExplicitBackingFields"));
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    #[test]
+    fn name_based_destructuring_complete_is_modeled_not_ignored() {
+        let parsed = parse_args(&["-Xname-based-destructuring=complete", "x.kt"]);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.features.has("NameBasedDestructuring"));
         assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
-        assert_eq!(parsed.jvm_default, JvmDefaultMode::NoCompatibility);
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 

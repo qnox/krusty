@@ -985,14 +985,39 @@ mod tests {
             .has("DataClassCopyRespectsConstructorVisibility"));
     }
 
-    /// JetBrains/kotlin 2.4.20 enables these on every compilation. Forwarding the kotlinc
-    /// spelling must reach the frontend; leaving one ignored makes the worker refuse the module.
     #[test]
-    fn kotlin_repo_language_flags_are_accepted() {
+    fn explicit_backing_fields_are_accepted() {
         let unit = translate(&args(&[
             "--x_explicit_backing_fields",
-            "--kotlinc-arg",
-            "-Xcontext-parameters",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("explicit backing fields must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("ExplicitBackingFields"));
+    }
+
+    #[test]
+    fn context_parameters_are_accepted() {
+        let unit = translate(&args(&[
+            "--x_context_parameters",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("context parameters must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("ContextParameters"));
+    }
+
+    #[test]
+    fn name_based_destructuring_complete_is_accepted() {
+        let unit = translate(&args(&[
             "--kotlinc-arg",
             "-Xname-based-destructuring=complete",
             "--srcs",
@@ -1000,11 +1025,9 @@ mod tests {
             "--out",
             "o.jar",
         ]))
-        .expect("kotlin 2.4.20 language flags must be accepted");
+        .expect("name-based destructuring must be accepted");
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
-        assert!(parsed.features.has("ExplicitBackingFields"));
-        assert!(parsed.features.has("ContextParameters"));
         assert!(parsed.features.has("NameBasedDestructuring"));
         assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
     }
