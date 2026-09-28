@@ -1317,14 +1317,7 @@ impl JvmLibraries {
         {
             return Some(ty);
         }
-        let companion = if let Some(companion) =
-            crate::types::existing_type_name_nested_child(internal, "Companion")
-        {
-            self.cp.find_name(companion)
-        } else {
-            let companion = format!("{}$Companion", internal.render());
-            self.cp.find(&companion)
-        }?;
+        let companion = self.cp.find_nested_class(internal, "Companion")?;
         declared(&companion)
     }
 
@@ -1332,15 +1325,7 @@ impl JvmLibraries {
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        let companion = if let Some(companion) =
-            crate::types::existing_type_name_nested_child(ci.this_class, "Companion")
-        {
-            self.cp.find_name(companion)
-        } else {
-            let companion_internal = format!("{}$Companion", ci.this_class.render());
-            self.cp.find(&companion_internal)
-        };
-        let Some(companion) = companion else {
+        let Some(companion) = self.cp.find_nested_class(ci.this_class, "Companion") else {
             return std::collections::HashMap::new();
         };
         let prop_rets: std::collections::HashMap<_, _> =
