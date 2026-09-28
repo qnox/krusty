@@ -100,8 +100,9 @@ pub fn classfile_internal_name(internal: &str) -> String {
 }
 
 /// Physical JVM classfile name of an interned classifier. A repeated lookup returns the remembered
-/// spelling and does not render the classifier again.
-fn classfile_internal_name_of(internal: TypeName) -> String {
+/// spelling and does not render the classifier again. Callers that already hold a [`TypeName`] use
+/// this instead of rendering the name into [`classfile_internal_name`].
+pub fn classfile_internal_name_of(internal: TypeName) -> String {
     thread_local! {
         static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
             std::cell::RefCell::default();
@@ -460,6 +461,30 @@ mod tests {
             classfile_internal_name("kotlin/Int.Companion"),
             "kotlin/jvm/internal/IntCompanionObject"
         );
+    }
+
+    #[test]
+    fn interned_classfile_name_matches_the_string_mapping() {
+        for spelling in [
+            "kotlin/String",
+            "kotlin/collections/MutableList",
+            "kotlin/Function1",
+            "kotlin/reflect/KFunction2",
+            "sample/identity6044/Outer.Inner",
+            "kotlin/Int.Companion",
+        ] {
+            let identity = crate::types::type_name(spelling);
+            assert_eq!(
+                classfile_internal_name_of(identity),
+                classfile_internal_name(&identity.render()),
+                "{spelling}"
+            );
+            assert_eq!(
+                classfile_internal_name_of(identity),
+                classfile_internal_name_of(identity),
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
