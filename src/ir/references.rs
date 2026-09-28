@@ -211,27 +211,3 @@ impl FuncRef {
         self.call_owner.is_none()
     }
 }
-
-impl PropRef {
-    pub fn owner_or_facade(&self, facade: &str) -> String {
-        self.owner_internal
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn owner(&self) -> Option<String> {
-        self.owner_internal.map(TypeName::render)
-    }
-
-    pub fn call_owner(&self) -> Option<String> {
-        self.call_owner_internal.map(TypeName::render)
-    }
-
-    pub fn ext_facade_or_facade(&self, facade: &str) -> Option<String> {
-        self.ext_facade.as_ref().map(|f| {
-            f.as_ref()
-                .map(|facade| facade.render())
-                .unwrap_or_else(|| facade.to_string())
-        })
-    }
-}
