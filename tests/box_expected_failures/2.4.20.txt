@@ -65,10 +65,8 @@ coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/resume/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/resume/defaultStub.kt
-coroutines/inlineClasses/resume/invokeOperator.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_suspendFunType.kt
-coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
