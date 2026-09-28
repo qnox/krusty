@@ -5,6 +5,8 @@
 //! amortizes classpath startup across a bounded number of analyses, then restarts to release all
 //! compiler-global memory while the supervisor retains only source text and compact query indexes.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -45,6 +47,10 @@ struct AnalysisRequest<'a> {
     language_features: &'a [&'a str],
     java_sources: &'a [String],
     classpath: Option<&'a [PathBuf]>,
+    /// Hash of the sources after `result_count`, plus their kinds and the Java sources. When set,
+    /// `sources` is only the checked prefix and the worker appends the tail it already stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    support_hash: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +67,82 @@ struct OwnedAnalysisRequest {
     java_sources: Vec<String>,
     #[serde(default)]
     classpath: Option<Vec<PathBuf>>,
+    /// Absent on a full analysis. A value asks the worker to reuse the tail stored for that hash.
+    #[serde(default)]
+    support_hash: Option<u64>,
+}
+
+/// Support sources kept in the worker so a later edit does not send them again.
+struct RememberedSupport {
+    hash: u64,
+    sources: Vec<String>,
+    kinds: Vec<u8>,
+    java_sources: Vec<String>,
+}
+
+const SUPPORT_MISSING_RESPONSE: &[u8] = br#"{"error":"support"}"#;
+
+fn support_tail_hash(sources: &[&str], kinds: &[u8], java_sources: &[String]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    sources.len().hash(&mut hasher);
+    for (source, kind) in sources.iter().zip(kinds) {
+        kind.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    for source in java_sources {
+        source.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// What one analysis frame puts on the wire. A remembered tail is omitted; the worker appends it.
+struct SupportOutbound<'a> {
+    inputs: &'a [SourceInput<'a>],
+    java_sources: &'a [String],
+    support_hash: Option<u64>,
+    tail_hash: u64,
+    reusable: bool,
+}
+
+fn support_outbound<'a>(
+    inputs: &'a [SourceInput<'a>],
+    result_count: usize,
+    java_sources: &'a [String],
+    remembered: Option<u64>,
+    force_full: bool,
+) -> io::Result<SupportOutbound<'a>> {
+    if result_count > inputs.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "analysis result and inference prefixes do not align with the source count",
+        ));
+    }
+    let tail = &inputs[result_count..];
+    let tail_kinds = tail
+        .iter()
+        .map(|source| source.kind.wire_code())
+        .collect::<Vec<_>>();
+    let tail_texts = tail.iter().map(|source| source.text).collect::<Vec<_>>();
+    let tail_hash = support_tail_hash(&tail_texts, &tail_kinds, java_sources);
+    let reusable = !tail.is_empty() || !java_sources.is_empty();
+    let reuse = !force_full && reusable && remembered == Some(tail_hash);
+    if reuse {
+        Ok(SupportOutbound {
+            inputs: &inputs[..result_count],
+            java_sources: &[],
+            support_hash: Some(tail_hash),
+            tail_hash,
+            reusable,
+        })
+    } else {
+        Ok(SupportOutbound {
+            inputs,
+            java_sources,
+            support_hash: None,
+            tail_hash,
+            reusable,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -291,6 +373,8 @@ struct WorkerProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: Option<BufReader<ChildStdout>>,
+    /// Hash of the support tail the running worker stored. Cleared when that process is replaced.
+    remembered_support: Option<u64>,
 }
 
 /// Borrowed send shape: a many-thousand-entry classpath must stream into the bounded writer without
@@ -351,6 +435,7 @@ fn encode_request(
     features: &LangFeatures,
     java_sources: &[String],
     classpath: Option<&[PathBuf]>,
+    support_hash: Option<u64>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
@@ -363,7 +448,12 @@ fn encode_request(
             "open source set exceeds analysis limit",
         ));
     }
-    if result_count > inferred_count || inferred_count > inputs.len() {
+    let aligned = if support_hash.is_some() {
+        inputs.len() == result_count && result_count <= inferred_count
+    } else {
+        result_count <= inferred_count && inferred_count <= inputs.len()
+    };
+    if !aligned {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "analysis result and inference prefixes do not align with the source count",
@@ -386,6 +476,7 @@ fn encode_request(
             language_features: &language_features,
             java_sources,
             classpath,
+            support_hash,
         },
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -464,6 +555,7 @@ fn encode_dump_request(
             language_features: &language_features,
             java_sources: target.java_sources,
             classpath: target.classpath,
+            support_hash: None,
         },
         target: target.target,
         label: target.label,
@@ -522,6 +614,7 @@ impl WorkerProcess {
             child,
             stdin,
             stdout: Some(BufReader::new(stdout)),
+            remembered_support: None,
         };
         write_framed(&mut process.stdin, &configuration)?;
         process.wait_until_ready()?;
@@ -611,24 +704,55 @@ impl WorkerProcess {
         java_sources: &[String],
         classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let request = encode_request(
-            inputs,
-            result_count,
-            inferred_count,
-            language_features,
-            java_sources,
-            classpath,
-        )?;
-        write_framed(&mut self.stdin, &request)?;
-        drop(request);
-        let response = self.read_response()?;
-        let analyses =
-            serde_json::from_slice::<Vec<AnalysisResponse>>(&response).map_err(json_io)?;
-        drop(response);
-        Ok(analyses
-            .into_iter()
-            .map(AnalysisResponse::into_document_analysis)
-            .collect())
+        if result_count > inferred_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "analysis result and inference prefixes do not align with the source count",
+            ));
+        }
+        let mut force_full = false;
+        loop {
+            let outbound = support_outbound(
+                inputs,
+                result_count,
+                java_sources,
+                self.remembered_support,
+                force_full,
+            )?;
+            let request = encode_request(
+                outbound.inputs,
+                result_count,
+                inferred_count,
+                language_features,
+                outbound.java_sources,
+                classpath,
+                outbound.support_hash,
+            )?;
+            write_framed(&mut self.stdin, &request)?;
+            drop(request);
+            let response = self.read_response()?;
+            if response.first() == Some(&b'{') {
+                self.remembered_support = None;
+                if outbound.support_hash.is_some() {
+                    force_full = true;
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "analysis worker rejected a full support tail",
+                ));
+            }
+            let analyses =
+                serde_json::from_slice::<Vec<AnalysisResponse>>(&response).map_err(json_io)?;
+            drop(response);
+            if outbound.support_hash.is_none() && outbound.reusable {
+                self.remembered_support = Some(outbound.tail_hash);
+            }
+            return Ok(analyses
+                .into_iter()
+                .map(AnalysisResponse::into_document_analysis)
+                .collect());
+        }
     }
 
     fn materialize(
@@ -950,6 +1074,106 @@ impl PreparedClasspath {
     }
 }
 
+struct PreparedAnalysis<'a> {
+    texts: Vec<&'a str>,
+    kinds: Vec<u8>,
+    java_sources: &'a [String],
+    inferred_count: usize,
+}
+
+enum AttachSupport {
+    Missing,
+    Invalid(&'static str),
+}
+
+fn attach_support<'a>(
+    request: &'a OwnedAnalysisRequest,
+    remembered: Option<&'a RememberedSupport>,
+) -> Result<PreparedAnalysis<'a>, AttachSupport> {
+    if request.source_kinds.len() != request.sources.len() && !request.source_kinds.is_empty() {
+        return Err(AttachSupport::Invalid(
+            "analysis source kinds do not align with source texts",
+        ));
+    }
+    let prefix_kinds = if request.source_kinds.is_empty() {
+        vec![0; request.sources.len()]
+    } else {
+        request.source_kinds.clone()
+    };
+    if let Some(hash) = request.support_hash {
+        let Some(tail) = remembered.filter(|tail| tail.hash == hash) else {
+            return Err(AttachSupport::Missing);
+        };
+        if request.result_count != request.sources.len() || tail.kinds.len() != tail.sources.len() {
+            return Err(AttachSupport::Invalid(
+                "reused support requires the request to carry only the checked prefix",
+            ));
+        }
+        let full_len = request.sources.len() + tail.sources.len();
+        let inferred_count = request.inferred_count.unwrap_or(full_len);
+        if request.result_count > inferred_count || inferred_count > full_len {
+            return Err(AttachSupport::Invalid(
+                "analysis result and inference prefixes do not align with the source count",
+            ));
+        }
+        let mut texts = request
+            .sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        texts.extend(tail.sources.iter().map(String::as_str));
+        let mut kinds = prefix_kinds;
+        kinds.extend_from_slice(&tail.kinds);
+        if !source_set_fits(texts.iter().map(|text| text.len())) {
+            return Err(AttachSupport::Invalid(
+                "analysis source set exceeds size limit",
+            ));
+        }
+        return Ok(PreparedAnalysis {
+            texts,
+            kinds,
+            java_sources: &tail.java_sources,
+            inferred_count,
+        });
+    }
+    let inferred_count = request.inferred_count.unwrap_or(request.sources.len());
+    if request.result_count > inferred_count || inferred_count > request.sources.len() {
+        return Err(AttachSupport::Invalid(
+            "analysis result and inference prefixes do not align with the source count",
+        ));
+    }
+    if !source_set_fits(request.sources.iter().map(String::len)) {
+        return Err(AttachSupport::Invalid(
+            "analysis source set exceeds size limit",
+        ));
+    }
+    Ok(PreparedAnalysis {
+        texts: request.sources.iter().map(String::as_str).collect(),
+        kinds: prefix_kinds,
+        java_sources: &request.java_sources,
+        inferred_count,
+    })
+}
+
+fn remember_support(request: &OwnedAnalysisRequest, kinds: &[u8]) -> Option<RememberedSupport> {
+    if request.result_count > request.sources.len() || kinds.len() != request.sources.len() {
+        return None;
+    }
+    let sources = request.sources[request.result_count..].to_vec();
+    let tail_kinds = kinds[request.result_count..].to_vec();
+    if sources.is_empty() && request.java_sources.is_empty() {
+        return None;
+    }
+    let texts = sources.iter().map(String::as_str).collect::<Vec<_>>();
+    let hash = support_tail_hash(&texts, &tail_kinds, &request.java_sources);
+    Some(RememberedSupport {
+        hash,
+        sources,
+        kinds: tail_kinds,
+        java_sources: request.java_sources.clone(),
+    })
+}
+
 pub fn run_analysis_worker<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -957,6 +1181,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     let mut prepared = PreparedClasspath::launch(classpath);
     write_framed(writer, WORKER_READY)?;
+    let mut remembered: Option<RememberedSupport> = None;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
@@ -1002,36 +1227,23 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 continue;
             }
         };
-        let inferred_count = request.inferred_count.unwrap_or(request.sources.len());
-        if request.result_count > inferred_count || inferred_count > request.sources.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "analysis result and inference prefixes do not align with the source count",
-            ));
-        }
-        if !source_set_fits(request.sources.iter().map(String::len)) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "analysis source set exceeds size limit",
-            ));
-        }
-        let source_kinds = if request.source_kinds.is_empty() {
-            vec![0; request.sources.len()]
-        } else {
-            request.source_kinds
+        let attached = match attach_support(&request, remembered.as_ref()) {
+            Ok(attached) => attached,
+            Err(AttachSupport::Missing) => {
+                write_framed(writer, SUPPORT_MISSING_RESPONSE)?;
+                continue;
+            }
+            Err(AttachSupport::Invalid(message)) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+            }
         };
-        if source_kinds.len() != request.sources.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "analysis source kinds do not align with source texts",
-            ));
-        }
-        let inputs = request
-            .sources
+        let inferred_count = attached.inferred_count;
+        let inputs = attached
+            .texts
             .iter()
-            .zip(source_kinds)
+            .zip(&attached.kinds)
             .map(|(source, kind)| {
-                let kind = SourceKind::from_wire_code(kind).ok_or_else(|| {
+                let kind = SourceKind::from_wire_code(*kind).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "analysis request contains an unknown source kind",
@@ -1052,7 +1264,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             language_features.enable(feature);
         }
         let classpath = prepared.for_request(request.classpath.as_deref());
-        let stub_overlay_set = set_java_stub_overlay(&classpath, &request.java_sources);
+        let stub_overlay_set = set_java_stub_overlay(&classpath, attached.java_sources);
         let platform = JvmLibraries::new(classpath.clone());
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
@@ -1131,6 +1343,9 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             classpath.clear_stub_overlay();
         }
         let response = encode_response(&analyses)?;
+        if request.support_hash.is_none() {
+            remembered = remember_support(&request, &attached.kinds);
+        }
         // A clean EOF makes the supervisor retry the request in a fresh worker.
         if !classpath.snapshot_is_current() {
             return Ok(());
@@ -1472,13 +1687,13 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[], None, None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[], None, None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -1490,6 +1705,7 @@ mod tests {
                 1,
                 &LangFeatures::new(),
                 &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
+                None,
                 None,
             )
             .unwrap_err()
@@ -1517,7 +1733,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[], None).unwrap();
+        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[], None, None).unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1579,6 +1795,7 @@ mod tests {
             &LangFeatures::new(),
             &[],
             Some(&classpath),
+            None,
         )
         .unwrap();
         let dump = encode_dump_request(
@@ -2158,6 +2375,7 @@ mod tests {
             language_features: &[],
             java_sources: &[],
             classpath: None,
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2205,6 +2423,7 @@ mod tests {
             language_features: &[],
             java_sources: &[],
             classpath: Some(&[]),
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2323,6 +2542,7 @@ mod tests {
             language_features: &[],
             java_sources,
             classpath,
+            support_hash: None,
         })
         .unwrap();
         write_framed(input, &request).unwrap();
@@ -2375,6 +2595,7 @@ mod tests {
             language_features: &[],
             java_sources: &[],
             classpath: None,
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2407,6 +2628,7 @@ mod tests {
             language_features: &[],
             java_sources: &java_sources,
             classpath: None,
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2466,6 +2688,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &["NameBasedDestructuring"],
             java_sources: &[],
             classpath: None,
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2490,6 +2713,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &[],
             java_sources: &[],
             classpath: None,
+            support_hash: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2522,5 +2746,268 @@ fun combine(entries: Array<Entry>): String {
             !diagnostics.iter().any(|d| d.message.contains("Widget")),
             "Widget resolved from stub: {diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn outbound_support_omits_a_remembered_tail() {
+        let marker = "class SupportTailMarker";
+        let primary = "fun use(): SupportTailMarker = SupportTailMarker()";
+        let inputs = [SourceInput::kotlin(primary), SourceInput::kotlin(marker)];
+        let kind = SourceKind::Kotlin.wire_code();
+        let hash = support_tail_hash(&[marker], &[kind], &[]);
+        let features = LangFeatures::new();
+
+        let reused = support_outbound(&inputs, 1, &[], Some(hash), false).unwrap();
+        assert_eq!(reused.support_hash, Some(hash));
+        assert_eq!(reused.inputs.len(), 1);
+        let json = String::from_utf8(
+            encode_request(
+                reused.inputs,
+                1,
+                2,
+                &features,
+                reused.java_sources,
+                None,
+                reused.support_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !json.contains("class SupportTailMarker"),
+            "a remembered tail must stay off the wire: {json}"
+        );
+        assert!(json.contains("\"support_hash\""));
+
+        let cold = support_outbound(&inputs, 1, &[], None, false).unwrap();
+        assert!(cold.support_hash.is_none());
+        let cold_json = String::from_utf8(
+            encode_request(
+                cold.inputs,
+                1,
+                2,
+                &features,
+                cold.java_sources,
+                None,
+                cold.support_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(cold_json.contains("class SupportTailMarker"));
+
+        let forced = support_outbound(&inputs, 1, &[], Some(hash), true).unwrap();
+        assert!(forced.support_hash.is_none());
+        assert_eq!(forced.inputs.len(), 2);
+
+        let changed = [
+            SourceInput::kotlin(primary),
+            SourceInput::kotlin("class Other"),
+        ];
+        let missed = support_outbound(&changed, 1, &[], Some(hash), false).unwrap();
+        assert!(missed.support_hash.is_none());
+
+        let only_open = [SourceInput::kotlin(primary)];
+        let bare = support_outbound(&only_open, 1, &[], Some(hash), false).unwrap();
+        assert!(!bare.reusable);
+        assert!(bare.support_hash.is_none());
+
+        let java = vec!["package p; public class Widget {} // JavaSupportTailMarker".to_string()];
+        let java_hash = support_tail_hash(&[], &[], &java);
+        let kotlin = [SourceInput::kotlin("fun use(w: p.Widget) {}")];
+        let reused_java = support_outbound(&kotlin, 1, &java, Some(java_hash), false).unwrap();
+        assert!(reused_java.java_sources.is_empty());
+        let java_json = String::from_utf8(
+            encode_request(
+                reused_java.inputs,
+                1,
+                1,
+                &features,
+                reused_java.java_sources,
+                None,
+                reused_java.support_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !java_json.contains("JavaSupportTailMarker"),
+            "remembered Java stubs must stay off the wire: {java_json}"
+        );
+    }
+
+    #[test]
+    fn worker_reuses_a_support_tail_instead_of_resending_it() {
+        let support = "package demo\nclass Widget\n// SupportTailMarker\n";
+        let primary = "package demo\nfun use(): Widget = Widget()\n";
+        let edited = "package demo\nfun use(): Widget = Missing()\n";
+        let replacement = "package demo\nclass Gadget\n// OtherSupportTail\n";
+        let replacement_primary = "package demo\nfun use(): Gadget = Gadget()\n";
+        let hash = support_tail_hash(&[support], &[0], &[]);
+        let replacement_hash = support_tail_hash(&[replacement], &[0], &[]);
+        let wrong_hash = hash.wrapping_add(1);
+
+        let full = |primary: &str, support: &str| {
+            let sources = [primary, support];
+            serde_json::to_vec(&AnalysisRequest {
+                sources: &sources,
+                source_kinds: &[0, 0],
+                result_count: 1,
+                inferred_count: 2,
+                language_features: &[],
+                java_sources: &[],
+                classpath: None,
+                support_hash: None,
+            })
+            .unwrap()
+        };
+        let reused = |primary: &str, support_hash: u64| {
+            let sources = [primary];
+            let encoded = serde_json::to_vec(&AnalysisRequest {
+                sources: &sources,
+                source_kinds: &[0],
+                result_count: 1,
+                inferred_count: 2,
+                language_features: &[],
+                java_sources: &[],
+                classpath: None,
+                support_hash: Some(support_hash),
+            })
+            .unwrap();
+            let json = String::from_utf8(encoded.clone()).unwrap();
+            assert!(
+                !json.contains("SupportTailMarker") && !json.contains("OtherSupportTail"),
+                "a reuse frame must not carry the support text: {json}"
+            );
+            encoded
+        };
+
+        let mut input = Vec::new();
+        write_framed(&mut input, &full(primary, support)).unwrap();
+        write_framed(&mut input, &reused(edited, hash)).unwrap();
+        write_framed(&mut input, &reused(edited, wrong_hash)).unwrap();
+        write_framed(&mut input, &reused(edited, hash)).unwrap();
+        write_framed(&mut input, &full(replacement_primary, replacement)).unwrap();
+        write_framed(&mut input, &reused(primary, hash)).unwrap();
+        write_framed(&mut input, &reused(replacement_primary, replacement_hash)).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let frames = read_worker_frames(output);
+        assert_eq!(frames.len(), 7);
+        assert_clean_analysis(&frames[0]);
+        let edited_diagnostics = analysis_messages(&frames[1]);
+        assert!(
+            edited_diagnostics
+                .iter()
+                .any(|message| message.contains("Missing")),
+            "the edited prefix must be the file that was checked: {edited_diagnostics:?}"
+        );
+        assert!(
+            !edited_diagnostics
+                .iter()
+                .any(|message| message.contains("Widget")),
+            "the remembered support class must still resolve: {edited_diagnostics:?}"
+        );
+        assert_eq!(frames[2], SUPPORT_MISSING_RESPONSE);
+        let still_resolved = analysis_messages(&frames[3]);
+        assert!(
+            !still_resolved
+                .iter()
+                .any(|message| message.contains("Widget")),
+            "a rejected hash must leave the stored tail in place: {still_resolved:?}"
+        );
+        assert_clean_analysis(&frames[4]);
+        assert_eq!(
+            frames[5], SUPPORT_MISSING_RESPONSE,
+            "a replaced tail must not answer the previous hash"
+        );
+        assert_clean_analysis(&frames[6]);
+    }
+
+    #[test]
+    fn worker_reuses_stubbed_java_without_resending_it() {
+        let java = "package p; public class Widget {} // JavaSupportTailMarker";
+        let java_sources = vec![java.to_string()];
+        let primary = "fun use(w: p.Widget) {}";
+        let hash = support_tail_hash(&[], &[], &java_sources);
+        let full = serde_json::to_vec(&AnalysisRequest {
+            sources: &[primary],
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &java_sources,
+            classpath: None,
+            support_hash: None,
+        })
+        .unwrap();
+        let reused = serde_json::to_vec(&AnalysisRequest {
+            sources: &[primary],
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[],
+            classpath: None,
+            support_hash: Some(hash),
+        })
+        .unwrap();
+        let wrong = serde_json::to_vec(&AnalysisRequest {
+            sources: &[primary],
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[],
+            classpath: None,
+            support_hash: Some(hash.wrapping_add(1)),
+        })
+        .unwrap();
+        assert!(!String::from_utf8(reused.clone())
+            .unwrap()
+            .contains("JavaSupportTailMarker"));
+
+        let mut input = Vec::new();
+        write_framed(&mut input, &full).unwrap();
+        write_framed(&mut input, &reused).unwrap();
+        write_framed(&mut input, &wrong).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let frames = read_worker_frames(output);
+        assert_eq!(frames.len(), 3);
+        assert_clean_analysis(&frames[0]);
+        assert_clean_analysis(&frames[1]);
+        assert_eq!(frames[2], SUPPORT_MISSING_RESPONSE);
+    }
+
+    fn read_worker_frames(output: Vec<u8>) -> Vec<Vec<u8>> {
+        let mut output = Cursor::new(output);
+        let ready = read_framed(&mut output, WORKER_READY.len())
+            .unwrap()
+            .expect("worker readiness message");
+        assert_eq!(ready, WORKER_READY);
+        let mut frames = Vec::new();
+        while let Some(frame) = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES).unwrap() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn analysis_messages(frame: &[u8]) -> Vec<String> {
+        let analyses: Vec<AnalysisResponse> = serde_json::from_slice(frame).unwrap();
+        analyses
+            .into_iter()
+            .flat_map(|analysis| analysis.diagnostics)
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    fn assert_clean_analysis(frame: &[u8]) {
+        let messages = analysis_messages(frame);
+        assert!(messages.is_empty(), "{messages:?}");
     }
 }
