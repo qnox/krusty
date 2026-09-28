@@ -5165,6 +5165,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
   boxed class even when an inlined call substitutes a primitive for it (`ldc Integer`), so the IR
   literal records that it names a type parameter. Test: `tests/class_literal_e2e.rs`.
+- **A function reference is owned by its declaring file's facade.** `::target` names the facade of
+  the file that declares `target` as its reflection owner (`ldc DeclarationsKt`), even when another
+  file of the module references it. Test:
+  `tests/library_function_reference_class_e2e.rs::a_module_function_in_another_file_is_owned_by_its_own_facade`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.
