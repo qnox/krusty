@@ -3,7 +3,7 @@
 //! The ledger comes from the diagnostic harness: kotlinc's `file:line:column: message` for this
 //! source, recorded per Kotlin version. The toolchain must print that same diagnostic.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::common;
@@ -27,9 +27,13 @@ fn a_toolchain_build_reports_kotlinc_diagnostics() {
     std::fs::write(root.join("module.yaml"), "product: jvm/app\n").expect("module");
     std::fs::write(root.join("src/main.kt"), source).expect("source");
 
-    let output = Command::new(toolchain_binary())
+    // `Command` resolves a relative program against the child's directory. The coverage gate's
+    // `KRUSTY_BIN` is relative to the workspace, and this command's directory is the temporary
+    // project, so both the toolchain and the compiler it runs have to be workspace-absolute.
+    let compiler = workspace_path(common::krusty_binary());
+    let output = Command::new(toolchain_binary(&compiler))
         .current_dir(&root)
-        .env("KRUSTY_COMPILER", common::krusty_binary())
+        .env("KRUSTY_COMPILER", &compiler)
         .arg("build")
         .output()
         .expect("run krusty-toolchain");
@@ -54,8 +58,27 @@ fn a_toolchain_build_reports_kotlinc_diagnostics() {
     assert_ne!(output.status.code(), Some(0));
 }
 
-fn toolchain_binary() -> PathBuf {
-    let compiler = common::krusty_binary();
+#[test]
+fn a_relative_toolchain_path_is_resolved_in_the_workspace() {
+    let relative = PathBuf::from("target/coverage-build/coverage/krusty-toolchain");
+    let resolved = workspace_path(&relative);
+    let workspace = std::env::current_dir().expect("current directory");
+    assert!(resolved.is_absolute());
+    assert_eq!(resolved, workspace.join(&relative));
+    assert_ne!(std::env::temp_dir().join(&relative), resolved);
+}
+
+fn workspace_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .expect("current directory")
+        .join(path)
+}
+
+fn toolchain_binary(compiler: &Path) -> PathBuf {
     let binary = compiler
         .parent()
         .expect("krusty directory")
