@@ -85,7 +85,7 @@ use statement_normalization::{
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
-use tail_forward::{rewrite_forward_body, tail_forward};
+use tail_forward::{delegation_carrier, rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
@@ -273,6 +273,7 @@ pub(crate) fn lower_suspend(
                 bytecode_machine::Routed::NotEligible => {}
             }
         }
+        let delegation_forwarder = ir.interface_delegation_forwarders.contains(&fid);
         let forward = body.and_then(|b| {
             tail_forward(
                 ir,
@@ -281,6 +282,7 @@ pub(crate) fn lower_suspend(
                 &suspend_set,
                 orig_rets[fid as usize],
                 &orig_rets,
+                delegation_forwarder,
             )
         });
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
@@ -559,6 +561,11 @@ pub(crate) fn lower_suspend(
                         .into_iter()
                         .map(|ret| (ret, SuspendedResultReturn::Unit)),
                 );
+            }
+            if let Some(returned) = returned {
+                if let Some(carrier) = delegation_carrier(ir, &forward, &suspend_set) {
+                    outputs.suspended_result_returns.insert(returned, carrier);
+                }
             }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must

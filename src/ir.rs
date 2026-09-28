@@ -2138,6 +2138,11 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// Functions that exist only to forward an interface member to its delegate (`: I by d`).
+    /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
+    /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
+    /// after returning `COROUTINE_SUSPENDED` unchanged.
+    pub interface_delegation_forwarders: std::collections::HashSet<u32>,
     /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
     /// The declaration promises constant stack and the body still recurses, so a backend that
     /// cannot supply the guarantee itself must decline the function rather than emit a program that

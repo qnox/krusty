@@ -64,6 +64,7 @@ pub(super) fn tail_forward(
     suspend_functions: &HashSet<u32>,
     declared_return: Ty,
     original_returns: &[Ty],
+    delegation_forwarder: bool,
 ) -> Option<TailForward> {
     let forward = match tail_forward_call(
         ir,
@@ -82,8 +83,12 @@ pub(super) fn tail_forward(
         )?),
     };
     // A callee's continuation completes with its value class boxed, so the caller unboxes the
-    // resumed result and cannot hand its own continuation over. An intrinsic point's value is the
-    // box on either path, which a function returning the carrier unboxes too.
+    // resumed result and cannot hand its own continuation over. An interface-delegation forwarder
+    // is not that caller: it returns the callee's CPS result, adapted to the carrier. An intrinsic
+    // point's value is the box on either path, which a function returning the carrier unboxes too.
+    if delegation_forwarder {
+        return Some(forward);
+    }
     let returns_carrier =
         unboxed_carrier(ir.value_class_suspend_returns.get(&function).copied()).is_some();
     let unboxes = forward.calls().iter().any(|&call| {
@@ -91,6 +96,19 @@ pub(super) fn tail_forward(
             || (returns_carrier && ir.intrinsic_suspension_points.contains_key(&call))
     });
     (!unboxes).then_some(forward)
+}
+
+/// The carrier check an interface-delegation forwarder applies to its one reference-carrier call.
+pub(super) fn delegation_carrier(
+    ir: &IrFile,
+    forward: &TailForward,
+    suspend_functions: &HashSet<u32>,
+) -> Option<super::SuspendedResultReturn> {
+    let TailForward::Single(call) = forward else {
+        return None;
+    };
+    let (_classifier, carrier) = boxed_on_resume(ir, *call, suspend_functions)?;
+    Some(super::SuspendedResultReturn::ValueClassCarrier { carrier })
 }
 
 /// Rewrite the body so each forwarded call's CPS `Object` is what the function returns.
