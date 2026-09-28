@@ -1432,10 +1432,14 @@ impl Checker<'_> {
             }
             OrdinaryDelegateSelection::None(members) => {
                 let syntax = vec![delegate; args.len()];
+                let receivers = member_extension_selection::ordinary_dispatch_first(
+                    scope,
+                    self.implicit_receivers(scope),
+                );
                 let member_extension = member_extension_function_with(
                     &self.fed_source(),
                     self,
-                    &self.implicit_receivers(scope),
+                    &receivers,
                     self.file.explicit_context_arguments,
                     &|parameters| self.select_context_arguments_with_types(scope, parameters),
                     &|_| false,

@@ -1021,5 +1021,5 @@ fn same_type_context_dispatch_and_extension_stay_distinct() {
             ) "OK" else "NOK"
         }
     "#;
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "SameTypeContextDispatchAndExtension");
 }
