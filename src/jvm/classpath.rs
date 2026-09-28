@@ -2036,9 +2036,18 @@ impl Classpath {
     }
 
     /// Whether the first classpath definition of `internal` belongs to a friend entry.
+    /// A complete catalog already records that entry, so the check does not render the classifier
+    /// or open its class bytes. An incomplete catalog still reads the entry to confirm ownership.
     pub fn grants_internal_access(&self, internal: TypeName) -> bool {
         let internal = super::jvm_class_map::to_jvm_type_name(internal);
         if self.stub_overlay.borrow().contains_key(&internal) {
+            return false;
+        }
+        let tree = self.package_tree();
+        if let Some(index) = tree.first_class_jar(internal) {
+            return self.friend_entries.get(index).copied().unwrap_or(false);
+        }
+        if tree.catalog_complete() {
             return false;
         }
         self.physical_class_entry(&internal.render())
@@ -5017,6 +5026,18 @@ impl PackageTree {
             return Vec::new();
         };
         self.jars_for_class_id(class)
+    }
+
+    /// The first classpath entry that declares `internal`, in the same shadowing order as
+    /// [`Self::jars_for_class_name`].
+    fn first_class_jar(&self, internal: TypeName) -> Option<JarId> {
+        let class = crate::types::existing_type_name_in(&self.names, internal)?;
+        let start = self
+            .classes
+            .partition_point(|&(candidate, _)| candidate.0 < class.0);
+        self.classes
+            .get(start)
+            .and_then(|&(candidate, jar)| (candidate == class).then_some(jar))
     }
 
     pub(super) fn catalog_complete(&self) -> bool {
