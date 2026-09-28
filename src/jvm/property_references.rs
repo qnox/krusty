@@ -1,6 +1,9 @@
 //! JVM realization of checked property-reference declarations.
 
+pub(crate) mod delegated_arrays;
 mod realization;
+
+pub(crate) use delegated_arrays::DelegatedPropertyArrays;
 
 pub(crate) use realization::{
     PropertyAccessorRole, PropertyFieldAccess, PropertyReferenceRealization,
@@ -102,6 +105,7 @@ pub(super) fn realize(
     current_facade: &str,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
+    let mut delegated_operands = Vec::new();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
         if let IrExpr::LocalPropertyReference {
@@ -231,27 +235,53 @@ pub(super) fn realize(
             | FirCallableReferenceBinding::Unbound
             | FirCallableReferenceBinding::Static => {}
         }
-        ir.exprs[raw] = if delegated {
-            let target = delegated_target.expect("delegated target was validated above");
+        if let Some(target) = delegated_target {
             let declaration = ir
                 .referenced_module_properties
                 .get(&target)
                 .cloned()
                 .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
-            synthesize_delegated(ir, stems, target, &declaration, property)?
-        } else {
-            synthesize(
-                ir,
-                current_facade,
-                raw,
-                property,
-                realization,
-                receiver,
-                &mut realizations,
-            )
-        };
+            let source_order = ir
+                .checked_properties
+                .get(&target)
+                .map(|checked| checked.source_order)
+                .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+            let (owner, element) =
+                synthesize_delegated(ir, stems, target, &declaration, property, mutable)?;
+            delegated_operands.push(delegated_arrays::DelegatedOperand {
+                operand: raw as u32,
+                owner,
+                property: target,
+                source_order,
+                element,
+            });
+            continue;
+        }
+        ir.exprs[raw] = synthesize(
+            ir,
+            current_facade,
+            raw,
+            property,
+            realization,
+            receiver,
+            &mut realizations,
+        );
     }
+    realizations.pending_delegated = delegated_operands;
     Ok(realizations)
+}
+
+/// Choose each class's `$$delegatedProperties` for the delegated operands [`realize`] found, once
+/// dependency calls are realized: an operand an inline operator never reads is `null` instead and
+/// takes no slot.
+pub(crate) fn place_delegated_arrays(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+    bodies: &dyn crate::jvm::inline::MethodBodies,
+) {
+    delegated_arrays::elide_unread(ir, bodies);
+    let pending = std::mem::take(&mut realizations.pending_delegated);
+    realizations.delegated_arrays = delegated_arrays::place(ir, pending);
 }
 
 /// Realize the compiler-generated metadata value passed to a delegate convention. Unlike a
@@ -265,7 +295,8 @@ fn synthesize_delegated(
     target: PropertyId,
     declaration: &IrModuleProperty,
     property: PropRef,
-) -> Result<IrExpr, PropertyReferenceRealizationTarget> {
+    mutable: bool,
+) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !declaration.context_parameters.is_empty() {
         return Err(failure);
@@ -279,9 +310,14 @@ fn synthesize_delegated(
     if receiver_arity > 2 {
         return Err(failure);
     }
-    let reflection_owner = property.owner_internal.ok_or(failure)?;
+    // The class declaring the property, whose array holds it and which it names as its owner: a
+    // top-level declaration's is its file facade, an extension's too, never the receiver's class.
+    let container = match declaration.owner {
+        Some(owner) => owner,
+        None => super::module_calls::facade_for(declaration.source, stems).ok_or(failure)?,
+    };
     let owner = ir.add_expr(IrExpr::ClassConst {
-        internal: Some(reflection_owner),
+        internal: Some(container),
     });
     let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
         declaration.name.clone().into(),
@@ -300,25 +336,24 @@ fn synthesize_delegated(
     let flags = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(i32::from(
         declaration.owner.is_none(),
     ))));
+    let mutability = if mutable { "Mutable" } else { "" };
     let internal = type_name(&format!(
-        "kotlin/jvm/internal/PropertyReference{receiver_arity}Impl"
+        "kotlin/jvm/internal/{mutability}PropertyReference{receiver_arity}Impl"
     ));
-    // Resolve the facade while the module-source table is still available. A top-level declaration
-    // uses it as its reflection owner; member declarations already carry their classifier owner.
-    if declaration.owner.is_none()
-        && super::module_calls::facade_for(declaration.source, stems).is_none()
-    {
-        return Err(failure);
-    }
-    Ok(IrExpr::New {
-        internal,
-        args: vec![owner, name, signature, flags],
-        ctor_params: None,
-        ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
-        external_target: None,
-        defaults: Box::new([]),
-        default_prefix_count: 0,
-    })
+    Ok((
+        container,
+        IrExpr::New {
+            internal,
+            args: vec![owner, name, signature, flags],
+            ctor_params: None,
+            ctor_desc: Some(
+                "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
+            ),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        },
+    ))
 }
 
 fn local_property_reference(ir: &mut IrFile, name: Box<str>, property_type: Ty) -> IrExpr {

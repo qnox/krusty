@@ -103,6 +103,10 @@ impl ClassWriter {
         let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
             return;
         };
+        let lineless = |(name_, desc_): &(String, String)| name_ == name && desc_ == desc;
+        if self.lineless_methods.iter().any(lineless) {
+            return;
+        }
         if let Some(method) = self
             .methods
             .iter_mut()
@@ -113,6 +117,13 @@ impl ClassWriter {
                 .map(|&(pc, line)| (pc, line as u16))
                 .collect();
         }
+    }
+
+    /// Write no `LineNumberTable` for `name desc`, whatever lines its emission collects: kotlinc
+    /// writes none for a `<clinit>` that fills `$$delegatedProperties`.
+    pub(in crate::jvm) fn omit_method_lines(&mut self, name: &str, desc: &str) {
+        self.lineless_methods
+            .push((name.to_string(), desc.to_string()));
     }
 }
 

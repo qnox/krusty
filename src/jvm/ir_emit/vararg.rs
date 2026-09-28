@@ -164,7 +164,7 @@ fn emit_reference_spread(
 }
 
 /// Build a packed array through the next local slot, matching kotlinc's evaluation and frame shape.
-fn emit_packed_array(
+pub(super) fn emit_packed_array(
     emitter: &mut Emitter<'_>,
     array_type: &Ty,
     elements: &[u32],

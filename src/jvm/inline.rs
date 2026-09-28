@@ -1379,7 +1379,7 @@ fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
 
 /// The local slot of each parameter in the original (static) method — `long`/`double` take two. Used to
 /// locate a lambda parameter's `aload <slot>` before relocation/shifting.
-fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
+pub(crate) fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
     let inner = descriptor.strip_prefix('(')?.split(')').next()?;
     let b = inner.as_bytes();
     let mut i = 0;

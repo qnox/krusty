@@ -21,6 +21,7 @@ mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
 mod inner_classes;
+mod late_fields;
 mod line_numbers;
 mod local_variables;
 mod member_mapping;
@@ -454,57 +455,6 @@ struct FieldInfo {
     invisible_anns: Vec<Vec<u8>>,
 }
 
-/// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
-/// visits methods first and fields last, so a field entry the method bodies never introduced (a
-/// `const val`'s name + `ConstantValue`, a facade backing field) interns AFTER every method window.
-/// Realized into a [`FieldInfo`] (appended after the eagerly-added fields) by `intern_late_fields`.
-struct LateField {
-    placement: LateFieldPlacement,
-    access: u16,
-    name: String,
-    desc: String,
-    signature: Option<String>,
-    /// The `ConstantValue` payload, interned at realization (`None` for a `<clinit>`-initialized field).
-    const_value: Option<crate::ir::IrConst>,
-    /// BINARY-retention nullability annotation type descriptor (`Lorg/jetbrains/annotations/NotNull;`).
-    ann: Option<String>,
-    /// USER annotations on the field (`@Target(FIELD)` on the property), split by retention. Held
-    /// unencoded so their types intern in the field-table window, where kotlinc interns them —
-    /// before the class's own `@Metadata`, not after the methods.
-    user_visible: Vec<crate::ir::AppliedAnnotation>,
-    user_invisible: Vec<crate::ir::AppliedAnnotation>,
-}
-
-/// Position in the finished field table, independent from the constant-pool interning window.
-enum LateFieldPlacement {
-    Trailing,
-    Leading,
-}
-
-impl LateField {
-    fn new(
-        access: u16,
-        name: &str,
-        desc: &str,
-        signature: Option<&str>,
-        const_value: Option<crate::ir::IrConst>,
-        ann: Option<&str>,
-        placement: LateFieldPlacement,
-    ) -> Self {
-        Self {
-            placement,
-            access,
-            name: name.to_string(),
-            desc: desc.to_string(),
-            signature: signature.map(str::to_string),
-            const_value,
-            ann: ann.map(str::to_string),
-            user_visible: Vec::new(),
-            user_invisible: Vec::new(),
-        }
-    }
-}
-
 /// Partition retained declaration annotations into the two class-file attributes the JVM splits them
 /// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
 /// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
@@ -565,7 +515,9 @@ pub struct ClassWriter {
     super_class: u16,
     interfaces: Vec<u16>,
     fields: Vec<FieldInfo>,
-    late_fields: Vec<LateField>,
+    late_fields: Vec<late_fields::LateField>,
+    /// Methods (name, descriptor) whose line table [`Self::omit_method_lines`] drops.
+    lineless_methods: Vec<(String, String)>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
     /// Constant-pool index of the class's generic `Signature` VALUE, when it has one.
@@ -661,6 +613,7 @@ impl ClassWriter {
             interfaces: Vec::new(),
             fields: Vec::new(),
             late_fields: Vec::new(),
+            lineless_methods: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
             class_signature: None,
@@ -911,127 +864,6 @@ impl ClassWriter {
         );
     }
 
-    /// Declare a field whose pool entries intern at the FIELD-TABLE visit (after every method) —
-    /// kotlinc's writer order. Use for a field the method bodies don't introduce; a field whose
-    /// name/descriptor the bodies DO intern can use either form (the table interning dedups).
-    pub fn add_field_late(
-        &mut self,
-        access: u16,
-        name: &str,
-        desc: &str,
-        const_value: Option<crate::ir::IrConst>,
-        ann: Option<&str>,
-    ) {
-        self.add_field_late_sig(access, name, desc, None, const_value, ann);
-    }
-
-    /// Deferred field declaration with an optional generic `Signature` value.
-    pub fn add_field_late_sig(
-        &mut self,
-        access: u16,
-        name: &str,
-        desc: &str,
-        signature: Option<&str>,
-        const_value: Option<crate::ir::IrConst>,
-        ann: Option<&str>,
-    ) {
-        self.late_fields.push(LateField::new(
-            access,
-            name,
-            desc,
-            signature,
-            const_value,
-            ann,
-            LateFieldPlacement::Trailing,
-        ));
-    }
-
-    /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
-    /// `Companion` field before the instance fields, while interning it with the field visit).
-    pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
-        // The `Companion` field is a non-null reference — kotlinc annotates it.
-        self.late_fields.push(LateField::new(
-            access,
-            name,
-            desc,
-            None,
-            None,
-            Some("Lorg/jetbrains/annotations/NotNull;"),
-            LateFieldPlacement::Leading,
-        ));
-    }
-
-    /// Realize the deferred fields NOW rather than at `finish`. An enum's leading fields carry a
-    /// generic `Signature`, and kotlinc interns that string BEFORE the class's own annotation
-    /// descriptors — so the emitter forces the field visit before queuing those. Draining, so a
-    /// second call (from `finish`) is a no-op.
-    pub(super) fn realize_late_fields(&mut self) {
-        self.intern_late_fields();
-    }
-
-    fn intern_late_fields(&mut self) {
-        let mut lead_at = 0usize;
-        for lf in std::mem::take(&mut self.late_fields) {
-            let n = self.cp.utf8(&lf.name);
-            let d = self.cp.utf8(&lf.desc);
-            let signature = lf.signature.as_ref().map(|value| self.cp.utf8(value));
-            let cv = lf.const_value.as_ref().and_then(|c| {
-                use crate::ir::IrConst;
-                Some(match c {
-                    IrConst::Boolean(b) => self.const_int(*b as i32),
-                    IrConst::Byte(v) => self.const_int(*v as i32),
-                    IrConst::Short(v) => self.const_int(*v as i32),
-                    IrConst::Int(v) => self.const_int(*v),
-                    // The JVM carries `UByte`/`UShort` in `B`/`S`, so the pool entry is the
-                    // value read as that signed primitive: 200u is the byte -56.
-                    IrConst::UByte(v) => self.const_int(i32::from(*v as i8)),
-                    IrConst::UShort(v) => self.const_int(i32::from(*v as i16)),
-                    IrConst::UInt(v) => self.const_int(*v as i32),
-                    IrConst::ULong(v) => self.const_long(*v as i64),
-                    IrConst::Char(ch) => self.const_int(*ch as i32),
-                    IrConst::Long(v) => self.const_long(*v),
-                    IrConst::Float(v) => self.const_float(*v),
-                    IrConst::Double(v) => self.const_double(*v),
-                    IrConst::String(s) => self.const_string_kt(s),
-                    IrConst::Null => return None,
-                })
-            });
-            // A user annotation interns before the nullability one, matching the attribute order
-            // (`RuntimeVisibleAnnotations` precedes `RuntimeInvisibleAnnotations`).
-            let visible_anns: Vec<Vec<u8>> = lf
-                .user_visible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            let mut invisible_anns: Vec<Vec<u8>> = lf
-                .user_invisible
-                .iter()
-                .map(|annotation| self.encode_annotation(annotation))
-                .collect();
-            let nullability = lf.ann.as_deref().and_then(|a| self.written_annotation(a));
-            invisible_anns.extend(nullability.map(|a| {
-                let ti = self.cp.utf8(a);
-                vec![(ti >> 8) as u8, ti as u8, 0, 0]
-            }));
-            let info = FieldInfo {
-                access: lf.access,
-                name: n,
-                desc: d,
-                signature,
-                const_value: cv,
-                visible_anns,
-                invisible_anns,
-            };
-            match lf.placement {
-                LateFieldPlacement::Trailing => self.fields.push(info),
-                LateFieldPlacement::Leading => {
-                    self.fields.insert(lead_at, info);
-                    lead_at += 1;
-                }
-            }
-        }
-    }
-
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
     /// `const_string`/`const_int`/… ). kotlinc emits this on a `const val`; the JVM initializes the
     /// field, so its `<clinit>` store is omitted.
@@ -1056,21 +888,6 @@ impl ClassWriter {
         if let Some(f) = self.fields.last_mut() {
             f.visible_anns = vis;
             f.invisible_anns = invis;
-        }
-    }
-
-    /// Attach user annotations to the most recently DEFERRED field ([`Self::add_field_late_sig`]),
-    /// which realizes them when the field table interns.
-    pub fn set_last_late_field_annotations(
-        &mut self,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) {
-        // Kept UNENCODED: a deferred field's annotation types must intern in the field-table window,
-        // which `intern_late_fields` opens, not here. Only the retention → attribute split happens now.
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        if let Some(field) = self.late_fields.last_mut() {
-            field.user_visible = visible;
-            field.user_invisible = invisible;
         }
     }
 
