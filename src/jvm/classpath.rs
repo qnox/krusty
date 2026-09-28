@@ -2762,21 +2762,18 @@ impl Classpath {
     fn rebuild_ext_candidate_records(
         &self,
         owner: NameId,
-        root: &str,
+        root: TypeName,
         name: &str,
     ) -> Vec<ExtCandidateRecord> {
         let mut out = Vec::new();
-        let Some(root_ci) = self.find(root) else {
+        let Some(root_ci) = self.find_name(root) else {
             return out;
         };
         let root_public = root_ci.is_public();
-        let mut cur = Some(root.to_string());
+        let mut cur = Some(root_ci);
         let mut visited = std::collections::HashSet::new();
-        while let Some(cn) = cur {
-            if !visited.insert(cn.clone()) {
-                break;
-            }
-            let Some(ci) = self.find(&cn) else { break };
+        visited.insert(root);
+        while let Some(ci) = cur.take() {
             for m in &ci.methods {
                 // Static methods of this name only — never `<init>`/`<clinit>` (the eager scan excluded
                 // `<`-prefixed names; a real call name never starts with `<`, so this only hardens the path).
@@ -2798,7 +2795,9 @@ impl Classpath {
                     public: root_public && m.is_public(),
                 });
             }
-            cur = ci.super_class();
+            cur = ci
+                .super_class
+                .and_then(|next| visited.insert(next).then(|| self.find_name(next)).flatten());
         }
         out
     }
@@ -3776,8 +3775,9 @@ impl Classpath {
             }
         }
         cache_stat!(l1_class, false);
-        let internal = internal_id.render();
-        let name = format!("{internal}.class");
+        // The classfile spelling is a zip/directory key. An L2 hit already holds the parsed class,
+        // so the render waits until this entry actually has to read bytes.
+        let mut classfile_name: Option<(String, String)> = None;
         let mut found = None;
         let mut all_cached = true;
         for i in self.class_entry_indices_name(&tree, internal_id) {
@@ -3797,14 +3797,20 @@ impl Classpath {
                 None | Some(_) => {}
             }
             all_cached = false;
+            if classfile_name.is_none() {
+                let internal = internal_id.render();
+                let name = format!("{internal}.class");
+                classfile_name = Some((internal, name));
+            }
+            let (internal, name) = classfile_name.as_ref().expect("classfile spelling");
             let read_and_parse = || -> Result<Option<std::sync::Arc<ClassInfo>>, ReadError> {
                 let bytes = match e {
-                    Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
-                    Entry::Jar(j) => self.jar_entry(j, &name),
+                    Entry::Dir(d) => std::fs::read(d.join(name)).ok(),
+                    Entry::Jar(j) => self.jar_entry(j, name),
                     // The JDK jimage stores classes uncompressed — seek-read the class via a one-time
                     // name→(offset,size) index so JDK type members (String, collections, …) resolve.
-                    Entry::Jimage(_) => self.jimage_bytes(&internal),
-                    Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, &internal),
+                    Entry::Jimage(_) => self.jimage_bytes(internal),
+                    Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, internal),
                 };
                 // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
                 // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
@@ -3816,7 +3822,7 @@ impl Classpath {
                     Err(_) => return Ok(None),
                 };
                 Ok(class
-                    .this_class_matches(&internal)
+                    .this_class_matches(internal)
                     .then(|| std::sync::Arc::new(class)))
             };
             let parsed = if incomplete {
@@ -4636,22 +4642,22 @@ impl Classpath {
             }
         }
         cache_stat!(ext_l2, false);
-        // Union the per-entry root lists for THIS name (entry order, dedup by rendered root — the same
-        // order the composed index's per-part merge produced), then rebuild candidates from each root's
-        // cached `ClassInfo`, grouped by receiver.
+        // Union the per-entry root lists for THIS name (entry order, dedup by classifier identity —
+        // the same order the composed index's per-part merge produced), then rebuild candidates from
+        // each root's cached `ClassInfo`, grouped by receiver.
         let mut grouped = ExtByName::default();
-        let mut seen_roots: Vec<String> = Vec::new();
+        let mut seen_roots: Vec<TypeName> = Vec::new();
         for p in self.ext_parts().iter() {
             let Some(owners) = p.by_name.get(method_name) else {
                 continue;
             };
             for &owner_id in owners {
-                let root = p.owner_names.render(owner_id);
+                let root = type_name_from(&p.owner_names, owner_id);
                 if seen_roots.contains(&root) {
                     continue;
                 }
                 let owner = grouped.owner_names.insert_from(&p.owner_names, owner_id);
-                for cand in self.rebuild_ext_candidate_records(owner, &root, method_name) {
+                for cand in self.rebuild_ext_candidate_records(owner, root, method_name) {
                     let cand_idx = grouped.all.len();
                     if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
                         grouped.by_recv.entry(recv).or_default().push(cand_idx);
