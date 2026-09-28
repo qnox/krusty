@@ -59,6 +59,18 @@ fn a_public_override_returns_the_wrapper_like_kotlinc() {
 }
 
 #[test]
+fn override_member_tables_match_kotlinc() {
+    for class in ["Next", "Last", "Shift"] {
+        let pair = common::ModuleClassPair::compile(&SOURCES, class);
+        assert_eq!(
+            common::member_table(&pair.krusty),
+            common::member_table(&pair.kotlinc),
+            "{class}"
+        );
+    }
+}
+
+#[test]
 fn a_subclass_in_another_file_overrides_the_wrapper_like_kotlinc() {
     assert_same_instructions("Last", "public java.lang.Integer echo(int);");
 }

@@ -553,6 +553,8 @@ mod delegated_prop_e2e;
 mod delegated_properties_array_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
+#[path = "dependency_override_signature_e2e.rs"]
+mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
