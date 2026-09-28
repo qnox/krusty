@@ -8695,6 +8695,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps the `ifnull`/`ifnonnull` form. The emitter reads the classifier kind from the checked
   classifier facts for the operand's type. Test: `tests/enum_equality_e2e.rs`.
 
+- **A lambda's implementation guards its own parameters** (kotlinc's `generateNonNullAssertions`,
+  which skips a private function unless it is `LOCAL_FUNCTION_FOR_LAMBDA`). The private static
+  method of a lambda literal checks each non-null parameter whose JVM type is not primitive with
+  `Intrinsics.checkNotNullParameter`: its extension receiver and its value parameters, but not the
+  values it captures. An anonymous function (`fun(…) {}`), a private `LOCAL_FUNCTION` for kotlinc,
+  guards nothing, and a suspend lambda (a class) is left alone. `Unit` is a reference type here, for
+  every function (`fun f(u: Unit)` is guarded too). The message is the parameter's name: a bare `_`
+  is `<unused var>`, a destructuring pattern `<destruct>`, and the receiver its local name
+  (`$this$<label>`, or `<this>`). An anonymous function's bare `_` parameter is unused too, so it has
+  no `LocalVariableTable` row. `IrLambdaOrigin::form` carries whether a lowered function literal is
+  a lambda or an anonymous function; the JVM backend selects the guards from it in
+  `jvm::parameter_assertions`, replacing the receiver-only guard common lowering used to record.
+  The parameter's role alone decides the guard; its source name is only the message, and a value
+  parameter without one fails the backend's validation instead of losing its check. Test:
+  `tests/lambda_parameter_checks_e2e.rs` (a separate case for a `Unit` parameter).
+
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
   closes a protected region the transfer leaves. The emitter no longer fuses a guard over a bare
