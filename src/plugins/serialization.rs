@@ -1569,6 +1569,10 @@ impl IrPlugin for SerializationPlugin {
                         crate::fir::ResolvedParameterIdentity::Source("encoder".into()),
                         crate::fir::ResolvedParameterIdentity::Source("value".into()),
                     ],
+                    parameter_types: vec![
+                        class_ty("kotlinx/serialization/encoding/Encoder"),
+                        class_ty("kotlin/Any"),
+                    ],
                     name: "serialize".to_string(),
                     erased_params: vec![
                         class_ty("kotlinx/serialization/encoding/Encoder"),
@@ -1591,6 +1595,7 @@ impl IrPlugin for SerializationPlugin {
                     parameter_identities: vec![crate::fir::ResolvedParameterIdentity::Source(
                         "decoder".into(),
                     )],
+                    parameter_types: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                     name: "deserialize".to_string(),
                     erased_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                     erased_ret: class_ty("kotlin/Any"),

@@ -535,11 +535,16 @@ fn attach_bridge_debug_tables(
             bridge.erased_params.len(),
             "bridge debug identities exactly match physical arity"
         );
+        assert_eq!(
+            bridge.parameter_types.len(),
+            bridge.parameter_identities.len(),
+            "bridge debug types align with its identities"
+        );
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
         let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
             &bridge.parameter_identities,
-            &bridge.concrete_params,
+            &bridge.parameter_types,
             &bridge.name,
         );
         for (parameter, spelling) in jvm_tys(&bridge.erased_params).iter().zip(parameter_names) {

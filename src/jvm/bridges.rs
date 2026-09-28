@@ -302,6 +302,7 @@ fn superclass_method_bridges(
             kind: BridgeKind::Function,
             target_function: own_fid,
             parameter_identities,
+            parameter_types: base_params.clone(),
             name: bridge_name,
             erased_params: base_params,
             erased_ret: base_ret,
@@ -408,18 +409,7 @@ fn property_bridges(
             );
             continue;
         }
-        let name = edge.name.clone();
-        push_property_bridge(
-            ir,
-            cid,
-            &name,
-            edge.declared_type,
-            edge.implementation_type,
-            (edge.declared_type, edge.implementation_type),
-            edge.overridden_mutable && edge.implementation_mutable,
-            bridge_getter,
-            target_getter,
-        );
+        push_property_bridge(ir, cid, &edge, bridge_getter, target_getter);
         order.resize(
             order.len() + ir.classes[cid].bridges.len() - pushed_before,
             position,
@@ -448,6 +438,7 @@ fn push_member_extension_accessor_bridges(
         kind: BridgeKind::Function,
         target_function,
         parameter_identities: vec![receiver.clone()],
+        parameter_types: vec![bridge_erasure(declared_receiver)],
         name,
         erased_params: vec![bridge_erasure(declared_receiver)],
         erased_ret,
@@ -470,6 +461,9 @@ fn push_member_extension_accessor_bridges(
             .parameter_identities
             .push(crate::fir::ResolvedParameterIdentity::PropertySetterValue);
         setter
+            .parameter_types
+            .push(bridge_erasure(edge.declared_type));
+        setter
             .erased_params
             .push(bridge_erasure(edge.declared_type));
         setter.concrete_params.push(edge.implementation_type);
@@ -485,44 +479,47 @@ fn push_member_extension_accessor_bridges(
 }
 
 /// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded under
-/// the accessor's name wins — the first supertype in the walk is the nearest one.
+/// the accessor's name wins — the first supertype in the walk is the nearest one. Each delegates to
+/// the implementation's own accessor function when this class declares it.
 fn push_property_bridge(
     ir: &mut IrFile,
     cid: usize,
-    pname: &str,
-    super_ret: Ty,
-    own_ret: Ty,
-    (super_ty, own_ty): (Ty, Ty),
-    needs_setter: bool,
+    edge: &crate::ir::IrPropertyOverride,
     getter_name: String,
     getter_target: String,
 ) {
+    let own = |accessor: Option<u32>| accessor.filter(|f| ir.classes[cid].methods.contains(f));
+    let (getter, setter) = (
+        own(edge.implementation_getter),
+        own(edge.implementation_setter),
+    );
     let has_getter = ir.classes[cid]
         .bridges
         .iter()
         .any(|b| b.name == getter_name && b.erased_params.is_empty());
     if !has_getter {
         let target_name = (getter_name != getter_target).then_some(getter_target);
-        let special = getter_name != property_getter_name(pname);
+        let special = getter_name != property_getter_name(&edge.name);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
-            target_function: None,
+            target_function: getter,
             parameter_identities: Vec::new(),
+            parameter_types: Vec::new(),
             name: getter_name,
             erased_params: vec![],
-            erased_ret: super_ret,
+            erased_ret: edge.declared_type,
             concrete_params: vec![],
-            concrete_ret: own_ret,
+            concrete_ret: edge.implementation_type,
             target_ret: None,
             type_safe_barrier: false,
             special,
             target_name,
         });
     }
-    if !needs_setter {
+    if !(edge.overridden_mutable && edge.implementation_mutable) {
         return;
     }
-    let sname = property_setter_name(pname);
+    let sname = property_setter_name(&edge.name);
     let has_setter = ir.classes[cid]
         .bridges
         .iter()
@@ -530,12 +527,13 @@ fn push_property_bridge(
     if !has_setter {
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
-            target_function: None,
+            target_function: setter,
             parameter_identities: vec![crate::fir::ResolvedParameterIdentity::PropertySetterValue],
+            parameter_types: vec![edge.declared_type],
             name: sname,
-            erased_params: vec![super_ty],
+            erased_params: vec![edge.declared_type],
             erased_ret: Ty::Unit,
-            concrete_params: vec![own_ty],
+            concrete_params: vec![edge.implementation_type],
             concrete_ret: Ty::Unit,
             target_ret: None,
             type_safe_barrier: false,
