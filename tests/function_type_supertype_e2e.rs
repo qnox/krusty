@@ -122,3 +122,69 @@ fun f() {\n\
         "complete argument diagnostics"
     );
 }
+
+/// A suspend function type as a supertype is realized as `Function{N+1}` with the continuation as
+/// its last type argument, plus the `SuspendFunction` marker; kotlinc's `invoke(Object, Object)`
+/// bridge casts that `Object` to `Continuation`, and `@Metadata` records the supertype as
+/// `Function{N+1}<…, Continuation<R>, Any?>` flagged suspend.
+#[test]
+fn a_suspend_function_supertype_matches_kotlinc() {
+    const SRC: &str = "class Probe : suspend (Int) -> String {\n\
+    override suspend fun invoke(p1: Int): String = \"OK\"\n\
+}\n";
+    common::byte_diff_against_kotlinc("SuspendFunctionSupertype", SRC, "Probe")
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+/// The erased `invoke(Object, Object)` a caller reaches through `Function2` delegates to the
+/// suspend override with the object cast back to a `Continuation`.
+#[test]
+fn a_suspend_function_supertype_is_invoked_through_its_erased_bridge() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+class Probe : suspend (Int) -> String {\n\
+    override suspend fun invoke(p1: Int): String = if (p1 == 7) \"OK\" else \"fail\"\n\
+}\n\
+object Done : Continuation<String> {\n\
+    override val context: CoroutineContext get() = throw UnsupportedOperationException()\n\
+    override fun resumeWith(result: Result<String>) {}\n\
+}\n\
+fun box(): String {\n\
+    val erased: Any = Probe()\n\
+    @Suppress(\"UNCHECKED_CAST\")\n\
+    val physical = erased as (Int, Continuation<String>) -> Any?\n\
+    return physical(7, Done) as String\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "SuspendFunctionSupertypeBridge");
+}
+
+/// Past the 22 numbered function interfaces a function type is `FunctionN`, whose single
+/// `invoke(Object[])` kotlinc implements as a final bridge that checks the array length and casts
+/// each element to the override's parameter.
+#[test]
+fn a_big_arity_function_supertype_matches_kotlinc() {
+    const SRC: &str = "class Box(val value: String)\n\
+class Wide : (Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box) -> String {\n\
+    override fun invoke(p1: Box, p2: Box, p3: Box, p4: Box, p5: Box, p6: Box, p7: Box, p8: Box, p9: Box, p10: Box, p11: Box, p12: Box, p13: Box, p14: Box, p15: Box, p16: Box, p17: Box, p18: Box, p19: Box, p20: Box, p21: Box, p22: Box, p23: Box): String = p2.value + p21.value\n\
+}\n";
+    common::byte_diff_against_kotlinc("BigArityFunctionSupertype", SRC, "Wide")
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+/// A call through the function type packs its arguments into the array the bridge unpacks.
+#[test]
+fn a_big_arity_function_supertype_is_invoked_through_its_array_bridge() {
+    const SRC: &str = "class Box(val value: String)\n\
+class Wide : (Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box) -> String {\n\
+    override fun invoke(p1: Box, p2: Box, p3: Box, p4: Box, p5: Box, p6: Box, p7: Box, p8: Box, p9: Box, p10: Box, p11: Box, p12: Box, p13: Box, p14: Box, p15: Box, p16: Box, p17: Box, p18: Box, p19: Box, p20: Box, p21: Box, p22: Box, p23: Box): String = p2.value + p21.value\n\
+}\n\
+fun box(): String {\n\
+    val b = Box(\"\")\n\
+    val o = Box(\"O\")\n\
+    val k = Box(\"K\")\n\
+    val f: (Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box, Box) -> String = Wide()\n\
+    return f(b, o, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, k, b, b)\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "BigArityFunctionSupertypeBridge");
+}

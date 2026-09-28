@@ -25,6 +25,8 @@ fn finish_bridge(
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
         finish_code_sig::<0x0001>(cw, name, desc, code, locals, signature);
+    } else if bridge.kind == crate::ir::BridgeKind::FunctionArgumentArray {
+        finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     } else if bridge.special {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 }>(cw, name, desc, code, locals);
     } else {
@@ -252,6 +254,10 @@ fn emit_bridge(
         locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
         code.bind(dispatch);
     }
+    let packed_arguments = b.kind == crate::ir::BridgeKind::FunctionArgumentArray;
+    if packed_arguments {
+        super::function_reference_invoke::check_argument_count(cw, &mut code, cp.len());
+    }
     if let Some(parameters) = &target_parameters {
         assert!(
             c.is_value,
@@ -275,10 +281,19 @@ fn emit_bridge(
     } else {
         code.aload(0);
     }
+    let erased_arguments = if packed_arguments {
+        vec![Ty::obj("java/lang/Object"); cp.len()]
+    } else {
+        ep.clone()
+    };
     let mut slot = 1u16;
-    for (k, (et, ct)) in ep.iter().zip(&cp).enumerate() {
-        load(*et, slot, &mut code);
-        slot += slot_words(*et);
+    for (k, (et, ct)) in erased_arguments.iter().zip(&cp).enumerate() {
+        if packed_arguments {
+            super::function_reference_invoke::load_erased_function_argument(cw, &mut code, true, k);
+        } else {
+            load(*et, slot, &mut code);
+            slot += slot_words(*et);
+        }
         // A boxed value-class param (a generic supertype method `f(Object,…)` delegating to a mangled
         // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
         // then `unbox-impl` it to the underlying `ct` the target expects.
@@ -512,6 +527,19 @@ fn attach_bridge_debug_tables(
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
         attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, body_pc);
+        return;
+    }
+    if bridge.kind == crate::ir::BridgeKind::FunctionArgumentArray {
+        // kotlinc maps no line of the array bridge and names its one parameter `args`.
+        let locals = vec![
+            (String::from("this"), format!("L{};", c.fq_name()), 0u16),
+            (
+                String::from("args"),
+                String::from("[Ljava/lang/Object;"),
+                1u16,
+            ),
+        ];
+        cw.set_method_debug(&bridge.name, erased_desc, None, &locals);
         return;
     }
     if c.decl_line == 0 {

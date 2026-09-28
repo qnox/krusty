@@ -103,6 +103,28 @@ pub(crate) fn classifier_name(fqn: &str) -> Option<TypeName> {
     Some(type_name(fqn))
 }
 
+/// A supertype as a classifier: a function type (`class C : suspend (A) -> R`) stands for the
+/// function classifier it is an instance of, applied to its parameters and result
+/// (`kotlin/coroutines/SuspendFunction1<A, R>`), which declares the `invoke` a class declaring
+/// that supertype overrides.
+pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
+    let Ty::Fun(signature) = supertype else {
+        return supertype;
+    };
+    let classifier = FunctionClassifier {
+        kind: if signature.suspend {
+            FunctionClassKind::SuspendFunction
+        } else {
+            FunctionClassKind::Function
+        },
+        arity: signature.params.len(),
+    }
+    .identity();
+    let mut arguments = signature.params.clone();
+    arguments.push(signature.ret);
+    Ty::obj_args_name(classifier, &arguments)
+}
+
 pub(crate) fn is_reflective_function_classifier(internal: TypeName) -> bool {
     classifier(internal).is_some_and(FunctionClassifier::is_reflective)
 }
@@ -222,6 +244,17 @@ fn ensure_invoke(
         member.set_is_abstract(true);
         member.set_is_interface(true);
         member.set_is_operator(true);
+        member.set_suspend(suspend);
+        // kotlinc synthesizes these classifiers inside the standard library's must-use scope, and
+        // an override inherits the status of the declaration it overrides.
+        member.return_value_status = Some(crate::types::ReturnValueStatus::MustUse);
+        if suspend {
+            // A suspend member publishes its CPS continuation as its final physical parameter.
+            member
+                .physical_params
+                .push(Ty::obj("kotlin/coroutines/Continuation"));
+            member.physical_ret = Ty::obj("kotlin/Any");
+        }
         member.call_sig = CallSig::metadata_plain(parameters.len());
         shape.members.push(member);
     }

@@ -16,6 +16,10 @@ pub enum BridgeKind {
     /// The ordinary public instance entry through which a boxed value class implements an interface;
     /// it delegates to the selected static carrier implementation but is not `ACC_BRIDGE|SYNTHETIC`.
     ValueClassInterfaceEntry,
+    /// `FunctionN.invoke(Object[])`, past the numbered function interfaces: the erased arguments
+    /// arrive as one array whose length is checked before each element is cast to the override's
+    /// parameter.
+    FunctionArgumentArray,
 }
 
 #[derive(Clone, Debug)]
