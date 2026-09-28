@@ -315,10 +315,10 @@ pub struct LibraryMember {
     pub default_values: Vec<Option<DefaultValue>>,
     /// Opaque default-argument bridge coupled to this selected declaration.
     pub default_realization: Option<Box<DefaultCallRealization>>,
-    /// Opaque callable constructor target used when the declaration's direct JVM constructor is not
-    /// accessible to dependency consumers (for example, value-class parameters force a public
-    /// marker accessor around a private primary constructor).
-    pub constructor_realization: Option<Box<ConstructorCallRealization>>,
+    /// Exact nonvirtual target when the declaration's own entry point is not callable directly: a
+    /// constructor behind a public marker accessor, or a `super` call to a legacy interface body
+    /// that lives on a receiver-first static holder. Ordinary calls still dispatch as declared.
+    pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     /// The member's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
     /// the return analogue of [`LibraryCallable::source_receiver`], and recorded with no value-class
     /// reasoning of its own.
@@ -768,7 +768,7 @@ impl LibraryMember {
             return_value_status: None,
             default_values: Vec::new(),
             default_realization: None,
-            constructor_realization: None,
+            nonvirtual_realization: None,
             declared_ret: None,
             implicit_classifier_callable: None,
             associated_classifier: None,
@@ -938,7 +938,7 @@ impl LibraryCallable {
             generic_sig: None,
             singleton_dispatch: None,
             default_realization: None,
-            constructor_realization: None,
+            nonvirtual_realization: None,
             declared_ret: None,
         }
     }
@@ -964,7 +964,7 @@ impl LibraryCallable {
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
-        callable.constructor_realization = member.constructor_realization.clone();
+        callable.nonvirtual_realization = member.nonvirtual_realization.clone();
         callable
     }
 
@@ -1156,13 +1156,13 @@ pub struct LibraryCallable {
     /// Opaque platform target for this declaration's default-argument bridge. It is attached to the
     /// selected source callable and never participates in name or overload resolution.
     pub default_realization: Option<Box<DefaultCallRealization>>,
-    /// Exact non-default constructor target selected by the provider. Present only for constructor
-    /// declarations whose ordinary physical descriptor is not the legal cross-module entry point.
-    pub constructor_realization: Option<Box<ConstructorCallRealization>>,
+    /// Exact nonvirtual target selected by the provider (see [`LibraryMember::nonvirtual_realization`]):
+    /// present only when the ordinary physical descriptor is not the legal nonvirtual entry point.
+    pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ConstructorCallRealization {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonvirtualCallRealization {
     pub owner: TypeName,
     pub descriptor: String,
 }
@@ -2165,7 +2165,7 @@ impl FunctionInfo {
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
-        callable.constructor_realization = member.constructor_realization.clone();
+        callable.nonvirtual_realization = member.nonvirtual_realization.clone();
         callable.declared_ret = member.declared_ret;
         callable.context_count = member.context_count;
         callable.contract = member.contract.clone();
@@ -2232,7 +2232,7 @@ impl FunctionInfo {
         member.default_values = self.default_values.clone();
         member.default_realization = self.callable.default_realization.clone();
         member.external_default_provider = self.callable.external_default_provider;
-        member.constructor_realization = self.callable.constructor_realization.clone();
+        member.nonvirtual_realization = self.callable.nonvirtual_realization.clone();
         member.generic_sig = self.generic_sig.clone();
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;

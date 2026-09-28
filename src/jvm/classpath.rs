@@ -2141,8 +2141,8 @@ impl Classpath {
         if stored.callable.default_realization.is_none() {
             stored.callable.default_realization = callable.default_realization.clone();
         }
-        if stored.callable.constructor_realization.is_none() {
-            stored.callable.constructor_realization = callable.constructor_realization.clone();
+        if stored.callable.nonvirtual_realization.is_none() {
+            stored.callable.nonvirtual_realization = callable.nonvirtual_realization.clone();
         }
         if !stored.callable.inline.can_inline() && callable.inline.can_inline() {
             stored.callable.inline = callable.inline;
@@ -2981,7 +2981,6 @@ impl Classpath {
         let class = file.get_name(nested)?;
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
     }
-
     /// Constructors declared by a classless Kotlin builtin. Their descriptor is deliberately empty:
     /// the declaration is semantic metadata, while a backend intrinsic owns the platform realization
     /// (`Array(size, init)` has no JVM `<init>` method).

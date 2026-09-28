@@ -5093,6 +5093,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   which is still null, and it does not use the nested class's uninitialized `this`. A reference
   to a different entry stays a read of that entry's static field. Tests:
   `tests/enum_entry_self_instance_e2e.rs`.
+- **A legacy interface body is reached through its holder only by `super`.** A dependency
+  compiled with `-jvm-default=disable` (the standard library's `ClosedRange`, for one) leaves the
+  interface method abstract and puts the body on the receiver-first `$DefaultImpls` static. kotlinc
+  still calls such a member through the interface (`invokeinterface ClosedRange.contains`), so the
+  implementing class's forwarder dispatches; only a nonvirtual `super` call or read names the
+  holder static, and it loads the receiver at its own class with no `checkcast`. The provider
+  publishes the holder as the declaration's nonvirtual realization. Tests:
+  `tests/legacy_interface_calls_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.

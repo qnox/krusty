@@ -207,7 +207,7 @@ pub(super) fn realize(
             };
             let constructor = defaults
                 .is_empty()
-                .then(|| callable.constructor_realization.as_deref())
+                .then_some(callable.nonvirtual_realization.as_deref())
                 .flatten();
             if constructor.is_some_and(|constructor| constructor.owner != callable.owner) {
                 return Err(target.into());
@@ -868,13 +868,23 @@ pub(super) fn realize(
                     if let crate::ir::IrPropertyDispatch::Super { owner, interface } =
                         property_dispatch
                     {
-                        *callee = Callee::Special {
-                            owner,
-                            name: callable.name,
-                            descriptor,
-                            interface,
-                            source_member: None,
-                            source: None,
+                        // A legacy interface body lives only on its receiver-first holder static,
+                        // which takes the retained dispatch receiver at its own class.
+                        *callee = match callable.nonvirtual_realization.as_deref() {
+                            Some(holder) => Callee::Static {
+                                owner: holder.owner,
+                                name: callable.name,
+                                descriptor: holder.descriptor.clone(),
+                                inline: crate::libraries::InlineKind::None,
+                            },
+                            None => Callee::Special {
+                                owner,
+                                name: callable.name,
+                                descriptor,
+                                interface,
+                                source_member: None,
+                                source: None,
+                            },
                         };
                     } else if callable.inline.must_inline() {
                         *callee = Callee::Static {

@@ -600,26 +600,25 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                         dispatch_receiver,
                         args,
                     },
-                    crate::libraries::MemberRealization::Direct { pass_receiver } => {
-                        let mut operands = args;
-                        if pass_receiver {
-                            operands.insert(
-                                0,
+                    // The receiver stays the call's dispatch receiver: a receiver-first holder
+                    // static loads it at its own class, as the original dispatch did.
+                    crate::libraries::MemberRealization::Direct { pass_receiver } => IrExpr::Call {
+                        callee: Callee::Static {
+                            owner,
+                            name,
+                            descriptor,
+                            inline: crate::libraries::InlineKind::None,
+                        },
+                        dispatch_receiver: if pass_receiver {
+                            Some(
                                 dispatch_receiver
                                     .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
-                            );
-                        }
-                        IrExpr::Call {
-                            callee: Callee::Static {
-                                owner,
-                                name,
-                                descriptor,
-                                inline: crate::libraries::InlineKind::None,
-                            },
-                            dispatch_receiver: None,
-                            args: operands,
-                        }
-                    }
+                            )
+                        } else {
+                            None
+                        },
+                        args,
+                    },
                     crate::libraries::MemberRealization::Intrinsic(_)
                     | crate::libraries::MemberRealization::RangeConstruction { .. } => {
                         return Err(source.map_or(

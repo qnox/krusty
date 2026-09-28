@@ -4939,7 +4939,6 @@ impl ResolvedMember {
         projected_return_hazard: bool,
     ) -> Self {
         let origin = callable.origin.clone();
-        let ret = callable.ret;
         let suspend = callable.suspend;
         let physical_params = callable.physical_params.clone();
         let mut member = LibraryMember::new(
@@ -4968,13 +4967,14 @@ impl ResolvedMember {
         member.declared_ret = callable.declared_ret;
         member.contract = callable.contract;
         member.default_realization = callable.default_realization;
+        member.nonvirtual_realization = callable.nonvirtual_realization;
         member.plugin_expression = callable.plugin_expression;
         Self {
             receiver,
+            ret: member.ret,
             member,
             physical_params,
             context_args: Vec::new(),
-            ret,
             projected_return_hazard,
             suspend,
             origin,
@@ -8444,7 +8444,7 @@ mod tests {
             generic_sig: None,
             singleton_dispatch: None,
             default_realization: None,
-            constructor_realization: None,
+            nonvirtual_realization: None,
             declared_ret: None,
         };
         FunctionInfo {

@@ -5666,49 +5666,49 @@ fn emit_default_impls_forwarders(
             {
                 continue;
             }
-            let (target_owner, target_name, target_desc, dispatch) = match member.realization {
-                crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true,
-                } => {
-                    let Some(owner) = member.owner else { continue };
-                    (
-                        owner.render(),
+            // A dependency's `disable` realization: its holder static is the only body.
+            let holder = member.nonvirtual.as_deref();
+            let (target_owner, target_name, target_desc, dispatch) =
+                match (holder, member.realization) {
+                    (Some(holder), _) => (
+                        holder.owner.render(),
                         name.clone(),
-                        member.descriptor.to_string(),
+                        holder.descriptor.clone(),
                         ForwarderDispatch::HolderStatic,
-                    )
-                }
-                crate::libraries::MemberRealization::Dispatch
-                    if env.jvm_default == JvmDefaultMode::Disable && shape.source =>
-                {
-                    let mut with_receiver = vec![Ty::obj_name(interface)];
-                    with_receiver.extend_from_slice(&param_tys);
-                    (
-                        crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
-                        name.clone(),
-                        method_descriptor(&with_receiver, ret),
-                        ForwarderDispatch::HolderStatic,
-                    )
-                }
-                // A KOTLIN interface member whose body is a JVM default method on the interface
-                // (this module under `enable`, or a dependency compiled under `enable`/
-                // `no-compatibility`): kotlinc forwards with a Java-style interface `super` call.
-                // A JAVA default method never gets a forwarder, and `no-compatibility` emits none.
-                crate::libraries::MemberRealization::Dispatch
-                    if env.jvm_default != JvmDefaultMode::NoCompatibility && shape.is_kotlin =>
-                {
-                    let Some(named) = interface_special_target(interface) else {
-                        continue;
-                    };
-                    (
-                        named.render(),
-                        name.clone(),
-                        method_descriptor(&param_tys, ret),
-                        ForwarderDispatch::InterfaceSpecial,
-                    )
-                }
-                _ => continue,
-            };
+                    ),
+                    (None, crate::libraries::MemberRealization::Dispatch)
+                        if env.jvm_default == JvmDefaultMode::Disable && shape.source =>
+                    {
+                        let mut with_receiver = vec![Ty::obj_name(interface)];
+                        with_receiver.extend_from_slice(&param_tys);
+                        (
+                            crate::types::type_name_nested_child(interface, "DefaultImpls")
+                                .render(),
+                            name.clone(),
+                            method_descriptor(&with_receiver, ret),
+                            ForwarderDispatch::HolderStatic,
+                        )
+                    }
+                    // A KOTLIN interface member whose body is a JVM default method on the interface
+                    // (this module under `enable`, or a dependency compiled under `enable`/
+                    // `no-compatibility`): kotlinc forwards with a Java-style interface `super` call.
+                    // A JAVA default method never gets a forwarder, and `no-compatibility` emits none.
+                    (None, crate::libraries::MemberRealization::Dispatch)
+                        if env.jvm_default != JvmDefaultMode::NoCompatibility
+                            && shape.is_kotlin =>
+                    {
+                        let Some(named) = interface_special_target(interface) else {
+                            continue;
+                        };
+                        (
+                            named.render(),
+                            name.clone(),
+                            method_descriptor(&param_tys, ret),
+                            ForwarderDispatch::InterfaceSpecial,
+                        )
+                    }
+                    _ => continue,
+                };
             write_forwarder(
                 interface,
                 &name,
@@ -9935,15 +9935,12 @@ impl<'a> Emitter<'a> {
                             self.run.set_inline_bail("inline splice failed");
                         }
                     }
-                    let physical_params = parse_descriptor_params(&descriptor)
+                    let mut physical_params = parse_descriptor_params(&descriptor)
                         .expect("static call descriptor must be valid");
                     let (physical_args, leading_non_argument_operands) =
                         match dispatch_receiver.as_ref() {
                             Some(&recv) if physical_params.len() == args.len() + 1 => {
-                                let mut all = Vec::with_capacity(args.len() + 1);
-                                all.push(recv);
-                                all.extend(args.iter().copied());
-                                (all, 1)
+                                (self.receiver_operands(recv, &args, &mut physical_params), 1)
                             }
                             _ => (args, 0),
                         };

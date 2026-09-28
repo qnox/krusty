@@ -45,8 +45,15 @@ impl ResolvedSuperCall {
         receiver: ImplicitReceiverSelection,
         dispatch_owner: TypeName,
         interface: bool,
-        member: crate::libraries::LibraryMember,
+        mut member: crate::libraries::LibraryMember,
     ) -> Option<Self> {
+        if let Some(target) = member.nonvirtual_realization.take() {
+            member.owner = Some(target.owner);
+            member.descriptor = target.descriptor;
+            member.realization = crate::libraries::MemberRealization::Direct {
+                pass_receiver: true,
+            };
+        }
         let realization = member.realization;
         let stable_declaration = member.stable_declaration;
         let source_member = member.source_member;
@@ -90,6 +97,21 @@ impl ResolvedSuperCall {
             suspend,
         })
     }
+}
+
+/// A selected accessor as a `super` call reaches it: through its provider-published nonvirtual
+/// holder when its body is not on the declaring owner (a legacy interface body), else as declared.
+pub(super) fn nonvirtual_accessor(
+    mut callable: crate::libraries::LibraryCallable,
+) -> crate::libraries::LibraryCallable {
+    if let Some(target) = callable.nonvirtual_realization.take() {
+        callable.owner = target.owner;
+        callable.descriptor = target.descriptor;
+        callable.member_realization = crate::libraries::MemberRealization::Direct {
+            pass_receiver: true,
+        };
+    }
+    callable
 }
 
 impl Checker<'_> {
