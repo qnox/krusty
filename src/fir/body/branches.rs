@@ -26,6 +26,12 @@ pub struct FirWhenBranch {
 /// already consume the subject (`is`/`!is` and `in`/`!in`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirWhenCondition {
-    SubjectEquals(FirExprId),
+    /// `candidate` compared with the subject. `subject_ty` is the subject's type for this
+    /// comparison after earlier conditions' false-branch smart casts, when that type is a numeric
+    /// primitive different from the subject's declared type. `None` compares the declared type.
+    SubjectEquals {
+        candidate: FirExprId,
+        subject_ty: Option<ResolvedTy>,
+    },
     Predicate(FirExprId),
 }

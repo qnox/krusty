@@ -10162,6 +10162,9 @@ pub struct TypeInfo {
     reflective_callable_references: std::collections::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
     exhaustive_whens: std::collections::HashSet<ExprId>,
+    /// Equality conditions whose subject is a numeric primitive after earlier failed type tests,
+    /// keyed by the condition expression. The value is that primitive, not the declared subject type.
+    when_subject_comparison_types: HashMap<ExprId, Ty>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     /// Full checked generic-bound shapes keyed by the bound's source span. Unlike an ordinary type
     /// use, a declaration bound retains the referenced type variables and declaration-site variance.
@@ -37212,6 +37215,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         callable_reference_types: HashMap::new(),
         reflective_callable_references: std::collections::HashSet::new(),
         exhaustive_whens: std::collections::HashSet::new(),
+        when_subject_comparison_types: HashMap::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
         active_statement_suppressions: Vec::new(),
@@ -38922,6 +38926,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
+        when_subject_comparison_types,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -39270,6 +39275,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
+        when_subject_comparison_types,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -40029,6 +40035,8 @@ struct Checker<'a> {
     callable_reference_types: HashMap<ExprId, Ty>,
     reflective_callable_references: std::collections::HashSet<ExprId>,
     exhaustive_whens: std::collections::HashSet<ExprId>,
+    /// See [`TypeInfo::when_subject_comparison_types`].
+    when_subject_comparison_types: HashMap<ExprId, Ty>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     unresolved_type_segments: HashMap<(u32, u32), String>,
     /// Transient diagnostic directives inherited from annotated enclosing statements.
@@ -53502,6 +53510,18 @@ impl<'a> Checker<'a> {
             result.push((path, ty));
         }
         (result, declined)
+    }
+
+    /// The numeric type a name subject has in `scope` after an earlier failed type test smart-cast
+    /// it. A root proof rebinds the lexical value (`declare_narrowing_shadow`); a later name read
+    /// sees that binding, with a straight-line flow fact winning when one is also recorded.
+    fn when_subject_numeric_type(&self, scope: &CheckerScope<'_>, subject: ExprId) -> Option<Ty> {
+        let Expr::Name(name) = self.file.expr(subject) else {
+            return None;
+        };
+        let binding = self.lookup(scope, name)?;
+        let narrowed = self.local_narrowing(scope, name).unwrap_or(binding.ty);
+        narrowed.is_numeric().then_some(narrowed)
     }
 
     /// Flow facts established by one `when` condition. Predicate conditions already contain the
@@ -67844,6 +67864,17 @@ impl<'a> Checker<'a> {
                 let cond_scope = &arm_scope;
                 for &condition in &arm.conditions {
                     let cnd = condition.expression();
+                    if let (Some(subject_expr), Some(declared), WhenCondition::SubjectEquals(_)) =
+                        (subject, subj_ty, condition)
+                    {
+                        if let Some(narrowed) =
+                            self.when_subject_numeric_type(cond_scope, subject_expr)
+                        {
+                            if narrowed.canonical_semantic() != declared.canonical_semantic() {
+                                self.when_subject_comparison_types.insert(cnd, narrowed);
+                            }
+                        }
+                    }
                     // Subject predicates (`is`, `in`, and their negations) are complete Boolean
                     // tests, not values to compare with the subject through `==`.
                     let is_predicate = condition.is_predicate();

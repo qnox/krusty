@@ -105,7 +105,14 @@ impl BodyFirChecker<'_> {
                             self.boolean_condition(condition.expression())?
                         };
                         Ok(if has_subject && !condition.is_predicate() {
-                            FirWhenCondition::SubjectEquals(checked)
+                            let subject_ty = self
+                                .info
+                                .when_subject_comparison_type(condition.expression())
+                                .and_then(|ty| ResolvedTy::new(ty).ok());
+                            FirWhenCondition::SubjectEquals {
+                                candidate: checked,
+                                subject_ty,
+                            }
                         } else {
                             FirWhenCondition::Predicate(checked)
                         })

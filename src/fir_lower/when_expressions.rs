@@ -7,8 +7,8 @@
 //! Removing the physical store/load pair when the subject is read once belongs to the JVM
 //! backend's bytecode temporaries pass, never to this module.
 
-use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition};
-use crate::ir::{ExprId, IrBinOp, IrExpr};
+use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition, ResolvedTy};
+use crate::ir::{ExprId, IrBinOp, IrExpr, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
@@ -55,15 +55,29 @@ impl BodyLowering<'_> {
             let mut condition = None;
             for candidate in branch.conditions.iter().copied() {
                 let candidate = match candidate {
-                    FirWhenCondition::SubjectEquals(candidate) => {
+                    FirWhenCondition::SubjectEquals {
+                        candidate,
+                        subject_ty,
+                    } => {
                         // fir2ir builds the subject comparison, and the subject read in it, at
                         // the condition's own offsets.
                         let line = self.body.expression_debug_lines(candidate).source;
+                        let candidate_ty = self
+                            .body
+                            .expr(candidate)
+                            .ok_or(FirLoweringFailure::MissingExpression(candidate))?
+                            .ty;
                         let candidate = self.expression(candidate)?;
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
                             origin: branch.origin,
                         })?;
                         let subject = self.ir.add_expr(IrExpr::GetValue(subject));
+                        let (subject, candidate) = self.when_subject_equality_operands(
+                            subject,
+                            subject_ty,
+                            candidate,
+                            candidate_ty,
+                        );
                         let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: IrBinOp::Eq,
                             lhs: subject,
@@ -120,5 +134,50 @@ impl BodyLowering<'_> {
                 value: Some(when),
             }))
         }
+    }
+
+    /// A subject smart-cast to a numeric primitive compares at that primitive, widened to the
+    /// candidate's numeric type when the two differ. The declared subject stays a reference, so
+    /// the cast unboxes before the comparison.
+    fn when_subject_equality_operands(
+        &mut self,
+        subject: ExprId,
+        subject_ty: Option<ResolvedTy>,
+        candidate: ExprId,
+        candidate_ty: ResolvedTy,
+    ) -> (ExprId, ExprId) {
+        let Some(subject_ty) = subject_ty else {
+            return (subject, candidate);
+        };
+        let subject_ty = subject_ty.get();
+        let candidate_ty = candidate_ty.get().canonical_semantic();
+        if !candidate_ty.is_numeric() {
+            return (subject, candidate);
+        }
+        let compared = Ty::promote(subject_ty, candidate_ty).unwrap_or(subject_ty);
+        let subject = self.coerce_when_operand(subject, subject_ty);
+        let subject = if compared == subject_ty {
+            subject
+        } else {
+            self.coerce_when_operand(subject, compared)
+        };
+        let candidate = if compared == candidate_ty {
+            candidate
+        } else {
+            self.coerce_when_operand(candidate, compared)
+        };
+        (subject, candidate)
+    }
+
+    fn coerce_when_operand(&mut self, value: ExprId, target: Ty) -> ExprId {
+        self.ir.add_expr(IrExpr::TypeOp {
+            op: if target.is_reference() {
+                IrTypeOp::Cast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            },
+            arg: value,
+            type_operand: target,
+        })
     }
 }

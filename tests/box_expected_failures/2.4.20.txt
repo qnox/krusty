@@ -131,7 +131,6 @@ function/defaultsWithVarArg2.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
-ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
 increment/argumentWithSideEffects.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedTypeAsLambdaInputType.kt
@@ -276,4 +275,3 @@ unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 unsignedTypes/whenByUnsigned.kt
 vararg/kt10926.kt
-when/whenSubjectVariable/ieee754EqualityWithSmartCast.kt
