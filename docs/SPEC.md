@@ -7580,6 +7580,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is a suspend function is named by the suspend mangling rule, so a class delegating
   `suspend fun tag(s: String): Tag` forwards to `tag-vneLvdU`, the name the interface declares,
   as kotlinc does. Tests: `tests/suspend_value_class_delegation_e2e.rs`.
+- **A value class's suspend member is re-entered on its class.** The member is realized as a
+  static `-impl` method of the value class, so the continuation of its state machine calls
+  `Tag.twice-<hash>(String, Continuation)` on that class, as kotlinc does, not on the file facade.
+  Tests: `tests/value_class_suspend_member_reentry_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

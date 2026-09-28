@@ -67,11 +67,21 @@ pub(super) fn build_continuation_class(
     let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
     reentry_args.push(this_as_cont);
     let call_outer = match receiver {
-        None => ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(outer_fid),
-            dispatch_receiver: None,
-            args: reentry_args,
-        }),
+        // A static member (a value class's `-impl` realization) is called on its class.
+        None => {
+            let callee = match ir.classes.iter().find(|c| c.methods.contains(&outer_fid)) {
+                Some(class) => Callee::ClassStatic {
+                    owner: class.fq_name,
+                    function: outer_fid,
+                },
+                None => Callee::Local(outer_fid),
+            };
+            ir.add_expr(IrExpr::Call {
+                callee,
+                dispatch_receiver: None,
+                args: reentry_args,
+            })
+        }
         Some(owner) => {
             let owner_internal = owner.render();
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
