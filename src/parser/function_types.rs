@@ -98,3 +98,153 @@ impl Parser<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::Decl;
+    use crate::diag::DiagSink;
+    use crate::lexer::lex;
+
+    use super::super::parse;
+
+    fn parsed_parameter(source: &str) -> crate::ast::TypeRef {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "{}",
+            diagnostics.render("test.kt", source)
+        );
+        let Decl::Fun(function) = file.decl(file.decls[0]) else {
+            panic!("expected a top-level function");
+        };
+        function.params[0].ty.clone()
+    }
+
+    fn parameter_names(source: &str) -> Vec<String> {
+        parsed_parameter(source)
+            .fun_params
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn parenthesized_receiver_is_an_extension_function_type() {
+        let source = "fun f(a: (Receiver).() -> Result) {}";
+        let ty = parsed_parameter(source);
+        assert!(ty.fun_has_receiver());
+        assert!(!ty.fun_suspend());
+        assert_eq!(ty.fun_context_count, 0);
+        assert_eq!(parameter_names(source), ["Receiver"]);
+        assert_eq!(ty.arg.unwrap().name, "Result");
+    }
+
+    #[test]
+    fn nullable_parenthesized_receiver_stays_the_receiver() {
+        let ty = parsed_parameter("fun f(a: (Receiver)?.() -> Result) {}");
+        assert!(ty.fun_has_receiver());
+        assert!(ty.fun_params[0].nullable());
+        assert_eq!(ty.fun_params[0].name, "Receiver");
+    }
+
+    #[test]
+    fn suspend_parenthesized_receiver_keeps_suspend() {
+        let source = "fun f(a: suspend (Receiver).() -> Result) {}";
+        let ty = parsed_parameter(source);
+        assert!(ty.fun_suspend());
+        assert!(ty.fun_has_receiver());
+        assert_eq!(parameter_names(source), ["Receiver"]);
+        assert_eq!(ty.arg.unwrap().name, "Result");
+    }
+
+    #[test]
+    fn context_on_a_parenthesized_receiver_precedes_it() {
+        let source = "fun f(a: context(Context) (Receiver).() -> Result) {}";
+        let ty = parsed_parameter(source);
+        assert!(ty.fun_has_receiver());
+        assert_eq!(ty.fun_context_count, 1);
+        assert_eq!(parameter_names(source), ["Context", "Receiver"]);
+        assert_eq!(ty.arg.unwrap().name, "Result");
+    }
+
+    #[test]
+    fn context_parenthesized_receiver_keeps_value_parameters() {
+        let source = "fun f(a: context(Context) (Receiver).(First, Second) -> Result) {}";
+        let ty = parsed_parameter(source);
+        assert!(ty.fun_has_receiver());
+        assert_eq!(ty.fun_context_count, 1);
+        assert_eq!(
+            parameter_names(source),
+            ["Context", "Receiver", "First", "Second"]
+        );
+        assert_eq!(ty.arg.unwrap().name, "Result");
+    }
+
+    #[test]
+    fn parenthesized_function_type_can_be_a_receiver() {
+        let ty = parsed_parameter("fun f(a: ((Argument) -> Value).() -> Result) {}");
+        assert!(ty.fun_has_receiver());
+        assert_eq!(ty.fun_context_count, 0);
+        assert_eq!(ty.fun_params.len(), 1);
+        assert_eq!(ty.fun_params[0].name, "<fun>");
+        assert_eq!(ty.fun_params[0].fun_params[0].name, "Argument");
+        assert_eq!(ty.fun_params[0].arg.as_ref().unwrap().name, "Value");
+        assert_eq!(ty.arg.unwrap().name, "Result");
+    }
+
+    #[test]
+    fn identifier_receiver_still_precedes_context_parameters() {
+        let source = "fun f(a: context(Context) Receiver.(Argument) -> Result) {}";
+        let ty = parsed_parameter(source);
+        assert!(ty.fun_has_receiver());
+        assert_eq!(ty.fun_context_count, 1);
+        assert_eq!(parameter_names(source), ["Context", "Receiver", "Argument"]);
+    }
+
+    #[test]
+    fn grouping_parentheses_are_not_a_receiver() {
+        let ty = parsed_parameter("fun f(a: (Value)) {}");
+        assert_eq!(ty.name, "Value");
+        assert!(ty.fun_params.is_empty());
+        assert!(!ty.fun_has_receiver());
+
+        let nullable = parsed_parameter("fun f(a: (Value)?) {}");
+        assert_eq!(nullable.name, "Value");
+        assert!(nullable.nullable());
+
+        let function = parsed_parameter("fun f(a: (() -> Result)?) {}");
+        assert_eq!(function.name, "<fun>");
+        assert!(function.nullable());
+        assert!(!function.fun_has_receiver());
+        assert!(function.fun_params.is_empty());
+    }
+
+    #[test]
+    fn anonymous_function_receiver_is_not_a_function_type() {
+        let source = "fun f() { val y = fun Receiver.() = this }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let _ = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "{}",
+            diagnostics.render("test.kt", source)
+        );
+    }
+
+    #[test]
+    fn context_without_a_function_type_is_rejected() {
+        let source = "fun f(a: context(Context) (Value)) {}";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let _ = parse(source, &tokens, &mut diagnostics);
+        let messages = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["expected '->' for function type"]);
+    }
+}

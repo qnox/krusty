@@ -10853,7 +10853,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   extension function `context(p: String) fun String.() = p` has that same type: its named context
   parameters lead, then its receiver.
   Tests: `tests/context_function_type_e2e.rs`
-  (`a_context_receiver_function_value_takes_its_context_and_receiver_from_scope`).
+  (`a_context_receiver_function_value_takes_its_context_and_receiver_from_scope`),
+  and the parser cases in `src/parser/function_types.rs`.
   Corpus: `contextParameters/sameArgForContextAndExtension.kt`.
 
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
