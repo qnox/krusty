@@ -111,6 +111,9 @@ pub struct ResolvedFunctionOverride {
     /// Semantic declaration name. Physical spellings remain behind external callable identities and
     /// are selected only by a target backend.
     pub name: Box<str>,
+    /// The overridden declaration's own parameters (extension receiver in place) and result,
+    /// before any substitution. For a dependency declaration this is its declared value-class
+    /// spelling, else its generic signature, else the shape its provider published.
     pub declared_parameters: Box<[ResolvedTy]>,
     pub declared_result: ResolvedTy,
     pub applied_parameters: Box<[ResolvedTy]>,
