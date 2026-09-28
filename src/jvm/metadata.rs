@@ -2473,6 +2473,9 @@ fn decode_functions(
                             })
                             .collect()
                     };
+                    // The predicate renders every parameter type. It exists only to decide whether
+                    // this trace fires, so it must not run when tracing is compiled out.
+                    #[cfg(feature = "trace")]
                     if value_params.iter().any(|parameter| {
                         parameter
                             .ty
