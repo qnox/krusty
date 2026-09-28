@@ -2719,6 +2719,22 @@ mod tests {
     }
 
     #[test]
+    fn declaring_package_is_the_namespace_identity() {
+        let nested = type_name("kotlin/collections/Map$Entry");
+        let sibling = type_name("kotlin/collections/List");
+        let other = type_name("java/util/Map$Entry");
+        let root = type_name("RootClass");
+        assert_eq!(nested.namespace(), sibling.namespace());
+        assert_eq!(nested.namespace().render(), nested.package());
+        assert!(sibling.package_matches(&nested.package()));
+        assert_ne!(nested.namespace(), other.namespace());
+        assert!(!other.package_matches(&nested.package()));
+        assert_eq!(root.namespace(), TypeName::ROOT);
+        assert_eq!(root.package(), "");
+        assert!(TypeName::ROOT.matches(&root.package()));
+    }
+
+    #[test]
     fn textual_name_comparison_does_not_intern_a_miss() {
         let missing = "__type_name_comparison_must_not_intern__/Missing";
         assert_eq!(existing_type_name(missing), None);
