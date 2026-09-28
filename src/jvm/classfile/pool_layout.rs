@@ -14,7 +14,9 @@
 //! - the entries of a rewritten method ([`RelaidMethod`]) that only rewritten code names are
 //!   placed where the method's constants began, in the order ASM's `MethodWriter` interns the
 //!   rewritten body: catch types, then each instruction's operands, then the local-variable
-//!   tables, then the frames' classes, every entry after the entries it names;
+//!   tables, then the frames' classes, every entry after the entries it names. That includes an
+//!   entry something kotlinc visits after the method also names, such as `@Metadata`: the
+//!   rewritten code interned it first;
 //! - an entry a rewritten method interned for code its rewrite removed, and that code emitted
 //!   as it was names later, is placed where that code first names it: ASM interns it there;
 //! - every other entry keeps its relative place.
@@ -140,6 +142,28 @@ impl<'a> Layout<'a> {
                     reach(read, slot.index, &mut rewritten_reach);
                 }
                 None => reach(read, slot.index, &mut fixed),
+            }
+        }
+        // An entry rewritten code names stays where it is only when kotlinc's writer interns it
+        // before that code, for another holder it visits first (the method's header, an earlier
+        // method's code). A holder it visits later (a later method, a field, `@Metadata`) finds
+        // the entry the code interned.
+        let mut visited = vec![false; count];
+        let mut visited_first = vec![false; count];
+        for slot in read.visit_order() {
+            let rewritten = matches!(
+                slot.holder,
+                Holder::Code(method, _) if by_method.contains_key(&method)
+            );
+            for index in reached_from(read, slot.index) {
+                if !std::mem::replace(&mut visited[index], true) && !rewritten {
+                    visited_first[index] = true;
+                }
+            }
+        }
+        for index in 0..count {
+            if rewritten_reach[index] {
+                fixed[index] = visited_first[index];
             }
         }
         let orphaned: Vec<bool> = (0..count)

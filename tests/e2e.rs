@@ -183,6 +183,8 @@ mod cannot_infer_cascade_e2e;
 mod catch_annotation_comma_e2e;
 #[path = "catch_entry_flow_e2e.rs"]
 mod catch_entry_flow_e2e;
+#[path = "catch_type_pool_order_e2e.rs"]
+mod catch_type_pool_order_e2e;
 #[path = "chained_plus_element_join_e2e.rs"]
 mod chained_plus_element_join_e2e;
 #[path = "char_literal_diagnostics_e2e.rs"]
