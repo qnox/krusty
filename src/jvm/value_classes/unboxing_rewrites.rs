@@ -29,9 +29,8 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
         dispatch_receiver: Some(cast),
         args: vec![],
     };
-    // `id` used to denote the erased reference call cloned above. It now denotes the result of
-    // `unbox-impl`, so its physical fact must change with the node instead of continuing to claim
-    // that the primitive carrier on the operand stack is `Object`.
+    // `id` now denotes the `unbox-impl` result (here and in `unbox_wrap_nullable`), so its physical
+    // fact changes with the node rather than still claim the erased reference or the box.
     ir.physical_types.insert(id, u);
 }
 
@@ -99,4 +98,5 @@ pub(super) fn unbox_wrap_nullable(
         stmts: vec![var],
         value: Some(when),
     };
+    ir.physical_types.insert(id, Ty::nullable(u));
 }
