@@ -1,14 +1,17 @@
 //! Decoded inline-body plan caching for immutable classpath compositions.
 
 use super::{Classpath, EntryKey};
+use crate::name_tree::{FxBuildHasher, FxHasher};
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::hash::{Hash, Hasher};
 
 /// The full input set a plan decode reads. The same physical method can surface through distinct
 /// provider views whose semantic receiver, result, generic signature, physical parameter shape,
 /// suspend shape, and default realization differ, so every decoder input participates in the key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct PlanKey {
+struct PlanKey {
     owner: TypeName,
     name: String,
     body_descriptor: String,
@@ -53,8 +56,7 @@ pub(in crate::jvm) struct InlinePlanCacheInput<'a> {
     pub(in crate::jvm) generic_signature: Option<(Option<Ty>, Ty)>,
     pub(in crate::jvm) default_realization: Option<&'a crate::libraries::DefaultCallRealization>,
 }
-type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
-pub(super) type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
+pub(super) type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMemo>>;
 
 /// Process-global plans keyed by the complete archive/jimage composition. A decoded facade plan
 /// can read a body from another entry, so an entry-local cache would be unsound under shadowing.
@@ -67,7 +69,7 @@ pub(super) fn global_plan_cache(key: &[EntryKey]) -> PlanCache {
         .unwrap();
     cache
         .entry(key.to_vec())
-        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(PlanMemo::unbounded())))
         .clone()
 }
 
@@ -82,14 +84,13 @@ impl Classpath {
             cache_stat!(inline_plans, false);
             return None;
         }
-        let key = plan_key(input);
-        if let Some(hit) = self.inline_plans.borrow_mut().get(&key) {
+        if let Some(hit) = self.inline_plans.borrow_mut().touch(&input) {
             cache_stat!(inline_plans, true);
-            return Some(hit.clone());
+            return Some(hit);
         }
         if let Some(global) = self.shared_inline_plans.as_ref() {
-            if let Some(hit) = global.read().unwrap().get(&key).cloned() {
-                self.inline_plans.borrow_mut().insert(key, hit.clone());
+            if let Some(hit) = global.read().unwrap().get(&input) {
+                self.inline_plans.borrow_mut().insert(&input, hit.clone());
                 cache_stat!(inline_plans, true);
                 return Some(hit);
             }
@@ -107,11 +108,10 @@ impl Classpath {
         if !self.plan_is_cacheable() {
             return;
         }
-        let key = plan_key(input);
         if let Some(global) = self.shared_inline_plans.as_ref() {
-            global.write().unwrap().insert(key.clone(), plan.clone());
+            global.write().unwrap().insert(&input, plan.clone());
         }
-        self.inline_plans.borrow_mut().insert(key, plan);
+        self.inline_plans.borrow_mut().insert(&input, plan);
     }
 
     fn plan_is_cacheable(&self) -> bool {
@@ -119,7 +119,7 @@ impl Classpath {
     }
 }
 
-fn plan_key(input: InlinePlanCacheInput<'_>) -> PlanKey {
+fn plan_key(input: &InlinePlanCacheInput<'_>) -> PlanKey {
     PlanKey {
         owner: input.owner,
         name: input.name.to_owned(),
@@ -140,6 +140,226 @@ fn plan_key(input: InlinePlanCacheInput<'_>) -> PlanKey {
             mask_count: realization.mask_count,
             suspend: realization.suspend,
         }),
+    }
+}
+
+impl PlanKey {
+    fn matches(&self, input: &InlinePlanCacheInput<'_>) -> bool {
+        self.owner == input.owner
+            && self.name == input.name
+            && self.body_descriptor == input.body_descriptor
+            && self.parameter_slots == input.parameter_slots
+            && self.physical_parameters == input.physical_parameters
+            && self.context_count == input.context_count
+            && self.source_receiver == input.source_receiver
+            && self.semantic_parameters == input.semantic_parameters
+            && self.semantic_result == input.semantic_result
+            && self.suspend == input.suspend
+            && self.generic_signature == input.generic_signature
+            && default_matches(self.default_realization.as_ref(), input.default_realization)
+    }
+}
+
+fn default_matches(
+    stored: Option<&DefaultPlanKey>,
+    probed: Option<&crate::libraries::DefaultCallRealization>,
+) -> bool {
+    match (stored, probed) {
+        (None, None) => true,
+        (Some(stored), Some(probed)) => {
+            stored.declaration_owner == probed.declaration_owner
+                && stored.name == probed.name
+                && stored.descriptor == probed.descriptor
+                && stored.real_params == probed.real_params
+                && stored.mask_count == probed.mask_count
+                && stored.suspend == probed.suspend
+        }
+        _ => false,
+    }
+}
+
+fn fingerprint(input: &InlinePlanCacheInput<'_>) -> u64 {
+    let mut hasher = FxHasher::default();
+    input.owner.hash(&mut hasher);
+    input.name.hash(&mut hasher);
+    input.body_descriptor.hash(&mut hasher);
+    input.parameter_slots.hash(&mut hasher);
+    input.physical_parameters.hash(&mut hasher);
+    input.context_count.hash(&mut hasher);
+    input.source_receiver.hash(&mut hasher);
+    input.semantic_parameters.hash(&mut hasher);
+    input.semantic_result.hash(&mut hasher);
+    input.suspend.hash(&mut hasher);
+    input.generic_signature.hash(&mut hasher);
+    match input.default_realization {
+        None => 0u8.hash(&mut hasher),
+        Some(realization) => {
+            1u8.hash(&mut hasher);
+            realization.declaration_owner.hash(&mut hasher);
+            realization.name.hash(&mut hasher);
+            realization.descriptor.hash(&mut hasher);
+            realization.real_params.hash(&mut hasher);
+            realization.mask_count.hash(&mut hasher);
+            realization.suspend.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Inline-plan memo whose lookup hashes and compares the borrowed provider view.
+///
+/// The owned key is built only when a new view is stored. A hit copies the memoized plan and
+/// leaves the name, descriptor, and parameter vectors on the stack.
+pub(super) struct PlanMemo {
+    cap: Option<usize>,
+    tick: u64,
+    buckets: HashMap<u64, Vec<PlanSlot>, FxBuildHasher>,
+    recency: BinaryHeap<Reverse<PlanRecency>>,
+    len: usize,
+}
+
+struct PlanSlot {
+    key: PlanKey,
+    value: Option<Box<crate::libraries::InlineBodyPlan>>,
+    tick: u64,
+}
+
+struct PlanRecency {
+    tick: u64,
+    fingerprint: u64,
+    key: PlanKey,
+}
+
+impl PartialEq for PlanRecency {
+    fn eq(&self, other: &Self) -> bool {
+        self.tick == other.tick
+    }
+}
+
+impl Eq for PlanRecency {}
+
+impl PartialOrd for PlanRecency {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PlanRecency {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tick.cmp(&other.tick)
+    }
+}
+
+impl PlanMemo {
+    /// A bounded memo using the repository-wide cache-cap override when configured.
+    pub(super) fn new(default_cap: usize) -> Self {
+        let cap = std::env::var("KRUSTY_CACHE_CAP")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(default_cap);
+        Self::new_fixed(cap)
+    }
+
+    fn new_fixed(cap: usize) -> Self {
+        Self {
+            cap: Some(cap.max(1)),
+            tick: 0,
+            buckets: HashMap::default(),
+            recency: BinaryHeap::new(),
+            len: 0,
+        }
+    }
+
+    pub(super) fn unbounded() -> Self {
+        Self {
+            cap: None,
+            tick: 0,
+            buckets: HashMap::default(),
+            recency: BinaryHeap::new(),
+            len: 0,
+        }
+    }
+
+    fn get(
+        &self,
+        input: &InlinePlanCacheInput<'_>,
+    ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
+        let slots = self.buckets.get(&fingerprint(input))?;
+        let slot = slots.iter().find(|slot| slot.key.matches(input))?;
+        Some(slot.value.clone())
+    }
+
+    fn touch(
+        &mut self,
+        input: &InlinePlanCacheInput<'_>,
+    ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
+        let fingerprint = fingerprint(input);
+        let slots = self.buckets.get_mut(&fingerprint)?;
+        let slot = slots.iter_mut().find(|slot| slot.key.matches(input))?;
+        self.tick += 1;
+        slot.tick = self.tick;
+        Some(slot.value.clone())
+    }
+
+    fn insert(
+        &mut self,
+        input: &InlinePlanCacheInput<'_>,
+        plan: Option<Box<crate::libraries::InlineBodyPlan>>,
+    ) {
+        let fingerprint = fingerprint(input);
+        if let Some(slots) = self.buckets.get_mut(&fingerprint) {
+            if let Some(slot) = slots.iter_mut().find(|slot| slot.key.matches(input)) {
+                self.tick += 1;
+                slot.tick = self.tick;
+                slot.value = plan;
+                return;
+            }
+        }
+        if self.cap.is_some_and(|cap| self.len >= cap) {
+            self.evict();
+        }
+        let key = plan_key(input);
+        self.tick += 1;
+        let tick = self.tick;
+        if self.cap.is_some() {
+            self.recency.push(Reverse(PlanRecency {
+                tick,
+                fingerprint,
+                key: key.clone(),
+            }));
+        }
+        self.buckets.entry(fingerprint).or_default().push(PlanSlot {
+            key,
+            value: plan,
+            tick,
+        });
+        self.len += 1;
+    }
+
+    fn evict(&mut self) {
+        while let Some(Reverse(candidate)) = self.recency.pop() {
+            let Some(slots) = self.buckets.get_mut(&candidate.fingerprint) else {
+                continue;
+            };
+            let Some(position) = slots.iter().position(|slot| slot.key == candidate.key) else {
+                continue;
+            };
+            if slots[position].tick != candidate.tick {
+                let tick = slots[position].tick;
+                self.recency.push(Reverse(PlanRecency {
+                    tick,
+                    fingerprint: candidate.fingerprint,
+                    key: candidate.key,
+                }));
+                continue;
+            }
+            slots.swap_remove(position);
+            if slots.is_empty() {
+                self.buckets.remove(&candidate.fingerprint);
+            }
+            self.len -= 1;
+            return;
+        }
     }
 }
 
@@ -207,6 +427,24 @@ mod tests {
             Some(Box::new(plan)),
         );
         assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_some());
+        let owned_name = "run".to_string();
+        let owned_descriptor = "()V".to_string();
+        assert!(cp
+            .cached_inline_plan(InlinePlanCacheInput {
+                owner,
+                name: &owned_name,
+                body_descriptor: &owned_descriptor,
+                parameter_slots: &[0],
+                physical_parameters: &[Ty::String],
+                context_count: 0,
+                source_receiver: None,
+                semantic_parameters: &[],
+                semantic_result: Ty::Unit,
+                suspend: false,
+                generic_signature: Some((None, Ty::Unit)),
+                default_realization: None,
+            })
+            .is_some());
         for (context, result, suspend, generic, default) in [
             (1, Ty::Unit, false, Some((None, Ty::Unit)), None),
             (0, Ty::String, false, Some((None, Ty::Unit)), None),
@@ -357,5 +595,35 @@ mod tests {
         distinct = default.clone();
         distinct.suspend = true;
         assert!(lookup(&cp, owner, &[Ty::String], &distinct).is_none());
+    }
+
+    #[test]
+    fn capped_plan_memo_drops_the_least_recently_stored_view() {
+        fn view<'a>(owner: TypeName, name: &'a str) -> InlinePlanCacheInput<'a> {
+            InlinePlanCacheInput {
+                owner,
+                name,
+                body_descriptor: "()V",
+                parameter_slots: &[0],
+                physical_parameters: &[Ty::String],
+                context_count: 0,
+                source_receiver: None,
+                semantic_parameters: &[],
+                semantic_result: Ty::Unit,
+                suspend: false,
+                generic_signature: None,
+                default_realization: None,
+            }
+        }
+        let owner = type_name("sample/PlanCap");
+        let mut memo = PlanMemo::new_fixed(1);
+        let first = view(owner, "first");
+        let second = view(owner, "second");
+        memo.insert(&first, None);
+        memo.insert(&first, None);
+        assert!(memo.touch(&first).is_some());
+        memo.insert(&second, None);
+        assert!(memo.touch(&first).is_none());
+        assert!(memo.touch(&second).is_some());
     }
 }
