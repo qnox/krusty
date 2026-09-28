@@ -42,10 +42,17 @@ pub(super) fn materialize(
             }) else {
                 continue;
             };
+            // The entry is the member itself seen through the box, so its parameters are the
+            // member's own, in their semantic types from before the carrier realization.
             let entry = (
                 class,
                 implementation,
-                edge.implementation_parameter_identities.clone(),
+                edge.implementation_parameter_identities
+                    .iter()
+                    .cloned()
+                    .zip(edge.implementation_parameters.iter().copied())
+                    .map(|(identity, semantic)| crate::ir::BridgeParameter { identity, semantic })
+                    .collect::<Vec<_>>(),
             );
             if !entries.contains(&entry) {
                 entries.push(entry);
@@ -53,7 +60,7 @@ pub(super) fn materialize(
         }
     }
     let mut targets = HashSet::new();
-    for (class, implementation, parameter_identities) in entries {
+    for (class, implementation, bridge_parameters) in entries {
         // The static member's physical signature, less the carrier it receives first.
         let target = &ir.functions[implementation as usize];
         let parameters = target
@@ -62,9 +69,9 @@ pub(super) fn materialize(
             .expect("a static value-class member carries its receiver")
             .to_vec();
         assert_eq!(
-            parameter_identities.len(),
+            bridge_parameters.len(),
             parameters.len(),
-            "a value-class interface entry retains its semantic parameter identities"
+            "a value-class interface entry retains its semantic parameters"
         );
         let result = target.ret;
         let name = entry_name(ir, implementation);
@@ -76,7 +83,7 @@ pub(super) fn materialize(
             bridges.push(crate::ir::Bridge {
                 kind: crate::ir::BridgeKind::ValueClassInterfaceEntry,
                 target_function: Some(implementation),
-                parameter_identities,
+                parameters: bridge_parameters,
                 name,
                 erased_params: parameters.clone(),
                 erased_ret: result,

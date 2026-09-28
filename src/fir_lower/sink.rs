@@ -113,6 +113,7 @@ fn lower_function_override_plans(
                 .map(|ty| ty.get())
                 .collect(),
             implementation_parameter_identities: edge.implementation_parameter_identities.to_vec(),
+            overridden_parameter_identities: edge.overridden_parameter_identities.to_vec(),
             implementation_result: edge.implementation_result.get(),
             suspend: edge.suspend,
             has_kotlin_superclass_override: edge.has_kotlin_superclass_override,
