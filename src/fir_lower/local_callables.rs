@@ -402,8 +402,16 @@ impl BodyLowering<'_> {
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
         // A lambda carries no `tailrec`: the modifier is a function declaration's.
-        // A lambda is not a scope: what it declares belongs to the enclosing one.
-        let enclosure = self.enclosure;
+        // A plain lambda is not a scope: what it declares belongs to the enclosing one. A suspend
+        // lambda may be one; the backend that realizes it decides.
+        let enclosure = if suspend {
+            if let Some(outer) = self.enclosure {
+                self.ir.lambda_enclosures.insert(function, outer);
+            }
+            Some(crate::ir::IrEnclosure::Lambda(function))
+        } else {
+            self.enclosure
+        };
         let lowered =
             self.lower_nested_function(body, function, enclosure, unit_as_value, true, false)?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
