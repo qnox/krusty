@@ -30,7 +30,7 @@ use super::classpath::{
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
-use crate::jvm::names::same_mapped_virtual_name;
+use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -1332,9 +1332,15 @@ impl JvmLibraries {
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        let internal = ci.this_class();
-        let companion_internal = format!("{internal}$Companion");
-        let Some(companion) = self.cp.find(&companion_internal) else {
+        let companion = if let Some(companion) =
+            crate::types::existing_type_name_nested_child(ci.this_class, "Companion")
+        {
+            self.cp.find_name(companion)
+        } else {
+            let companion_internal = format!("{}$Companion", ci.this_class.render());
+            self.cp.find(&companion_internal)
+        };
+        let Some(companion) = companion else {
             return std::collections::HashMap::new();
         };
         let prop_rets: std::collections::HashMap<_, _> =
@@ -1613,7 +1619,6 @@ impl JvmLibraries {
                     return mapped_builtin_signature(internal_name);
                 }
             };
-            let internal = &internal_name.render();
             let mut constructors = Vec::new();
             let mut members = Vec::new();
             let mut companion = Vec::new();
@@ -2064,7 +2069,7 @@ impl JvmLibraries {
                     companion.push(member);
                 } else {
                     let source_name =
-                        super::names::mapped_builtin_virtual_source_name(&ci.this_class(), &m.name);
+                        super::names::mapped_builtin_virtual_source_name(ci.this_class, &m.name);
                     if source_name != m.name {
                         let mut alias = member.clone();
                         alias.name = source_name.to_string();
@@ -2244,6 +2249,7 @@ impl JvmLibraries {
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
+                    let internal = internal_name.render();
                     ci.fields.iter().find_map(|f| {
                         // A Kotlin companion-object instance field is always `public static final`, typed as the
                         // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
@@ -2555,13 +2561,16 @@ impl JvmLibraries {
                 .collect();
             // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
             const ACC_STATIC: u16 = 0x0008;
-            let enum_entry_descriptor = format!("L{internal};");
-            let enum_entries: Vec<String> = ci
-                .fields
-                .iter()
-                .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == enum_entry_descriptor)
-                .map(|f| f.name.clone())
-                .collect();
+            let enum_entries: Vec<String> = if ci.access & crate::jvm::classreader::ACC_ENUM != 0 {
+                let enum_entry_descriptor = format!("L{};", internal_name.render());
+                ci.fields
+                    .iter()
+                    .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == enum_entry_descriptor)
+                    .map(|f| f.name.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // A MAPPED Kotlin builtin (`kotlin/collections/MutableList`, `kotlin/CharSequence`, …) has
             // no `.class` of its own; the members read above came from the JVM class it maps to
             // (`java/util/List`). That class's method set is NOT its Kotlin API: `java.util.List`
@@ -2606,8 +2615,8 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name(
-                            internal,
+                        same_mapped_virtual_name_of(
+                            internal_name,
                             member_physical,
                             builtin_physical,
                             &member.descriptor,
