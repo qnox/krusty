@@ -34,7 +34,7 @@ pub(super) fn emit_func_ref_class(
         .expect("callable-reference captures are a prefix of its adapter parameters");
     let field_capture_descs = field_capture_tys
         .iter()
-        .map(|capture| type_descriptor(*capture))
+        .map(|capture| type_descriptor(*capture).to_owned())
         .collect::<Vec<_>>();
     let capture_signatures = capture_signatures(ir, env, fr);
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
@@ -149,7 +149,7 @@ pub(super) fn emit_func_ref_class(
     let signature_ret = if matches!(reflection_target_ret, Ty::Unit | Ty::Nothing) {
         "V".to_string()
     } else {
-        type_descriptor(jvm_declared_ty(&reflection_target_ret))
+        type_descriptor(jvm_declared_ty(&reflection_target_ret)).to_owned()
     };
     signature_desc.push_str(&signature_ret);
     // A local function is reflected under the name its lifted function is finally emitted with.
@@ -179,7 +179,7 @@ pub(super) fn emit_func_ref_class(
         let ret_desc = if target_returns_void {
             "V".to_string()
         } else {
-            type_descriptor(target_ret_jvm)
+            type_descriptor(target_ret_jvm).to_owned()
         };
         d.push_str(&ret_desc);
         d

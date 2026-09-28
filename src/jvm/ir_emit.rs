@@ -1020,7 +1020,7 @@ fn attach_synth_debug_tables(
     }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let slot_size = |t: Ty| -> u16 {
-        match desc(t).as_str() {
+        match desc(t) {
             "J" | "D" => 2,
             _ => 1,
         }
@@ -1060,7 +1060,7 @@ fn attach_synth_debug_tables(
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
-            ctor_locals.push((name, desc(argument.ty), slot));
+            ctor_locals.push((name, desc(argument.ty).to_owned(), slot));
         }
         slot += slot_size(argument.ty);
     }
@@ -1156,7 +1156,7 @@ fn attach_synth_debug_tables(
                 Some((set_pc, pline)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
-                    ("<set-?>".to_string(), pd, 1),
+                    ("<set-?>".to_string(), pd.to_owned(), 1),
                 ],
             );
         }
@@ -1194,7 +1194,7 @@ fn attach_synth_debug_tables(
                 Some((set_pc, pline)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
-                    ("<set-?>".to_string(), pd.clone(), 1),
+                    ("<set-?>".to_string(), pd.to_owned(), 1),
                 ],
             );
         }
@@ -1223,7 +1223,7 @@ fn attach_synth_debug_tables(
                 &setter_bridge,
                 &format!("({pd})V"),
                 Some((0, line)),
-                &[("<set-?>".to_string(), pd.clone(), 0)],
+                &[("<set-?>".to_string(), pd.to_owned(), 0)],
             );
         }
     }
@@ -1236,7 +1236,7 @@ fn attach_synth_debug_tables(
             let u = desc(f0.ty);
             let obj = "Ljava/lang/Object;".to_string();
             let w = slot_size(f0.ty);
-            let one = |n: &str, d: &String, slot: u16| vec![(n.to_string(), d.clone(), slot)];
+            let one = |n: &str, d: &str, slot: u16| vec![(n.to_string(), d.to_owned(), slot)];
             let vc_methods: Vec<VcDebugMethod> = vec![
                 (
                     "toString-impl".into(),
@@ -1258,7 +1258,7 @@ fn attach_synth_debug_tables(
                     "equals-impl".into(),
                     format!("({u}Ljava/lang/Object;)Z"),
                     vec![
-                        ("arg0".to_string(), u.clone(), 0),
+                        ("arg0".to_string(), u.to_owned(), 0),
                         ("other".to_string(), obj.clone(), w),
                     ],
                 ),
@@ -1291,12 +1291,12 @@ fn attach_synth_debug_tables(
                     vec![
                         (
                             crate::jvm::parameter_names::value_class_equals_operand(1).to_string(),
-                            u.clone(),
+                            u.to_owned(),
                             0,
                         ),
                         (
                             crate::jvm::parameter_names::value_class_equals_operand(2).to_string(),
-                            u.clone(),
+                            u.to_owned(),
                             w,
                         ),
                     ],
@@ -2345,7 +2345,11 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         cw.add_interface("kotlin/jvm/internal/FunctionAdapter");
     }
 
-    let field_descs: Vec<String> = plan.captures.iter().map(|t| type_descriptor(*t)).collect();
+    let field_descs: Vec<String> = plan
+        .captures
+        .iter()
+        .map(|t| type_descriptor(*t).to_owned())
+        .collect();
     for (index, desc) in field_descs.iter().enumerate() {
         // Captured values never change after construction.
         cw.add_field(0x0012, &format!("$captured${index}"), desc); // ACC_PRIVATE | ACC_FINAL
@@ -2427,7 +2431,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
                     .strip_prefix('L')
                     .and_then(|rest| rest.strip_suffix(';'))
                     .map(str::to_owned)
-                    .unwrap_or(wanted);
+                    .unwrap_or_else(|| wanted.to_owned());
                 let target = cw.class_ref(&internal);
                 invoke.checkcast(target);
             }
@@ -2455,7 +2459,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
                         .strip_prefix('L')
                         .and_then(|rest| rest.strip_suffix(';'))
                         .map(str::to_owned)
-                        .unwrap_or(wanted);
+                        .unwrap_or_else(|| wanted.to_owned());
                     let target = cw.class_ref(&internal);
                     invoke.checkcast(target);
                 }
@@ -2721,7 +2725,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
 fn checkcast_internal(ty: Ty) -> Option<String> {
     match ty {
         Ty::String => Some("java/lang/String".to_string()),
-        _ if ty.is_array() => Some(type_descriptor(ty)),
+        _ if ty.is_array() => Some(type_descriptor(ty).to_owned()),
         Ty::Obj(n, _) if !crate::types::wk::is_any_or_object(n) => {
             Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
@@ -4396,7 +4400,7 @@ fn arrays_param_desc(array: Ty) -> String {
     if array.is_reference_array() {
         "[Ljava/lang/Object;".to_string()
     } else {
-        type_descriptor(array)
+        type_descriptor(array).to_owned()
     }
 }
 
@@ -6947,7 +6951,7 @@ fn member_semantic_signature(params: &[Ty], ret: Ty) -> Option<String> {
             )),
             Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => part(*inner),
             t if !crate::types::ty_mentions_any_param(t) && t.type_args().is_empty() => {
-                Some(crate::jvm::names::type_descriptor(ir_ty_to_jvm(&t)))
+                Some(crate::jvm::names::type_descriptor(ir_ty_to_jvm(&t)).to_owned())
             }
             _ => None,
         }
@@ -7210,7 +7214,9 @@ fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Op
         return Some("Ljava/lang/Object;".to_string());
     }
     if bound.is_jvm_scalar() {
-        return bound.nullable_boxed().map(type_descriptor);
+        return bound
+            .nullable_boxed()
+            .map(|bound| type_descriptor(bound).to_owned());
     }
     formatter.ty_at(bound, Wildcards::Generic)
 }
@@ -7694,7 +7700,7 @@ impl<'a> Emitter<'a> {
                                     u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
                                     slot,
                                     name.clone(),
-                                    crate::jvm::names::type_descriptor(jt),
+                                    crate::jvm::names::type_descriptor(jt).to_owned(),
                                 ));
                             }
                         }
@@ -9090,7 +9096,7 @@ impl<'a> Emitter<'a> {
         Some(crate::jvm::inline::PropertyAccess::Field {
             owner: field.owner?,
             name: field.name.clone(),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_declared_ty(&field.ty)).to_owned(),
             is_static: true,
         })
     }
@@ -9170,7 +9176,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner,
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_declared_ty(&field.ty)).to_owned(),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
@@ -9302,7 +9308,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner,
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_declared_ty(&field.ty)).to_owned(),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
@@ -10520,7 +10526,7 @@ impl<'a> Emitter<'a> {
                             if ty.is_array() {
                                 arrays_param_desc(ty)
                             } else {
-                                type_descriptor(ty)
+                                type_descriptor(ty).to_owned()
                             }
                         };
                         let mut expected = String::from("(");
@@ -11199,7 +11205,7 @@ impl<'a> Emitter<'a> {
                                 if descriptor_is_reference(physical) {
                                     boxed_descriptor(logical)
                                 } else {
-                                    type_descriptor(logical)
+                                    type_descriptor(logical).to_owned()
                                 }
                             })
                             .collect();
@@ -11212,7 +11218,7 @@ impl<'a> Emitter<'a> {
                         } else if descriptor_is_reference(sam_ret) {
                             boxed_descriptor(impl_ret)
                         } else {
-                            type_descriptor(impl_ret)
+                            type_descriptor(impl_ret).to_owned()
                         };
                         let inst_desc = format!("({params}){ret}");
                         (
@@ -12220,7 +12226,7 @@ impl<'a> Emitter<'a> {
             Ty::Float => VerifType::Float,
             Ty::String => VerifType::ObjectName("java/lang/String".to_string()),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
-            t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
+            t if t.is_array() => VerifType::ObjectName(type_descriptor(ty).to_owned()),
             Ty::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
@@ -12461,7 +12467,7 @@ fn boxed_descriptor(t: Ty) -> String {
     }
     match crate::jvm::jvm_class_map::wrapper_internal(t) {
         Some(w) => format!("L{w};"),
-        None => type_descriptor(t),
+        None => type_descriptor(t).to_owned(),
     }
 }
 

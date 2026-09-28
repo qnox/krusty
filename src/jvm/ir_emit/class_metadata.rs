@@ -118,8 +118,8 @@ pub(super) fn build_class_metadata(
     {
         let (getter, setter) = accessor_jvm_names(c, name);
         let descriptor = crate::jvm::names::type_descriptor(jvm_declared_ty(&ty));
-        getter_names.insert(getter, descriptor.clone());
-        setter_names.insert(setter, descriptor);
+        getter_names.insert(getter, descriptor.to_owned());
+        setter_names.insert(setter, descriptor.to_owned());
     }
     // Member-extension-PROPERTY accessors are described as `Property` records (below), never as
     // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
@@ -413,7 +413,7 @@ pub(super) fn build_class_metadata(
                         .map(|(_, field)| field)
                         .or(delegate)
                         .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|field| desc(field.ty).to_owned()),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -526,7 +526,7 @@ pub(super) fn build_class_metadata(
             setter_parameter_name: super::super::parameter_names::explicit_setter(ir, ext.setter),
             field_desc: ext_delegate
                 .filter(|field| field.ty != ext.ty)
-                .map(|field| desc(field.ty)),
+                .map(|field| desc(field.ty).to_owned()),
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_marker_annotations(ir, c, &ext.name),
             field_annotations: Vec::new(),

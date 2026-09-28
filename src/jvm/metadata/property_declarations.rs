@@ -348,7 +348,7 @@ pub(super) fn decode_properties(
                 .or_else(|| {
                     accessor_types
                         .as_ref()
-                        .map(|(_, ty)| crate::jvm::names::type_descriptor(*ty))
+                        .map(|(_, ty)| crate::jvm::names::type_descriptor(*ty).to_owned())
                 })
                 .map(|desc| MetaJvmFieldSig { name, desc })
         };

@@ -3473,9 +3473,9 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
         // Arrays are `Obj("kotlin/IntArray")`/`Obj("kotlin/Array", [T])` but their extensions are indexed
         // by the JVM ARRAY descriptor (`[I`, `[Ljava/lang/String;`), not a `Lkotlin/…Array;` class name —
         // so key off the array descriptor + `Object`, exactly as the legacy `Ty::Array` spelling did.
-        _ if receiver.is_array() => return vec![type_descriptor(receiver), object],
+        _ if receiver.is_array() => return vec![type_descriptor(receiver).to_owned(), object],
         Ty::Obj(i, _) => super::jvm_class_map::to_jvm_type_name(i),
-        _ => return vec![type_descriptor(receiver), object],
+        _ => return vec![type_descriptor(receiver).to_owned(), object],
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -4620,6 +4620,7 @@ impl JvmLibraries {
                                     self, *p,
                                 ),
                             )
+                            .to_owned()
                         })
                         .collect()
                 });
@@ -5639,9 +5640,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     .iter()
                     .position(|descriptor| descriptor == &want)
                     .map(|index| index as u32)
-                    .or_else(|| {
-                        matches!(want.as_str(), "Ljava/lang/Object;").then_some(u32::MAX - 1)
-                    })
+                    .or_else(|| matches!(want, "Ljava/lang/Object;").then_some(u32::MAX - 1))
             }
         }?;
         // ELEMENT (type-argument) compatibility: the erased receivers matched, but a concrete element must
