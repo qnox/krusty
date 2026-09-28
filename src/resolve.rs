@@ -68,6 +68,8 @@ mod context_receiver_priority;
 mod context_sensitive_resolution;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
+#[cfg(test)]
+mod enum_entry_method_owner;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
 mod diagnostic_selection;
@@ -49135,14 +49137,10 @@ impl<'a> Checker<'a> {
             return;
         };
         let receiver = Ty::obj_name(type_name(&class_internal(self.file, &owner.name)));
-        let entry_owner = type_name(&format!(
-            "{}${}",
-            receiver
-                .obj_internal()
-                .expect("enum receiver has a classifier")
-                .render(),
-            entry.name
-        ));
+        let entry_owner = receiver
+            .obj_internal()
+            .expect("enum receiver has a classifier")
+            .nested_child(&entry.name);
         for (method_index, method) in entry.methods.iter().enumerate() {
             let stable_declaration = match self.active_declarations {
                 Some(active) => active.enum_entry_method_declaration(
