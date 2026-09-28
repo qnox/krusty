@@ -66948,12 +66948,9 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                } else if let Some(ty) = self.read_context_parameter_receiver(
-                    scope,
-                    e,
-                    &n,
-                    &context_parameter_receivers,
-                ) {
+                } else if let Some(ty) =
+                    self.read_context_parameter_receiver(scope, e, &n, &context_parameter_receivers)
+                {
                     ty
                 } else if let Some((receiver, declared_name, _)) =
                     self.imported_singleton_member(&n)
