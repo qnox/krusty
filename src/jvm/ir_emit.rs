@@ -4827,6 +4827,9 @@ fn class_enclosure(
             ))
         }
         crate::ir::IrEnclosure::File => Some((facade.to_string(), None)),
+        crate::ir::IrEnclosure::Classifier(class) => {
+            Some((ir.classes[class as usize].fq_name(), None))
+        }
         crate::ir::IrEnclosure::ClassInitializer(class) => {
             let class = &ir.classes[class as usize];
             if class.is_companion {

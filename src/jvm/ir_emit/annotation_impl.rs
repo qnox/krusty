@@ -50,16 +50,34 @@ pub(super) fn emit_annotation_impl_class(
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
+    let (owner, method) =
+        super::class_enclosure(ir, c, facade).expect("an annotation implementation has an owner");
+    assert!(
+        method.is_none(),
+        "an annotation implementation is enclosed by its owner as a whole"
+    );
+    cw.set_enclosing_class(&owner);
     for (name, jt) in &members {
         // SYNTHETIC: nothing in source declares these — the class is generated for an annotation
         // instantiation, and kotlinc marks its fields and member accessors so tooling skips them.
         // The constructor and the `Object` overrides are NOT marked, which is kotlinc's split.
-        cw.add_field(0x0002 | 0x0010 | 0x1000, name, &type_descriptor(*jt)); // PRIVATE|FINAL|SYNTHETIC
+        // Like any field, kotlinc interns them when it visits the field table, after the methods.
+        let access = 0x0002 | 0x0010 | 0x1000; // PRIVATE|FINAL|SYNTHETIC
+        cw.add_field_late(access, name, &type_descriptor(*jt), None, None);
     }
 
-    // <init>(members…): super(); store each arg to its field.
+    // <init>(members…): super(); store each arg to its field. kotlinc visits each method's header
+    // before its code, so its name and descriptor precede every constant the body introduces.
     {
         let params_words: u16 = members.iter().map(|(_, jt)| slot_words(*jt)).sum();
+        let desc = format!(
+            "({})V",
+            members
+                .iter()
+                .map(|(_, jt)| type_descriptor(*jt))
+                .collect::<String>()
+        );
+        cw.reserve_method_pool("<init>", &desc, None, &[]);
         let mut ctor = CodeBuilder::new(1 + params_words);
         // Every REFERENCE member is guarded at entry, before `super()` — kotlinc's shape, and the
         // same `Intrinsics.checkNotNullParameter` any non-null parameter gets. An annotation member
@@ -90,13 +108,6 @@ pub(super) fn emit_annotation_impl_class(
             ctor.putfield(fref, slot_words(*jt) as i32);
             slot += slot_words(*jt);
         }
-        let desc = format!(
-            "({})V",
-            members
-                .iter()
-                .map(|(_, jt)| type_descriptor(*jt))
-                .collect::<String>()
-        );
         ctor.ret_void();
         finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
         let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
@@ -133,13 +144,14 @@ pub(super) fn emit_annotation_impl_class(
 
     // Per-member accessor `x()T`: return this.x.
     for (name, jt) in &members {
+        let accessor_desc = format!("(){}", type_descriptor(*jt));
+        cw.reserve_method_pool(name, &accessor_desc, None, &[]);
         let mut g = CodeBuilder::new(1);
         g.aload(0);
         let fref = cw.fieldref(&fq, name, &type_descriptor(*jt));
         g.getfield(fref, slot_words(*jt) as i32);
         emit_return(*jt, &mut g);
         // PUBLIC | FINAL | SYNTHETIC — see the field flags above.
-        let accessor_desc = format!("(){}", type_descriptor(*jt));
         finish_code::<0x1011>(&mut cw, name, &accessor_desc, &mut g, 1);
         // kotlinc names `this` in every member's `LocalVariableTable`, generated class or not.
         cw.set_method_debug(
@@ -157,6 +169,7 @@ pub(super) fn emit_annotation_impl_class(
     // order, and the method table is part of the class file, so emitting it beside the member
     // accessors diverged from the reference on every annotation that is instantiated.
     {
+        cw.reserve_method_pool("annotationType", "()Ljava/lang/Class;", None, &[]);
         let mut m = CodeBuilder::new(1);
         m.ldc_class(iface, &mut cw);
         m.areturn();
@@ -170,6 +183,7 @@ pub(super) fn emit_annotation_impl_class(
             &[("this".to_string(), format!("L{fq};"), 0)],
         );
     }
+    env.inner_classes.register(&mut cw);
     finish_local_synthetic_class(cw, env)
 }
 
@@ -194,6 +208,7 @@ fn emit_annotation_equals(
     // - The comparison is per type: `if_icmpeq` for the int-likes, `lcmp`, `Float`/`Double.compare`
     //   (not the wrapper's `equals`), `if_acmpeq` for an ENUM member, `Arrays.equals` for an array,
     //   and `Intrinsics.areEqual` for every other reference.
+    cw.reserve_method_pool("equals", "(Ljava/lang/Object;)Z", None, &[]);
     let mut cb = CodeBuilder::new(2); // this=0, o=1
     cb.ensure_locals(3); // +o-as-iface at local 2
     let icls = cw.class_ref(iface);
@@ -303,10 +318,11 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
     // The accumulator lives in local 1: each member xors its weighted name hash with its value hash,
     // adds that into the accumulator (from the second member on) and stores it back.
     let accumulates = members.len() > 1;
+    cw.reserve_method_pool("hashCode", "()I", None, &[]);
     let mut cb = CodeBuilder::new(if accumulates { 2 } else { 1 });
-    let string_hash = cw.methodref("java/lang/String", "hashCode", "()I");
     for (index, (name, jt)) in members.iter().enumerate() {
         cb.push_string(name, cw);
+        let string_hash = cw.methodref("java/lang/String", "hashCode", "()I");
         cb.invokevirtual(string_hash, 0, 1);
         cb.push_int(127, cw);
         cb.imul();
@@ -365,11 +381,18 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
     cb.ireturn();
     let max_locals = if accumulates { 2 } else { 1 };
     finish_code::<0x0011>(cw, "hashCode", "()I", &mut cb, max_locals);
+    cw.set_method_debug(
+        "hashCode",
+        "()I",
+        None,
+        &[("this".to_string(), format!("L{fq};"), 0)],
+    );
 }
 
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays
 /// rendered via `Arrays.toString`). Straight-line (no frames).
 fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
+    cw.reserve_method_pool("toString", "()Ljava/lang/String;", None, &[]);
     let mut cb = CodeBuilder::new(1);
     // A MEMBERLESS annotation renders to a constant, so kotlinc emits no `StringBuilder` at all.
     if members.is_empty() {
@@ -390,14 +413,18 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
     cb.dup();
     let sb_init = cw.methodref(sb, "<init>", "()V");
     cb.invokespecial(sb_init, 0, 0);
-    let append_str = cw.methodref(
-        sb,
-        "append",
-        "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-    );
+    // Each `append` is interned where its call is emitted, after the operand it takes: kotlinc
+    // interns an instruction's constants in instruction order.
+    let append_str = |cw: &mut ClassWriter| {
+        cw.methodref(
+            sb,
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        )
+    };
     let append_lit = |cb: &mut CodeBuilder, cw: &mut ClassWriter, s: &str| {
         cb.push_string(s, cw);
-        cb.invokevirtual(append_str, 1, 1);
+        cb.invokevirtual(append_str(cw), 1, 1);
     };
     for (i, (name, jt)) in members.iter().enumerate() {
         // Adjacent literals are ONE `ldc`: the class prefix runs into the first member's name
@@ -425,7 +452,7 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
                     &format!("({ad})Ljava/lang/String;"),
                 );
                 cb.invokestatic(ats, 1, 1);
-                cb.invokevirtual(append_str, 1, 1);
+                cb.invokevirtual(append_str(cw), 1, 1);
             }
             Ty::Int | Ty::Short | Ty::Byte => {
                 cb.aload(0);
@@ -466,7 +493,7 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
             Ty::String => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
-                cb.invokevirtual(append_str, 1, 1);
+                cb.invokevirtual(append_str(cw), 1, 1);
             }
             _ => {
                 cb.aload(0);
