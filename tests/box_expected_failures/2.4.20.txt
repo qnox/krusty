@@ -275,7 +275,6 @@ specialBuiltins/notEmptyMap.kt
 statics/syntheticAccessor.kt
 suspendConversion/suspendConversionNullableCCE.kt
 syntheticAccessors/kt10047.kt
-try/finally12.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt

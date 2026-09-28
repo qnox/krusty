@@ -150,3 +150,27 @@ fn nothing_returning_user_function_tail_call() {
 fn infinite_do_while() {
     assert_accepts("fun f(): Int { do { println(\"x\") } while (true) }");
 }
+
+#[test]
+fn do_while_return_in_body() {
+    assert_accepts("fun f(): Int { do { return 1 } while (false) }");
+}
+
+#[test]
+fn do_while_break_then_return_still_needs_a_return() {
+    assert_missing_return("fun f(c: Boolean): Int { do { if (c) break; return 1 } while (false) }");
+}
+
+/// Official box `try/finally12.kt`: the `finally` return covers the `break`, so the loop leaves
+/// the function.
+#[test]
+fn do_while_finally_return_covers_break() {
+    assert_accepts(
+        "fun f(): String {\n\
+var x: Any = 42\n\
+do {\n\
+try { throw Exception() } catch (e: Throwable) { x = \"OK\"; break } finally { return x.toString() }\n\
+} while (false)\n\
+}\n",
+    );
+}
