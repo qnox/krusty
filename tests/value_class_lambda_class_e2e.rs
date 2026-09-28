@@ -23,7 +23,9 @@ const SRC: &str = "@JvmInline value class Tag(val name: String)\n\
     \x20   val c = label({ suffix = \"!\"; it.name }, Tag(\"-\"))\n\
     \x20   val d = total({ it.n + 1 }, Count(1))\n\
     \x20   val e = Owner(\"s\").read(Tag(\"x\"))\n\
-    \x20   if (none != null || c != \"-\" || suffix != \"!\" || d != 2 || e != \"s\") return \"fail\"\n\
+    \x20   val u = Tag(\"u\")\n\
+    \x20   val f = label({ u.name }, Tag(\"v\"))\n\
+    \x20   if (none != null || c != \"-\" || suffix != \"!\" || d != 2 || e != \"s\" || f != \"u\") return \"fail\"\n\
     \x20   return a + b!!.name\n\
     }\n";
 
@@ -61,6 +63,14 @@ fn a_nullable_value_class_lambda_boxes_null_safely_in_its_bridge() {
 #[test]
 fn a_capturing_lambda_class_stores_its_shared_cell_in_a_field() {
     assert_identical("ValueClassLambdaClassKt$box$c$1");
+}
+
+/// A captured value class is stored as its carrier, and the constructor taking it is a plain
+/// package-private one: only a declared Kotlin parameter hides a constructor behind the
+/// `DefaultConstructorMarker` accessor.
+#[test]
+fn a_captured_value_class_is_a_plain_constructor_parameter() {
+    assert_identical("ValueClassLambdaClassKt$box$f$1");
 }
 
 #[test]

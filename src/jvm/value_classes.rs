@@ -1462,6 +1462,9 @@ pub(crate) fn lower_value_classes(
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
+    // Only a declared Kotlin parameter counts: a lexical capture, an outer instance or a lambda class's
+    // capture is a compiler-added slot kotlinc adds after value classes are lowered, so it is already
+    // the carrier and never hides the constructor.
     let serialization_deserialization_ctors = (0..ir.classes.len())
         .map(|class| {
             ir.generated_secondary_constructor(
@@ -1475,7 +1478,9 @@ pub(crate) fn lower_value_classes(
         if !c.is_value
             && !c.is_object
             && !c.is_interface
-            && c.ctor_args.iter().any(|a| is_vc_ty(&a.ty))
+            && c.ctor_args
+                .iter()
+                .any(|a| a.declared_ty.is_some() && is_vc_ty(&a.ty))
         {
             // Capture the DECLARED ctor param types before the erase below rewrites them — the
             // class metadata constructor record must name the value classes.
@@ -1664,6 +1669,33 @@ pub(crate) fn lower_value_classes(
     // selected constructor may still be private behind its marker accessor. Its recorded generated
     // declaration identity decides that ABI; no owner-wide parameter scan is involved.
     let mut value_class_parameter_constructions = serialization_constructor_accessor_calls;
+    // Which primary-constructor slots of each class lowered here are declared Kotlin parameters.
+    // A capture or an enclosing instance is a slot kotlinc adds after lowering value classes, so a
+    // value class there never selects the hidden constructor (see `value_param_ctors` above).
+    let declared_primary_slots: HashMap<TypeName, Vec<bool>> = ir
+        .classes
+        .iter()
+        .map(|class| {
+            let declared = class
+                .ctor_args
+                .iter()
+                .map(|argument| argument.declared_ty.is_some())
+                .collect();
+            (class.fq_name, declared)
+        })
+        .collect();
+    let primary_constructions: HashSet<ExprId> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(expression, _)| {
+            let expression = expression as ExprId;
+            ir.construction_targets
+                .get(&expression)
+                .is_none_or(|target| target.primary())
+                .then_some(expression)
+        })
+        .collect();
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
@@ -1704,7 +1736,17 @@ pub(crate) fn lower_value_classes(
                 // A value class's own construction is `constructor-impl`, not the hidden-marker ABI
                 // used by an ordinary class whose selected constructor declares a value-class
                 // parameter.
-                if !is_value_class_internal(*internal, &under) && ps.iter().any(is_vc_ty) {
+                let declared = declared_primary_slots.get(internal).filter(|slots| {
+                    slots.len() == ps.len() && primary_constructions.contains(&(i as ExprId))
+                });
+                let hides = match declared {
+                    Some(slots) => ps
+                        .iter()
+                        .zip(slots)
+                        .any(|(parameter, &declared)| declared && is_vc_ty(parameter)),
+                    None => ps.iter().any(is_vc_ty),
+                };
+                if !is_value_class_internal(*internal, &under) && hides {
                     value_class_parameter_constructions.push(i as ExprId);
                 }
                 ps.iter_mut().for_each(|p| *p = erase(p, &under));
