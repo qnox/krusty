@@ -472,8 +472,7 @@ pub(super) fn realize_super_calls(
                     interface,
                     realization,
                     descriptor,
-                    source,
-                    external,
+                    declaration,
                     defaults,
                     source_member,
                 },
@@ -481,9 +480,19 @@ pub(super) fn realize_super_calls(
             args,
         } = ir.exprs[raw].clone()
         {
-            // A dependency declaration whose ordinary descriptor is not a legal nonvirtual entry
-            // (a legacy interface body) names its holder: realize the selected declaration there,
-            // as a receiver-first static. Resolution keeps the declaration it selected.
+            // The current-module declaration a realized call keeps as its source. A dependency
+            // declaration whose ordinary descriptor is not a legal nonvirtual entry (a legacy
+            // interface body) names its holder: realize the selected declaration there, as a
+            // receiver-first static. Resolution keeps the declaration it selected.
+            let (source, external) = match declaration {
+                Some(crate::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
+                    (Some(callable), None)
+                }
+                Some(crate::fir::ResolvedFunctionOverrideTarget::External(external)) => {
+                    (None, Some(external))
+                }
+                None => (None, None),
+            };
             let holder = external
                 .and_then(|target| classpath.external_callable(target))
                 .and_then(|target| target.callable.nonvirtual_realization);

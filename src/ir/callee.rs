@@ -166,12 +166,12 @@ pub enum Callee {
         /// Provider-owned physical descriptor when one exists; source declarations leave it empty
         /// and the target backend derives its ABI from `params`/`ret`.
         descriptor: String,
-        /// Exact source callable owning checked default expressions, when this super declaration is
-        /// part of the current module.
-        source: Option<crate::fir::CallableId>,
-        /// Exact dependency declaration selected for this super call. A target resolves its own
-        /// physical realization of that declaration (a legacy interface body's holder) from it.
-        external: Option<crate::fir::ExternalCallableId>,
+        /// The function the checker selected: a current-module callable, which also owns any
+        /// retained checked default expressions, or a dependency callable. An accessor has no
+        /// callable of its own and leaves this unset, since `kind` names its property; so does a
+        /// super call a compiler plugin synthesizes. A target realizes a dependency holder's
+        /// physical entry from the external case.
+        declaration: Option<crate::fir::ResolvedFunctionOverrideTarget>,
         /// Final semantic parameter ordinals omitted at the checked call site.
         defaults: Vec<u32>,
         source_member: Option<crate::libraries::SourceMember>,
@@ -196,11 +196,14 @@ pub enum Callee {
 
 /// Source-level member operation selected for a semantic `super` dispatch. This common-IR identity
 /// is target-neutral; backends realize the getter/setter spelling and physical invocation shape.
+/// An accessor names the current-module property it belongs to, so a backend reaches the
+/// property's own realization without deriving it from the accessor's spelling. A dependency
+/// property reached through `super` stays a property operation and never becomes a super call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrSuperCallKind {
     Function,
-    PropertyGetter,
-    PropertySetter,
+    PropertyGetter(crate::fir::PropertyId),
+    PropertySetter(crate::fir::PropertyId),
 }
 
 impl Callee {

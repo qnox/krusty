@@ -4915,3 +4915,17 @@ supertype, a nullable Java function-value conversion, and a provider member with
 `fun_interface_constructor_reference_returns_a_checked_sam_delegate` (exact `method_target` and
 `wraps_function_value`), and `tests/fun_interface_value_class_e2e.rs` (the abstract slot among
 same-name, same-arity siblings).
+
+## The selected declaration on a super call  ✅
+
+A `super` call names the function the checker selected (`Callee::Super::declaration`, a module or
+dependency callable, required by the checker and shared with checked FIR's
+`FirCallTarget::Super::declaration`), so a backend reaches `super.toString()` through the provider's
+own declaration rather than its spelling. A dependency declaration whose physical entry is a
+receiver-first holder is realized from that same external identity. A `super` accessor names its
+current-module property (`IrSuperCallKind::PropertyGetter/Setter`), taken from the property
+declaration the resolver selected; an accessor has no callable of its own. A dependency property
+reached through `super` is already a property operation. The JVM realization reads the module
+declaration as it read the old module-only `source`. Tests: `fir_lower/call_target_tests.rs`, and
+`fir/body_check/receiver_tests.rs` for a dependency `super.toString()`. Gap: the serialization
+plugin's synthesized super call names no declaration.

@@ -326,7 +326,8 @@ pub(super) fn publish_referenced(
                         ..
                     }
                     | Callee::Super {
-                        source: Some(target),
+                        declaration:
+                            Some(crate::fir::ResolvedFunctionOverrideTarget::Module(target)),
                         ..
                     },
                 ..

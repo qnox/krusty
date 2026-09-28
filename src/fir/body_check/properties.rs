@@ -34,6 +34,18 @@ pub(super) fn accessor_property(
 }
 
 impl BodyFirChecker<'_> {
+    /// The current-module property whose accessor a `super` property access selected.
+    fn super_property(
+        &self,
+        span: Option<Span>,
+        target: &crate::resolve::ResolvedSuperCall,
+    ) -> Result<crate::fir::PropertyId, BodyCheckFailure> {
+        target
+            .property_declaration
+            .and_then(|declaration| self.index.property_for_declaration(declaration))
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
+    }
+
     /// Preserve an already-selected dependency property reached through `super` as a PROPERTY
     /// operation. The provider identity remains opaque; only the non-virtual dispatch fact crosses
     /// FIR/common IR. Source-module properties retain their existing stable accessor-call path
@@ -46,13 +58,14 @@ impl BodyFirChecker<'_> {
         let Some(property) = target.external_property else {
             let span = self.file.expr_span(expression);
             let cause = self.expression_origin(expression)?;
+            let property = self.super_property(span, target)?;
             return self.selected_super_call_at(
                 span,
                 cause,
                 Some(expression),
                 &[],
                 target,
-                crate::fir::FirSuperCallKind::PropertyGetter,
+                crate::fir::FirSuperCallKind::PropertyGetter(property),
             );
         };
         let span = self.file.expr_span(expression);
@@ -95,13 +108,14 @@ impl BodyFirChecker<'_> {
         target: &crate::resolve::ResolvedSuperCall,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let Some(property) = target.external_property else {
+            let property = self.super_property(span, target)?;
             return self.selected_super_call_at(
                 span,
                 cause,
                 None,
                 std::slice::from_ref(&value),
                 target,
-                crate::fir::FirSuperCallKind::PropertySetter,
+                crate::fir::FirSuperCallKind::PropertySetter(property),
             );
         };
         let [value_type] = target.params.as_slice() else {

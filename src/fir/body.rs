@@ -318,12 +318,11 @@ pub enum FirCallTarget {
         /// The declaration's physical result type, which differs from `result` when the selected
         /// declaration erases or boxes (a generic override, a value class).
         physical_result: ResolvedTy,
-        /// Stable current-module callable selected for the super declaration. This is the exact
-        /// owner of retained checked defaults; dependency declarations leave it unset.
-        source: Option<CallableId>,
-        /// Stable dependency declaration selected for the super declaration; current-module
-        /// declarations leave it unset.
-        external: Option<super::ExternalCallableId>,
+        /// The function selected for a super call: a current-module callable, which is also the
+        /// exact owner of retained checked defaults, or a dependency callable. An accessor has no
+        /// callable of its own and leaves this unset; `kind` names its property. A target realizes
+        /// a dependency holder's physical entry from the external case.
+        declaration: Option<super::ResolvedFunctionOverrideTarget>,
         source_member: Option<crate::libraries::SourceMember>,
         /// The selected declaration is a `suspend` function: the call is a suspension point, and
         /// a target passes it a continuation.
@@ -334,8 +333,10 @@ pub enum FirCallTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirSuperCallKind {
     Function,
-    PropertyGetter,
-    PropertySetter,
+    /// An accessor of the named current-module property. A dependency property reached through
+    /// `super` is a property operation, not a super call.
+    PropertyGetter(PropertyId),
+    PropertySetter(PropertyId),
 }
 
 impl From<CallableId> for FirCallTarget {
