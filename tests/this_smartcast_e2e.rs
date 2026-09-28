@@ -84,3 +84,36 @@ class Derived : Base() {\n\
 fun box(): String = if (Derived().foo() == \"derived\") \"OK\" else \"FAIL\"\n";
     common::expect_box_ok_with_stdlib(SRC, "Base");
 }
+
+const CAST_STATEMENT: &str = "class Slot<T> {\n\
+    \x20   var stored: Any? = null\n\
+    \x20   fun put(value: T) { stored = value }\n\
+    }\n\
+    fun <E> Slot<out E>.implicitPut(value: E) {\n\
+    \x20   this as Slot<E>\n\
+    \x20   put(value)\n\
+    }\n\
+    fun <E> Slot<out E>.explicitPut(value: E) {\n\
+    \x20   this as Slot<E>\n\
+    \x20   this.put(value)\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val slot = Slot<String>()\n\
+    \x20   slot.implicitPut(\"O\")\n\
+    \x20   val first = slot.stored\n\
+    \x20   slot.explicitPut(\"K\")\n\
+    \x20   return if (first == \"O\" && slot.stored == \"K\") \"OK\" else \"fail\"\n\
+    }\n";
+
+/// A cast statement `this as Slot<E>` on a `Slot<out E>` receiver proves the explicitly applied
+/// target for the rest of the block, so `put(value: E)` applies through the implicit and the
+/// explicit receiver instead of seeing the out-projected `put(value: Nothing)`.
+#[test]
+fn a_cast_statement_on_this_narrows_to_its_explicit_type_arguments() {
+    common::assert_class_matches_kotlinc(
+        "ThisCastStatement",
+        CAST_STATEMENT,
+        "ThisCastStatementKt",
+    );
+    common::expect_box_same_as_kotlinc(CAST_STATEMENT, "ThisCastStatementRun");
+}

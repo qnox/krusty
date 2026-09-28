@@ -2829,6 +2829,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checked again. A hard cast narrows a stable operand only when the target refines that operand's
   type (`a: Any as String`); `x: R as Any` and an unrelated cast leave the original type in place.
   `tests/invoke_receiver_smartcast_e2e.rs`.
+- **A cast statement proves its explicitly applied target.** After `this as Buildee<ETV>` on a
+  `Buildee<out ETV>` receiver (or the same cast of any stable path), the path reads as
+  `Buildee<ETV>` for the rest of the block, so `setTypeVariable(value: ETV)` applies through the
+  implicit and the explicit receiver instead of the out-projected `setTypeVariable(Nothing)`. Only
+  a target spelled without type arguments (`as Sm`) takes them from the path's declared supertype
+  (`Opt<T>` to `Sm<T>`); an explicit application is the proven type as written. Test:
+  `tests/this_smartcast_e2e.rs`; box: `inference/pcla/issues/kt57707.kt`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.

@@ -51073,7 +51073,12 @@ impl<'a> Checker<'a> {
         let runtime_target =
             crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), target)
                 .unwrap_or(target);
+        // Only a target spelled without type arguments (`as Sm`) takes them from the path's
+        // declared supertype. An explicit application (`this as Buildee<T>` on `Buildee<out T>`)
+        // is the proven type itself; re-deriving its arguments from the declaration restored the
+        // projection the cast removed.
         let runtime_target = declared
+            .filter(|_| ty.targs.is_empty())
             .map(|declared| {
                 crate::symbol_resolver::apply_subtype_arguments_from_supertype(
                     &self.fed_source(),
