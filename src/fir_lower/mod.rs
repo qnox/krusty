@@ -621,8 +621,7 @@ impl<'a> BodyLowering<'a> {
         if !self.ir.classes[class as usize].methods.contains(&function) {
             self.ir.classes[class as usize].methods.push(function);
         }
-        let owner = self.ir.classes[class as usize].fq_name_id();
-        self.ir.class_static_local_functions.insert(function, owner);
+        self.ir.class_static_local_functions.insert(function);
     }
 
     /// Build the implementation body of a function-like reference after the frontend has selected
