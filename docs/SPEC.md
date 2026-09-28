@@ -8180,6 +8180,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
   read for a box and cast the enum to `Z1`. Tests: `tests/value_class_nested_carrier_e2e.rs`.
   Corpus: `inlineClasses/kt27096_enum`, `kt27096_functional`, `kt27096_reference`.
+- **A null-safe unbox yields the nullable carrier.** Where an erased result that is a value
+  class's box becomes `X?` carried as its reference carrier (`Map.get` in a `Map<K, X>` delegation),
+  the null-safe `unbox-impl` is the carrier: kotlinc unboxes once and returns it. krusty kept the
+  box's physical type on the unboxed result, so the return unboxed the carrier again and the class
+  failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
+  `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
