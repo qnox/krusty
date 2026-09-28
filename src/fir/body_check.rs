@@ -2168,8 +2168,18 @@ impl BodyFirChecker<'_> {
                             self.source_member_operator_call(expression, convention, *lhs, &[*rhs])?
                         }
                     } else if matches!(op, BinOp::Eq | BinOp::Ne) {
-                        let lhs_ty = self.info.semantic_ty(*lhs).canonical_semantic();
-                        let rhs_ty = self.info.semantic_ty(*rhs).canonical_semantic();
+                        // A type parameter compares as its upper bound. `<A : Double, B : Double?>`
+                        // is IEEE equality of a primitive and a nullable `Double`, not `Any.equals`.
+                        let lhs_ty = self
+                            .info
+                            .semantic_ty(*lhs)
+                            .canonical_semantic()
+                            .range_operand_bound();
+                        let rhs_ty = self
+                            .info
+                            .semantic_ty(*rhs)
+                            .canonical_semantic()
+                            .range_operand_bound();
                         crate::trace_compiler!(
                             "fir",
                             "checked equality expression={expression:?} lhs={lhs_ty:?} rhs={rhs_ty:?}"

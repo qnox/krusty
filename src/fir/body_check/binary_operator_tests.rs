@@ -1,4 +1,4 @@
-use super::test_support::checked_function_body;
+use super::test_support::{checked_function_body, root_expression};
 use super::*;
 use crate::fir::{FirBody, FirConstant};
 
@@ -104,4 +104,71 @@ fn a_constant_operand_keeps_its_checked_widening() {
             "{source}"
         );
     }
+}
+
+/// `<A : Double, B : Double?>` compares as a primitive `Double` against a nullable `Double`.
+#[test]
+fn double_type_parameter_equality_uses_the_floating_bound() {
+    let (body, _) = checked_function_body(
+        "fun <A : Double, B : Double?> equal(a: A, b: B): Boolean = a == b\n",
+        "equal",
+    );
+    let kind = body
+        .expr(root_expression(&body))
+        .expect("checked equality")
+        .kind;
+    let FirExprKind::NullablePrimitiveComparison {
+        operation,
+        primitive_ty,
+        nullable_first,
+        ..
+    } = kind
+    else {
+        panic!("a non-null Double bound against Double? must unbox, found {kind:?}")
+    };
+    assert_eq!(operation, FirBinaryOperation::Equal);
+    assert_eq!(primitive_ty.get(), Ty::Double);
+    assert!(!nullable_first);
+}
+
+/// Two `Double?` type parameters compare as nullable doubles, including null.
+#[test]
+fn nullable_double_type_parameters_compare_as_nullable_doubles() {
+    let (body, _) = checked_function_body(
+        "fun <A : Double?, B : Double?> equal(a: A, b: B): Boolean = a == b\n",
+        "equal",
+    );
+    let kind = body
+        .expr(root_expression(&body))
+        .expect("checked equality")
+        .kind;
+    let FirExprKind::NullableNumericComparison {
+        lhs_primitive,
+        rhs_primitive,
+        comparison,
+        ..
+    } = kind
+    else {
+        panic!("two Double? bounds must compare as nullable doubles, found {kind:?}")
+    };
+    assert_eq!(lhs_primitive.get(), Ty::Double);
+    assert_eq!(rhs_primitive.get(), Ty::Double);
+    assert_eq!(comparison.get(), Ty::Double);
+}
+
+/// `<B : Any>` is not a floating bound, so equality stays structural `equals`.
+#[test]
+fn double_type_parameter_against_any_stays_structural_equality() {
+    let (body, _) = checked_function_body(
+        "fun <A : Double, B : Any> equal(a: A, b: B): Boolean = a == b\n",
+        "equal",
+    );
+    let kind = body
+        .expr(root_expression(&body))
+        .expect("checked equality")
+        .kind;
+    assert!(
+        matches!(kind, FirExprKind::Binary { .. } | FirExprKind::Call(_)),
+        "Any must not select IEEE equality, found {kind:?}"
+    );
 }
