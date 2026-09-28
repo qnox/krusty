@@ -923,7 +923,7 @@ pub(super) fn build_class_metadata(
             })
             .collect::<Vec<_>>()
     };
-    let class_ty = Ty::obj(&c.fq_name());
+    let class_ty = Ty::obj_name(c.fq_name);
     let declared_method_list = declared_methods();
     let declared_method_count = declared_method_list.len();
     let inferred_methods: Vec<FnMeta> = if c.is_data {
