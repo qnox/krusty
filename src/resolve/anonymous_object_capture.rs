@@ -4,8 +4,8 @@
 use super::scope::ContextReceiverKind;
 use super::{Checker, CheckerScope};
 use crate::diag::Span;
-use crate::fir::{CapturedContextKind, FirCapturedReceiver};
-use crate::types::Ty;
+use crate::fir::FirCapturedReceiver;
+use crate::types::{CapturedContextKind, Ty};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {

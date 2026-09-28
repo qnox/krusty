@@ -3,6 +3,7 @@
 use super::header::{DeclarationId, FirExprId, LocalValueId, OriginId};
 use super::signature::ResolvedTy;
 use super::ClassCaptureIdentity;
+use crate::types::CapturedContextKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirLocalClassCaptureSource {
@@ -88,18 +89,6 @@ pub enum FirCapturedReceiver {
         types: Box<[ResolvedTy]>,
         index: u32,
     },
-}
-
-/// Which kind of context parameter a captured implicit context receiver is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapturedContextKind {
-    /// `context(_: Box)` on a callable or class.
-    Anonymous,
-    /// A context parameter of the function type a lambda is checked against,
-    /// `context(Box) () -> R`.
-    FunctionType,
-    /// Legacy `context(Box)`.
-    LegacyReceiver,
 }
 
 impl FirCapturedReceiver {

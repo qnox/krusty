@@ -164,7 +164,7 @@ pub enum IrCapturedReceiver {
     /// A context parameter that is an implicit receiver: its kind, the declared types of its
     /// rung's context parameters of that kind, in order, and its own position among them.
     Context {
-        kind: crate::fir::CapturedContextKind,
+        kind: crate::types::CapturedContextKind,
         types: Box<[Ty]>,
         index: u32,
     },

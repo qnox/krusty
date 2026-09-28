@@ -5,9 +5,9 @@
 //! the constructor's `MethodParameters` entry and its `LocalVariableTable` row the same way (`$a`).
 //! Every class-file surface that names a capture goes through this module.
 
-use crate::fir::CapturedContextKind;
 use crate::ir::{IrCapturedReceiver, IrClass, IrConstructorCapture};
 use crate::jvm::anonymous_context_labels;
+use crate::types::CapturedContextKind;
 
 /// The field and reflected parameter name of a capture: `$a` for a value, `this$0` for the
 /// enclosing instance, `$this_<label>` for a callable's or lambda's receiver (`$this` for an
