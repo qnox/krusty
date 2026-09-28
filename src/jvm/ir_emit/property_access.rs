@@ -122,12 +122,20 @@ impl Emitter<'_> {
                 owner,
                 name,
                 descriptor,
+                ..
             } => {
-                // The receiver is already on the stack as the bridge's sole argument.
+                // The bridge's arguments are already on the stack: the receiver when it takes one,
+                // and nothing when the field is a named object's static.
                 let words = descriptor_ret_words(&descriptor);
+                let (parameters, _) = crate::jvm::names::parse_method_descriptor(&descriptor)
+                    .expect("a planned property access bridge has a valid JVM descriptor");
+                let arguments = parameters
+                    .iter()
+                    .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                    .sum();
                 let m = self.cw.methodref(&owner, &name, &descriptor);
                 self.mark_dispatch_line(operation, code);
-                code.invokestatic(m, 1, words);
+                code.invokestatic(m, arguments, words);
                 if words == 0 {
                     return;
                 }

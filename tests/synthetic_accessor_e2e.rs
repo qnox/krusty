@@ -166,6 +166,81 @@ fn private_member_properties_used_from_other_classes_go_through_field_accessors(
     common::expect_box_same_as_kotlinc(SRC, "MemberFieldAccessors");
 }
 
+/// A named object's private backing fields are JVM statics. A nested object reaches them through
+/// receiverless `access$get<X>$p()` / `access$set<X>$p(value)` bridges that `getstatic` / `putstatic`
+/// the field. An instance bridge would `getfield` a static field and throw
+/// `IncompatibleClassChangeError`.
+#[test]
+fn private_object_fields_used_from_a_nested_object_use_static_bridges() {
+    const SRC: &str = "object Holder {\n\
+        \x20   private val mark = \"O\"\n\
+        \x20   private var tail = \"x\"\n\
+        \x20   object Nested {\n\
+        \x20       val read = mark\n\
+        \x20       fun write(value: String) { tail = value }\n\
+        \x20       fun current() = tail\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   Holder.Nested.write(\"K\")\n\
+        \x20   val r = Holder.Nested.read + Holder.Nested.current()\n\
+        \x20   return if (r == \"OK\") \"OK\" else \"fail \" + r\n\
+        }\n";
+    let owner = common::compare_with_kotlinc_plugin(
+        "ObjectFieldAccessors",
+        SRC,
+        "Holder",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    for header in [
+        "public static final java.lang.String access$getMark$p();",
+        "public static final void access$setTail$p(java.lang.String);",
+        "public static final java.lang.String access$getTail$p();",
+    ] {
+        let accessor = common::method_block(&owner.reference, header);
+        assert!(!accessor.is_empty(), "kotlinc declares {header}");
+        assert_eq!(
+            common::method_block(&owner.krusty, header),
+            accessor,
+            "{header}"
+        );
+    }
+    common::expect_box_same_as_kotlinc(SRC, "ObjectFieldAccessors");
+}
+
+/// A default argument in an interface default implementation can read private companion storage
+/// from another source file. The access still goes through the companion/owner's receiverless
+/// static field bridge; an instance-shaped bridge would fail before the default body returns.
+#[test]
+fn private_companion_field_used_from_an_interface_default_argument_uses_a_static_bridge() {
+    let sources = [
+        (
+            "Use.kt",
+            "class Derived : Contract<String>\n\
+             fun box(): String = Derived().value() ?: \"fail\"\n",
+        ),
+        (
+            "Contract.kt",
+            "interface Contract<T> {\n\
+             \x20   fun value(input: String = RESULT): T? = input as T\n\
+             \x20   companion object { private val RESULT = \"OK\" }\n\
+             }\n",
+        ),
+    ];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "UseKt"),
+        "OK",
+        "reference fixture"
+    );
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+}
+
 #[test]
 fn a_class_reaches_a_private_top_level_declared_accessor() {
     // A private property's declared accessors are private facade methods, so a class in the same

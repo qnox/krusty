@@ -7,8 +7,11 @@
 //! final synthetic` forwarder per target — `access$<name>` for a function, `access$get<X>$p` and
 //! `access$set<X>$p` for a property's field — and every use from another class calls it instead.
 //! A nested class, a callable-reference carrier and a lambda class are all such other classes.
-//! A private member property's field is reached the same way: its class declares
-//! `access$get<X>$p(<owner>)` and `access$set<X>$p(<owner>, value)` for the uses that need them.
+//! A private member property's field is reached the same way. A class declares
+//! `access$get<X>$p(<owner>)` and `access$set<X>$p(<owner>, value)`. A named object's backing
+//! field is itself static, so its bridge is `access$get<X>$p()` / `access$set<X>$p(value)` and
+//! reads or writes that field with `getstatic` / `putstatic`. A declared accessor stays an
+//! instance method, and its bridge still takes the object.
 //!
 //! The owner appends its accessors after every declared and lifted member, ahead of `<clinit>`, in
 //! the order the file first uses them. [`plan`] finds those uses once per emission pass; each use
@@ -34,9 +37,9 @@ pub(super) enum StaticAccessor {
     /// `access$<name>(<receiver>, …)`, calling a protected member of a class in another package:
     /// an index into the plan's protected accessors.
     Protected(u32),
-    /// `access$get<X>$p(<owner>)`, reading private member property `property` of class `class`.
+    /// `access$get<X>$p`, reading private member property `property` of class `class`.
     MemberGetter { class: u32, property: u32 },
-    /// `access$set<X>$p(<owner>, value)`, writing private member property `property` of `class`.
+    /// `access$set<X>$p`, writing private member property `property` of `class`.
     MemberSetter { class: u32, property: u32 },
 }
 
@@ -579,6 +582,47 @@ struct Accessor<'a> {
     flags: u16,
 }
 
+/// The field bridge another class uses for private member property `property`. A named object's
+/// plain backing field is static, so the bridge takes no instance. A declared accessor, and every
+/// instance field, still receives the owner.
+pub(super) fn member_property_field_bridge(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    owner: &str,
+    property: &crate::ir::IrProperty,
+    value: &str,
+    read: bool,
+) -> crate::jvm::inline::PropertyAccess {
+    let declared_accessor = if read {
+        property.getter.is_some()
+    } else {
+        property.setter.is_some()
+    };
+    let static_field = !declared_accessor && super::static_storage(ir, class);
+    let descriptor = if read {
+        if static_field {
+            format!("(){value}")
+        } else {
+            format!("(L{owner};){value}")
+        }
+    } else if static_field {
+        format!("({value})V")
+    } else {
+        format!("(L{owner};{value})V")
+    };
+    let accessor = if read {
+        property_getter_name(&property.name)
+    } else {
+        property_setter_name(&property.name)
+    };
+    crate::jvm::inline::PropertyAccess::AccessBridge {
+        owner: owner.to_string(),
+        name: format!("access${accessor}$p"),
+        descriptor,
+        takes_receiver: !static_field,
+    }
+}
+
 impl Accessor<'_> {
     /// `access$get<X>$p`: read the private property's field, or call its declared getter.
     fn member_getter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
@@ -594,6 +638,20 @@ impl Accessor<'_> {
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
         let name = format!("access${}$p", property_getter_name(&property.name));
+        if property.getter.is_none() && super::static_storage(ir, owner) {
+            let descriptor = format!("(){}", type_descriptor(ty));
+            let mut code = CodeBuilder::new(0);
+            code.mark_line(self.declaration_line);
+            let physical = instance_field_jvm_name(ir, owner, field);
+            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+            code.getstatic(field_ref, slot_words(field_ty) as i32);
+            emit_backing_field_read_adaptation(ir, cw, &mut code, property, field_ty, ty);
+            emit_return(ty, &mut code);
+            code.ensure_locals(0);
+            code.link();
+            cw.add_method(self.flags, &name, &descriptor, &code);
+            return;
+        }
         let descriptor = format!("(L{internal};){}", type_descriptor(ty));
         let mut code = CodeBuilder::new(1);
         code.mark_line(self.declaration_line);
@@ -637,6 +695,28 @@ impl Accessor<'_> {
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
         let name = format!("access${}$p", property_setter_name(&property.name));
+        if property.setter.is_none() && super::static_storage(ir, owner) {
+            let descriptor = format!("({})V", type_descriptor(ty));
+            let words = slot_words(ty);
+            let mut code = CodeBuilder::new(words);
+            code.mark_line(self.declaration_line);
+            load(ty, 0, &mut code);
+            emit_backing_field_write_adaptation(ir, cw, &mut code, property, ty, field_ty);
+            let physical = instance_field_jvm_name(ir, owner, field);
+            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+            code.putstatic(field_ref, slot_words(field_ty) as i32);
+            code.ret_void();
+            code.ensure_locals(words);
+            code.link();
+            cw.add_method(self.flags, &name, &descriptor, &code);
+            cw.set_method_debug(
+                &name,
+                &descriptor,
+                None,
+                &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+            );
+            return;
+        }
         let descriptor = format!("(L{internal};{})V", type_descriptor(ty));
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(1 + words);

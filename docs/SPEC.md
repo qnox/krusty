@@ -4047,6 +4047,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call into a non-inline one, a different program. `IrProperty::needs_access_bridge` records the need
   during lowering and the backend emits the synthetic static, so the splice stays legal.
   Test: `tests/classpath_jvmstatic_object_property_e2e.rs`.
+  A named object's backing field is a JVM static. Another class reads it with `access$get<X>$p()`
+  (`getstatic`) and writes it with `access$set<X>$p(value)` (`putstatic`); neither bridge takes the
+  object. A declared accessor on that object stays an instance method, so its bridge still takes the
+  instance and calls the accessor. An ordinary class's field bridge keeps the `(owner, …)` shape.
+  Test: `tests/synthetic_accessor_e2e.rs`
+  (`private_object_fields_used_from_a_nested_object_use_static_bridges`).
 
 - **INSTANCE member of a classpath `object`, and dotted classpath nested types.** A plain (non-`@JvmStatic`)
   member call on a classpath `object` (`Ids.generate()`, `L.logger { }`) is an instance call on the
