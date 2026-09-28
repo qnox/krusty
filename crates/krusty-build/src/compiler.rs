@@ -305,13 +305,9 @@ impl BuildEnvironment for KrustyCli {
             .map_err(|error| format!("cannot run {}: {error}", self.binary.display()))?;
 
         if !result.status.success() {
-            // The compiler's own diagnostics are the useful part; the exit code alone is not.
-            return Err(format!(
-                "krusty exited with {}: {}{}",
-                result.status,
-                String::from_utf8_lossy(&result.stderr).trim(),
-                String::from_utf8_lossy(&result.stdout).trim(),
-            ));
+            // The compiler's own diagnostics are the result. Wrapping them would make a toolchain
+            // build disagree with kotlinc on the same source.
+            return Err(compiler_diagnostics(&result));
         }
 
         let mut artifacts = Vec::new();
@@ -334,6 +330,27 @@ impl BuildEnvironment for KrustyCli {
             },
         })
     }
+}
+
+/// The compiler's stderr, then any stdout. An empty report keeps the exit status, because there
+/// is no diagnostic text to pass through.
+fn compiler_diagnostics(result: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    if stderr.trim().is_empty() && stdout.trim().is_empty() {
+        return format!("krusty exited with {}", result.status);
+    }
+    let mut report = String::new();
+    if !stderr.is_empty() {
+        report.push_str(&stderr);
+    }
+    if !stdout.trim().is_empty() {
+        if !report.is_empty() && !report.ends_with('\n') {
+            report.push('\n');
+        }
+        report.push_str(&stdout);
+    }
+    report
 }
 
 /// A module id is opaque build-tool data, not a path. Hash its exact bytes into one fixed-width

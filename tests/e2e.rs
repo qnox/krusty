@@ -1969,6 +1969,8 @@ mod this_callable_ref_e2e;
 mod this_smartcast_e2e;
 #[path = "throw_e2e.rs"]
 mod throw_e2e;
+#[path = "toolchain_diagnostics_e2e.rs"]
+mod toolchain_diagnostics_e2e;
 #[path = "top_level_custom_accessor_e2e.rs"]
 mod top_level_custom_accessor_e2e;
 #[path = "top_level_generic_property_inference_e2e.rs"]

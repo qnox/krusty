@@ -1,0 +1,6 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_toolchain_build_reports_kotlinc_diagnostics]
+2.4.0..2.4.20:
+  main.kt:1:22: 'break' and 'continue' are only allowed inside loops.

@@ -178,22 +178,72 @@ impl BuildReport {
         self.outcomes.iter().all(|(_, outcome)| outcome.is_ok())
     }
 
-    /// One line per module, in build order — what a `krusty-toolchain build` run prints.
+    /// One line per module, in build order — what a successful `krusty-toolchain build` prints.
     pub fn render(&self) -> String {
         let mut out = String::new();
         for (id, outcome) in &self.outcomes {
-            match outcome {
-                Outcome::CacheHit { key, .. } => out.push_str(&format!("cached    {id} ({key})\n")),
-                Outcome::Compiled { key, .. } => out.push_str(&format!("compiled  {id} ({key})\n")),
-                Outcome::Refused { reason } => out.push_str(&format!("refused   {id}: {reason}\n")),
-                Outcome::Failed { message } => {
-                    out.push_str(&format!("failed    {id}: {message}\n"))
-                }
-                Outcome::Blocked { on } => out.push_str(&format!("blocked   {id} (needs {on})\n")),
-            }
+            push_outcome(&mut out, id, outcome);
         }
         out
     }
+
+    /// What a failed `krusty-toolchain build` prints.
+    ///
+    /// Compiler diagnostics come first, exactly as the compiler wrote them (`file:line:column:
+    /// error: message`). A refusal or an environment failure stays a one-line outcome after that.
+    pub fn failure_output(&self) -> String {
+        let mut diagnostics = String::new();
+        let mut rest = String::new();
+        for (id, outcome) in &self.outcomes {
+            if let Outcome::Failed { message } = outcome {
+                if is_compiler_diagnostic(message) {
+                    diagnostics.push_str(message);
+                    if !message.ends_with('\n') {
+                        diagnostics.push('\n');
+                    }
+                    continue;
+                }
+            }
+            if !outcome.is_ok() {
+                push_outcome(&mut rest, id, outcome);
+            }
+        }
+        diagnostics.push_str(&rest);
+        diagnostics
+    }
+}
+
+fn push_outcome(out: &mut String, id: &ModuleId, outcome: &Outcome) {
+    match outcome {
+        Outcome::CacheHit { key, .. } => out.push_str(&format!("cached    {id} ({key})\n")),
+        Outcome::Compiled { key, .. } => out.push_str(&format!("compiled  {id} ({key})\n")),
+        Outcome::Refused { reason } => out.push_str(&format!("refused   {id}: {reason}\n")),
+        Outcome::Failed { message } => out.push_str(&format!("failed    {id}: {message}\n")),
+        Outcome::Blocked { on } => out.push_str(&format!("blocked   {id} (needs {on})\n")),
+    }
+}
+
+/// A compiler diagnostic is `path:line:column: error: message`, the line the diagnostic harness
+/// compares with kotlinc.
+fn is_compiler_diagnostic(message: &str) -> bool {
+    message.lines().any(|line| {
+        let Some((location, _)) = line.split_once(": error:") else {
+            return false;
+        };
+        let mut fields = location.rsplitn(3, ':');
+        let Some(column) = fields.next() else {
+            return false;
+        };
+        let Some(line_number) = fields.next() else {
+            return false;
+        };
+        let Some(path) = fields.next() else {
+            return false;
+        };
+        !path.trim().is_empty()
+            && line_number.trim().parse::<usize>().is_ok()
+            && column.trim().parse::<usize>().is_ok()
+    })
 }
 
 pub struct Driver<E: BuildEnvironment> {
@@ -1084,5 +1134,31 @@ mod tests {
         let rendered = d.build(&graph).expect("plannable").render();
         assert_eq!(rendered.lines().count(), 3);
         assert!(rendered.contains("compiled  core"));
+    }
+
+    #[test]
+    fn a_compiler_diagnostic_is_printed_unchanged() {
+        let report = BuildReport {
+            outcomes: vec![
+                (
+                    ModuleId::new("app:main"),
+                    Outcome::Failed {
+                        message: "main.kt:1:21: error: 'break' and 'continue' are only allowed inside loops.\nkrusty: 1 error(s)\n".into(),
+                    },
+                ),
+                (
+                    ModuleId::new("lib:main"),
+                    Outcome::Blocked {
+                        on: ModuleId::new("app:main"),
+                    },
+                ),
+            ],
+        };
+        assert_eq!(
+            report.failure_output(),
+            "main.kt:1:21: error: 'break' and 'continue' are only allowed inside loops.\n\
+             krusty: 1 error(s)\n\
+             blocked   lib:main (needs app:main)\n"
+        );
     }
 }
