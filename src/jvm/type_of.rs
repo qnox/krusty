@@ -21,7 +21,6 @@ use crate::types::{Ty, TypeName, TypeVariance};
 const REFLECTION: &str = "kotlin/jvm/internal/Reflection";
 const K_TYPE: &str = "kotlin/reflect/KType";
 const K_TYPE_PROJECTION: &str = "kotlin/reflect/KTypeProjection";
-const K_TYPE_PROJECTION_COMPANION: &str = "kotlin/reflect/KTypeProjection$Companion";
 const K_VARIANCE: &str = "kotlin/reflect/KVariance";
 
 /// kotlinc's `ReifiedTypeInliner.OperationKind.TYPE_OF`.
@@ -48,11 +47,6 @@ pub enum TypeOfInsn {
         descriptor: &'static str,
     },
     InvokeStatic {
-        owner: &'static str,
-        name: &'static str,
-        descriptor: String,
-    },
-    InvokeVirtual {
         owner: &'static str,
         name: &'static str,
         descriptor: String,
@@ -349,18 +343,15 @@ impl Generator<'_, '_> {
         Ok(())
     }
 
+    /// kotlinc's `generateTypeOfArguments`: `KTypeProjection.star`, or the argument's type passed
+    /// to the static factory for its variance.
     fn projection(&mut self, argument: Ty, type_parameter_bound: bool) -> Result<(), TypeOfError> {
-        self.push(TypeOfInsn::GetStatic {
-            owner: K_TYPE_PROJECTION,
-            name: "Companion",
-            descriptor: "Lkotlin/reflect/KTypeProjection$Companion;",
-        });
         let (ty, factory) = match argument {
             Ty::StarProjection(_) => {
-                self.push(TypeOfInsn::InvokeVirtual {
-                    owner: K_TYPE_PROJECTION_COMPANION,
-                    name: "getSTAR",
-                    descriptor: format!("()L{K_TYPE_PROJECTION};"),
+                self.push(TypeOfInsn::GetStatic {
+                    owner: K_TYPE_PROJECTION,
+                    name: "star",
+                    descriptor: "Lkotlin/reflect/KTypeProjection;",
                 });
                 return Ok(());
             }
@@ -369,8 +360,8 @@ impl Generator<'_, '_> {
             ty => (ty, "invariant"),
         };
         self.type_of(ty, type_parameter_bound)?;
-        self.push(TypeOfInsn::InvokeVirtual {
-            owner: K_TYPE_PROJECTION_COMPANION,
+        self.push(TypeOfInsn::InvokeStatic {
+            owner: K_TYPE_PROJECTION,
             name: factory,
             descriptor: format!("(L{K_TYPE};)L{K_TYPE_PROJECTION};"),
         });
@@ -584,15 +575,6 @@ pub(super) fn encode(
                 let (arguments, result) = descriptor_words(descriptor);
                 let method = cw.methodref(owner, name, descriptor);
                 code.invokestatic(method, arguments, result);
-            }
-            TypeOfInsn::InvokeVirtual {
-                owner,
-                name,
-                descriptor,
-            } => {
-                let (arguments, result) = descriptor_words(descriptor);
-                let method = cw.methodref(owner, name, descriptor);
-                code.invokevirtual(method, arguments, result);
             }
             TypeOfInsn::InvokeSpecial {
                 owner,
