@@ -23,8 +23,8 @@ use super::emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
-    ensure_tail_return, recorded_suspension_result, shift_locals, suspend_call_fid,
-    value_class_suspension_result, EmitTimeMachines, MachineContext,
+    ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
+    suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::jvm::local_class_names::name_continuation;
@@ -73,6 +73,9 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
 
     let completion = adopt_cps_signature(ir, fid);
     shift_locals(ir, body, completion);
+    // `coroutineContext` is the context of the continuation kotlinc's transformer puts in place
+    // of the fake one: the machine's own, or `$completion` when there is no suspension point.
+    realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
     for suspension in &suspensions {
         let continuation = ir.add_expr(IrExpr::CurrentContinuation);
         if !append_continuation(
@@ -202,8 +205,24 @@ pub(super) fn eligible_points(
                 .any(|class| class.fq_name_id() == owner && !class.is_interface)
         });
     let suspend_set = route.suspend_set;
-    // Checked in order, each only while every earlier one holds.
-    let declines: [(&dyn Fn() -> bool, &str); 8] = [
+    let points = suspension_points_in_order(ir, body, suspend_set);
+    // Shapes the transformer cannot take at all: a suspension spliced in from an inline body, or
+    // a read of the function's own continuation, which kotlinc realizes through a fake one.
+    let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
+        (
+            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
+            "suspends in a spliced inline body",
+        ),
+        (
+            &|| reads_current_continuation(ir, body),
+            "reads its own continuation",
+        ),
+    ];
+    // Gates of the state machine itself: its spills, its continuation class and that class's
+    // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
+    // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
+    // machine.
+    let machine_declines: [(&dyn Fn() -> bool, &str); 6] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -227,18 +246,17 @@ pub(super) fn eligible_points(
         // Spliced inline bodies are a later step: the splice does not mark the call's own line
         // yet, which the transformer's `@DebugMetadata` reads off the body.
         (&|| splices_inline_code(ir, body), "splices an inline body"),
-        // A classpath inline body or an inline lambda that suspends is spliced into this frame.
-        (
-            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
-            "suspends in a spliced inline body",
-        ),
-        (
-            &|| reads_current_continuation(ir, body),
-            "reads its own continuation",
-        ),
     ];
-    let declined = declines
+    let machine_declines: &[(&dyn Fn() -> bool, &str)] =
+        if points.is_empty() && subject == Subject::NamedFunction {
+            &[]
+        } else {
+            &machine_declines
+        };
+    // Checked in order, each only while every earlier one holds.
+    let declined = body_declines
         .iter()
+        .chain(machine_declines)
         .find_map(|(declines, reason)| declines().then_some(*reason));
     if let Some(reason) = declined {
         crate::trace_compiler!(
@@ -248,7 +266,6 @@ pub(super) fn eligible_points(
         );
         return None;
     }
-    let points = suspension_points_in_order(ir, body, route.suspend_set);
     let plain_call = |call: ExprId| {
         matches!(
             ir.exprs[call as usize],
@@ -258,16 +275,6 @@ pub(super) fn eligible_points(
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };
-    // kotlinc's transformer builds a lambda's `invokeSuspend` state machine even with no
-    // suspension point in it; a named function without one stays a plain method.
-    if points.is_empty() && subject == Subject::NamedFunction {
-        crate::trace_compiler!(
-            "suspend",
-            "transformer declines {}: it has no suspension point",
-            function.name
-        );
-        return None;
-    }
     if !points.iter().all(|&call| plain_call(call)) {
         crate::trace_compiler!(
             "suspend",

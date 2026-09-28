@@ -398,7 +398,9 @@ pub(crate) fn transform_named_function(
     method.method.max_locals += 2;
     let machine = Machine {
         state_class: function.continuation_class,
-        line_number: function.line_number,
+        line_number: function.line_number.ok_or(CoroutineError::Unsupported(
+            "a state machine for a function with no declaration line",
+        ))?,
         continuation_index,
         data_index,
     };

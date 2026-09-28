@@ -195,11 +195,10 @@ pub(super) fn request_transform(
         desc,
         CoroutineRequest {
             continuation_class: machine.continuation_class.clone(),
-            line_number: (*ir
+            line_number: ir
                 .fn_decl_lines
                 .get(&fid)
-                .expect("a transformed source function retains its declaration line"))
-            .min(u16::MAX as u32) as u16,
+                .map(|&line| line.min(u16::MAX as u32) as u16),
             completion_slot,
             dispatch_receiver: dispatch_receiver(ir, fid).filter(|_| machine.lambda.is_none()),
             suspend_lambda: machine

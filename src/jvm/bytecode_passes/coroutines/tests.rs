@@ -359,7 +359,7 @@ const F: NamedFunction = NamedFunction {
     owner: "AKt",
     continuation_class: "AKt$f$1",
     source_file: "A.kt",
-    line_number: 3,
+    line_number: Some(3),
     completion_slot: 1,
     dispatch_receiver: None,
 };
@@ -418,7 +418,7 @@ const B: NamedFunction = NamedFunction {
     owner: "BKt",
     continuation_class: "BKt$stack$1",
     source_file: "B.kt",
-    line_number: 3,
+    line_number: Some(3),
     completion_slot: 1,
     dispatch_receiver: None,
 };
@@ -551,7 +551,7 @@ fn a_suspension_point_in_constructor_arguments_moves_the_allocation_after_it() {
         owner: "CKt",
         continuation_class: "CKt$ctor$1",
         source_file: "C.kt",
-        line_number: 3,
+        line_number: Some(3),
         completion_slot: 1,
         dispatch_receiver: None,
     };

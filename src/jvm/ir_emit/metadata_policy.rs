@@ -41,9 +41,15 @@ pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
 /// Finish a class kotlinc generates for an expression in the scope it was written in: a callable
 /// reference or an annotation instantiation. It carries the `k=3` synthetic-class record with LOCAL
 /// visibility, as kotlinc 2.4.20 writes it.
-pub(super) fn finish_local_synthetic_class(mut cw: crate::jvm::classfile::ClassWriter) -> Vec<u8> {
+///
+/// A suspend-conversion or suspend-reference carrier's `invoke` is a suspend function kotlinc's
+/// transformer rewrites, so the class is finished through the run that keeps what it found.
+pub(super) fn finish_local_synthetic_class(
+    mut cw: crate::jvm::classfile::ClassWriter,
+    env: &super::EmitEnv,
+) -> Vec<u8> {
     cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &[], &[]);
-    cw.finish()
+    env.run.finish_class(cw)
 }
 
 /// Whether a synthetic annotation implementation stamps nullability on its constructor, `equals`
