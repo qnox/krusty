@@ -2795,22 +2795,6 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    /// The parser represents `receiver.name op= rhs` as a write whose value contains the matching
-    /// read and deliberately reuses the same receiver expression identity. Kotlin evaluates that
-    /// receiver once, so checked FIR binds the shared identity before publishing either access.
-    fn is_compound_member_assignment(&self, receiver: ExprId, name: &str, value: ExprId) -> bool {
-        let Expr::Binary { lhs, .. } = self.file.expr(value) else {
-            return false;
-        };
-        matches!(
-            self.file.expr(*lhs),
-            Expr::Member {
-                receiver: read_receiver,
-                name: read_name,
-            } if *read_receiver == receiver && read_name == name
-        )
-    }
-
     /// The parser represents `receiver[indices] op= rhs` as a write whose value contains the
     /// matching indexed read and reuses every operand identity. Checked FIR binds those operands
     /// once before publishing the read-modify-write, just as it does for compound member access.
@@ -3118,31 +3102,8 @@ impl BodyFirChecker<'_> {
                     Some(StmtLowering::SuperPropertyWrite { target }) => Some(target),
                     _ => None,
                 };
-                let receiver_binding = if super_target.is_none()
-                    && self.is_compound_member_assignment(*receiver, name, *value)
-                {
-                    let initializer = self.expression(*receiver)?;
-                    let ty = self.expression_type(*receiver)?;
-                    let target = self.allocate_local();
-                    let declaration = self.body.add_statement(FirStatement {
-                        origin,
-                        kind: FirStatementKind::Local {
-                            target,
-                            ty,
-                            mutable: false,
-                            lateinit: false,
-                            deferred: false,
-                            initializer: Some(initializer),
-                            conversion: None,
-                        },
-                    });
-                    let replacement = self.body.add_expr(FirExpr {
-                        origin,
-                        ty,
-                        kind: FirExprKind::ValueRead(target),
-                    });
-                    self.expression_substitutions.insert(*receiver, replacement);
-                    Some(declaration)
+                let receiver_binding = if super_target.is_none() {
+                    self.bind_compound_member_receiver(*receiver, name, *value, origin)?
                 } else {
                     None
                 };
@@ -3162,7 +3123,9 @@ impl BodyFirChecker<'_> {
                             })
                         })
                 };
-                self.expression_substitutions.remove(receiver);
+                if receiver_binding.is_some() {
+                    self.expression_substitutions.remove(receiver);
+                }
                 let write = write?;
                 let selector = self.body.add_expr(FirExpr {
                     origin,

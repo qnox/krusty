@@ -95,3 +95,53 @@ fn a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument()
         "PropIncContextArgs",
     );
 }
+
+/// A qualified or indexed prefix increment re-reads after the write. The receiver and the index
+/// operands are evaluated once; the getter or `get` runs again for the prefix result, including
+/// when that result is discarded. Postfix keeps the first read.
+#[test]
+fn a_prefix_increment_of_a_qualified_or_indexed_access_rereads() {
+    both_compilers_agree(
+        "var log = \"\"\n\
+         fun <T> logged(value: T): T { log += \"$value;\"; return value }\n\
+         object A {\n\
+         \x20   var x = 0\n\
+         \x20       get() { log += \"get;\"; return field }\n\
+         \x20       set(value: Int) { log += \"set;\"; field = value }\n\
+         }\n\
+         fun getA(): A { log += \"recv;\"; return A }\n\
+         object B {\n\
+         \x20   var x = 0\n\
+         \x20   operator fun get(i1: Int, i2: Int): Int { log += \"get($i1,$i2);\"; return x }\n\
+         \x20   operator fun set(i1: Int, i2: Int, value: Int) {\n\
+         \x20       log += \"set($i1,$i2,$value);\"; x = value\n\
+         \x20   }\n\
+         }\n\
+         fun getB(): B { log += \"recvB;\"; return B }\n\
+         fun box(): String {\n\
+         \x20   ++getA().x\n\
+         \x20   if (log != \"recv;get;set;get;\") return \"fail stmt prefix $log\"\n\
+         \x20   log = \"\"\n\
+         \x20   getA().x--\n\
+         \x20   if (log != \"recv;get;set;\") return \"fail stmt postfix $log\"\n\
+         \x20   log = \"\"\n\
+         \x20   val prefixValue = ++getA().x\n\
+         \x20   if (log != \"recv;get;set;get;\" || prefixValue != 1) return \"fail value prefix $log -> $prefixValue\"\n\
+         \x20   log = \"\"\n\
+         \x20   val postfixValue = getA().x--\n\
+         \x20   if (log != \"recv;get;set;\" || postfixValue != 1) return \"fail value postfix $log -> $postfixValue\"\n\
+         \x20   log = \"\"\n\
+         \x20   val indexed = ++getB()[logged(1), logged(2)]\n\
+         \x20   if (log != \"recvB;1;2;get(1,2);set(1,2,1);get(1,2);\" || indexed != 1) {\n\
+         \x20       return \"fail index prefix $log -> $indexed\"\n\
+         \x20   }\n\
+         \x20   log = \"\"\n\
+         \x20   val indexedPost = getB()[logged(3), logged(4)]--\n\
+         \x20   if (log != \"recvB;3;4;get(3,4);set(3,4,0);\" || indexedPost != 1) {\n\
+         \x20       return \"fail index postfix $log -> $indexedPost\"\n\
+         \x20   }\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "QualifiedPrefixReread",
+    );
+}
