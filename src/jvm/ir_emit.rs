@@ -18,6 +18,7 @@ use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
     reference_array_element, type_descriptor,
 };
+use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 use field_visibility::{default_accessor_access, is_jvm_field, jvm_field_visibility};
@@ -9851,12 +9852,11 @@ impl<'a> Emitter<'a> {
                 outer,
             } => {
                 self.emit_value(*receiver, code);
-                let fref = self.cw.fieldref(
-                    &inner.render(),
-                    "this$0",
-                    &type_descriptor(Ty::obj_name(*outer)),
-                );
-                code.getfield(fref, 1);
+                let outer = instance_representation(self.ir, *outer);
+                let fref = self
+                    .cw
+                    .fieldref(&inner.render(), "this$0", &type_descriptor(outer));
+                code.getfield(fref, slot_words(outer) as i32);
             }
             IrExpr::GetField {
                 receiver,
@@ -12624,7 +12624,7 @@ impl<'a> Emitter<'a> {
                 .map(|(_, t)| *t)
                 .or_else(|| self.var_types.get(i).copied())
                 .unwrap_or(Ty::Error),
-            IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
+            IrExpr::EnclosingInstance { outer, .. } => instance_representation(self.ir, *outer),
             IrExpr::GetField { class, index, .. } => {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }

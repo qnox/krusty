@@ -52,7 +52,7 @@ pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    is_boxed_value_class,
+    instance_representation, is_boxed_value_class,
 };
 use result_tail_boxing::box_vc_tail;
 use std::collections::{HashMap, HashSet};
