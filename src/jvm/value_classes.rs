@@ -693,11 +693,9 @@ pub(crate) fn lower_value_classes(
             {
                 continue;
             }
-            let Some(&fid) = c
-                .methods
-                .iter()
-                .find(|&&fid| ir.functions[fid as usize].name == b.name)
-            else {
+            // The bridge's exact target. A bridge to an implementation this class does not declare
+            // (an inherited or external one) has no body here whose slots receive the box.
+            let Some(fid) = b.target_function.filter(|fid| c.methods.contains(fid)) else {
                 continue;
             };
             let f = &ir.functions[fid as usize];
@@ -731,10 +729,7 @@ pub(crate) fn lower_value_classes(
                     // type PARAMETER there (`I<Result>.foo(T)`), so the arg is boxed. A value class that is
                     // CONCRETE in the supertype (`Core.getFor(id: Aid)`) erases to its OWN underlying
                     // (`String`), the method is mangled, and its param arrives UNBOXED — do NOT mark it.
-                    let supertype_generic = ep
-                        .non_null()
-                        .obj_internal()
-                        .is_some_and(|n| n.matches("kotlin/Any") || n.matches("java/lang/Object"));
+                    let supertype_generic = ep.is_erased_top();
                     if under.contains_key(&x) && supertype_generic && !generic_vcs.contains(&x) {
                         // Mark BOXED in the body's slot repr AND the call-boundary target, so a
                         // CALLER boxes into this generic slot and the BODY unboxes it.
