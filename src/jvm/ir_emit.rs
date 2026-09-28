@@ -404,6 +404,8 @@ pub(super) struct EmitEnv<'a> {
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    /// The bridges that take `FunctionN.invoke`'s packed argument array.
+    function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
@@ -3416,6 +3418,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         emit_time_machines: facts.metadata.emit_time_machines,
         unit_result_tail_forwards: facts.metadata.unit_result_tail_forwards,
         bridge_return_adaptations: facts.metadata.bridge_returns,
+        function_argument_arrays: facts.metadata.function_argument_arrays,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
@@ -4769,8 +4772,7 @@ fn emit_scheduled_member(
             cw,
             fid,
             signature_formatter,
-            env.bridge_return_adaptations,
-            env.run,
+            env,
         );
     } else {
         cw.add_abstract_method_sig(
@@ -5778,7 +5780,7 @@ fn emit_class(
     // or every inherited call is an `AbstractMethodError`. kotlinc adds them before the bridges, and
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     access_bridges::emit_protected_member_access_bridges(c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
@@ -7091,7 +7093,7 @@ fn emit_enum_class(
     // { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`). kotlinc adds both
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -14808,6 +14810,8 @@ mod invariant_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let function_argument_arrays =
+            crate::jvm::function_argument_arrays::FunctionArgumentArrays::default();
         let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
         emit_all_with_checked_classifiers(
             ir,
@@ -14818,6 +14822,7 @@ mod invariant_tests {
                     facade: None,
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
+                    function_argument_arrays: &function_argument_arrays,
                     emit_time_machines,
                     unit_result_tail_forwards: &unit_result_tail_forwards,
                 },

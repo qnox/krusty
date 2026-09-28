@@ -13,6 +13,8 @@ pub(crate) struct EmitMetadata<'a> {
     /// Forwarded suspend returns requiring the target version's physical `Unit` adaptation.
     pub(crate) unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     pub(crate) bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    pub(crate) function_argument_arrays:
+        &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.

@@ -18,9 +18,10 @@ use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
-pub fn derive_bridges(
+pub(crate) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes and declaration-owned enum-entry subclasses only. Lambdas and
@@ -32,7 +33,7 @@ pub fn derive_bridges(
         }
         let first = ir.classes[cid].bridges.len();
         let mut order = Vec::new();
-        superclass_method_bridges(ir, cid, classpath, &mut order)?;
+        superclass_method_bridges(ir, cid, classpath, argument_arrays, &mut order)?;
         property_bridges(ir, cid, classpath, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
@@ -133,6 +134,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
@@ -329,11 +331,7 @@ fn superclass_method_bridges(
         );
         let special = bridge_name != edge.name;
         ir.classes[cid].bridges.push(Bridge {
-            kind: if packed_arguments {
-                BridgeKind::FunctionArgumentArray
-            } else {
-                BridgeKind::Function
-            },
+            kind: BridgeKind::Function,
             target_function: own_fid,
             parameter_identities,
             name: bridge_name,
@@ -348,6 +346,11 @@ fn superclass_method_bridges(
             box_ret: None,
             unbox_params: Vec::new(),
         });
+        if packed_arguments {
+            let class = &ir.classes[cid];
+            let bridge = class.bridges.last().expect("the bridge just pushed");
+            argument_arrays.record(class.fq_name_id(), bridge);
+        }
     }
     Ok(())
 }
