@@ -207,18 +207,6 @@ pub struct PropRef {
 }
 
 impl FuncRef {
-    pub fn owner_class_or_facade(&self, facade: &str) -> String {
-        self.owner_class
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn call_owner_or_facade(&self, facade: &str) -> String {
-        self.call_owner
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
     pub fn call_owner_key(&self) -> String {
         self.call_owner.map(TypeName::render).unwrap_or_default()
     }
