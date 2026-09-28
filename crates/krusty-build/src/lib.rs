@@ -22,17 +22,16 @@
 //!   not `Send`.
 //! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
 //!   process per module.
+//! * [`kotlin_toolchain`] — `module.yaml` / `project.yaml` loading for `krusty build`, the drop-in
+//!   for the Kotlin Toolchain's `kotlin build` on JVM modules.
 //!
 //! # What is NOT here
 //!
-//! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling. The providers are
-//! ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change;
-//! this crate establishes the types they will populate. Parallelism needs a process pool with
-//! crash isolation and interleaved diagnostics, and the sequential driver is its oracle: the same
-//! graph must produce the same artifacts either way.
-//!
-//! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
-//! standalone.
+//! Gradle, Maven, BSP, and JPS are not compiled by this crate. The language server still owns those
+//! project models. `krusty build` recognizes a Gradle or `.iml` tree and stops, rather than reading
+//! it as a toolchain project. Parallelism needs a process pool with crash isolation and interleaved
+//! diagnostics, and the sequential driver is its oracle: the same graph must produce the same
+//! artifacts either way.
 //!
 //! # The property this all rests on
 //!
@@ -47,6 +46,7 @@ pub mod compiler;
 pub mod digest;
 pub mod driver;
 pub mod graph;
+pub mod kotlin_toolchain;
 pub mod model;
 pub mod store;
 

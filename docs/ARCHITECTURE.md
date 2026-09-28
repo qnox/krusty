@@ -59,6 +59,12 @@ their dependency DAG, constructs content-addressed cache keys, stores complete a
 drives a compiler through an explicit environment boundary. The crate is a consumer of the compiler
 library; neither the compiler nor a target backend may depend on it.
 
+`krusty` stays a drop-in for `kotlinc`. `krusty build` is the drop-in for the Kotlin Toolchain
+command `kotlin build` on JVM modules: it reads `module.yaml` and `project.yaml` and compiles those
+units with the driver above. It does not extend the toolchain's plugin API, and it does not shell
+out to the `kotlin` CLI. Gradle and JetBrains `.iml` projects remain language-server project models.
+`krusty build` recognizes them and stops, so a Gradle tree is not parsed as a toolchain project.
+
 The build model is wider than an analysis-only project model. A build unit records resources, Java
 sources, module name, processor inputs, per-module JDK selection, friend paths, and output shape
 because silently ignoring any of those can cache a short or semantically different artifact. An
