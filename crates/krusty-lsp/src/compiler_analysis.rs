@@ -35,6 +35,8 @@ pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, LibraryRef};
 pub(crate) use rendering::render_ty;
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits, MAX_LIBRARY_DEFINITION_BYTES};
+#[cfg(test)]
+pub(crate) use semantic::{HighlightKind, HighlightModifiers};
 pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
 pub(crate) use signature_help::{SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols};
 

@@ -184,7 +184,9 @@ Build correctness rests on these contracts:
   the official Kotlin LSP, which refines server-side and always returns
   `isIncomplete: true`. Each
   semantic token is a 16-byte `(UTF-16 line, start, length, type, modifiers)` record, positioned once
-  in the compiler worker so full/range requests neither rerun analysis nor rescan source. Worker JSON
+  in the compiler worker so full/range requests neither rerun analysis nor rescan source. One file
+  retains at most 65,536 of those records (1 MiB); a denser file keeps the prefix so the worker
+  frame and the open-document cache stay bounded. Worker JSON
   uses packed array entries rather than repeating object keys, and range encoding binary-searches
   the sorted snapshot before allocating its result. A definition entry is a 20-byte
   `(source lo, source hi, target file, target lo, target hi)` array with no retained strings; a shared

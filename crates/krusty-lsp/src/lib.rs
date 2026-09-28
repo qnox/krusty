@@ -11,6 +11,7 @@ pub mod open_document_digest;
 mod options;
 pub mod parity;
 pub mod project;
+mod semantic_tokens;
 mod server;
 pub mod uri;
 mod worker;

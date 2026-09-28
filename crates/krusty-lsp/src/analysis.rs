@@ -10,11 +10,16 @@ use crate::compiler_analysis::{
     document_symbol_occurrences, folding_range_occurrences, hover_wire_cost, parsed_file_symbols,
     CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
     DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis, FoldingRangeOccurrence,
-    FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, LibraryRef,
-    SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
-    FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, MAX_LIBRARY_DEFINITION_BYTES,
-    TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING,
-    TEXT_REGION_LABEL,
+    FrontendSymbols, HighlightSymbols, HoverOccurrence, LibraryRef, SemanticLimits,
+    SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols, FOLDING_KIND_COMMENT,
+    FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, MAX_LIBRARY_DEFINITION_BYTES, TEXT_BLOCK_COMMENT,
+    TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
+};
+use crate::semantic_tokens::advance_position;
+#[cfg(test)]
+pub(crate) use crate::semantic_tokens::SemanticTokenEntry;
+pub use crate::semantic_tokens::{
+    SemanticTokenIndex, SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use krusty::diag::{Diagnostic, Span};
 use krusty::source::{SourceInput, SourceKind};
@@ -3196,200 +3201,6 @@ fn completion_receiver_names(source: &str) -> HashSet<&str> {
             (start != end).then_some(&source[start..end])
         })
         .collect()
-}
-
-pub const SEMANTIC_TOKEN_TYPES: [&str; 23] = [
-    "namespace",
-    "class",
-    "enum",
-    "interface",
-    "struct",
-    "typeParameter",
-    "type",
-    "parameter",
-    "variable",
-    "property",
-    "enumMember",
-    "event",
-    "function",
-    "method",
-    "macro",
-    "keyword",
-    "modifier",
-    "comment",
-    "string",
-    "number",
-    "regexp",
-    "operator",
-    "decorator",
-];
-
-pub const SEMANTIC_TOKEN_MODIFIERS: [&str; 10] = [
-    "declaration",
-    "definition",
-    "readonly",
-    "static",
-    "deprecated",
-    "abstract",
-    "async",
-    "modification",
-    "documentation",
-    "defaultLibrary",
-];
-
-/// `(line, UTF-16 start, UTF-16 length, token-type | modifiers << 8)`.
-///
-/// An array keeps the in-memory entry at 16 bytes and also serializes to compact JSON arrays on the
-/// worker wire instead of repeating five object-field names per source token.
-type SemanticTokenEntry = [u32; 4];
-
-#[derive(Clone, Copy)]
-pub struct SemanticTokenRange {
-    pub start_line: u32,
-    pub start_character: u32,
-    pub end_line: u32,
-    pub end_character: u32,
-}
-
-/// Compact, already-positioned semantic-highlighting snapshot.
-///
-/// Positions are converted to UTF-16 once in the compiler worker. Full and range requests then
-/// encode directly from this array without retaining the AST or rescanning source text.
-#[derive(Clone, Default, Deserialize, Serialize)]
-pub struct SemanticTokenIndex {
-    entries: Vec<SemanticTokenEntry>,
-}
-
-impl SemanticTokenIndex {
-    pub fn from_file_analysis(
-        source: &str,
-        analysis: &FileAnalysis,
-        symbols: &FrontendSymbols,
-    ) -> Self {
-        let highlight_symbols =
-            HighlightSymbols::from_source_set(std::slice::from_ref(analysis), symbols);
-        Self::from_source_set_file_analysis(source, analysis, symbols, &highlight_symbols)
-    }
-
-    pub fn from_source_set_file_analysis(
-        source: &str,
-        analysis: &FileAnalysis,
-        symbols: &FrontendSymbols,
-        highlight_symbols: &HighlightSymbols,
-    ) -> Self {
-        Self::from_occurrences(
-            source,
-            analysis.highlight_occurrences(source, symbols, highlight_symbols),
-        )
-    }
-
-    fn from_occurrences(source: &str, occurrences: Vec<HighlightOccurrence>) -> Self {
-        Self {
-            entries: position_semantic_tokens(source, occurrences),
-        }
-    }
-
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn encode(&self, range: Option<SemanticTokenRange>) -> Vec<u32> {
-        let entries = if let Some(range) = range {
-            let start = (range.start_line, range.start_character);
-            let end = (range.end_line, range.end_character);
-            let first = self
-                .entries
-                .partition_point(|entry| (entry[0], entry[1].saturating_add(entry[2])) <= start);
-            let count = self.entries[first..].partition_point(|entry| (entry[0], entry[1]) < end);
-            &self.entries[first..first + count]
-        } else {
-            &self.entries
-        };
-        let mut encoded = Vec::with_capacity(entries.len().saturating_mul(5));
-        let mut previous_line = 0;
-        let mut previous_start = 0;
-        for entry in entries {
-            let line = entry[0];
-            let start = entry[1];
-            let delta_line = line - previous_line;
-            let delta_start = if delta_line == 0 {
-                start - previous_start
-            } else {
-                start
-            };
-            let packed = entry[3];
-            encoded.extend_from_slice(&[
-                delta_line,
-                delta_start,
-                entry[2],
-                packed & u8::MAX as u32,
-                packed >> 8,
-            ]);
-            previous_line = line;
-            previous_start = start;
-        }
-        encoded
-    }
-}
-
-fn position_semantic_tokens(
-    source: &str,
-    tokens: Vec<HighlightOccurrence>,
-) -> Vec<SemanticTokenEntry> {
-    let mut entries = Vec::with_capacity(tokens.len());
-    let mut byte = 0usize;
-    let mut line = 0u32;
-    let mut character = 0u32;
-    let mut previous_was_cr = false;
-    for token in tokens {
-        advance_position(
-            &source[byte..token.span.lo as usize],
-            &mut line,
-            &mut character,
-            &mut previous_was_cr,
-        );
-        let start_line = line;
-        let start = character;
-        advance_position(
-            &source[token.span.lo as usize..token.span.hi as usize],
-            &mut line,
-            &mut character,
-            &mut previous_was_cr,
-        );
-        if line == start_line {
-            entries.push([
-                start_line,
-                start,
-                character - start,
-                token.kind as u32 | u32::from(token.modifiers.bits()) << 8,
-            ]);
-        }
-        byte = token.span.hi as usize;
-    }
-    entries
-}
-
-fn advance_position(text: &str, line: &mut u32, character: &mut u32, previous_was_cr: &mut bool) {
-    for ch in text.chars() {
-        match ch {
-            '\r' => {
-                *line = line.saturating_add(1);
-                *character = 0;
-                *previous_was_cr = true;
-            }
-            '\n' => {
-                if !*previous_was_cr {
-                    *line = line.saturating_add(1);
-                }
-                *character = 0;
-                *previous_was_cr = false;
-            }
-            _ => {
-                *character = character.saturating_add(ch.len_utf16() as u32);
-                *previous_was_cr = false;
-            }
-        }
-    }
 }
 
 impl HoverIndex {
