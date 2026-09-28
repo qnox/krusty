@@ -11076,7 +11076,7 @@ impl<'a> Emitter<'a> {
                         let inst_desc =
                             format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
                         (
-                            iface,
+                            iface.to_owned(),
                             "invoke".to_string(),
                             jvm_function_invoke_descriptor(*arity),
                             inst_desc,
@@ -12288,7 +12288,7 @@ fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
 }
 
-fn jvm_function_interface(arity: u8) -> String {
+fn jvm_function_interface(arity: u8) -> &'static str {
     crate::jvm::names::function_interface_internal_name(usize::from(arity))
 }
 
@@ -12617,7 +12617,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
-        Ty::Fun(s) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
+        Ty::Fun(s) => Ty::obj(crate::jvm::names::function_interface_internal_name(
             s.params.len() + usize::from(s.suspend),
         )),
         // JVM erasure of a type parameter: collapse `T` to its declared upper bound (which itself

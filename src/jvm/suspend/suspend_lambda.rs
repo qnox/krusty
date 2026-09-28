@@ -502,7 +502,7 @@ fn declare_class(
     };
     class
         .interfaces
-        .push(&crate::jvm::names::function_interface_internal_name(arity));
+        .push(crate::jvm::names::function_interface_internal_name(arity));
     for capture in captures {
         class
             .fields

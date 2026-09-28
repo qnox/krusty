@@ -39,11 +39,14 @@ pub(crate) fn uses_function_n(arity: usize) -> bool {
 }
 
 /// Physical JVM carrier for a Kotlin function value of the given runtime arity.
-pub(crate) fn function_interface_internal_name(arity: usize) -> String {
+///
+/// The spelling is a static table entry (or the single `FunctionN` literal past arity 22), so
+/// callers that only need the name do not copy it into a `String`.
+pub(crate) fn function_interface_internal_name(arity: usize) -> &'static str {
     if uses_function_n(arity) {
-        "kotlin/jvm/functions/FunctionN".to_string()
+        "kotlin/jvm/functions/FunctionN"
     } else {
-        FUNCTION_N_INTERNAL[arity].to_string()
+        FUNCTION_N_INTERNAL[arity]
     }
 }
 
@@ -413,7 +416,7 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_void()))
         }
         Ty::Null => DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::any())),
-        Ty::Fun(signature) => DescriptorShape::Class(function_classfile_name(
+        Ty::Fun(signature) => DescriptorShape::Class(function_interface_internal_name(
             signature.params.len() + usize::from(signature.suspend),
         )),
         Ty::Nullable(inner) => match *inner {
@@ -441,14 +444,6 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
         Ty::InProjection(_) => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_object()))
         }
-    }
-}
-
-fn function_classfile_name(arity: usize) -> &'static str {
-    if uses_function_n(arity) {
-        "kotlin/jvm/functions/FunctionN"
-    } else {
-        FUNCTION_N_INTERNAL[arity]
     }
 }
 
@@ -491,7 +486,8 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
         Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
             signature.params.len() + usize::from(signature.suspend),
-        ),
+        )
+        .to_string(),
         // `Unit` is a real class with one instance, so `x is Unit` is a real question about the
         // object. Without this arm it fell to the erasure below and asked `instanceof
         // java/lang/Object`, which every non-null value passes.
@@ -713,6 +709,16 @@ mod tests {
     fn unit_array_uses_the_unit_reference_descriptor() {
         let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
         assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
+    }
+
+    #[test]
+    fn function_interface_name_reuses_the_static_spelling() {
+        let numbered = function_interface_internal_name(1);
+        assert!(std::ptr::eq(numbered, function_interface_internal_name(1)));
+        assert_eq!(numbered, "kotlin/jvm/functions/Function1");
+        let high = function_interface_internal_name(23);
+        assert!(std::ptr::eq(high, function_interface_internal_name(40)));
+        assert_eq!(high, "kotlin/jvm/functions/FunctionN");
     }
 
     #[test]
