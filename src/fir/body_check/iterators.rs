@@ -3,6 +3,19 @@ use crate::fir::{FirIteratorCall, FirIteratorContextArgument, FirIteratorReceive
 use crate::resolve::ResolvedCall;
 
 impl BodyFirChecker<'_> {
+    /// A `for` loop's own variable. A destructuring loop's (`for ((a, b) in xs)`) is a compiler-
+    /// generated container that only the prepended destructuring reads: it carries that role and
+    /// no source name.
+    pub(super) fn loop_variable(&mut self, statement: StmtId, name: &str) -> LocalValueId {
+        let variable = self.allocate_local();
+        if self.file.destructured_loops.contains(&statement) {
+            self.body.mark_destructuring_loop_container(variable);
+        } else {
+            self.body.set_debug_value_name(variable, name);
+        }
+        variable
+    }
+
     pub(super) fn iterator_loop_header(
         &mut self,
         statement: StmtId,

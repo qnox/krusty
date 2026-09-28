@@ -10950,3 +10950,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fir_lower::tests::a_capture_coordinate_naming_no_slot_fails_rather_than_reading_the_parameter`
   for the lowering contract. Corpus: eight of the eleven red cases under
   `closures/captureInSuperConstructorCall`, plus `super/kt4173_2.kt`.
+
+- **A destructuring `for` loop's own variable is a compiler-generated container** (kotlinc's
+  `isVisibleInLVT`). `for ((a, b) in xs)` binds one element variable that only the prepended
+  `val (a, b) = …` reads. The parser records the loop (`File::destructured_loops`); checked FIR marks
+  its variable as a destructuring-loop container (`FirBody::is_destructuring_loop_container`) and
+  publishes no debug name for it, and common lowering declares it `IrExpr::Variable { named: false }`.
+  It therefore has no `LocalVariableTable` row where krusty wrote `$dest$<offset>`, and a suspend
+  function's state machine treats it as a temporary, spilling it only by liveness rather than as a
+  named variable in scope. Test: `tests/destructuring_loop_temporary_e2e.rs` (an ordinary class and a
+  suspend function with its continuation class).

@@ -2972,8 +2972,7 @@ impl BodyFirChecker<'_> {
                 kind: FirExprKind::Call(call),
             });
             let variable_ty = self.resolved_type(span, plan.protocol.elem_ty)?;
-            let variable = self.allocate_local();
-            self.body.set_debug_value_name(variable, name.clone());
+            let variable = self.loop_variable(statement, &name);
             let body = self.checked_loop_body(
                 target,
                 &label,
@@ -3786,8 +3785,7 @@ impl BodyFirChecker<'_> {
                 )?;
                 let start = self.expression(range.start)?;
                 let end = self.expression(range.end)?;
-                let variable = self.allocate_local();
-                self.body.set_debug_value_name(variable, name.clone());
+                let variable = self.loop_variable(statement, name);
                 let body = self.checked_loop_body(
                     target,
                     label,
@@ -3854,8 +3852,7 @@ impl BodyFirChecker<'_> {
                         })?,
                     element_ty,
                 )?;
-                let variable = self.allocate_local();
-                self.body.set_debug_value_name(variable, name.clone());
+                let variable = self.loop_variable(statement, name);
                 let body = self.checked_loop_body(
                     target,
                     label,
