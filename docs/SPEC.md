@@ -8708,8 +8708,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a lambda or an anonymous function; the JVM backend selects the guards from it in
   `jvm::parameter_assertions`, replacing the receiver-only guard common lowering used to record.
   The parameter's role alone decides the guard; its source name is only the message, and a value
-  parameter without one fails the backend's validation instead of losing its check. Test:
-  `tests/lambda_parameter_checks_e2e.rs` (a separate case for a `Unit` parameter).
+  parameter without one fails the backend's validation instead of losing its check. A destructured
+  parameter's prepended `val (a, b) = …` and the parameter read it destructures carry no line (the
+  parser records them in `File::lambda_parameter_destructures`), and such a lambda marks no line at
+  the post-guard pc, so its first line is its body's own statement or fall-through return. A
+  callable's own scope block (`IrFile::callable_scopes`) starts no line of its own and, in value
+  position too, keeps its locals open to the method's end, so a lambda that returns a value
+  covers its return with them as kotlinc does. Test: `tests/lambda_parameter_checks_e2e.rs`
+  (separate cases for a `Unit` parameter and destructured parameters).
 
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that

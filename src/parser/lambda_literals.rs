@@ -275,6 +275,7 @@ impl Parser<'_> {
         for (synth, entries, source_props, entry_types, sp) in destructures.into_iter().rev() {
             let init = self.file.add_expr(Expr::Name(synth), sp);
             let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
+            self.file.lambda_parameter_destructures.insert(d);
             if source_props.iter().any(|s| s.is_some()) {
                 self.file.destructure_source_props.insert(d.0, source_props);
             }

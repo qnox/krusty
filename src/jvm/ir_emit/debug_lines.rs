@@ -20,8 +20,13 @@ pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBui
 /// Mark every value expression that begins on a different source line.
 ///
 /// Operands of a multi-line call use this path independently. `CodeBuilder::mark_line` deduplicates
-/// a line already in effect and replaces a mark at the same bytecode offset.
+/// a line already in effect and replaces a mark at the same bytecode offset. A callable's own scope
+/// block starts no line: the callable's entry marks its body line, and its statements their own
+/// (a lambda's destructured parameter is read before any of them, without a line).
 pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
+    if ir.callable_scopes.contains(&expression) {
+        return;
+    }
     if let Some(&line) = ir.expr_source_lines.get(&expression) {
         if line != 0 {
             code.mark_line(line);

@@ -1721,6 +1721,9 @@ pub struct File {
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
     /// Absent ⇒ the whole destructuring is positional.
     pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// The `val (a, b) = …` a destructured lambda parameter `{ (a, b) -> … }` prepends to the
+    /// body. kotlinc gives its component calls no line of their own.
+    pub lambda_parameter_destructures: std::collections::HashSet<StmtId>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     /// These remain parser-owned syntax; resolution publishes their semantic types before checked
     /// FIR consumes the active bounded unit.
@@ -1904,6 +1907,7 @@ impl File {
         self.lambda_labels = Default::default();
         self.lambda_call_labels = Default::default();
         self.destructure_source_props = Default::default();
+        self.lambda_parameter_destructures = Default::default();
         self.destructure_entry_types = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();

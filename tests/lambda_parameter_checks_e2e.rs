@@ -28,11 +28,18 @@ const SOURCE: &str = "package store\n\
     \x20   fun anonymousReceiver(): Any = fun UserKlass.(s: String) {}\n\
     }\n\
     \n\
+    data class Entry(val key: String, val count: Int)\n\
     fun takeUnit(f: (Unit, UserKlass) -> Int): Int = 0\n\
+    fun takeEntry(f: (Entry) -> String): String = \"\"\n\
     \n\
     class UnitChecks {\n\
     \x20   fun unit(): Int = takeUnit { u, k -> k.name.length }\n\
     \x20   fun unitOnly(): Any = { u: Unit -> }\n\
+    }\n\
+    \n\
+    class DestructuredChecks {\n\
+    \x20   fun destructured(): String = takeEntry { (key, count) -> key + count }\n\
+    \x20   fun partly(): String = takeEntry { (_, count) -> count.toString() }\n\
     }\n";
 
 fn assert_identical(class: &str) {
@@ -56,4 +63,11 @@ fn lambda_parameter_checks_are_byte_identical_to_kotlinc() {
 #[test]
 fn unit_lambda_parameters_are_guarded_like_kotlinc() {
     assert_identical("store/UnitChecks");
+}
+
+/// A destructured parameter is guarded as `<destruct>`, has no `LocalVariableTable` row, and its
+/// component calls carry no line of their own.
+#[test]
+fn destructured_lambda_parameters_are_guarded_like_kotlinc() {
+    assert_identical("store/DestructuredChecks");
 }
