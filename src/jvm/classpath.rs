@@ -4104,7 +4104,7 @@ impl Classpath {
             let jvm = super::jvm_class_map::to_jvm_type_name(internal);
             let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
             while let Some(superclass) = cur {
-                if superclass.matches("java/lang/Object") {
+                if superclass == crate::types::wk::java_object() {
                     break;
                 }
                 if let Some(body) =
