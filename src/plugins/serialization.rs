@@ -2145,7 +2145,7 @@ mod tests {
     use crate::plugins::{synthetic_class, PluginHost};
 
     fn jvm_type_descriptor(ty: Ty) -> Option<String> {
-        Some(crate::jvm::names::type_descriptor(ty))
+        Some(crate::jvm::names::type_descriptor(ty).to_owned())
     }
 
     fn plugin_context() -> PluginContext {

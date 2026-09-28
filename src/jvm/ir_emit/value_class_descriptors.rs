@@ -17,7 +17,10 @@ pub(super) fn of(ir: &IrFile) -> ValueClassDescriptors {
         crate::jvm::value_classes::boxed_value_class_names(ir)
             .filter_map(|name| {
                 let unboxed = unboxed_type(ir, Ty::obj_name(name))?;
-                Some((name.render(), type_descriptor(ir_ty_to_jvm(&unboxed))))
+                Some((
+                    name.render(),
+                    type_descriptor(ir_ty_to_jvm(&unboxed)).to_owned(),
+                ))
             })
             .collect();
     ValueClassDescriptors(descriptors)

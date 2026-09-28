@@ -495,7 +495,7 @@ fn emit_invoke(
     for (index, (parameter, &slot)) in shape.parameters.iter().zip(&slots).enumerate() {
         locals.push((
             crate::jvm::parameter_names::suspend_lambda_invoke_parameter(index as u16),
-            type_descriptor(parameter.physical),
+            type_descriptor(parameter.physical).to_owned(),
             slot,
         ));
     }

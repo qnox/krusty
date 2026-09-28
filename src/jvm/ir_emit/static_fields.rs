@@ -353,7 +353,7 @@ fn emit_default_static_setter(
         &sname,
         &format!("({desc})V"),
         None,
-        &[("<set-?>".to_string(), desc.clone(), 0)],
+        &[("<set-?>".to_string(), desc.to_owned(), 0)],
     );
 }
 

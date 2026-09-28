@@ -303,12 +303,12 @@ pub(super) fn emit_ctor_marker_accessor(
             .zip(&param_slots)
             .filter_map(|(name, &(slot, ty))| {
                 name.clone()
-                    .map(|name| (name, super::type_descriptor(ty), slot))
+                    .map(|name| (name, super::type_descriptor(ty).to_owned(), slot))
             }),
     );
     locals.push((
         "$constructor_marker".to_string(),
-        super::type_descriptor(marker),
+        super::type_descriptor(marker).to_owned(),
         slot,
     ));
     cw.set_method_debug("<init>", &desc, None, &locals);
