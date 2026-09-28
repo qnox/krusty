@@ -136,12 +136,6 @@ fn file_facade_segment(file_stem: &str) -> String {
 
 pub use crate::names::property_getter_name;
 
-/// A classifier's class id with `$` between nested segments (`app/Outer.Inner` → `app/Outer$Inner`),
-/// read from the name tree. Unlike [`classfile_internal_name`] it maps no built-in.
-pub(super) fn binary_class_name(classifier: TypeName) -> String {
-    classifier.jvm_binary_name()
-}
-
 /// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
 /// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
 ///
