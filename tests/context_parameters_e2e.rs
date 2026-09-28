@@ -639,6 +639,36 @@ fn context_function_value_uses_scope() {
 }
 
 #[test]
+fn class_member_and_top_level_with_context() {
+    // kotlinc tower: a dispatch or extension receiver (Member) beats a top-level callable, which
+    // beats a context-parameter receiver. Inside `context(A) { }`, `foo` and `b` are the contextual
+    // top-level declarations; `A().foo()` and `A().b` stay the class members.
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        class A {
+            fun foo(): String = "class fun"
+            val b: String = "class val"
+        }
+        fun <A, R> context(context: A, block: context(A) () -> R): R = block(context)
+        context(a: A)
+        fun foo(): String = "context fun"
+        context(a: A)
+        val b: String
+            get() = "context val"
+        fun box(): String {
+            return if (
+                (A().foo() == "class fun") &&
+                (A().b == "class val") &&
+                (context(A()) {
+                    foo() == "context fun" && b == "context val"
+                })
+            ) "OK" else "NOK"
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
 fn missing_context_names_the_parameter() {
     const SRC: &str = r#"
         // LANGUAGE: +ContextParameters
