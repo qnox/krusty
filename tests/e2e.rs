@@ -1215,6 +1215,8 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
+#[path = "result_generic_override_argument_e2e.rs"]
+mod result_generic_override_argument_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
