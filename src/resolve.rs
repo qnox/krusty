@@ -1120,6 +1120,9 @@ pub struct Signature {
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
+    /// Provider-normalized semantic identities parallel to `params`. Source context roles are
+    /// captured from compact headers instead of being reconstructed from their spelling later.
+    pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// File-independent default values, parallel to `params`. `Some` only for literal/object defaults the
     /// lowerer can emit without dereferencing the declaring file's AST arena.
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
@@ -1320,6 +1323,14 @@ impl Signature {
         call_sig.no_infer_params = self.no_infer_params.clone();
         call_sig.implicit_integer_coercion = self.implicit_integer_coercion.clone();
         call_sig.inline_modifiers = self.inline_modifiers.clone();
+        if !self.parameter_identities.is_empty() {
+            assert_eq!(
+                self.parameter_identities.len(),
+                self.params.len(),
+                "a source signature's parameter identities must cover its logical parameters"
+            );
+            call_sig.parameter_identities = self.parameter_identities.clone();
+        }
         call_sig
     }
 }
@@ -1353,6 +1364,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
         implicit_integer_coercion: function.call_sig.implicit_integer_coercion.clone(),
         param_default_values: Vec::new(),
         param_names: function.call_sig.param_names.clone(),
+        parameter_identities: function.call_sig.parameter_identities.clone(),
         lambda_param_types: function.call_sig.lambda_param_types.clone(),
         lambda_recv: function.call_sig.lambda_receiver_params.clone(),
         inline_modifiers: function.call_sig.inline_modifiers.clone(),
@@ -26362,6 +26374,18 @@ impl<'a> Checker<'a> {
                 .collect(),
             param_default_values: Vec::new(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            parameter_identities: f
+                .params
+                .iter()
+                .enumerate()
+                .map(|(ordinal, parameter)| {
+                    crate::fir::ResolvedParameterIdentity::declared(
+                        ordinal as u32,
+                        &parameter.name,
+                        parameter.context_kind,
+                    )
+                })
+                .collect(),
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
             inline_modifiers: f.params.iter().map(written_inline_modifier).collect(),
@@ -73848,6 +73872,11 @@ impl<'a> Checker<'a> {
             no_infer_params: call_sig.no_infer_params.clone(),
             implicit_integer_coercion: call_sig.implicit_integer_coercion.clone(),
             param_names,
+            parameter_identities: if aligned {
+                call_sig.parameter_identities.clone()
+            } else {
+                Vec::new()
+            },
             param_default_values: vec![None; semantic_params.len()],
             lambda_param_types: semantic_params
                 .iter()

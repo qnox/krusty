@@ -41,6 +41,33 @@ pub enum ResolvedParameterIdentity {
     SuspendCompletion,
 }
 
+impl ResolvedParameterIdentity {
+    /// Build one source declaration identity while its typed context role is still available.
+    /// Spelling is payload only; it never decides whether a parameter is contextual.
+    pub(crate) fn declared(
+        ordinal: u32,
+        source_name: &str,
+        context_kind: crate::types::ContextParameterKind,
+    ) -> Self {
+        match context_kind {
+            crate::types::ContextParameterKind::Named => Self::ContextValue {
+                ordinal,
+                source_name: source_name.into(),
+            },
+            crate::types::ContextParameterKind::Anonymous => {
+                Self::AnonymousContextParameter { ordinal }
+            }
+            crate::types::ContextParameterKind::LegacyReceiver => {
+                Self::LegacyContextReceiver { ordinal }
+            }
+            crate::types::ContextParameterKind::None if source_name.is_empty() => {
+                Self::Unnamed { ordinal }
+            }
+            crate::types::ContextParameterKind::None => Self::Source(source_name.into()),
+        }
+    }
+}
+
 /// Stable identity of the overridden property declaration.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ResolvedPropertyOverrideTarget {

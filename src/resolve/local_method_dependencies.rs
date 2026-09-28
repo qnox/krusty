@@ -639,6 +639,18 @@ impl Checker<'_> {
                 .iter()
                 .map(|parameter| parameter.name.clone())
                 .collect(),
+            parameter_identities: function
+                .params
+                .iter()
+                .enumerate()
+                .map(|(ordinal, parameter)| {
+                    crate::fir::ResolvedParameterIdentity::declared(
+                        ordinal as u32,
+                        &parameter.name,
+                        parameter.context_kind,
+                    )
+                })
+                .collect(),
             lambda_param_types,
             lambda_recv: function
                 .params

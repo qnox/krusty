@@ -299,28 +299,20 @@ impl ResolvedModuleIndex {
         let parameter = self.callable_parameter(callable, ordinal)?;
         let name = self.callable_parameter_name(callable, ordinal)?;
         if ordinal < header.shape.context_parameter_count {
-            return Some(match parameter.flags.context_kind() {
-                crate::types::ContextParameterKind::Named => {
-                    ResolvedParameterIdentity::ContextValue {
-                        ordinal,
-                        source_name: name.into(),
-                    }
-                }
-                crate::types::ContextParameterKind::Anonymous => {
-                    ResolvedParameterIdentity::AnonymousContextParameter { ordinal }
-                }
-                crate::types::ContextParameterKind::LegacyReceiver => {
-                    ResolvedParameterIdentity::LegacyContextReceiver { ordinal }
-                }
-                crate::types::ContextParameterKind::None => return None,
-            });
+            return Some(ResolvedParameterIdentity::declared(
+                ordinal,
+                name,
+                parameter.flags.context_kind(),
+            ));
         }
         Some(if parameter.flags.is_property_setter_value() {
             ResolvedParameterIdentity::PropertySetterValue
-        } else if name.is_empty() {
-            ResolvedParameterIdentity::Unnamed { ordinal }
         } else {
-            ResolvedParameterIdentity::Source(name.into())
+            ResolvedParameterIdentity::declared(
+                ordinal,
+                name,
+                crate::types::ContextParameterKind::None,
+            )
         })
     }
 

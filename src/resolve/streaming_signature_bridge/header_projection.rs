@@ -31,6 +31,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
 pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) name: String,
     pub(in crate::resolve) ty: TypeRef,
+    pub(in crate::resolve) context_kind: crate::types::ContextParameterKind,
     pub(in crate::resolve) is_vararg: bool,
     pub(in crate::resolve) has_default: bool,
     /// The `crossinline`/`noinline` modifier the parameter wrote.
@@ -38,6 +39,25 @@ pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) annotations: Vec<TypeRef>,
     pub(in crate::resolve) type_annotations: Vec<TypeRef>,
     pub(in crate::resolve) annotation_class_literals: Vec<(usize, String)>,
+}
+
+/// Stable semantic identities for a source callable's logical parameter list. Context roles are
+/// projected while the compact declaration header still owns them; downstream symbol providers
+/// must not reconstruct those roles from names or declaration origin.
+pub(in crate::resolve) fn streamed_parameter_identities(
+    parameters: &[StreamedCallableParameter],
+) -> Vec<crate::fir::ResolvedParameterIdentity> {
+    parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parameter)| {
+            crate::fir::ResolvedParameterIdentity::declared(
+                ordinal as u32,
+                &parameter.name,
+                parameter.context_kind,
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -136,6 +156,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
                 ty: headers
                     .syntax
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
+                context_kind: parameter.context_kind,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
                 inline_modifier: crate::types::InlineParameterModifier::written(
@@ -283,6 +304,7 @@ pub(in crate::resolve) fn legacy_callable_header(function: &FunDecl) -> Streamed
             .map(|parameter| StreamedCallableParameter {
                 name: parameter.name.clone(),
                 ty: parameter.ty.clone(),
+                context_kind: parameter.context_kind,
                 is_vararg: parameter.is_vararg,
                 has_default: parameter.default.is_some(),
                 inline_modifier: crate::resolve::written_inline_modifier(parameter),
@@ -937,6 +959,7 @@ pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
                 ty: headers
                     .syntax
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
+                context_kind: parameter.context_kind,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
                 inline_modifier: crate::types::InlineParameterModifier::written(

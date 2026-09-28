@@ -805,6 +805,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .iter()
                             .map(|parameter| parameter.name.clone())
                             .collect(),
+                        parameter_identities: streamed_parameter_identities(
+                            &callable_header.parameters,
+                        ),
                         lambda_param_types,
                         lambda_recv: callable_header
                             .parameters
@@ -2740,6 +2743,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 } else {
                                     Vec::new()
                                 },
+                                parameter_identities: Vec::new(),
                                 lambda_param_types: vec![Vec::new(); parameter_count],
                                 lambda_recv: vec![false; parameter_count],
                                 inline_modifiers: Vec::new(),
@@ -2814,6 +2818,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     implicit_integer_coercion: Vec::new(),
                                     param_default_values: Vec::new(),
                                     param_names: Vec::new(),
+                                    parameter_identities: Vec::new(),
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     inline_modifiers: Vec::new(),
@@ -2868,6 +2873,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .iter()
                                     .map(|((property, _), _)| property.name.clone())
                                     .collect(),
+                                parameter_identities: Vec::new(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 inline_modifiers: Vec::new(),
@@ -3043,6 +3049,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             implicit_integer_coercion: vec![],
                             param_default_values: Vec::new(),
                             param_names: member.param_names,
+                            parameter_identities: Vec::new(),
                             lambda_param_types: vec![],
                             lambda_recv: vec![],
                             inline_modifiers: Vec::new(),
@@ -3209,6 +3216,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .map(|parameter| StreamedCallableParameter {
                                         name: parameter.name.clone(),
                                         ty: parameter.ty.clone(),
+                                        context_kind: parameter.context_kind,
                                         is_vararg: parameter.is_vararg,
                                         has_default: parameter.default.is_some(),
                                         inline_modifier: crate::resolve::written_inline_modifier(
