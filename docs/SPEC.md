@@ -5173,6 +5173,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the outer instance first, and kotlinc names that parameter `this$0` in the constructor's
   `LocalVariableTable`, like the field it initializes. A local class with no outer instance has no
   such row. Test: `tests/inner_class_constructor_e2e.rs`.
+- **A secondary constructor signs only what it declares.** Its `Signature` lists the declared
+  parameters, never a capture prefix (an inner class's outer instance, a local class's captured
+  values), and kotlinc writes it only when those parameters carry generic information, so an
+  erased `constructor(size: Int, label: String)` of an inner class has none. An enum's name and
+  ordinal prefix still forces one (`(Ljava/lang/String;)V`). Test:
+  `tests/inner_class_constructor_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.
