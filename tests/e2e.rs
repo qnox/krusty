@@ -1245,6 +1245,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_entry_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
 mod value_class_lambda_class_e2e;
+#[path = "value_class_nested_carrier_e2e.rs"]
+mod value_class_nested_carrier_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
 mod value_class_nothing_override_bridges_e2e;
 #[path = "value_class_nullable_bridge_e2e.rs"]
