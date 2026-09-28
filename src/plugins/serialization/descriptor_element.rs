@@ -105,14 +105,13 @@ pub(super) fn specialize(
         return true;
     };
     let descriptor = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: type_name(KSERIALIZER_FQ),
-            name: "getDescriptor".to_string(),
-            descriptor: "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
-            params: None,
-            interface: true,
-            module_target: None,
-        },
+        callee: Callee::realized_virtual(
+            type_name(KSERIALIZER_FQ),
+            "getDescriptor".to_string(),
+            "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
+            None,
+            true,
+        ),
         dispatch_receiver: Some(serializer),
         args: vec![],
     });
@@ -131,14 +130,13 @@ pub(super) fn specialize(
     let is_optional =
         is_optional.unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Boolean(false))));
     ir.exprs[index] = IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: type_name(CLASS_SERIAL_DESCRIPTOR_BUILDER_FQ),
-            name: "element".to_string(),
-            descriptor: BUILDER_ELEMENT_DESC.to_string(),
-            params: None,
-            interface: false,
-            module_target: None,
-        },
+        callee: Callee::realized_virtual(
+            type_name(CLASS_SERIAL_DESCRIPTOR_BUILDER_FQ),
+            "element".to_string(),
+            BUILDER_ELEMENT_DESC.to_string(),
+            None,
+            false,
+        ),
         dispatch_receiver: Some(receiver),
         args: vec![name, descriptor, annotations, is_optional],
     };

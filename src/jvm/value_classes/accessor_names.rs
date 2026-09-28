@@ -256,6 +256,7 @@ mod tests {
                 params: None,
                 interface: false,
                 module_target: None,
+                target: None,
             },
             dispatch_receiver: None,
             args: Vec::new(),

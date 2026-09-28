@@ -139,6 +139,11 @@ pub enum Callee {
         interface: bool,
         /// Exact current-module declaration the checker selected, when the call names one.
         module_target: Option<crate::fir::CallableId>,
+        /// The member this call dispatches to, as the frontend selected it. Every virtual call
+        /// that common lowering and the shared backend passes build names it, so a backend finds
+        /// the dispatch slot by identity, never by `name` and `params`. Only a call a target
+        /// backend or a compiler plugin synthesizes for its own realization leaves it unset.
+        target: Option<IrVirtualTarget>,
     },
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
     /// Used for `super.method(…)`, which dispatches through the source-level super qualifier directly
@@ -206,7 +211,38 @@ pub enum IrSuperCallKind {
     PropertySetter(crate::fir::PropertyId),
 }
 
+/// The member a [`Callee::Virtual`] dispatches to, as the frontend selected it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrVirtualTarget {
+    /// A checker-selected current-module or dependency function.
+    Function(crate::fir::ResolvedFunctionOverrideTarget),
+    /// The getter of a current-module property.
+    PropertyGetter(crate::fir::PropertyId),
+    /// The setter of a current-module property.
+    PropertySetter(crate::fir::PropertyId),
+}
+
 impl Callee {
+    /// A virtual call that a target backend or a compiler plugin builds for its own realization.
+    /// It names no frontend selection: the frontend selected no member for it.
+    pub(crate) fn realized_virtual(
+        owner: TypeName,
+        name: String,
+        descriptor: String,
+        params: Option<(Vec<Ty>, Ty)>,
+        interface: bool,
+    ) -> Self {
+        Callee::Virtual {
+            owner,
+            name,
+            descriptor,
+            params,
+            interface,
+            module_target: None,
+            target: None,
+        }
+    }
+
     /// The function declaration stored in this IR file that owns this call's semantic signature.
     ///
     /// Default-dispatch calls still point at the source function; only their emitted entry point is

@@ -61,14 +61,13 @@ pub(super) fn realize_safe_coroutine_points(ir: &mut IrFile) {
         });
         let safe_for_result = ir.add_expr(IrExpr::GetValue(safe_slot));
         let result = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: type_name("kotlin/coroutines/SafeContinuation"),
-                name: "getOrThrow".to_string(),
-                descriptor: "()Ljava/lang/Object;".to_string(),
-                params: None,
-                interface: false,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                type_name("kotlin/coroutines/SafeContinuation"),
+                "getOrThrow".to_string(),
+                "()Ljava/lang/Object;".to_string(),
+                None,
+                false,
+            ),
             dispatch_receiver: Some(safe_for_result),
             args: Vec::new(),
         });

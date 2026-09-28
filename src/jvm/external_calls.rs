@@ -933,6 +933,7 @@ pub(super) fn realize(
                                 .then_some((semantic_params.clone(), semantic_ret)),
                             interface,
                             module_target: None,
+                            target: None,
                         };
                     }
                 }
@@ -970,14 +971,13 @@ pub(super) fn realize(
                     *callee = match primitive_iterator_next(callable.owner, receiver) {
                         Some((name, element)) => {
                             physical_result = element;
-                            Callee::Virtual {
-                                owner: callable.owner,
+                            Callee::realized_virtual(
+                                callable.owner,
                                 name,
-                                descriptor: crate::jvm::names::method_descriptor(&[], element),
-                                params: None,
-                                interface: false,
-                                module_target: None,
-                            }
+                                crate::jvm::names::method_descriptor(&[], element),
+                                None,
+                                false,
+                            )
                         }
                         None => {
                             let (owner, interface) = call_site_owner(
@@ -986,14 +986,13 @@ pub(super) fn realize(
                                 callable.owner_is_interface,
                                 receiver,
                             );
-                            Callee::Virtual {
+                            Callee::realized_virtual(
                                 owner,
-                                name: callable.name,
+                                callable.name,
                                 descriptor,
-                                params: None,
+                                None,
                                 interface,
-                                module_target: None,
-                            }
+                            )
                         }
                     };
                 }
@@ -1018,14 +1017,13 @@ pub(super) fn realize(
                                 callable.owner_is_interface,
                                 receiver,
                             );
-                            Callee::Virtual {
+                            Callee::realized_virtual(
                                 owner,
-                                name: callable.name,
+                                callable.name,
                                 descriptor,
-                                params: None,
+                                None,
                                 interface,
-                                module_target: None,
-                            }
+                            )
                         }
                     };
                 }

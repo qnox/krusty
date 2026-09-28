@@ -189,14 +189,13 @@ pub(super) fn add_object_serializer(
         descriptor: "Lkotlin/Lazy;".to_string(),
     });
     let get_value = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: type_name("kotlin/Lazy"),
-            name: "getValue".to_string(),
-            descriptor: String::new(),
-            params: Some((vec![], class_ty("kotlin/Any"))),
-            interface: true,
-            module_target: None,
-        },
+        callee: Callee::realized_virtual(
+            type_name("kotlin/Lazy"),
+            "getValue".to_string(),
+            String::new(),
+            Some((vec![], class_ty("kotlin/Any"))),
+            true,
+        ),
         dispatch_receiver: Some(read),
         args: vec![],
     });

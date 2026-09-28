@@ -391,7 +391,7 @@ pub(crate) fn lower_value_classes(
     let orig_fields: Vec<Vec<Ty>> = ir
         .classes
         .iter()
-        .map(|c| c.fields.iter().map(|f| f.ty.clone()).collect())
+        .map(|c| c.fields.iter().map(|f| f.ty).collect())
         .collect();
     // Pre-erasure constructor-parameter types per class (parallel to `ir.classes`) — the slot types for
     // an `init { … }` block's box/unbox analysis (slot 0 = `this`, slots 1.. = the ctor params).
@@ -599,7 +599,7 @@ pub(crate) fn lower_value_classes(
 
     // Per-function value-slot types (parameters + local `Variable`s) and return types, captured BEFORE
     // erasure so the box/unbox analysis sees `Class{X}` (non-null = unboxed, nullable = boxed).
-    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret).collect();
     // Shared-cell (`Ref$XxxRef`) element types, also pre-erasure: a write into a cell whose element
     // is a boxed `X?` (or reference) is a box boundary for an unboxed value.
     let orig_ref_elems: HashMap<ExprId, Ty> = ir
@@ -1142,14 +1142,13 @@ pub(crate) fn lower_value_classes(
         for id in targets {
             let get = ir.add_expr(IrExpr::GetValue(slot));
             ir.exprs[id as usize] = IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: x,
-                    name: "unbox-impl".to_string(),
-                    descriptor: format!("(){}", desc(&u)),
-                    params: None,
-                    interface: false,
-                    module_target: None,
-                },
+                callee: Callee::realized_virtual(
+                    x,
+                    "unbox-impl".to_string(),
+                    format!("(){}", desc(&u)),
+                    None,
+                    false,
+                ),
                 dispatch_receiver: Some(get),
                 args: vec![],
             };
@@ -3256,7 +3255,7 @@ pub(crate) fn lower_value_classes(
                                 defaults,
                                 *default_prefix_count,
                             ))
-                            .map(|(a, p)| (*a, p.clone()))
+                            .map(|(a, p)| (*a, *p))
                             .collect()
                     }
                 }
@@ -3425,7 +3424,7 @@ pub(crate) fn lower_value_classes(
                                 {
                                     return None;
                                 }
-                                Some((a.as_ref().copied()?, params.get(i)?.clone()))
+                                Some((a.as_ref().copied()?, *params.get(i)?))
                             })
                             .collect()
                     })
@@ -3439,7 +3438,7 @@ pub(crate) fn lower_value_classes(
                     init: Some(v),
                     ..
                 } => match slots.get(index) {
-                    Some(t) => vec![(*v, t.clone())],
+                    Some(t) => vec![(*v, *t)],
                     None => continue,
                 },
                 // A FIELD store is the same boundary, decided by the field's PRE-erasure declared
@@ -4548,6 +4547,93 @@ fn repr(
         // not reinterpret other erased nodes.
         _ => Repr::NotVc,
     }
+}
+
+/// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
+fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
+    let new_id = clone_below_representation_wrapper(ir, id);
+    let cast = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::Cast,
+        arg: new_id,
+        type_operand: boxed_value_ty(x),
+    });
+    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
+    let d = desc(&u);
+    ir.exprs[id as usize] = IrExpr::Call {
+        callee: Callee::realized_virtual(
+            x,
+            "unbox-impl".to_string(),
+            format!("(){d}"),
+            None,
+            false,
+        ),
+        dispatch_receiver: Some(cast),
+        args: vec![],
+    };
+    // `id` used to denote the erased reference call cloned above. It now denotes the result of
+    // `unbox-impl`, so its physical fact must change with the node instead of continuing to claim
+    // that the primitive carrier on the operand stack is `Object`.
+    ir.physical_types.insert(id, u);
+}
+
+/// Replace an erased-reference expression with an explicit cast to its known boxed value class.
+fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
+    let arg = clone_below_representation_wrapper(ir, id);
+    ir.exprs[id as usize] = IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::Cast,
+        arg,
+        type_operand: boxed_value_ty(x),
+    };
+}
+
+fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
+    let orig_id = clone_below_representation_wrapper(ir, id);
+    let boxed_ty = Ty::nullable(Ty::obj_name(x));
+    let var = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Variable {
+        index: slot,
+        ty: boxed_ty,
+        init: Some(orig_id),
+        named: false,
+    });
+    let get_for_test = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::GetValue(slot));
+    let null1 = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
+    let is_null = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::PrimitiveBinOp {
+        op: crate::ir::IrBinOp::Eq,
+        lhs: get_for_test,
+        rhs: null1,
+    });
+    let null2 = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
+    let get_for_unbox = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::GetValue(slot));
+    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
+    let d = desc(&u);
+    let unboxed = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Call {
+        callee: Callee::realized_virtual(
+            x,
+            "unbox-impl".to_string(),
+            format!("(){d}"),
+            None,
+            false,
+        ),
+        dispatch_receiver: Some(get_for_unbox),
+        args: vec![],
+    });
+    let when = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::When {
+        branches: vec![(Some(is_null), null2), (None, unboxed)],
+    });
+    ir.null_guards.insert(when);
+    ir.exprs[id as usize] = IrExpr::Block {
+        stmts: vec![var],
+        value: Some(when),
+    };
 }
 
 /// Build a sole-property access `x.v`: identity (`Block` yielding the receiver) when the receiver is an

@@ -67,3 +67,5 @@ mod wide_stack;
 mod architecture;
 #[cfg(test)]
 mod counted_loop_policy_tests;
+#[cfg(test)]
+mod local_property_accessor_tests;

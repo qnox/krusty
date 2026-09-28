@@ -4929,3 +4929,16 @@ reached through `super` is already a property operation. The JVM realization rea
 declaration as it read the old module-only `source`. Tests: `fir_lower/call_target_tests.rs`, and
 `fir/body_check/receiver_tests.rs` for a dependency `super.toString()`. Gap: the serialization
 plugin's synthesized super call names no declaration.
+
+## The selected member on a virtual call  ✅
+
+A virtual call names the member the frontend selected (`Callee::Virtual::target`, an
+`IrVirtualTarget`): a current-module or dependency function, or the getter or setter of a
+current-module property. Common lowering sets it on every virtual call it builds (a sibling-file
+member, an interface-delegation forwarder, a delegate convention on a sibling-file class), and so
+does the shared accessor realization (`backend/local_properties.rs`) for a member-extension or
+context-parameter accessor. A backend finds the dispatch slot by that identity, never by `name` and
+`params`. Only calls a target backend or a compiler plugin builds for its own realization leave it
+unset (`Callee::realized_virtual`). The JVM backend does not read it. Tests:
+`fir_lower/call_target_tests.rs`, `local_property_accessor_tests.rs`. Gap: the serialization
+plugin's synthesized calls name no selection.
