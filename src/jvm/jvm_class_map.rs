@@ -74,7 +74,7 @@ pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
     } else if let Some(function) = function {
         match function.is_reflective() {
             true => crate::types::KFUNCTION_INTERNAL.to_owned(),
-            false => super::names::function_interface_internal_name(function.arity()),
+            false => super::names::function_interface_internal_name(function.arity()).to_owned(),
         }
     } else if let Some(owner) =
         intrinsic_companion_owner(classifier).filter(|owner| Ty::obj_name(*owner) != Ty::Boolean)
