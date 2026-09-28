@@ -7,13 +7,15 @@ use super::common;
 
 #[test]
 fn a_continuation_over_any_has_no_wildcard() {
-    const SRC: &str = "suspend fun anything(): Any? = null\n\
+    const SRC: &str = "class Token\n\
 \n\
-suspend fun something(): Any = \"x\"\n\
+suspend fun anything(): Any? = null\n\
 \n\
-suspend fun text(): String = \"x\"\n\
+suspend fun something(): Any = Token()\n\
 \n\
-fun takes(f: suspend (String) -> Any) {}\n\
+suspend fun token(): Token = Token()\n\
+\n\
+fun takes(f: suspend (Token) -> Any) {}\n\
 \n\
 fun passes(f: suspend () -> Any?): suspend () -> Any? = f\n";
     common::byte_diff_against_kotlinc("ContinuationOverAny", SRC, "ContinuationOverAnyKt")
