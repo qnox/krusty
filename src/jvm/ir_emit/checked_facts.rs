@@ -11,7 +11,7 @@ pub(crate) struct EmitMetadata<'a> {
     /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
     pub(crate) emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     /// Forwarded suspend returns requiring the target version's physical `Unit` adaptation.
-    pub(crate) unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
+    pub(crate) suspend_result_forwards: &'a crate::jvm::suspend::SuspendResultForwards,
     pub(crate) bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The overrides whose primitive result is declared as its wrapper.
     pub(crate) override_results: &'a crate::jvm::override_results::OverrideResults,

@@ -2951,8 +2951,10 @@ pub(crate) fn lower_value_classes(
                 // the carrier to the box and invoking `unbox-impl` would double-unbox it.
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
                     let carrier = erase(&under[&target], &under);
-                    if let Some(crate::ir::IrValueClassSuspendResult::Carrier(boundary)) =
-                        ir.value_class_suspend_calls.get(arg).copied()
+                    if let Some(crate::ir::IrValueClassSuspendResult::Carrier {
+                        carrier: boundary,
+                        ..
+                    }) = ir.value_class_suspend_calls.get(arg).copied()
                     {
                         if boundary.canonical_semantic() == carrier.canonical_semantic() {
                             retarget.push((id, boundary));
@@ -3695,16 +3697,16 @@ pub(crate) fn lower_value_classes(
                 box_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
             }
-            BoxOp::Unbox(x)
+            BoxOp::Unbox(x) | BoxOp::UnboxNull(x)
                 if matches!(
                     ir.value_class_suspend_calls.get(&id).copied(),
-                    Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
-                        if carrier.canonical_semantic()
+                    Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
+                        if carrier.non_null().canonical_semantic()
                             == erase(&under[&x], &under).canonical_semantic()
                 ) =>
             {
                 // The erased CPS method descriptor says `Object`, but the continuation carries the
-                // already-unboxed representation recorded for this exact call. A boundary collected
+                // already-unboxed representation recorded for this exact call, null or not. A boundary collected
                 // from the pre-CPS descriptor must not insert a value-class `unbox-impl` around it.
             }
             BoxOp::Unbox(x) => {
@@ -3890,7 +3892,7 @@ pub(crate) fn lower_value_classes(
                                 },
                             );
                         }
-                        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
+                        Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
                             ir.functions[fid].ret = carrier;
                             // A safe coroutine primitive produces `T` through the generic
                             // `SafeContinuation<T>` slot, so a value-class `T` is boxed even when this
@@ -5337,6 +5339,8 @@ fn suspend_result_representation(
     under: &Under,
     force_boxed: bool,
 ) -> Option<crate::ir::IrValueClassSuspendResult> {
+    // `T : IC?` crosses exactly as `IC?` does.
+    let declared = &member_names::value_class_bound_occurrence(*declared, under);
     let classifier = declared
         .non_null()
         .obj_internal()
@@ -5348,7 +5352,10 @@ fn suspend_result_representation(
             carrier,
         })
     } else {
-        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
+        Some(crate::ir::IrValueClassSuspendResult::Carrier {
+            classifier,
+            carrier,
+        })
     }
 }
 

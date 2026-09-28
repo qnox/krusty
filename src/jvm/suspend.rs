@@ -33,6 +33,7 @@ mod continuation_class;
 mod coroutine_context;
 use continuation_class::build_continuation_class;
 use coroutine_context::realize_coroutine_context;
+use machine_context::MachineContext;
 mod call_operand_realization;
 mod cps_bridges;
 pub(crate) use cps_bridges::finalize_suspend_bridges;
@@ -42,11 +43,12 @@ pub(crate) mod cps;
 pub(crate) use cps::{EmitTimeMachines, SuspendLambdaClass, TransformedMachine};
 mod debug_metadata;
 mod emission_facts;
-pub(crate) use emission_facts::UnitResultTailForwards;
 pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
+pub(crate) use emission_facts::{ForwardedSuspendResult, SuspendResultForwards};
 mod get_or_create;
 mod hoisting;
 mod live_scopes;
+mod machine_context;
 use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
@@ -59,6 +61,7 @@ use spill_layout::{
 mod statement_normalization;
 mod suspend_lambda;
 mod tail_forward;
+mod value_class_resume;
 mod value_liveness;
 
 use crate::ir::{
@@ -118,14 +121,6 @@ struct SuspensionScope {
 }
 type SuspensionScopes = std::collections::HashMap<ExprId, SuspensionScope>;
 
-/// What every state machine of one file is built against.
-struct MachineContext<'a> {
-    /// Every function's declared (pre-CPS) return type.
-    orig_rets: &'a [Ty],
-    /// Whether the stdlib declares the exact public static
-    /// `SpillingKt.nullOutSpilledVariable(Object): Object` probe.
-    null_out_dead_spills: bool,
-}
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -204,7 +199,7 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
-    unit_result_tail_forwards: &mut UnitResultTailForwards,
+    suspend_result_forwards: &mut SuspendResultForwards,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
@@ -212,10 +207,7 @@ pub(crate) fn lower_suspend(
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
-    let context = MachineContext {
-        orig_rets: &orig_rets,
-        null_out_dead_spills,
-    };
+    let context = MachineContext::new(&orig_rets, null_out_dead_spills);
     let fids = suspend_lambda::innermost_first(ir, ir.suspend_funs.clone());
     let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
         std::collections::HashMap::new();
@@ -533,7 +525,11 @@ pub(crate) fn lower_suspend(
             if orig_rets[fid as usize] == Ty::Unit
                 && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
             {
-                unit_result_tail_forwards.extend(returned);
+                suspend_result_forwards.extend(
+                    returned
+                        .into_iter()
+                        .map(|r| (r, ForwardedSuspendResult::Unit)),
+                );
             }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
@@ -594,6 +590,7 @@ pub(crate) fn lower_suspend(
             }
         }
     }
+    suspend_result_forwards.extend(context.forwards.into_inner());
     default_call_operands.synchronize(ir)
 }
 
@@ -2213,8 +2210,8 @@ fn build_state_machine(
         &cont_internal,
         fid,
         &layout,
-        &param_caps,
-        receiver,
+        context,
+        semantic_owner,
         &real_params,
     );
 
@@ -2871,6 +2868,7 @@ impl Flat<'_> {
         });
         out.push(when);
         let vg = self.gv(vv);
+        let vg = self.resumable_result(point, vg);
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
     }
 
@@ -2910,9 +2908,9 @@ impl Flat<'_> {
             Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }) => {
                 unbox(self.ir, rg, &Ty::obj_name(classifier))
             }
-            Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
-                unbox(self.ir, rg, &carrier)
-            }
+            Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => self
+                .resumed_carrier(call, rg)
+                .unwrap_or_else(|| unbox(self.ir, rg, &carrier)),
             None => unbox(self.ir, rg, ty),
         };
         self.mark_assigned(local);

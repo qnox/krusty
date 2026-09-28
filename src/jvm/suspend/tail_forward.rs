@@ -1,8 +1,10 @@
 //! Detection and body rewriting for a suspend function that directly forwards its continuation.
 
 use super::bottom_completion::unwrap_suspend_cast;
+use super::value_class_resume::ReferenceCarrier;
 use super::{
     expr_calls_suspend, is_suspension_point, recorded_suspension_result, suspend_call_fid,
+    value_class_suspension_result,
 };
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
@@ -62,16 +64,27 @@ pub(super) fn tail_forward(
     declared_return: Ty,
     original_returns: &[Ty],
 ) -> Option<TailForward> {
-    if let Some(call) = tail_forward_call(
+    let forward = match tail_forward_call(
         ir,
         body,
         suspend_functions,
         declared_return,
         original_returns,
     ) {
-        return Some(TailForward::Single(call));
-    }
-    all_returned_tail_calls(ir, body, suspend_functions, declared_return).map(TailForward::Returned)
+        Some(call) => TailForward::Single(call),
+        None => TailForward::Returned(all_returned_tail_calls(
+            ir,
+            body,
+            suspend_functions,
+            declared_return,
+        )?),
+    };
+    // A callee returning a value class as its reference carrier resumes with the box, which the
+    // caller must unbox, so kotlinc keeps a state machine around the call.
+    let resumes_with_box = |&call: &ExprId| {
+        ReferenceCarrier::of(value_class_suspension_result(ir, call, suspend_functions)).is_some()
+    };
+    (!forward.calls().iter().any(resumes_with_box)).then_some(forward)
 }
 
 /// Rewrite the body so each forwarded call's CPS `Object` is what the function returns.

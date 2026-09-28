@@ -414,7 +414,7 @@ pub(super) struct EmitEnv<'a> {
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
-    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
+    suspend_result_forwards: &'a crate::jvm::suspend::SuspendResultForwards,
     bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     override_results: &'a crate::jvm::override_results::OverrideResults,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
@@ -1988,7 +1988,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         run,
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
-        unit_result_tail_forwards: facts.metadata.unit_result_tail_forwards,
+        suspend_result_forwards: facts.metadata.suspend_result_forwards,
         bridge_adaptations: facts.metadata.bridge_adaptations,
         override_results: facts.metadata.override_results,
         signature_symbols: facts.signature_symbols,
@@ -7444,7 +7444,7 @@ struct Emitter<'a> {
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
-    unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
+    suspend_result_forwards: &'a crate::jvm::suspend::SuspendResultForwards,
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
@@ -7577,7 +7577,7 @@ impl<'a> Emitter<'a> {
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
-            unit_result_tail_forwards: env.unit_result_tail_forwards,
+            suspend_result_forwards: env.suspend_result_forwards,
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
@@ -13238,7 +13238,7 @@ mod invariant_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_adaptations = crate::jvm::bridge_adaptations::BridgeAdaptations::default();
         let override_results = crate::jvm::override_results::OverrideResults::default();
-        let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
+        let suspend_result_forwards = crate::jvm::suspend::SuspendResultForwards::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -13250,7 +13250,7 @@ mod invariant_tests {
                     bridge_adaptations: &bridge_adaptations,
                     override_results: &override_results,
                     emit_time_machines,
-                    unit_result_tail_forwards: &unit_result_tail_forwards,
+                    suspend_result_forwards: &suspend_result_forwards,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,

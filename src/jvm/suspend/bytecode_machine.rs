@@ -107,7 +107,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
         &continuation_class,
         fid,
         &SpillLayout::default(),
-        &[],
+        route.context,
         receiver,
         &declared_params,
     );

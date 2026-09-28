@@ -481,7 +481,7 @@ pub struct IrExternalConstructorTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrValueClassSuspendResult {
     Boxed { classifier: TypeName, carrier: Ty },
-    Carrier(Ty),
+    Carrier { classifier: TypeName, carrier: Ty },
 }
 
 impl IrValueClassSuspendResult {
@@ -490,7 +490,7 @@ impl IrValueClassSuspendResult {
     pub fn boundary_ty(self) -> Ty {
         match self {
             Self::Boxed { classifier, .. } => Ty::obj_name(classifier),
-            Self::Carrier(carrier) => carrier,
+            Self::Carrier { carrier, .. } => carrier,
         }
     }
 }
@@ -2088,9 +2088,11 @@ pub struct IrFile {
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:
         std::collections::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
-    /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
-    /// ordinary function marker rather than constructor/value-class markers.
-    pub class_static_local_functions: std::collections::HashSet<FunId>,
+    /// Body-local static functions physically owned by a class, keyed to that class: a lambda or
+    /// local function lifted into its lexical class. They have no dispatch receiver, so this is the
+    /// owner a call re-entering one names. Their `$default` ABI uses the ordinary function marker
+    /// rather than constructor/value-class markers.
+    pub class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:

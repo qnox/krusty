@@ -61,13 +61,9 @@ coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/kt84305.kt
-coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/resume/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
-coroutines/inlineClasses/resume/defaultStub.kt
-coroutines/inlineClasses/resume/invokeOperator.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
-coroutines/inlineClasses/resumeWithException/invokeOperator.kt
 coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
@@ -203,7 +199,6 @@ properties/backingField/typeCheckSupertypeWithValueClassExplicitBackingField.kt
 properties/classFieldInsideLocalInSetter.kt
 properties/classFieldInsideNested.kt
 properties/classObjectProperties.kt
-properties/complexPropertyInitializer.kt
 properties/fieldInsideField.kt
 properties/fieldInsideNested.kt
 properties/lateinit/accessorException.kt

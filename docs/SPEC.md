@@ -7579,6 +7579,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is a suspend function is named by the suspend mangling rule, so a class delegating
   `suspend fun tag(s: String): Tag` forwards to `tag-vneLvdU`, the name the interface declares,
   as kotlinc does. Tests: `tests/suspend_value_class_delegation_e2e.rs`.
+- **A value class's suspend member is re-entered on its class.** The member is realized as a
+  static `-impl` method of the value class, so the continuation of its state machine calls
+  `Tag.twice-<hash>(String, Continuation)` on that class, as kotlinc does, not on the file facade.
+  Tests: `tests/value_class_suspend_member_reentry_e2e.rs`.
+- **A suspend function's reference carrier resumes its caller as the box.** A suspend function
+  returning a value class as its reference carrier (`Tag(val s: String)`, and `Tag?` over it)
+  returns the carrier when it completes without suspending, but its continuation's `invokeSuspend`
+  boxes the carrier it re-enters with (null-safely for `Tag?`). So the caller unboxes the value it
+  is resumed with, and a call to such a function is never a tail forward: kotlinc keeps a state
+  machine around it. A carrier that is itself the box (`Tag?` over `Int`) needs neither step. A
+  result declared as a type parameter bounded by a value class (`T : Tag?`) crosses exactly as
+  the bound does. krusty's machine also hands a synchronous result through `result`, so it stores
+  the box there too and every read of `result` sees one representation. Tests:
+  `tests/value_class_suspend_resume_e2e.rs`, `tests/value_class_suspend_member_reentry_e2e.rs`.
+  Corpus: `coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt`,
+  `coroutines/inlineClasses/resume/defaultStub.kt`,
+  `coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
