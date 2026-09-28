@@ -794,7 +794,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property
   with storage is a `private static final` field of `C` initialized in `C`'s `<clinit>` (so reading
   it initializes `C`, not the file), with `public static` `getX`/`setX` placed at the property's
-  source position. `C`'s `@Metadata` records them with function flag bit 18 and property flag
+  source position. Each accessor is decided on its own: a declared one is an ordinary static method
+  of `C` in the property's slot (getter before setter), its peer stays the default, and inside a
+  declared accessor `field` is the static backing field (the block's classifier receiver is not a
+  value receiver). `C`'s `@Metadata` records them with function flag bit 18 and property flag
   bit 19 (companion). Block members and written companion extensions are classifier-associated
   declarations: providers publish them in `C`'s namespace as receiver-less candidates (no receiver,
   no receiver parameter), never as members or extensions of a `C` value, so `C().f()` is kotlinc's

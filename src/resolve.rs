@@ -55991,12 +55991,11 @@ impl<'a> Checker<'a> {
                 self.property_decl_types
                     .insert((p.span.lo, p.span.hi), prop_ty);
             }
-            // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
-            // (Phase: top-level computed). Type-check the getter body against the declared type. A
-            // top-level backing-field property (`val x = init get() = field`) binds `field` to the
-            // property type for the accessor body (like a member accessor).
+            // A top-level computed property (`val g: T get() = …`) emits a static `getG()`, its getter
+            // checked against the declared type. A stored property with no value receiver (top-level,
+            // or a `companion { … }` block's, whose receiver is its classifier) binds `field`.
             let has_backing_field =
-                p.receiver.is_none() && p.context_params.is_empty() && p.init.is_some();
+                value_receiver.is_none() && p.context_params.is_empty() && p.init.is_some();
             if let Some(g) = p
                 .getter
                 .as_ref()
