@@ -33,3 +33,24 @@ return if (r == 1 && log == \"DoneFinally\") \"OK\" else \"r=\" + r + \" log=\" 
 }\n";
     common::expect_box_ok_with_stdlib(src, "F");
 }
+
+/// A `break` in a `catch` still runs the `finally`, and a `return` there overrides the `break`.
+/// The assignment in the catch is visible to that return. Official box `try/finally12.kt`.
+#[test]
+fn finally_return_overrides_break_in_catch() {
+    let src = "fun box(): String {\n\
+var x: Any = 42\n\
+do {\n\
+try {\n\
+throw Exception()\n\
+} catch (e: Throwable) {\n\
+x = \"OK\"\n\
+break\n\
+x = 117\n\
+} finally {\n\
+return x.toString()\n\
+}\n\
+} while (false)\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "F");
+}
