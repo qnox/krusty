@@ -96,18 +96,17 @@ pub(super) fn splice_type_map(
 
 /// The JVM class a reified argument's type-bearing instruction names: a function type's
 /// `FunctionN`, an array's descriptor, otherwise the stored classifier's mapped class.
-fn reified_class_internal(ty: Ty) -> Option<String> {
+fn reified_class_internal(ty: Ty) -> Option<&'static str> {
     let value = ty.non_null();
     if let Ty::Fun(signature) = value {
-        return (!signature.suspend).then(|| {
-            super::names::function_interface_internal_name(signature.params.len()).to_owned()
-        });
+        return (!signature.suspend)
+            .then(|| super::names::function_interface_internal_name(signature.params.len()));
     }
     if value.is_array() {
-        return Some(super::names::instanceof_internal_name(value).to_owned());
+        return Some(super::names::instanceof_internal_name(value));
     }
-    let internal = stored_value_ty(ty).kotlin_class_internal()?.render();
-    Some(super::jvm_class_map::to_jvm_internal(&internal).to_owned())
+    let internal = stored_value_ty(ty).kotlin_class_internal()?;
+    Some(super::jvm_class_map::jvm_internal_name(internal))
 }
 
 /// Everything a splice of the call `expression` needs to specialize its dependency's reified
@@ -238,6 +237,30 @@ mod tests {
     }
 
     #[test]
+    fn reified_argument_borrows_the_mapped_jvm_class() {
+        let host = Ty::obj("sample/reified6044/Host");
+        assert_eq!(reified_class_internal(Ty::Int), Some("java/lang/Integer"));
+        assert_eq!(reified_class_internal(Ty::String), Some("java/lang/String"));
+        assert_eq!(reified_class_internal(Ty::Unit), Some("kotlin/Unit"));
+        assert_eq!(
+            reified_class_internal(Ty::obj("kotlin/collections/MutableList")),
+            Some("java/util/List")
+        );
+        assert_eq!(
+            reified_class_internal(host),
+            Some("sample/reified6044/Host")
+        );
+        assert_eq!(
+            reified_class_internal(Ty::obj("kotlin/IntArray")),
+            Some("[I")
+        );
+        assert!(std::ptr::eq(
+            reified_class_internal(host).unwrap(),
+            reified_class_internal(host).unwrap(),
+        ));
+    }
+
+    #[test]
     fn splice_type_map_uses_the_stored_unit_classifier() {
         let expression = 7;
         let mut ir = IrFile::default();
@@ -252,7 +275,7 @@ mod tests {
                 (
                     "T".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "kotlin/Unit".to_owned(),
+                        internal: "kotlin/Unit",
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),
@@ -261,7 +284,7 @@ mod tests {
                 (
                     "R".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "java/lang/String".to_owned(),
+                        internal: "java/lang/String",
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),
