@@ -4671,6 +4671,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   code). A reference or `NameAndType` descriptor that only copied code uses mentions no class.
   Tests: `tests/inlined_code_inner_classes_e2e.rs`,
   `src/jvm/classfile/member_mapping.rs::tests::a_reference_is_copied_only_until_the_class_names_it_itself`.
+- **An enum entry's body class is a package-private nested class of its enum.** `FIRST { ... }`
+  compiles to `Mode$FIRST`, and both the enum and the entry class list it in `InnerClasses` as
+  `static final` with no visibility flag, whatever the enum's own visibility, matching the
+  package-private class itself. Test:
+  `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
