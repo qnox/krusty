@@ -588,11 +588,12 @@ struct Accessor<'a> {
 pub(super) fn member_property_field_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
-    owner: &str,
+    owner: TypeName,
     property: &crate::ir::IrProperty,
     value: &str,
     read: bool,
 ) -> crate::jvm::inline::PropertyAccess {
+    let owner_spelling = owner.render();
     let declared_accessor = if read {
         property.getter.is_some()
     } else {
@@ -603,12 +604,12 @@ pub(super) fn member_property_field_bridge(
         if static_field {
             format!("(){value}")
         } else {
-            format!("(L{owner};){value}")
+            format!("(L{owner_spelling};){value}")
         }
     } else if static_field {
         format!("({value})V")
     } else {
-        format!("(L{owner};{value})V")
+        format!("(L{owner_spelling};{value})V")
     };
     let accessor = if read {
         property_getter_name(&property.name)
@@ -622,7 +623,7 @@ pub(super) fn member_property_field_bridge(
         .filter(|field| field.is_lateinit())
         .map(|_| property.name.clone());
     crate::jvm::inline::PropertyAccess::AccessBridge {
-        owner: owner.to_string(),
+        owner,
         name: format!("access${accessor}$p"),
         descriptor,
         takes_receiver: !static_field,

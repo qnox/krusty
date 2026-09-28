@@ -653,7 +653,7 @@ pub(super) fn protected_property_access(
     let mut parameters = vec![Ty::obj_name(bridge.owner)];
     parameters.extend(bridge.bridge_parameters.iter().copied());
     PropertyAccess::AccessBridge {
-        owner: bridge.owner.render(),
+        owner: bridge.owner,
         name: format!("access${}", bridge.name),
         descriptor: method_descriptor(&parameters, bridge.result),
         takes_receiver: true,
@@ -666,7 +666,7 @@ pub(super) fn protected_property_access(
 pub(super) fn private_member_read_access(
     ir: &IrFile,
     getter: u32,
-    owner: &str,
+    owner: TypeName,
 ) -> crate::jvm::inline::PropertyAccess {
     use crate::jvm::inline::PropertyAccess;
     let function = &ir.functions[getter as usize];
@@ -675,17 +675,17 @@ pub(super) fn private_member_read_access(
     let name = format!("access${}", function.name);
     if function.is_static {
         return PropertyAccess::Accessor {
-            owner: owner.to_string(),
+            owner,
             name,
             descriptor: method_descriptor(&parameters, result),
             is_static: true,
             is_interface: false,
         };
     }
-    let mut bridge_parameters = vec![Ty::obj(owner)];
+    let mut bridge_parameters = vec![Ty::obj_name(owner)];
     bridge_parameters.extend(parameters);
     PropertyAccess::AccessBridge {
-        owner: owner.to_string(),
+        owner,
         name,
         descriptor: method_descriptor(&bridge_parameters, result),
         takes_receiver: true,

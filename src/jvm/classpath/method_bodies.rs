@@ -42,6 +42,18 @@ impl crate::jvm::inline::MethodBodies for Classpath {
             })
             .unwrap_or(false)
     }
+    fn owner_is_interface_name(&self, owner: TypeName) -> bool {
+        let owner_id = crate::jvm::jvm_class_map::to_jvm_type_name(owner);
+        self.find_name(owner_id)
+            .map(|class| class.is_interface())
+            .or_else(|| {
+                let kotlin =
+                    crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(owner_id)
+                        .unwrap_or(owner_id);
+                self.builtin_is_interface_name(kotlin)
+            })
+            .unwrap_or(false)
+    }
     fn method_is_static(&self, owner: &str, name: &str, descriptor: &str) -> bool {
         self.find(owner).is_some_and(|ci| {
             ci.methods
@@ -114,7 +126,7 @@ impl crate::jvm::inline::MethodBodies for Classpath {
     }
     fn property_read_access(
         &self,
-        owner: &str,
+        owner: TypeName,
         property: &str,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         // The class file first — it is authoritative whenever the owner has one. A mapped builtin
@@ -130,7 +142,7 @@ impl crate::jvm::inline::MethodBodies for Classpath {
     /// FUNCTION, which resolves as an ordinary member call, not a property write).
     fn property_write_access(
         &self,
-        owner: &str,
+        owner: TypeName,
         property: &str,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         inherited_property_access(self, owner, property, class_property_write_access)
@@ -153,7 +165,7 @@ impl crate::jvm::inline::MethodBodies for Classpath {
         };
         let callable = realization.callable;
         Some(crate::jvm::inline::PropertyAccess::Field {
-            owner: callable.owner.render(),
+            owner: callable.owner,
             name: callable.name,
             descriptor: callable.descriptor,
             is_static,
