@@ -1777,6 +1777,8 @@ mod supertype_cycle_e2e;
 mod supertype_scan_arrow_e2e;
 #[path = "suspend_arg_order_e2e.rs"]
 mod suspend_arg_order_e2e;
+#[path = "suspend_boxing_e2e.rs"]
+mod suspend_boxing_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]
 mod suspend_class_implements_interface_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]

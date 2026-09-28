@@ -170,7 +170,7 @@ pub(super) fn emit_annotation_impl_class(
             &[("this".to_string(), format!("L{fq};"), 0)],
         );
     }
-    finish_local_synthetic_class(cw)
+    finish_local_synthetic_class(env, cw)
 }
 
 /// `equals(Object)Z` for an annotation impl: `o` must be an instance of the annotation interface and every

@@ -181,6 +181,17 @@ impl ClassWriter {
         for index in 0..self.methods.len() {
             let Some(mut source) = self.methods[index].rewrite_source.take() else {
                 self.methods[index].drop_empty_locals();
+                // A transformed body interned its constants when it was installed, as a
+                // rewritten one does here.
+                if let Some(installed) = self.take_installed_coroutine(index) {
+                    let added_after = previous_end;
+                    previous_end = installed.pool_end.unwrap_or(previous_end);
+                    relaid.push(RelaidMethod {
+                        index,
+                        added: added_after + 1..previous_end.max(added_after) + 1,
+                        interned: installed.interned,
+                    });
+                }
                 continue;
             };
             let added_after = previous_end;

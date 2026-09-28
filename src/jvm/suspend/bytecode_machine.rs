@@ -203,7 +203,7 @@ pub(super) fn eligible_points(
         });
     let suspend_set = route.suspend_set;
     // Checked in order, each only while every earlier one holds.
-    let declines: [(&dyn Fn() -> bool, &str); 8] = [
+    let declines: [(&dyn Fn() -> bool, &str); 9] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -236,6 +236,10 @@ pub(super) fn eligible_points(
             &|| reads_current_continuation(ir, body),
             "reads its own continuation",
         ),
+        (
+            &|| subject == Subject::NamedFunction && reads_coroutine_context(ir, body),
+            "reads its coroutine context",
+        ),
     ];
     let declined = declines
         .iter()
@@ -258,16 +262,6 @@ pub(super) fn eligible_points(
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };
-    // kotlinc's transformer builds a lambda's `invokeSuspend` state machine even with no
-    // suspension point in it; a named function without one stays a plain method.
-    if points.is_empty() && subject == Subject::NamedFunction {
-        crate::trace_compiler!(
-            "suspend",
-            "transformer declines {}: it has no suspension point",
-            function.name
-        );
-        return None;
-    }
     if !points.iter().all(|&call| plain_call(call)) {
         crate::trace_compiler!(
             "suspend",
@@ -300,6 +294,27 @@ fn reads_current_continuation(ir: &IrFile, expression: ExprId) -> bool {
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
         found = found || reads_current_continuation(ir, child);
+    });
+    found
+}
+
+/// Whether the body reads `coroutineContext`, which a named function realizes off its
+/// continuation only on the IR machine path.
+fn reads_coroutine_context(ir: &IrFile, expression: ExprId) -> bool {
+    if let IrExpr::Call {
+        callee:
+            crate::ir::Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::CoroutineContext,
+                ..
+            },
+        ..
+    } = ir.exprs[expression as usize]
+    {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, expression, &mut |child| {
+        found = found || reads_coroutine_context(ir, child);
     });
     found
 }

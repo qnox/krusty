@@ -9,6 +9,9 @@
 //! continuation class (the spill fields and `@DebugMetadata`) is handed back to the emitter, which
 //! writes that class afterwards.
 
+use std::collections::HashMap;
+use std::ops::Range;
+
 use super::constant_pool_queries::PoolLookup;
 use super::method_rewrite::MethodIdentity;
 use super::ClassWriter;
@@ -62,6 +65,18 @@ pub(crate) struct TransformedCoroutine {
 pub(super) struct Coroutines {
     /// `(name index, descriptor index, request)` of each method to transform.
     requests: Vec<(u16, u16, CoroutineRequest)>,
+    /// The transformed methods, by position in the class's method table, with the pool entries
+    /// each interned: the pool is laid out again around them as around any rewritten method.
+    installed: HashMap<usize, Installed>,
+}
+
+/// The pool entries of a transformed method.
+#[derive(Clone, Debug)]
+pub(super) struct Installed {
+    /// The pool's size once the method was emitted and added.
+    pub(super) pool_end: Option<u16>,
+    /// The indices its transformed body interned.
+    pub(super) interned: Range<u16>,
 }
 
 impl ClassWriter {
@@ -117,6 +132,7 @@ impl ClassWriter {
             .ok_or("the method has no rewrite source")?;
         let (access, method_name, method_desc) =
             (source.access, source.name.clone(), source.desc.clone());
+        let pool_end = source.pool_end;
         let pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
         let node = self
             .finished_node(method, source, bytes, &pool)
@@ -153,7 +169,8 @@ impl ClassWriter {
                 fields: machine.layout.fields,
                 debug_metadata: machine.debug_metadata,
             };
-            self.install_transformed(index, access, &method_name, &method_desc, machine.method)?;
+            let method = (access, method_name.as_str(), method_desc.as_str());
+            self.install_transformed(index, method, pool_end, machine.method)?;
             return Ok(outcome);
         }
         let function = NamedFunction {
@@ -175,7 +192,8 @@ impl ClassWriter {
                     },
                 ),
             };
-        self.install_transformed(index, access, &method_name, &method_desc, node)?;
+        let method = (access, method_name.as_str(), method_desc.as_str());
+        self.install_transformed(index, method, pool_end, node)?;
         Ok(outcome)
     }
 
@@ -184,11 +202,11 @@ impl ClassWriter {
     fn install_transformed(
         &mut self,
         index: usize,
-        access: u16,
-        method_name: &str,
-        method_desc: &str,
+        (access, method_name, method_desc): (u16, &str, &str),
+        pool_end: Option<u16>,
         node: crate::jvm::method_node::MethodNode,
     ) -> Result<(), String> {
+        let interned_after = self.cp.slot_count();
         // The transformed body's constants intern here, in its instruction order, as kotlinc's
         // writer interns them when the transformed method is visited.
         let assembled = node
@@ -229,7 +247,19 @@ impl ClassWriter {
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }
+        self.coroutines.installed.insert(
+            index,
+            Installed {
+                pool_end,
+                interned: interned_after + 1..self.cp.slot_count() + 1,
+            },
+        );
         Ok(())
+    }
+
+    /// The pool entries of the method at `index`, when the transformer rewrote it.
+    pub(super) fn take_installed_coroutine(&mut self, index: usize) -> Option<Installed> {
+        self.coroutines.installed.remove(&index)
     }
 }
 
