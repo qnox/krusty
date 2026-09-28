@@ -347,9 +347,8 @@ pub(crate) fn lower_value_classes(
             // Common IR records every primary-constructor default in the ordinary instance frame.
             // A JVM value class realizes that constructor as static `constructor-impl`, so remove
             // the absent `this` slot exactly here, at the representation boundary.
-            shift_slots(ir, default);
+            synth_members::shift_slots(ir, default);
         }
-        let has_init = ir.classes[cid as usize].init_body.is_some();
         crate::trace_compiler!(
             "value_classes",
             "synthesize {} fields={:?} type-params={:?} secondary-ctors={}",
@@ -367,7 +366,7 @@ pub(crate) fn lower_value_classes(
             cid,
             &under,
             &callable_under,
-            has_init,
+            ir.classes[cid as usize].init_body.is_some(),
             constructor_default,
             &mut realized_members,
         ) {
@@ -379,6 +378,7 @@ pub(crate) fn lower_value_classes(
             return false;
         }
     }
+    synth_members::enclose_in_constructor_impls(ir, &realized_members);
 
     // Pre-erasure signatures, so box/unbox at call boundaries can see `Object`/generic param/field
     // types (which erasure leaves alone but values flowing in must be boxed to reach).
@@ -2748,7 +2748,11 @@ pub(crate) fn lower_value_classes(
             vc_methods.contains(&(fid as u32)),
             function.body
         );
-        if vc_methods.contains(&(fid as u32)) && !lowered_value_members.contains(&(fid as u32)) {
+        // A `constructor-impl` runs source constructor bodies over the carrier.
+        if vc_methods.contains(&(fid as u32))
+            && !lowered_value_members.contains(&(fid as u32))
+            && !ir.jvm_value_class_constructor_impls.contains(&(fid as u32))
+        {
             continue;
         }
         if let Some(root) = function.body {
@@ -5336,23 +5340,6 @@ fn suspend_result_representation(
         })
     } else {
         Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
-    }
-}
-
-/// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —
-/// reframing an instance-lowered body (`this` at slot 0) as a static one (params at slot 0).
-fn shift_slots(ir: &mut IrFile, root: ExprId) {
-    let mut reach = HashSet::new();
-    collect_reachable_scoped(&ir.exprs, root, &mut reach);
-    for id in reach {
-        match &mut ir.exprs[id as usize] {
-            IrExpr::GetValue(i)
-            | IrExpr::SetValue { var: i, .. }
-            | IrExpr::Variable { index: i, .. } => {
-                *i = i.saturating_sub(1);
-            }
-            _ => {}
-        }
     }
 }
 
