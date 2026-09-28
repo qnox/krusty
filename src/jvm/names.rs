@@ -166,25 +166,34 @@ pub fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
         return physical;
     }
-    let physical = crate::types::intern(&physical_classfile_name_of(internal));
+    let physical = physical_classfile_name_of(internal);
     INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
     physical
 }
 
-fn physical_classfile_name_of(internal: TypeName) -> String {
+fn physical_classfile_name_of(internal: TypeName) -> &'static str {
     if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_jvm_class(internal) {
-        return intrinsic;
+        return crate::types::intern(&intrinsic);
     }
     if let Some(function) = crate::jvm::function_classifiers::classifier(internal) {
         if function.is_reflective() {
-            return crate::types::KFUNCTION_INTERNAL.to_owned();
+            return crate::types::KFUNCTION_INTERNAL;
         }
         if !function.is_suspend() {
             return function_interface_internal_name(function.arity());
         }
     }
     let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
-    mapped.jvm_binary_name()
+    // Numbered and reflective function classifiers erase to a JVM interface that is not in the
+    // builtin identity table. That spelling is already static.
+    if mapped == internal && crate::jvm::jvm_class_map::maps_to_distinct_jvm_internal(internal) {
+        return crate::jvm::jvm_class_map::jvm_internal_name(internal);
+    }
+    let segment = mapped.segment_ref();
+    if segment.contains('.') {
+        return crate::types::intern(&mapped.jvm_binary_name());
+    }
+    mapped.rendered()
 }
 
 /// Whether `descriptor` is the object descriptor of `classifier` (`Lpkg/Foo;`). The comparison uses
@@ -899,6 +908,26 @@ mod tests {
             ));
             assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));
         }
+    }
+
+    #[test]
+    fn classfile_name_reuses_the_rendered_spelling() {
+        let host = crate::types::type_name("sample/classfile6044/Host");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(host),
+            host.rendered(),
+        ));
+        let string = crate::types::type_name("kotlin/String");
+        let java_string = crate::types::type_name("java/lang/String");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(string),
+            java_string.rendered(),
+        ));
+        let function = crate::types::type_name("kotlin/Function1");
+        assert!(std::ptr::eq(
+            classfile_internal_name_of(function),
+            crate::jvm::jvm_class_map::jvm_internal_name(function),
+        ));
     }
 
     #[test]
