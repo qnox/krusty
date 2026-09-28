@@ -1465,9 +1465,14 @@ pub(super) fn record_lifting_sites(
     let mut sites = Vec::new();
     body.collect_lifting_sites(&mut sites);
     for site in sites {
-        let Some(step) = site.path.last() else {
+        let Some((step, enclosing)) = site.path.split_last() else {
             continue;
         };
+        let scope = enclosing
+            .iter()
+            .rev()
+            .find(|step| step.name.is_none())
+            .map(|step| step.position);
         ir.lifting_sequences
             .entry(crate::ir::IrLiftingSequence {
                 source,
@@ -1480,6 +1485,7 @@ pub(super) fn record_lifting_sites(
                 crate::ir::IrLiftingEntry {
                     name: step.name.clone(),
                     lifted: site.lifted,
+                    scope,
                 },
             );
     }

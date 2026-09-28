@@ -45,6 +45,7 @@ mod function_scope;
 mod inline_copies;
 mod intrinsic;
 mod jvm_static_realization;
+mod lifting_sequences;
 mod local_class_names;
 mod operators;
 mod overrides;
@@ -74,6 +75,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
+pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{IrFunctionOverride, IrPropertyOverride};
@@ -1913,22 +1915,6 @@ impl IrStatic {
             .as_ref()
             .is_some_and(|owner| owner.matches(internal))
     }
-}
-
-/// One sequence of lifted local callables: the source file that declares it, the lexical owner,
-/// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct IrLiftingSequence {
-    pub source: crate::fir::SourceFileId,
-    pub owner: Box<str>,
-    pub container: Box<str>,
-}
-
-/// One position of an [`IrLiftingSequence`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLiftingEntry {
-    pub name: Option<Box<str>>,
-    pub lifted: bool,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.

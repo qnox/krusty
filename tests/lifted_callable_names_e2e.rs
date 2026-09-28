@@ -6,6 +6,13 @@
 //! numbered sequence per class and outermost declaration name, in source order: overloads share
 //! it, constructors and `init` blocks share `_init_`, and a lambda spliced at an inline call site
 //! still takes its number. A suspend lambda becomes a class of its own and takes none.
+//!
+//! Every lambda numbers what it contains on its own, local functions nested in it included, and
+//! spells a lambda among them as a bare number (`one$lambda$0$1$0`, `one$lambda$0$lf$0`); a local
+//! function opens no numbering of its own (`one$loc$lambda$1`). The methods follow kotlinc's
+//! order: local functions as their enclosing body (a lambda's body is one) finishes, nested bodies
+//! first; then the declared members' lambdas, each nested lambda before the one around it; then
+//! the lambdas of each local function.
 
 use super::common;
 
@@ -182,4 +189,25 @@ fn a_suspend_lambda_takes_no_number() {
 #[test]
 fn lifted_callables_run() {
     common::expect_box_same_as_kotlinc(SOURCE, "LiftedNamesRun");
+}
+
+#[test]
+fn lambdas_number_and_order_their_nested_callables_like_kotlinc() {
+    let src = "fun use(f: () -> Int): Int = f()\n\
+         class Rack {\n\
+         \x20   fun one(): Int {\n\
+         \x20       val f = use {\n\
+         \x20           fun lf(): Int = use { 3 }\n\
+         \x20           fun lf2(): Int = 4\n\
+         \x20           use { use { 1 } } + use { 2 } + lf() + lf2()\n\
+         \x20       }\n\
+         \x20       fun loc(): Int = use { 5 }\n\
+         \x20       return f + loc() + use { 6 }\n\
+         \x20   }\n\
+         \x20   fun two(): Int = use {\n\
+         \x20       fun lf(): Int = 7\n\
+         \x20       use { lf() }\n\
+         \x20   }\n\
+         }\n";
+    common::assert_classes_identical_to_kotlinc("LiftedLambdaNames", src, &["Rack"]);
 }
