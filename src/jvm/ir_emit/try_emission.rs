@@ -271,7 +271,7 @@ impl Emitter<'_> {
             if let Some(line) = c.line {
                 code.mark_line(line);
             }
-            let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
+            let exc_internal = crate::jvm::names::classfile_internal_name_of(c.exc_internal);
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
             let exc_ty = Ty::obj(&exc_internal);
