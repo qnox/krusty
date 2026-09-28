@@ -513,6 +513,12 @@ pub(crate) fn reference_descriptor(classfile_name: &'static str) -> &'static str
     })
 }
 
+/// Descriptor of a companion field. The companion's own internal spelling is the classfile name:
+/// this is not a builtin mapping.
+pub(crate) fn companion_field_descriptor(companion: crate::types::TypeName) -> &'static str {
+    reference_descriptor(companion.rendered())
+}
+
 /// `[element` for an interned element descriptor, including another array descriptor.
 fn array_descriptor(element: &'static str) -> &'static str {
     remembered_descriptor(DescriptorSpell::Array, element, |element| {
@@ -1184,6 +1190,15 @@ mod tests {
             assert_eq!(type_descriptor(Ty::obj(array_class)), array_desc);
         }
         check();
+    }
+
+    #[test]
+    fn companion_field_descriptor_reuses_the_internal_spelling() {
+        let companion = crate::types::type_name("sample/comp6044/Host").nested_child("Companion");
+        let first = companion_field_descriptor(companion);
+        assert_eq!(first, "Lsample/comp6044/Host$Companion;");
+        assert_eq!(first, format!("L{};", companion.render()));
+        assert!(std::ptr::eq(first, companion_field_descriptor(companion)));
     }
 
     #[test]
