@@ -142,44 +142,6 @@ pub(super) fn implementation_function(
         })
 }
 
-/// The overridden declaration's own parameters and result, before any substitution.
-///
-/// Common IR records the selected declaration and its call-site semantic signature. For an
-/// external declaration, recover the provider's canonical UNAPPLIED source signature by the opaque
-/// identity: the edge may say `Echo<String>.echo: String`, while the declaration still says
-/// `Echo<T>.echo: T`. The physical descriptor would be too early: it would manufacture a bridge for
-/// semantic value-class parameters such as `Continuation.resumeWith(Result<T>)` before the
-/// value-class pass realizes their carrier.
-pub(super) fn overridden_declaration(
-    edge: &crate::ir::IrFunctionOverride,
-    classpath: &crate::jvm::classpath::Classpath,
-) -> Result<(Vec<Ty>, Ty), SkipReason> {
-    let crate::fir::ResolvedFunctionOverrideTarget::External(target) = edge.overridden else {
-        return Ok((edge.declared_parameters.clone(), edge.declared_result));
-    };
-    let realization = classpath
-        .external_callable(target)
-        .ok_or(SkipReason::Bridges)?;
-    if realization.kind != crate::jvm::classpath::ExternalCallableKind::Member {
-        return Err(SkipReason::Bridges);
-    }
-    let callable = realization.callable;
-    let declared_parameters = callable
-        .declared_params
-        .or_else(|| {
-            callable
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.clone().into_boxed_slice())
-        })
-        .unwrap_or_else(|| callable.params.into_boxed_slice());
-    let declared_result = callable
-        .declared_ret
-        .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
-        .unwrap_or(callable.ret);
-    Ok((declared_parameters.into_vec(), declared_result))
-}
-
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
 /// override) needs an `ACC_BRIDGE` method carrying the SUPERCLASS's descriptor that delegates to the
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
@@ -203,7 +165,10 @@ fn superclass_method_bridges(
         {
             continue;
         }
-        let (declared_parameters, mut declared_result) = overridden_declaration(&edge, classpath)?;
+        // The overridden declaration's own shape, unapplied, as the frontend recorded it on the
+        // edge: bridge erasure applies to that, not to the call-site view through this class.
+        let declared_parameters = edge.declared_parameters.clone();
+        let mut declared_result = edge.declared_result;
         // An overridden declaration whose primitive result is realized as its wrapper is reached
         // through that wrapper.
         if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {

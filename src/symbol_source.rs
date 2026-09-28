@@ -174,6 +174,17 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.generated_serializer_singleton(classifier))
     }
 
+    /// Only the child that assigned `identity` answers for it; the module's own declarations
+    /// assign none.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.children
+            .iter()
+            .find_map(|child| child.external_callable(identity))
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence

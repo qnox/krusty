@@ -10,7 +10,6 @@
 //! so this runs with the other JVM representation passes, before bridges are derived from it.
 
 use crate::ir::{Callee, FunId, IrExpr, IrFile, IrTypeOp};
-use crate::jvm::backend::SkipReason;
 use crate::types::Ty;
 
 /// The functions whose JVM result this pass boxed.
@@ -33,10 +32,7 @@ impl BoxedResults {
 /// Only a class declared in executable code takes it yet: every call to, and every override of,
 /// its members is in this file. A member of a class other files can see keeps its primitive result
 /// until the choice is visible to them too.
-pub(super) fn box_primitive_override_results(
-    ir: &mut IrFile,
-    classpath: &crate::jvm::classpath::Classpath,
-) -> Result<BoxedResults, SkipReason> {
+pub(super) fn box_primitive_override_results(ir: &mut IrFile) -> BoxedResults {
     let mut boxed = BoxedResults::default();
     for class in 0..ir.classes.len() {
         // The classes whose override edges the bridge pass reads; see `derive_bridges`.
@@ -63,9 +59,7 @@ pub(super) fn box_primitive_override_results(
             {
                 continue;
             }
-            let (_, overridden_result) =
-                crate::jvm::bridges::overridden_declaration(&edge, classpath)?;
-            if !is_primitive(overridden_result) {
+            if !is_primitive(edge.declared_result) {
                 box_result(ir, function);
                 boxed.0.insert(function);
             }
@@ -75,7 +69,7 @@ pub(super) fn box_primitive_override_results(
         box_super_call_results(ir, &boxed);
         unbox_call_results(ir, &boxed);
     }
-    Ok(boxed)
+    boxed
 }
 
 /// Make `function`'s JVM result the wrapper of its primitive one: each value it returns is boxed.
