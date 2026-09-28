@@ -43,6 +43,9 @@ jobs="${KRUSTY_TEST_JOBS:-1}"
 # fixed value here. Override with KRUSTY_TEST_THREADS to pin it back down on a starved host.
 test_threads="${KRUSTY_TEST_THREADS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
+# Absolute, matching run-tests.sh. The toolchain e2e runs krusty-toolchain with the project as its
+# working directory, and a relative program path is resolved there.
+[[ "$coverage_target" = /* ]] || coverage_target="$PWD/$coverage_target"
 coverage_toolchain="${KRUSTY_COVERAGE_TOOLCHAIN:-nightly-2026-09-05}"
 coverage_cargo=(cargo "+${coverage_toolchain}")
 test_timeout="${KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS:-120}"
