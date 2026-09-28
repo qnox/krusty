@@ -3,9 +3,9 @@
 //! re-enters the function with the continuation.
 
 use super::spill_layout::SpillLayout;
-use super::{
-    add_static_call, continuation_ty, int_ty, object_ty, zero_value, CONTINUATION_IMPL, I32_MIN,
-};
+use super::value_class_results::unboxed_carrier;
+use super::{continuation_ty, int_ty, object_ty, zero_value, CONTINUATION_IMPL, I32_MIN};
+use super::{SuspendedResultReturn, SuspendedResultReturns};
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction,
     IrTypeOp,
@@ -17,7 +17,7 @@ pub(super) fn build_continuation_class(
     internal: &str,
     outer_fid: u32,
     layout: &SpillLayout,
-    _param_caps: &[(u32, Ty)],
+    suspended_result_returns: &mut SuspendedResultReturns,
     receiver: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
@@ -73,7 +73,6 @@ pub(super) fn build_continuation_class(
             args: reentry_args,
         }),
         Some(owner) => {
-            let owner_internal = owner.render();
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
@@ -92,9 +91,6 @@ pub(super) fn build_continuation_class(
                 &p_jvm,
                 crate::jvm::ir_emit::ir_ty_to_jvm(&object_ty()),
             );
-            // A PRIVATE member can't be invoked from the continuation class (a separate class,
-            // pre-nestmates). kotlinc emits a `PUBLIC|STATIC|FINAL|SYNTHETIC access$<name>` bridge on the
-            // owner that `invokespecial`s the private member; the continuation calls the bridge.
             let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
             let owner_midx = owner_cid
                 .and_then(|cid| ir.classes[cid].methods.iter().position(|&m| m == outer_fid));
@@ -116,50 +112,14 @@ pub(super) fn build_continuation_class(
                 owner_cid,
                 owner_midx,
             ) {
-                let access_name = format!("access${name}");
-                // Bridge body (static frame): 0 = the owner receiver, 1..=n the value params,
-                // n+1 the continuation — `return receiver.<private m>(args…, cont)` (the private
-                // `MethodCall` emits as `invokespecial`).
-                let recv0 = ir.add_expr(IrExpr::GetValue(0));
-                let margs: Vec<Option<ExprId>> = (1..=params.len() + 1)
-                    .map(|i| Some(ir.add_expr(IrExpr::GetValue(i as u32))))
-                    .collect();
-                let call = ir.add_expr(IrExpr::MethodCall {
+                // A PRIVATE member is called as itself; the continuation class is another class,
+                // so the call goes through the owner's `access$<name>` bridge like any other.
+                ir.add_expr(IrExpr::MethodCall {
                     class: cid as u32,
                     index: midx as u32,
-                    receiver: recv0,
-                    args: margs,
-                });
-                let aret = ir.add_expr(IrExpr::Return(Some(call)));
-                let abody = ir.add_expr(IrExpr::Block {
-                    stmts: vec![aret],
-                    value: None,
-                });
-                let mut aparams = vec![Ty::obj_name(owner)];
-                aparams.extend(params.iter().copied());
-                aparams.push(continuation_ty());
-                let afid = ir.add_fun(IrFunction {
-                    name: access_name.clone(),
-                    params: aparams.clone(),
-                    ret: object_ty(),
-                    body: Some(abody),
-                    is_static: true,
-                    dispatch_receiver: Some(owner),
-                    param_checks: Vec::new(),
-                });
-                ir.classes[cid].methods.push(afid);
-                ir.synthetic_methods.insert(afid); // kotlinc: 0x1019 PUBLIC|STATIC|FINAL|SYNTHETIC
-                let a_jvm: Vec<crate::types::Ty> = aparams
-                    .iter()
-                    .map(crate::jvm::ir_emit::ir_ty_to_jvm)
-                    .collect();
-                let adesc = crate::jvm::names::method_descriptor(
-                    &a_jvm,
-                    crate::jvm::ir_emit::ir_ty_to_jvm(&object_ty()),
-                );
-                let mut aargs = vec![recv];
-                aargs.extend(reentry_args);
-                add_static_call(ir, &owner_internal, &access_name, &adesc, aargs)
+                    receiver: recv,
+                    args: reentry_args.into_iter().map(Some).collect(),
+                })
             } else {
                 // A suspend DEFAULT method lives on an interface: the re-entry call must be an
                 // `invokeinterface` — an `invokevirtual` on an interface methodref fails linkage
@@ -180,6 +140,19 @@ pub(super) fn build_continuation_class(
         }
     };
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
+    // The function returns a value class's carrier where kotlinc's value-class ABI says so; its
+    // completion takes the value as `Any?`, so the carrier goes on as its box.
+    if let Some((classifier, carrier)) =
+        unboxed_carrier(ir.value_class_suspend_returns.get(&outer_fid).copied())
+    {
+        suspended_result_returns.insert(
+            ret,
+            SuspendedResultReturn::ValueClassBox {
+                classifier,
+                carrier,
+            },
+        );
+    }
     let inv_body = ir.add_expr(IrExpr::Block {
         stmts: vec![set_result, set_label, ret],
         value: None,

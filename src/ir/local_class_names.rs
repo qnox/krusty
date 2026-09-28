@@ -488,7 +488,13 @@ fn value_class_suspend_result(
             name(classifier, names);
             *carrier = ty(*carrier, names);
         }
-        super::IrValueClassSuspendResult::Carrier(carrier) => *carrier = ty(*carrier, names),
+        super::IrValueClassSuspendResult::Carrier {
+            classifier,
+            carrier,
+        } => {
+            name(classifier, names);
+            *carrier = ty(*carrier, names);
+        }
     }
 }
 

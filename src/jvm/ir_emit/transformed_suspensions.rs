@@ -56,19 +56,26 @@ impl Emitter<'_> {
         }
         // An implicit coercion to a reference type between them narrows nothing kotlinc writes, nor
         // does the one narrowing a dependency's erased result to its declared type.
+        // A statement-less block around the point, like the one a value-class tail that already
+        // is the callee's box leaves, is the point itself.
         let mut e = e;
-        while let IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
-        } = self.ir.expr(e)
-        {
-            if !super::ir_ty_to_jvm(type_operand).is_reference()
-                && self.transformed_result(*arg).is_none()
-            {
-                break;
-            }
-            e = *arg;
+        loop {
+            e = match self.ir.expr(e) {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if super::ir_ty_to_jvm(type_operand).is_reference()
+                    || self.transformed_result(*arg).is_some() =>
+                {
+                    *arg
+                }
+                IrExpr::Block {
+                    stmts,
+                    value: Some(value),
+                } if stmts.is_empty() => *value,
+                _ => break,
+            };
         }
         if self
             .transformed_result(e)

@@ -43,7 +43,7 @@ pub(crate) struct BackendPassFacts {
     /// lives inside a body the emitter splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
-    unit_result_tail_forwards: crate::jvm::suspend::UnitResultTailForwards,
+    suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
@@ -207,7 +207,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.continuation_metadata,
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
-        &mut facts.unit_result_tail_forwards,
+        &mut facts.suspended_result_returns,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -846,7 +846,7 @@ impl JvmBackend {
             facade: metadata.as_ref(),
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
-            unit_result_tail_forwards: &pass_facts.unit_result_tail_forwards,
+            suspended_result_returns: &pass_facts.suspended_result_returns,
             bridge_returns: &pass_facts.bridge_return_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
         };

@@ -40,8 +40,9 @@ pub(crate) mod cps;
 pub(crate) use cps::{EmitTimeMachines, SuspendLambdaClass, TransformedMachine};
 mod debug_metadata;
 mod emission_facts;
-pub(crate) use emission_facts::UnitResultTailForwards;
 pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
+use emission_facts::{MachineOutputs, MachineSubject};
+pub(crate) use emission_facts::{SuspendedResultReturn, SuspendedResultReturns};
 mod get_or_create;
 mod hoisting;
 mod live_scopes;
@@ -49,6 +50,8 @@ use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
+mod safe_coroutine_points;
+use safe_coroutine_points::realize_safe_coroutine_points;
 mod spill_layout;
 use spill_layout::{
     is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
@@ -57,6 +60,8 @@ use spill_layout::{
 mod statement_normalization;
 mod suspend_lambda;
 mod tail_forward;
+mod value_class_results;
+use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 
 use crate::ir::{
@@ -202,10 +207,15 @@ pub(crate) fn lower_suspend(
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
-    unit_result_tail_forwards: &mut UnitResultTailForwards,
+    suspended_result_returns: &mut SuspendedResultReturns,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
+    let mut outputs = MachineOutputs {
+        continuation_metadata,
+        default_call_operands,
+        suspended_result_returns,
+    };
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
@@ -236,8 +246,7 @@ pub(crate) fn lower_suspend(
                 suspend_set: &suspend_set,
                 context: &context,
                 machines: emit_time_machines,
-                continuation_metadata,
-                default_call_operands,
+                outputs: &mut outputs,
             };
             match suspend_lambda::route(ir, fid, b, route) {
                 bytecode_machine::Routed::Taken => continue,
@@ -254,8 +263,7 @@ pub(crate) fn lower_suspend(
                 suspend_set: &suspend_set,
                 context: &context,
                 machines: emit_time_machines,
-                continuation_metadata,
-                default_call_operands,
+                outputs: &mut outputs,
             };
             match bytecode_machine::route(ir, fid, b, route) {
                 bytecode_machine::Routed::Taken => continue,
@@ -263,8 +271,16 @@ pub(crate) fn lower_suspend(
                 bytecode_machine::Routed::NotEligible => {}
             }
         }
-        let forward = body
-            .and_then(|b| tail_forward(ir, b, &suspend_set, orig_rets[fid as usize], &orig_rets));
+        let forward = body.and_then(|b| {
+            tail_forward(
+                ir,
+                fid,
+                b,
+                &suspend_set,
+                orig_rets[fid as usize],
+                &orig_rets,
+            )
+        });
         // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
         // rewrites descendants in place and installs each suspension temp in the current parent's
         // prelude, so every non-forward body that can reach a suspension must own one node per use.
@@ -277,7 +293,10 @@ pub(crate) fn lower_suspend(
                     let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
                         continue;
                     };
-                    if !default_call_operands.clone_call(source, target, args) {
+                    if !outputs
+                        .default_call_operands
+                        .clone_call(source, target, args)
+                    {
                         return false;
                     }
                 }
@@ -517,7 +536,7 @@ pub(crate) fn lower_suspend(
                 if let Some(line) = ir.dispatch_line(call) {
                     ir.expr_source_lines.insert(cont, line);
                 }
-                if !append_continuation(ir, call, cont, default_call_operands) {
+                if !append_continuation(ir, call, cont, outputs.default_call_operands) {
                     return false;
                 }
             }
@@ -533,7 +552,11 @@ pub(crate) fn lower_suspend(
             if orig_rets[fid as usize] == Ty::Unit
                 && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
             {
-                unit_result_tail_forwards.extend(returned);
+                outputs.suspended_result_returns.extend(
+                    returned
+                        .into_iter()
+                        .map(|ret| (ret, SuspendedResultReturn::Unit)),
+                );
             }
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
@@ -550,7 +573,7 @@ pub(crate) fn lower_suspend(
             let mut recorded = Vec::new();
             for &call in &spliced_suspensions {
                 let cont = ir.add_expr(IrExpr::CurrentContinuation);
-                if !append_continuation(ir, call, cont, default_call_operands) {
+                if !append_continuation(ir, call, cont, outputs.default_call_operands) {
                     return false;
                 }
                 recorded.push(cps::SplicedSuspension { call });
@@ -578,24 +601,20 @@ pub(crate) fn lower_suspend(
             }
         } else {
             let unit_ret = orig_rets[fid as usize] == Ty::Unit;
-            if !build_state_machine(
-                ir,
-                facade,
+            let subject = MachineSubject {
                 fid,
-                body.unwrap(),
+                body: body.unwrap(),
                 unit_ret,
-                &context,
-                pre_splice_scopes.remove(&fid),
-                &suspension_lines,
-                continuation_metadata,
-                default_call_operands,
-            ) {
+                captured_scopes: pre_splice_scopes.remove(&fid),
+                suspension_lines: &suspension_lines,
+            };
+            if !build_state_machine(ir, facade, subject, &context, &mut outputs) {
                 return false;
             }
         }
     }
     finalize_suspend_bridges(ir);
-    default_call_operands.synchronize(ir)
+    outputs.default_call_operands.synchronize(ir)
 }
 
 /// Give suspend function `fid` its CPS signature: a trailing `Continuation` parameter and an erased
@@ -935,83 +954,6 @@ fn rewrite_returns_to_pending(
                 );
             }
         }
-    }
-}
-
-/// Realize Kotlin's safe `suspendCoroutine` protocol around each already-inlined user block.
-///
-/// Common lowering preserves the selected primitive and its checked block as one semantic suspension
-/// point. The JVM realization uses the stdlib's actual protocol: intercept the current machine
-/// continuation, wrap it in `SafeContinuation`, invoke the block once with that wrapper, then read
-/// `getOrThrow()`. An immediate resume therefore produces the value synchronously; an asynchronous
-/// resume first returns `COROUTINE_SUSPENDED` and later re-enters the enclosing machine. No callable
-/// lookup or inline-body recovery happens here—the frontend supplied both the exact intrinsic kind and
-/// the already-spliced block.
-fn realize_safe_coroutine_points(ir: &mut IrFile) {
-    let points = ir
-        .intrinsic_suspension_points
-        .iter()
-        .filter_map(|(&expression, point)| {
-            (point.kind == crate::ir::IrIntrinsicSuspensionKind::Safe).then_some(expression)
-        })
-        .collect::<Vec<_>>();
-    for expression in points {
-        let safe_slot = max_value_index(ir).saturating_add(1);
-        let block = ir.add_expr(ir.exprs[expression as usize].clone());
-        rewrite_subtree(ir, block, &mut |node| {
-            if matches!(node, IrExpr::CurrentContinuation) {
-                *node = IrExpr::GetValue(safe_slot);
-            }
-        });
-
-        let current = ir.add_expr(IrExpr::CurrentContinuation);
-        let intercepted = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
-                name: "intercepted".to_string(),
-                descriptor: "(Lkotlin/coroutines/Continuation;)Lkotlin/coroutines/Continuation;"
-                    .to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![current],
-        });
-        let safe_ty = Ty::obj("kotlin/coroutines/SafeContinuation");
-        let safe = ir.add_expr(IrExpr::New {
-            internal: type_name("kotlin/coroutines/SafeContinuation"),
-            args: vec![intercepted],
-            ctor_params: None,
-            ctor_desc: Some("(Lkotlin/coroutines/Continuation;)V".to_string()),
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
-        let declare_safe = ir.add_expr(IrExpr::Variable {
-            index: safe_slot,
-            ty: safe_ty,
-            init: Some(safe),
-            named: false,
-        });
-        let safe_for_result = ir.add_expr(IrExpr::GetValue(safe_slot));
-        let result = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: type_name("kotlin/coroutines/SafeContinuation"),
-                name: "getOrThrow".to_string(),
-                descriptor: "()Ljava/lang/Object;".to_string(),
-                params: None,
-                interface: false,
-            },
-            dispatch_receiver: Some(safe_for_result),
-            args: Vec::new(),
-        });
-        ir.exprs[expression as usize] = IrExpr::Block {
-            stmts: vec![declare_safe, block],
-            value: Some(result),
-        };
-        crate::trace_compiler!(
-            "suspend",
-            "realize safe coroutine point expression={expression} safe_slot={safe_slot}"
-        );
     }
 }
 
@@ -1779,7 +1721,11 @@ fn function_value_types_with(
 /// (`MethodCall`, whose `FunId` is the class's method at `index`). Returns `None` for a cross-unit
 /// suspend call (a `Callee::Static` to another file / the classpath) — that call has no local `FunId`;
 /// its logical type comes from `ir.suspend_calls` instead.
-fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
+pub(in crate::jvm) fn suspend_call_fid(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<u32> {
     match &ir.exprs[e as usize] {
         IrExpr::Call {
             callee: Callee::Local(fid),
@@ -1880,19 +1826,25 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// local live across any suspension point is spilled to a continuation field (restored at the loop top so
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
-#[allow(clippy::too_many_arguments)]
 fn build_state_machine(
     ir: &mut IrFile,
     facade: &str,
-    fid: u32,
-    b: ExprId,
-    unit_ret: bool,
+    subject: MachineSubject<'_>,
     context: &MachineContext<'_>,
-    captured_scopes: Option<SuspensionScopes>,
-    suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
-    continuation_metadata: &mut ContinuationMetadataMap,
-    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
+    outputs: &mut MachineOutputs<'_>,
 ) -> bool {
+    let MachineSubject {
+        fid,
+        body: b,
+        unit_ret,
+        captured_scopes,
+        suspension_lines,
+    } = subject;
+    let MachineOutputs {
+        continuation_metadata,
+        default_call_operands,
+        suspended_result_returns,
+    } = outputs;
     crate::trace_compiler!(
         "suspend",
         "build_state_machine fid={fid} input={:?}",
@@ -2311,7 +2263,7 @@ fn build_state_machine(
         &cont_internal,
         fid,
         &layout,
-        &param_caps,
+        suspended_result_returns,
         receiver,
         &real_params,
     );
@@ -2968,7 +2920,10 @@ impl Flat<'_> {
             branches: vec![(Some(is), ret_block), (None, empty)],
         });
         out.push(when);
-        let vg = self.gv(vv);
+        let mut vg = self.gv(vv);
+        if let Some((classifier, carrier)) = boxed_on_resume(self.ir, point, self.suspend) {
+            vg = boxed_carrier(self.ir, vg, classifier, carrier);
+        }
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
     }
 
@@ -3008,8 +2963,13 @@ impl Flat<'_> {
             Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }) => {
                 unbox(self.ir, rg, &Ty::obj_name(classifier))
             }
-            Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
-                unbox(self.ir, rg, &carrier)
+            Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
+                match boxed_on_resume(self.ir, call, self.suspend) {
+                    Some((classifier, carrier)) => {
+                        resumed_carrier(self.ir, rg, classifier, carrier)
+                    }
+                    None => unbox(self.ir, rg, &carrier),
+                }
             }
             None => unbox(self.ir, rg, ty),
         };

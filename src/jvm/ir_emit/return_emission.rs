@@ -2,6 +2,7 @@
 
 use crate::ir::ExprId;
 use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::suspend::SuspendedResultReturn;
 
 use super::frame_map::TempRole;
 use super::{debug_lines, emit_return, load, slot_words, store, Emitter};
@@ -51,10 +52,14 @@ impl Emitter<'_> {
         self.emit_transfer_finalizers(0, code)
     }
 
-    /// A forwarded `Unit` suspend function's result under Kotlin 2.4.20: the callee's
+    /// A suspend result a return reshapes (see [`SuspendedResultReturn`]): the callee's
     /// `COROUTINE_SUSPENDED` is returned as is (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn`),
-    /// and any other result is replaced by `Unit.INSTANCE`, which the caller's `return` then returns.
-    fn emit_unit_result_of_forward(&mut self, code: &mut CodeBuilder) {
+    /// and any other result is replaced by what the caller's `return` then returns.
+    fn emit_suspended_result_return(
+        &mut self,
+        result: SuspendedResultReturn,
+        code: &mut CodeBuilder,
+    ) {
         let resumed = code.new_label();
         code.dup();
         let suspended = self.cw.methodref(
@@ -66,9 +71,45 @@ impl Emitter<'_> {
         code.if_acmpne(resumed);
         code.areturn();
         self.bind(resumed, code);
-        code.pop();
-        let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
-        code.getstatic(unit, 1);
+        match result {
+            SuspendedResultReturn::Unit => {
+                code.pop();
+                let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                code.getstatic(unit, 1);
+            }
+            SuspendedResultReturn::ValueClassBox {
+                classifier,
+                carrier,
+            } => {
+                let nullable = carrier.is_nullable();
+                let carrier = super::ir_ty_to_jvm(&carrier);
+                if let Some(internal) = carrier.obj_internal() {
+                    let class = self.cw.class_ref(&internal.render());
+                    code.checkcast(class);
+                }
+                let owner = classifier.render();
+                let descriptor = format!(
+                    "({})L{owner};",
+                    crate::jvm::names::type_descriptor(carrier.non_null())
+                );
+                let box_impl = self.cw.methodref(&owner, "box-impl", &descriptor);
+                if nullable {
+                    // `box-impl` rejects the `null` a nullable value class's carrier holds.
+                    let null_case = code.new_label();
+                    let boxed = code.new_label();
+                    code.dup();
+                    code.ifnull(null_case);
+                    code.invokestatic(box_impl, 1, 1);
+                    code.goto(boxed);
+                    code.bind(null_case);
+                    code.pop();
+                    code.aconst_null();
+                    code.bind(boxed);
+                } else {
+                    code.invokestatic(box_impl, 1, 1);
+                }
+            }
+        }
     }
 
     pub(super) fn emit_return_node(
@@ -112,8 +153,8 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
-        if self.unit_result_tail_forwards.contains(&returned) {
-            self.emit_unit_result_of_forward(code);
+        if let Some(&result) = self.suspended_result_returns.get(&returned) {
+            self.emit_suspended_result_return(result, code);
         }
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {
