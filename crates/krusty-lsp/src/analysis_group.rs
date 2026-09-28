@@ -5,6 +5,7 @@
 //! any order without blanking an in-group file or dropping it from the cache key.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 pub(super) struct ProjectAnalysisGroup<'a> {
     pub(super) module_index: Option<usize>,
@@ -12,7 +13,7 @@ pub(super) struct ProjectAnalysisGroup<'a> {
     members: HashSet<usize>,
     pub(super) support_documents: Vec<(&'a str, &'a str)>,
     pub(super) inferred_support_count: usize,
-    pub(super) java_sources: Vec<String>,
+    pub(super) java_sources: Vec<Arc<str>>,
     pub(super) navigation_file_remaps: Vec<(u32, u32)>,
 }
 
@@ -22,7 +23,7 @@ impl<'a> ProjectAnalysisGroup<'a> {
         document_indices: Vec<usize>,
         support_documents: Vec<(&'a str, &'a str)>,
         inferred_support_count: usize,
-        java_sources: Vec<String>,
+        java_sources: Vec<Arc<str>>,
         navigation_file_remaps: Vec<(u32, u32)>,
     ) -> Self {
         let members = document_indices.iter().copied().collect();

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::model::{SourceModuleGraph, SourceModuleGraphKey};
 
@@ -12,7 +13,7 @@ const MAX_CACHED_MODULE_KEYS: usize = 32 * 1024;
 /// so reports must be rare enough that rendering them never competes with the walk itself.
 const SCAN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>);
+pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<Arc<str>>);
 
 #[derive(Default)]
 pub struct ProjectSources {
@@ -24,7 +25,7 @@ pub struct ProjectSources {
 struct Cache {
     key: CacheKey,
     documents: Vec<(String, String)>,
-    java_documents: Vec<(String, String)>,
+    java_documents: Vec<(String, Arc<str>)>,
     inferred_count: usize,
     kotlin_bytes: usize,
 }
@@ -573,9 +574,9 @@ fn load_java_documents_by_import_closure(
     paths: Vec<(PathBuf, PathBuf)>,
     import_seed: &[String],
     budget: usize,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Arc<str>)> {
     let mut remaining = budget;
-    let mut loaded: Vec<(String, String)> = Vec::new();
+    let mut loaded: Vec<(String, Arc<str>)> = Vec::new();
     let mut by_name: HashMap<std::ffi::OsString, Vec<PathBuf>> = HashMap::new();
     for (path, _) in &paths {
         if let Some(name) = path.file_name() {
@@ -623,7 +624,7 @@ fn load_java_documents_by_import_closure(
                     targets.directories.push(directory);
                 }
             }
-            loaded.push((uri, source));
+            loaded.push((uri, Arc::from(source)));
             progressed = true;
         }
         if !progressed {
@@ -652,7 +653,10 @@ fn read_document_within(path: &Path, remaining: &mut usize) -> Option<(String, S
     Some((uri.into(), source))
 }
 
-fn load_documents_best_effort(paths: Vec<PathBuf>, mut remaining: usize) -> Vec<(String, String)> {
+fn load_documents_best_effort(
+    paths: Vec<PathBuf>,
+    mut remaining: usize,
+) -> Vec<(String, Arc<str>)> {
     let mut documents = Vec::new();
     for path in paths {
         let Ok(metadata) = fs::metadata(&path) else {
@@ -674,17 +678,21 @@ fn load_documents_best_effort(paths: Vec<PathBuf>, mut remaining: usize) -> Vec<
             continue;
         };
         remaining -= source.len();
-        documents.push((uri.into(), source));
+        documents.push((uri.into(), Arc::from(source)));
     }
     documents
 }
 
-fn sources_within_budget(documents: &[(String, String)], mut remaining: usize) -> Vec<String> {
+/// Java stubs that still fit `remaining`.
+///
+/// The cache keeps each stub once. A keystroke clones the `Arc`, so the supervisor does not hold a
+/// second copy of every Java file while the worker request is encoded.
+fn sources_within_budget(documents: &[(String, Arc<str>)], mut remaining: usize) -> Vec<Arc<str>> {
     let mut sources = Vec::new();
     for (_, source) in documents {
         if source.len() <= remaining {
             remaining -= source.len();
-            sources.push(source.clone());
+            sources.push(Arc::clone(source));
         }
     }
     sources
@@ -1195,7 +1203,8 @@ mod tests {
         let (_, _, java_docs) = sources
             .load_model(&model, &documents, &open_uris, 64)
             .unwrap();
-        assert_eq!(java_docs, ["class A{}"]);
+        assert_eq!(java_docs.len(), 1);
+        assert_eq!(java_docs[0].as_ref(), "class A{}");
 
         let documents = [(uri.as_str(), "fun u()=0")];
         let (_, _, java_docs) = sources
@@ -1204,6 +1213,39 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 2);
+    }
+
+    #[test]
+    fn repeated_load_shares_cached_java_text() {
+        let directory = temp_path("java-shared-text");
+        fs::create_dir_all(&directory).unwrap();
+        let use_kt = directory.join("Use.kt");
+        let java = directory.join("Widget.java");
+        let widget = "package p; public class Widget {}";
+        fs::write(&use_kt, "fun use() {}").unwrap();
+        fs::write(&java, widget).unwrap();
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![SourceRoot::source(directory.clone())];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&use_kt);
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+        let documents = [(uri.as_str(), "fun use() {}")];
+
+        let first = sources
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .2;
+        let second = sources
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .2;
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].as_ref(), widget);
+        assert!(Arc::ptr_eq(&first[0], &second[0]));
     }
 
     #[test]

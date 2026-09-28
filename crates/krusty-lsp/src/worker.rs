@@ -43,7 +43,7 @@ struct AnalysisRequest<'a> {
     result_count: usize,
     inferred_count: usize,
     language_features: &'a [&'a str],
-    java_sources: &'a [String],
+    java_sources: &'a [&'a str],
     classpath: Option<&'a [PathBuf]>,
 }
 
@@ -143,7 +143,7 @@ pub struct DumpTarget<'a> {
     pub result_count: usize,
     pub inferred_count: usize,
     /// Java texts the analysis stubs onto the classpath.
-    pub java_sources: &'a [String],
+    pub java_sources: &'a [std::sync::Arc<str>],
     /// Per-module language CLI arguments; `None` keeps the worker's session features.
     pub language_arguments: Option<&'a [String]>,
     /// Per-module classpath; `None` keeps the worker's launch classpath.
@@ -344,19 +344,23 @@ pub fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool {
         .is_some_and(|total| total <= MAX_SOURCE_SET_BYTES)
 }
 
-fn encode_request(
+fn borrowed_java_sources<J: AsRef<str>>(java_sources: &[J]) -> Vec<&str> {
+    java_sources.iter().map(AsRef::as_ref).collect()
+}
+
+fn encode_request<J: AsRef<str>>(
     inputs: &[SourceInput<'_>],
     result_count: usize,
     inferred_count: usize,
     features: &LangFeatures,
-    java_sources: &[String],
+    java_sources: &[J],
     classpath: Option<&[PathBuf]>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
             .iter()
             .map(|source| source.text.len())
-            .chain(java_sources.iter().map(String::len)),
+            .chain(java_sources.iter().map(|source| source.as_ref().len())),
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -374,6 +378,7 @@ fn encode_request(
         .iter()
         .map(|source| source.kind.wire_code())
         .collect::<Vec<_>>();
+    let java_sources = borrowed_java_sources(java_sources);
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
     let language_features = language_feature_names(features);
     serde_json::to_writer(
@@ -384,7 +389,7 @@ fn encode_request(
             result_count,
             inferred_count,
             language_features: &language_features,
-            java_sources,
+            java_sources: &java_sources,
             classpath,
         },
     )
@@ -455,6 +460,7 @@ fn encode_dump_request(
         None => session_features.clone(),
     };
     let language_features = language_feature_names(&features);
+    let java_sources = borrowed_java_sources(target.java_sources);
     let request = DumpRequest {
         analysis: AnalysisRequest {
             sources: &sources,
@@ -462,7 +468,7 @@ fn encode_dump_request(
             result_count: target.result_count,
             inferred_count: target.inferred_count,
             language_features: &language_features,
-            java_sources: target.java_sources,
+            java_sources: &java_sources,
             classpath: target.classpath,
         },
         target: target.target,
@@ -602,13 +608,13 @@ impl WorkerProcess {
         }
     }
 
-    fn analyze(
+    fn analyze<J: AsRef<str>>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
         language_features: &LangFeatures,
-        java_sources: &[String],
+        java_sources: &[J],
         classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let request = encode_request(
@@ -728,15 +734,15 @@ impl AnalysisWorker {
             .iter()
             .map(|source| SourceInput::kotlin(source))
             .collect::<Vec<_>>();
-        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len(), &[])
+        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len(), &[] as &[&str])
     }
 
-    pub fn analyze_inputs_prefix(
+    pub fn analyze_inputs_prefix<J: AsRef<str>>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
-        java_sources: &[String],
+        java_sources: &[J],
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let features = self.language_features.clone();
         self.request(|process| {
@@ -751,12 +757,12 @@ impl AnalysisWorker {
         })
     }
 
-    pub fn analyze_inputs_prefix_with_config(
+    pub fn analyze_inputs_prefix_with_config<J: AsRef<str>>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
-        java_sources: &[String],
+        java_sources: &[J],
         language_arguments: &[String],
         classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
@@ -1472,13 +1478,13 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[] as &[&str], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[] as &[&str], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -1517,7 +1523,8 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[], None).unwrap();
+        let request =
+            encode_request(&inputs, 1, 1, &LangFeatures::new(), &[] as &[&str], None).unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1917,7 +1924,9 @@ mod tests {
             "fun use(w: p.Widget) {}".to_string(),
             "package p; public class Widget {}".to_string(),
         ];
-        let java_sources = vec!["package p; public class Widget {}".to_string()];
+        let java_sources = [std::sync::Arc::<str>::from(
+            "package p; public class Widget {}",
+        )];
         let classpath = vec![PathBuf::from("module.jar")];
         let language_arguments = vec!["-Xname-based-destructuring".to_string()];
         let mut session = LangFeatures::new();
@@ -1953,7 +1962,7 @@ mod tests {
             vec![SourceKind::Kotlin.wire_code(), SourceKind::Java.wire_code()],
             "a dump must not reinterpret a Java document as Kotlin"
         );
-        assert_eq!(dump.analysis.java_sources, java_sources);
+        assert_eq!(dump.analysis.java_sources, [java_sources[0].as_ref()]);
         assert_eq!(dump.analysis.classpath.as_deref(), Some(&classpath[..]));
         assert_eq!(dump.analysis.result_count, 1);
         assert_eq!(dump.analysis.inferred_count, Some(2));
@@ -2398,14 +2407,13 @@ mod tests {
         let java = "package demo;\n\npublic record Gadget(int width, int height) {\n}\n";
         let sources = [java, "package demo\n\nfun make(): Gadget? = null\n"];
         let source_kinds = vec![SourceKind::Java.wire_code(), SourceKind::Kotlin.wire_code()];
-        let java_sources = vec![java.to_string()];
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &[],
-            java_sources: &java_sources,
+            java_sources: &[java],
             classpath: None,
         })
         .unwrap();
@@ -2500,6 +2508,19 @@ fun combine(entries: Array<Entry>): String {
 
         let analyses = decode_worker_output(output);
         assert!(analyses[0].diagnostics.is_empty());
+    }
+
+    #[test]
+    fn shared_java_text_encodes_as_the_same_request_as_an_owned_copy() {
+        let inputs = [SourceInput::kotlin("fun use(): Widget = Widget()")];
+        let features = LangFeatures::new();
+        let shared = [std::sync::Arc::<str>::from("class Widget {}")];
+        let owned = ["class Widget {}".to_string()];
+        let shared_bytes =
+            encode_request(&inputs, 1, 1, &features, &shared, None).expect("shared encode");
+        let owned_bytes =
+            encode_request(&inputs, 1, 1, &features, &owned, None).expect("owned encode");
+        assert_eq!(shared_bytes, owned_bytes);
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod canonical_support;
 use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod project_analysis_group;
@@ -839,7 +840,7 @@ struct AnalysisPayload<'a> {
     uris: &'a [String],
     result_count: usize,
     inferred_count: usize,
-    java_sources: &'a [String],
+    java_sources: &'a [Arc<str>],
     language_arguments: &'a [String],
     classpath: Option<&'a [PathBuf]>,
 }
@@ -852,7 +853,7 @@ struct RetainedGroup {
     uris: Vec<String>,
     result_count: usize,
     inferred_count: usize,
-    java_sources: Vec<String>,
+    java_sources: Vec<Arc<str>>,
     language_arguments: Vec<String>,
     classpath: Option<Vec<PathBuf>>,
     /// Digest of everything above. The payload is the dump's only input, so two payloads with the
@@ -882,12 +883,10 @@ fn retained_group_fingerprint(payload: &AnalysisPayload<'_>) -> u64 {
 /// empty strings or classpath entries, so summing string lengths alone is not a memory bound. Vec
 /// headers and scalar fields live in `RetainedGroup` itself and are covered by its struct size.
 fn retained_payload_bytes(payload: &AnalysisPayload<'_>) -> usize {
-    fn strings(values: &[String]) -> usize {
-        std::mem::size_of_val(values).saturating_add(
-            values
-                .iter()
-                .fold(0usize, |bytes, value| bytes.saturating_add(value.len())),
-        )
+    fn strings<T: AsRef<str>>(values: &[T]) -> usize {
+        std::mem::size_of_val(values).saturating_add(values.iter().fold(0usize, |bytes, value| {
+            bytes.saturating_add(value.as_ref().len())
+        }))
     }
     fn paths(values: &[PathBuf]) -> usize {
         std::mem::size_of_val(values).saturating_add(values.iter().fold(0usize, |bytes, value| {
@@ -1713,7 +1712,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .iter()
                     .map(|&index| documents[index].1)
                     .chain(group_support.iter().map(|(_, source)| *source))
-                    .chain(java_sources.iter().map(String::as_str)),
+                    .chain(java_sources.iter().map(|source| source.as_ref())),
             );
             let fits_worker =
                 group_source_bytes.is_some_and(|bytes| bytes <= krusty_lsp::MAX_SOURCE_SET_BYTES);
@@ -3203,7 +3202,7 @@ mod tests {
                 uris: &uris,
                 result_count: 1,
                 inferred_count: 1,
-                java_sources: &["class Stub {}".to_string()],
+                java_sources: &[Arc::from("class Stub {}")],
                 language_arguments: &["-Xcontext-parameters".to_string()],
                 classpath: Some(&classpath),
             },
@@ -3225,7 +3224,7 @@ mod tests {
             "file:///w/Helper.java".to_string(),
         ];
         let source_kinds = [SourceKind::Kotlin, SourceKind::Java];
-        let java_sources = ["package p; class Stub {}".to_string()];
+        let java_sources = [Arc::<str>::from("package p; class Stub {}")];
         let language_arguments = ["-Xname-based-destructuring".to_string()];
         let classpath = vec![PathBuf::from("/modules/lib.jar")];
 
