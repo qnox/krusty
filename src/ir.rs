@@ -1740,8 +1740,8 @@ impl IrClass {
         })
     }
 
-    pub fn fq_name(&self) -> String {
-        self.fq_name.render()
+    pub fn fq_name(&self) -> &'static str {
+        self.fq_name.rendered()
     }
 
     pub fn fq_name_matches(&self, internal: &str) -> bool {
