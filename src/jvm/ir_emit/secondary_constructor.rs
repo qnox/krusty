@@ -127,7 +127,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
             let (target_class, mut target_jvm_tys, target, default_masks): (
-                String,
+                &str,
                 Vec<Ty>,
                 IrConstructorTarget,
                 &[i32],
@@ -136,24 +136,20 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     target_params,
                     target,
                     default_masks,
-                } => (
-                    fq_name.to_string(),
-                    jvm_tys(target_params),
-                    *target,
-                    default_masks,
-                ),
+                } => (fq_name, jvm_tys(target_params), *target, default_masks),
                 CtorDelegateTarget::Super {
                     owner,
                     target_params,
                     target,
                     default_masks,
-                } => {
-                    let owner =
-                        crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
-                    (owner, jvm_tys(target_params), *target, default_masks)
-                }
+                } => (
+                    crate::jvm::jvm_class_map::jvm_internal_name(*owner),
+                    jvm_tys(target_params),
+                    *target,
+                    default_masks,
+                ),
                 CtorDelegateTarget::ImplicitEnumBase => (
-                    "java/lang/Enum".to_string(),
+                    "java/lang/Enum",
                     Vec::new(),
                     IrConstructorTarget::UNRESTRICTED_PRIMARY,
                     &[],
@@ -238,7 +234,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // `super(…)` and from the class's own `this(…)` alike. So are a sealed class's
             // constructors, and a private one that a nested subclass delegates to.
             let targets_hidden_primary =
-                target.primary() && e.ir.has_value_param_ctor(&target_class);
+                target.primary() && e.ir.has_value_param_ctor(target_class);
             if emitted_default_masks.is_empty()
                 && (targets_hidden_primary
                     || super::constructor_accessors::reached_through_accessor(
@@ -262,8 +258,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let delegate_descriptor = external_descriptor
                 .map(str::to_owned)
                 .unwrap_or_else(|| method_descriptor(&target_jvm_tys, Ty::Unit));
-            let delegate_init =
-                e.cw.methodref(&target_class, "<init>", &delegate_descriptor);
+            let delegate_init = e.cw.methodref(target_class, "<init>", &delegate_descriptor);
             sctor.invokespecial(delegate_init, aw, 0);
             e.this_uninitialized = false;
             if !delegates_to_this {
