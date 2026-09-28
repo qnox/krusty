@@ -197,8 +197,12 @@ mod tests {
             "the toolchain CLI drives krusty as a subprocess, not through the compiler package"
         );
         assert!(
-            toolchain.contains("name = \"kotlin\""),
-            "the toolchain executable is the kotlin command"
+            toolchain.contains("name = \"krusty-kotlin\""),
+            "the toolchain executable keeps the krusty- prefix, like krusty-lsp"
+        );
+        assert!(
+            !toolchain.contains("name = \"kotlin\""),
+            "the toolchain executable is not named kotlin; that name belongs to the upstream driver beside kotlinc"
         );
     }
 

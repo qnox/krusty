@@ -79,7 +79,7 @@ If krusty saves your team build time or CI money, please consider sending part o
 
 ```sh
 cargo build --release -p krusty-cli      # the compiler (kotlinc drop-in)
-cargo build --release -p krusty-kotlin   # the toolchain CLI (kotlin build)
+cargo build --release -p krusty-kotlin   # the toolchain CLI (krusty-kotlin build)
 cargo build --release -p krusty-lsp      # the language server
 ./run-tests.sh                        # full test suite against the real kotlinc
 ```

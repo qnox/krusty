@@ -1,4 +1,4 @@
-//! Argument parsing for the `kotlin` executable.
+//! Argument parsing for the `krusty-kotlin` executable.
 //!
 //! Only `build` is implemented. Other toolchain commands fail closed so they are not mistaken for
 //! compiler inputs or silently ignored.
@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use krusty_build::kotlin_toolchain::BuildCommand;
 
 pub const ROOT_HELP: &str = "\
-usage: kotlin <command> [options]
+usage: krusty-kotlin <command> [options]
 
-krusty drop-in for the Kotlin Toolchain CLI. The compiler is the separate `krusty` executable
-(`KRUSTY_COMPILER`, the same directory as this program, or `PATH`).
+krusty stand-in for the Kotlin Toolchain CLI (`kotlin build`). The compiler is the separate
+`krusty` executable (`KRUSTY_COMPILER`, the same directory as this program, or `PATH`).
 
 Commands:
   build                   compile a JVM project (module.yaml or project.yaml)
@@ -20,11 +20,11 @@ Gradle and .iml projects are recognized and left to their project-model extensio
 ";
 
 pub const BUILD_HELP: &str = "\
-usage: kotlin build [options]
+usage: krusty-kotlin build [options]
 
 Compile a Kotlin Toolchain JVM project in the working directory (module.yaml or project.yaml).
-This is the krusty stand-in for the Kotlin Toolchain `kotlin build` command. Gradle and .iml
-projects are recognized and left to their project-model extensions.
+Same options as the toolchain `kotlin build` command. Gradle and .iml projects are recognized
+and left to their project-model extensions.
 
 Options:
   -m, --module <module>   build this module (repeatable). Dependencies are included.
@@ -40,12 +40,12 @@ pub enum Parsed {
     Build(BuildCommand),
 }
 
-/// Where to find the `krusty` compiler for a `kotlin` invocation.
+/// Where to find the `krusty` compiler for a `krusty-kotlin` invocation.
 #[derive(Clone, Debug)]
 pub struct CompilerSearch {
     /// `KRUSTY_COMPILER`, when the variable is set. An explicit path that is not a file is an error.
     pub override_path: Option<PathBuf>,
-    /// This `kotlin` executable. A sibling `krusty` is preferred over `PATH`.
+    /// This `krusty-kotlin` executable. A sibling `krusty` is preferred over `PATH`.
     pub executable: PathBuf,
     /// Directories from `PATH`, in order.
     pub path_dirs: Vec<PathBuf>,
@@ -277,7 +277,7 @@ mod tests {
         std::fs::write(&explicit, b"explicit").expect("explicit");
         std::fs::write(&on_path, b"path").expect("path");
 
-        let executable = bin.join("kotlin");
+        let executable = bin.join("krusty-kotlin");
         let found = locate_compiler(&CompilerSearch {
             override_path: Some(explicit.clone()),
             executable: executable.clone(),
