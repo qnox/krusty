@@ -885,13 +885,60 @@ fn retain_implementation_relations_for_response(
     Ok(())
 }
 
+/// The launch classpath plus the most recent module classpath.
+///
+/// A project analysis names its module classpath on every keystroke. Rebuilding that index walks
+/// every jar and the JDK image, so an unchanged path list keeps the classpath already prepared.
+/// `None` on the request is the launch classpath, not the most recent module list: an omitted
+/// classpath and an explicit empty one are different.
+struct PreparedClasspath {
+    launch_paths: Vec<PathBuf>,
+    launch: Rc<Classpath>,
+    recent_paths: Vec<PathBuf>,
+    recent: Rc<Classpath>,
+}
+
+impl PreparedClasspath {
+    fn launch(paths: Vec<PathBuf>) -> Self {
+        let classpath = Rc::new(Classpath::new(paths.clone()));
+        classpath.prepare_for_source_analysis();
+        Self {
+            recent_paths: paths.clone(),
+            recent: Rc::clone(&classpath),
+            launch_paths: paths,
+            launch: classpath,
+        }
+    }
+
+    fn launch_classpath(&self) -> Rc<Classpath> {
+        Rc::clone(&self.launch)
+    }
+
+    fn for_request(&mut self, requested: Option<&[PathBuf]>) -> Rc<Classpath> {
+        let Some(requested) = requested else {
+            return Rc::clone(&self.launch);
+        };
+        if requested == self.launch_paths.as_slice() {
+            return Rc::clone(&self.launch);
+        }
+        if requested == self.recent_paths.as_slice() {
+            return Rc::clone(&self.recent);
+        }
+        let paths = requested.to_vec();
+        let classpath = Rc::new(Classpath::new(paths.clone()));
+        classpath.prepare_for_source_analysis();
+        self.recent_paths = paths;
+        self.recent = Rc::clone(&classpath);
+        classpath
+    }
+}
+
 pub fn run_analysis_worker<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
     classpath: Vec<PathBuf>,
 ) -> io::Result<()> {
-    let default_classpath = Rc::new(Classpath::new(classpath));
-    default_classpath.prepare_for_source_analysis();
+    let mut prepared = PreparedClasspath::launch(classpath);
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
@@ -899,8 +946,9 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let request = match request {
             OwnedWorkerRequest::Analyze(request) => request,
             OwnedWorkerRequest::Materialize { materialize } => {
+                let launch = prepared.launch_classpath();
                 let response = crate::dependency_sources::render::materialize(
-                    &default_classpath,
+                    &launch,
                     &materialize.reference.fqn,
                     &materialize.reference.member_name,
                     &materialize.reference.member_desc,
@@ -924,7 +972,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 continue;
             }
             OwnedWorkerRequest::Dump { dump } => {
-                let response = render_dump_request(&default_classpath, dump);
+                let response = render_dump_request(&mut prepared, dump);
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
                 write_framed(writer, &encoded.bytes)?;
@@ -980,14 +1028,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         for feature in &request.language_features {
             language_features.enable(feature);
         }
-        let classpath = request.classpath.as_ref().map_or_else(
-            || default_classpath.clone(),
-            |entries| {
-                let classpath = Rc::new(Classpath::new(entries.clone()));
-                classpath.prepare_for_source_analysis();
-                classpath
-            },
-        );
+        let classpath = prepared.for_request(request.classpath.as_deref());
         let stub_overlay_set = set_java_stub_overlay(&classpath, &request.java_sources);
         let platform = JvmLibraries::new(classpath.clone());
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
@@ -1131,7 +1172,7 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
 /// failures are not among those cases: the bail reason is the most valuable line in the document, so
 /// it is rendered into the IR section instead of discarding the dump.
 fn render_dump_request(
-    default_classpath: &Rc<Classpath>,
+    prepared: &mut PreparedClasspath,
     request: OwnedDumpRequest,
 ) -> Option<DumpResponse> {
     let sources = request.analysis.sources;
@@ -1163,14 +1204,7 @@ fn render_dump_request(
     for feature in &request.analysis.language_features {
         features.enable(feature);
     }
-    let classpath = request.analysis.classpath.as_ref().map_or_else(
-        || default_classpath.clone(),
-        |entries| {
-            let classpath = Rc::new(Classpath::new(entries.clone()));
-            classpath.prepare_for_source_analysis();
-            classpath
-        },
-    );
+    let classpath = prepared.for_request(request.analysis.classpath.as_deref());
     // Replay the prefix the session analyzed, widened when needed so the dumped file is always
     // checked — an unchecked target would render neither types nor IR.
     let result_count = request
@@ -2011,6 +2045,138 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(messages, vec!["unresolved reference 'hidden'."]);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_module_classpath_reuses_the_prepared_index() {
+        let module = std::env::temp_dir().join(format!(
+            "krusty-worker-classpath-reuse-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&module);
+        std::fs::create_dir_all(&module).unwrap();
+        let launch_paths = Vec::new();
+        let module_paths = vec![module.clone()];
+        let mut prepared = PreparedClasspath::launch(launch_paths);
+        let launch = prepared.launch_classpath();
+
+        let same_as_launch = prepared.for_request(Some(&[]));
+        assert!(Rc::ptr_eq(&launch, &same_as_launch));
+        let built = prepared.for_request(Some(&module_paths));
+        assert!(!Rc::ptr_eq(&launch, &built));
+        let reused = prepared.for_request(Some(&module_paths));
+        assert!(Rc::ptr_eq(&built, &reused));
+        let omitted = prepared.for_request(None);
+        assert!(
+            Rc::ptr_eq(&launch, &omitted),
+            "an omitted classpath is the launch classpath"
+        );
+        let module_again = prepared.for_request(Some(&module_paths));
+        assert!(
+            Rc::ptr_eq(&built, &module_again),
+            "visiting the launch classpath must keep the module index"
+        );
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn a_reused_classpath_still_switches_when_the_path_list_changes() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-worker-classpath-switch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let package = directory.join("hidden");
+        std::fs::create_dir_all(&package).unwrap();
+        let class =
+            krusty::jvm::classfile::ClassWriter::new("hidden/Only", "java/lang/Object").finish();
+        std::fs::write(package.join("Only.class"), class).unwrap();
+
+        let source = "fun use(value: hidden.Only) {}";
+        let module_paths = vec![directory.clone()];
+        let mut input = Vec::new();
+        write_analysis_request(&mut input, source, &[], Some(&module_paths));
+        write_analysis_request(&mut input, source, &[], Some(&[]));
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let analyses = decode_worker_analyses(output, 2);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
+        assert_eq!(
+            diagnostic_messages(&analyses[1]),
+            vec!["unresolved reference 'hidden'."]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_reused_classpath_drops_the_previous_java_stub_overlay() {
+        let source = "fun use(widget: p.Widget) {}";
+        let java = "package p; public class Widget {}".to_string();
+        let mut input = Vec::new();
+        write_analysis_request(&mut input, source, &[java], Some(&[]));
+        write_analysis_request(&mut input, source, &[], Some(&[]));
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let analyses = decode_worker_analyses(output, 2);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
+        assert_eq!(
+            diagnostic_messages(&analyses[1]),
+            vec!["unresolved reference 'p'."]
+        );
+    }
+
+    fn write_analysis_request(
+        input: &mut Vec<u8>,
+        source: &str,
+        java_sources: &[String],
+        classpath: Option<&[PathBuf]>,
+    ) {
+        let sources = [source];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources,
+            classpath,
+        })
+        .unwrap();
+        write_framed(input, &request).unwrap();
+    }
+
+    fn diagnostic_messages(analysis: &AnalysisResponse) -> Vec<&str> {
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect()
+    }
+
+    fn decode_worker_analyses(output: Vec<u8>, responses: usize) -> Vec<AnalysisResponse> {
+        let mut output = Cursor::new(output);
+        let ready = read_framed(&mut output, WORKER_READY.len())
+            .unwrap()
+            .expect("worker readiness message");
+        assert_eq!(ready, WORKER_READY);
+        let mut analyses = Vec::with_capacity(responses);
+        for _ in 0..responses {
+            let response = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .expect("worker analysis response");
+            let mut documents: Vec<AnalysisResponse> = serde_json::from_slice(&response).unwrap();
+            assert_eq!(documents.len(), 1);
+            analyses.push(documents.remove(0));
+        }
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_none(),
+            "worker emitted an unexpected trailing frame"
+        );
+        analyses
     }
 
     #[test]
