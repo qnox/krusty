@@ -126,8 +126,9 @@ pub(super) fn classifier_type_parameter_ordinal(
 /// (`resolve::local_capture_dependencies`). Each forwarded field retains the superclass capture's
 /// stable semantic coordinate, so lowering never joins two constructor prefixes by field spelling.
 ///
-/// Only a call that is short by exactly the parent's prefix is filled. Anything else is a shape
-/// this does not understand and is left for the arity check downstream to report.
+/// Only a call that is short by exactly the parent's prefix is filled, whether it reaches the
+/// primary constructor or a secondary one. Anything else is a shape this does not understand and
+/// is left for the arity check downstream to report.
 pub(super) fn finalize_local_superclass_captures(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
@@ -142,10 +143,40 @@ pub(super) fn finalize_local_superclass_captures(
         if prefix == 0 {
             continue;
         }
-        let parent_args = &ir.classes[parent as usize].ctor_args;
-        if parent_args.len() != ir.classes[class].super_args.len() + prefix {
+        // A primary `super(written…)` is short by the capture prefix. A call to a secondary
+        // constructor is short by that same prefix: its JVM `<init>` carries the captures ahead of
+        // the parameters the source wrote, and the Kotlin signature the checker recorded does not.
+        let callee_source_len = if ir.classes[class].super_ctor.primary() {
+            let Some(source_len) = ir.classes[parent as usize]
+                .ctor_args
+                .len()
+                .checked_sub(prefix)
+            else {
+                continue;
+            };
+            source_len
+        } else {
+            let Some(secondary) = ir.classes[class]
+                .super_ctor
+                .ordinal
+                .checked_sub(1)
+                .and_then(|index| {
+                    ir.classes[parent as usize]
+                        .secondary_ctors
+                        .get(index as usize)
+                })
+            else {
+                continue;
+            };
+            if secondary.prefix_params.len() != prefix {
+                continue;
+            }
+            secondary.params.len()
+        };
+        if ir.classes[class].super_args.len() != callee_source_len {
             continue;
         }
+        let parent_args = &ir.classes[parent as usize].ctor_args;
         let wanted = (0..prefix)
             .map(|field| {
                 let field = u32::try_from(field).ok()?;
