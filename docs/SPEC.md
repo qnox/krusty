@@ -7413,7 +7413,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `void`; the erased `invoke(Object)Object` bridge unboxes and boxes the value class, null-safely
   for `X?`; a captureless one has a static `INSTANCE`. The call site loads `INSTANCE` or constructs
   the class and casts it to `FunctionN`. A private member of the enclosing class read from the body
-  goes through its `access$` accessor, like any nested class's. A value class over a primitive or a
+  goes through its `access$` accessor, like any nested class's. A captured value class is a field
+  and constructor parameter of its carrier type, and never hides the constructor behind the
+  `DefaultConstructorMarker` accessor: only a declared Kotlin parameter does, so the same holds for
+  an anonymous object's or local class's captures. A value class over a primitive or a
   nullable type keeps the indy lambda. Tests: `tests/value_class_lambda_class_e2e.rs` (each class
   byte for byte against kotlinc; the whole source at run time).
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
