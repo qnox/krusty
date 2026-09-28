@@ -402,7 +402,7 @@ fn annotations(
     annotations: &mut super::DeclarationAnnotations,
     names: &HashMap<TypeName, TypeName>,
 ) {
-    for retained in &mut annotations.0 {
+    for retained in annotations.iter_mut() {
         annotation_application(&mut retained.annotation, names);
     }
 }
