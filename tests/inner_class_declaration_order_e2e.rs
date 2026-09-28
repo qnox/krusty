@@ -106,3 +106,26 @@ fn an_enum_entry_subclass_lists_itself_as_a_nested_class() {
                   }\n";
     common::assert_same_inner_classes("EnumEntryBodies", source, &[], &["Mode", "Mode$FIRST"]);
 }
+
+/// kotlinc generates a local class from the class whose code declares it and lists it there, even
+/// when that code never names it: `Unused` in a member function, `Top` in the facade and `Deep` in
+/// an inner class's function all get a row in their declaring class.
+#[test]
+fn a_class_lists_every_local_class_its_code_declares() {
+    let source = "class Holder {\n\
+                  \x20   fun make(): Any {\n\
+                  \x20       class Unused\n\
+                  \x20       open class Base { fun v() = 1 }\n\
+                  \x20       class Leaf : Base()\n\
+                  \x20       return Leaf()\n\
+                  \x20   }\n\
+                  \x20   inner class In { fun g(): Int { class Deep; return 1 } }\n\
+                  }\n\
+                  fun top(): Int { class Top; return 3 }\n";
+    common::assert_same_inner_classes(
+        "DeclaredLocalClasses",
+        source,
+        &[],
+        &["Holder", "Holder$In", "DeclaredLocalClassesKt"],
+    );
+}
