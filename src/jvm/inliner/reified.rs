@@ -16,7 +16,7 @@ enum Repoint {
     Class {
         instruction: usize,
         mode: i32,
-        class: String,
+        class: &'static str,
         nullable: bool,
         intrinsic: Option<TypeCheckRole>,
         rendered: String,
@@ -171,7 +171,7 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                 }) => Repoint::Class {
                     instruction: target,
                     mode,
-                    class: internal.clone(),
+                    class: internal,
                     nullable: *nullable || argument.ends_with('?'),
                     intrinsic: *intrinsic,
                     rendered: rendered.clone(),
@@ -362,7 +362,7 @@ mod tests {
             classes: HashMap::from([(
                 "T".to_owned(),
                 ReifiedArgument::Class {
-                    internal: "java/lang/String".to_owned(),
+                    internal: "java/lang/String",
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -395,7 +395,7 @@ mod tests {
                 classes: HashMap::from([(
                     "T".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "java/lang/String".to_owned(),
+                        internal: "java/lang/String",
                         nullable,
                         intrinsic: None,
                         rendered: String::new(),
