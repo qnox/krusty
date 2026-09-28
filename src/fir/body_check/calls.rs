@@ -90,6 +90,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
         | crate::libraries::CompilerIntrinsic::PrimitiveCompare
         | crate::libraries::CompilerIntrinsic::BooleanNot
+        | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
         | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
         | crate::libraries::CompilerIntrinsic::Assert
         | crate::libraries::CompilerIntrinsic::AssertFailsWith

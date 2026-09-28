@@ -36,6 +36,9 @@ pub enum CompilerIntrinsic {
     PrimitiveShiftRight,
     PrimitiveUnsignedShiftRight,
     PrimitiveBitNot,
+    /// `hashCode()` as a builtin scalar class declares it (`Int.hashCode(): Int`). kotlinc's `HashCode`
+    /// intrinsic hashes the unboxed value through its wrapper's static `hashCode`, never boxing it.
+    PrimitiveHashCode,
     /// Exact builtin `Boolean.not()` declaration. Kotlin exposes it as an ordinary member, but the
     /// target realizes logical negation directly because no platform method implements it.
     BooleanNot,
