@@ -1309,8 +1309,14 @@ impl JvmLibraries {
         {
             return Some(ty);
         }
-        let companion = format!("{}$Companion", internal.render());
-        let companion = self.cp.find(&companion)?;
+        let companion = if let Some(companion) =
+            crate::types::existing_type_name_nested_child(internal, "Companion")
+        {
+            self.cp.find_name(companion)
+        } else {
+            let companion = format!("{}$Companion", internal.render());
+            self.cp.find(&companion)
+        }?;
         declared(&companion)
     }
 
@@ -5403,7 +5409,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // `kotlin.js.JsStatic` on JVM) and expectations with a real JVM actual (for example
         // `kotlin.jvm.JvmInline`). Only the former disappear from platform sources. Target
         // declarations always shadow the common header.
-        !self.cp.class_exists(&classifier.render())
+        !self.cp.class_exists_name(classifier)
             && self.cp.type_alias_target_name(classifier).is_none()
             && self.cp.builtin_classifier_name(classifier).is_none()
     }
