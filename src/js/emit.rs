@@ -786,7 +786,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         _ => format!("String({value})"),
                     }
                 }
-                crate::ir::IrIntrinsic::DataClassFieldEquals { .. } => format!(
+                crate::ir::IrIntrinsic::GeneratedPropertyEquals { .. } => format!(
                     "Object.is({}, {})",
                     emit_expr(ir, args[0], inst),
                     emit_expr(ir, args[1], inst)
@@ -797,7 +797,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     emit_expr(ir, args[0], inst),
                     emit_expr(ir, args[1], inst)
                 ),
-                crate::ir::IrIntrinsic::DataClassFieldHash { .. } => format!(
+                crate::ir::IrIntrinsic::GeneratedPropertyHash { .. } => format!(
                     "(String({}).split('').reduce((h,c)=>((h*31+c.charCodeAt(0))|0),0))",
                     emit_expr(ir, args[0], inst)
                 ),

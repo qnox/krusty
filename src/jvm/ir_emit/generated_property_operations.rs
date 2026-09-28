@@ -1,26 +1,24 @@
-//! JVM realization of data-class hash operations, and of equality over value-class fields.
+//! JVM realization of the generated-property equality and hash operations: a data class's
+//! properties, and a value class's sole one.
 
 use super::*;
 use crate::ir::ExprId;
 
 impl Emitter<'_> {
-    /// Emit a data-class property's contribution to `hashCode`: the value class's `hashCode-impl`,
+    /// Emit a generated property's contribution to `hashCode`: the value class's `hashCode-impl`,
     /// `Arrays.hashCode`, a boxed scalar's static `hashCode`, or the reference's own `hashCode()`.
-    pub(super) fn emit_data_class_field_hash(
+    pub(super) fn emit_generated_property_hash(
         &mut self,
         ty: Ty,
         value: ExprId,
         code: &mut CodeBuilder,
     ) {
-        if self.emit_data_class_value_hash(ty, value, code) {
+        if self.emit_value_class_property_hash(ty, value, code) {
             return;
         }
-        if ty.is_array() {
+        if ty.non_null().is_array() {
             self.emit_value(value, code);
-            let descriptor = format!("({})I", type_descriptor(ty));
-            let method = self
-                .cw
-                .methodref("java/util/Arrays", "hashCode", &descriptor);
+            let method = crate::jvm::array_representation::arrays_hash_code(self.cw, ty);
             code.invokestatic(method, 1, 1);
         } else if ty.non_null().is_jvm_scalar() && !ty.is_nullable() {
             let scalar = ty.non_null();
@@ -40,8 +38,8 @@ impl Emitter<'_> {
             code.invokestatic(method, slot_words(scalar) as i32, 1);
         } else {
             self.emit_value(value, code);
-            let owner = data_class_hashcode_owner(self.ir, self.bodies, ty)
-                .expect("checked reference data-class field has a JVM hash owner");
+            let owner = generated_property_hash_owner(self.ir, self.bodies, ty)
+                .expect("a checked reference property has a JVM hash owner");
             let method = self.cw.methodref(&owner, "hashCode", "()I");
             code.invokevirtual(method, 0, 1);
         }
@@ -49,14 +47,14 @@ impl Emitter<'_> {
 
     /// Emit `equals-impl0` for an unboxed value-class field. A boxed nullable field deliberately
     /// declines so the caller compares the two boxes through ordinary reference equality semantics.
-    pub(super) fn emit_data_class_value_equals(
+    pub(super) fn emit_value_class_property_equals(
         &mut self,
         declared: Ty,
         left: ExprId,
         right: ExprId,
         code: &mut CodeBuilder,
     ) -> bool {
-        let Some((owner, underlying, false)) = self.data_class_value_class_field(declared, left)
+        let Some((owner, underlying, false)) = self.value_class_property_operand(declared, left)
         else {
             return false;
         };
@@ -73,7 +71,7 @@ impl Emitter<'_> {
 
     /// Emit the value-class `hashCode-impl`, unboxing a nullable boxed field first. The carrier is
     /// the terminal exact underlying declaration, not a one-level sibling-file approximation.
-    pub(super) fn emit_data_class_value_hash(
+    pub(super) fn emit_value_class_property_hash(
         &mut self,
         declared: Ty,
         value: ExprId,
@@ -88,7 +86,7 @@ impl Emitter<'_> {
             code.invokestatic(method, slot_words(carrier) as i32, 1);
             return true;
         }
-        let Some((owner, underlying, boxed)) = self.data_class_value_class_field(declared, value)
+        let Some((owner, underlying, boxed)) = self.value_class_property_operand(declared, value)
         else {
             return false;
         };
@@ -109,17 +107,45 @@ impl Emitter<'_> {
         true
     }
 
-    /// Exact semantic identity, terminal declared underlying, and the already-selected JVM
-    /// representation of one generated data-class field operation.
-    fn data_class_value_class_field(
+    /// Exact semantic identity, JVM carrier, and the already-selected JVM
+    /// representation of one generated-property operation.
+    fn value_class_property_operand(
         &self,
         declared: Ty,
         value: ExprId,
     ) -> Option<(TypeName, Ty, bool)> {
         let owner = declared.non_null().obj_internal()?;
-        let underlying =
-            crate::jvm::value_classes::boxed_value_class_terminal_underlying(self.ir, owner)?;
+        let underlying = crate::jvm::value_classes::boxed_value_class_carrier(self.ir, owner)?;
         let boxed = self.value_ty(value).non_null().obj_internal() == Some(owner);
         Some((owner, underlying, boxed))
     }
+}
+
+/// JVM dispatch owner for a generated property's reference `hashCode` call. Common IR carries only
+/// the declared Kotlin type; interface dispatch and boxed scalar ownership are representation facts
+/// derived here by the backend. `None` means the classfile seeder can use its primitive/array rule.
+fn generated_property_hash_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> Option<String> {
+    if ty.is_array() || (ty.non_null().is_jvm_scalar() && !ty.is_nullable()) {
+        return None;
+    }
+    if let Some(owner) = ty.non_null().obj_internal() {
+        if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
+            return Some(owner.render());
+        }
+    }
+    let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
+        "java/lang/Object".to_owned()
+    } else {
+        crate::jvm::names::instanceof_internal_name(ty.non_null())
+    };
+    if ty
+        .non_null()
+        .obj_internal()
+        .and_then(|name| ir.class_id_by_name(name))
+        .is_some_and(|class| ir.classes[class as usize].is_interface)
+        || bodies.owner_is_interface(&owner)
+    {
+        owner = "java/lang/Object".to_owned();
+    }
+    Some(owner)
 }
