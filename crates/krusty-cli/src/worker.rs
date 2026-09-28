@@ -95,6 +95,7 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
             Some("-Xconsistent-data-class-copy-visibility")
         }
         "--x_context_parameters" => Some("-XXLanguage:+ContextParameters"),
+        "--x_explicit_backing_fields" => Some("-Xexplicit-backing-fields"),
         "--x_context_receivers" => Some("-Xcontext-receivers"),
         "--x_inline_classes" => Some("-Xinline-classes"),
         "--x_skip_prerelease_check" => Some("-Xskip-prerelease-check"),
@@ -982,6 +983,30 @@ mod tests {
         assert!(parsed
             .features
             .has("DataClassCopyRespectsConstructorVisibility"));
+    }
+
+    /// JetBrains/kotlin 2.4.20 enables these on every compilation. Forwarding the kotlinc
+    /// spelling must reach the frontend; leaving one ignored makes the worker refuse the module.
+    #[test]
+    fn kotlin_repo_language_flags_are_accepted() {
+        let unit = translate(&args(&[
+            "--x_explicit_backing_fields",
+            "--kotlinc-arg",
+            "-Xcontext-parameters",
+            "--kotlinc-arg",
+            "-Xname-based-destructuring=complete",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("kotlin 2.4.20 language flags must be accepted");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.features.has("ExplicitBackingFields"));
+        assert!(parsed.features.has("ContextParameters"));
+        assert!(parsed.features.has("NameBasedDestructuring"));
+        assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
     }
 
     #[test]

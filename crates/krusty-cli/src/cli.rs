@@ -651,6 +651,32 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
+    /// Flags `common-configuration.gradle.kts` passes on every JetBrains/kotlin 2.4.20
+    /// compilation. An ignored flag leaves explicit backing fields off, so `field =` in the
+    /// compiler sources is rejected, and the worker refuses the request outright.
+    #[test]
+    fn kotlin_repo_language_flags_are_modeled_not_ignored() {
+        let parsed = parse_args(&[
+            "-Xcontext-parameters",
+            "-Xexplicit-backing-fields",
+            "-Xname-based-destructuring=complete",
+            "-jvm-default=no-compatibility",
+            "x.kt",
+        ]);
+        assert!(
+            parsed.ignored.is_empty(),
+            "kotlin 2.4.20 flags must be modeled: {:?}",
+            parsed.ignored
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.features.has("ContextParameters"));
+        assert!(parsed.features.has("ExplicitBackingFields"));
+        assert!(parsed.features.has("NameBasedDestructuring"));
+        assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
+        assert_eq!(parsed.jvm_default, JvmDefaultMode::NoCompatibility);
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
     /// `indy` is what krusty emits, so asking for it is honored silently. Any other value asks for a
     /// shape krusty cannot emit and must be reported — compiling `class` as `indy` would hand the
     /// build a different set of class files than it asked for.

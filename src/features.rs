@@ -125,6 +125,18 @@ impl LangFeatures {
             self.enable("DataClassCopyRespectsConstructorVisibility");
             return true;
         }
+        // JetBrains/kotlin 2.4.20 passes these on every compilation
+        // (`common-configuration.gradle.kts`). Context parameters are already on at this
+        // language level; recognizing the flag keeps it from being reported as ignored.
+        // Explicit backing fields are not on unless the build asks for them.
+        if arg == "-Xcontext-parameters" {
+            self.enable("ContextParameters");
+            return true;
+        }
+        if arg == "-Xexplicit-backing-fields" {
+            self.enable("ExplicitBackingFields");
+            return true;
+        }
         false
     }
 }
@@ -177,6 +189,12 @@ mod tests {
         assert!(g.has("MultiDollarInterpolation"));
         assert!(g.apply_cli_arg("-Xconsistent-data-class-copy-visibility"));
         assert!(g.has("DataClassCopyRespectsConstructorVisibility"));
+        assert!(g.apply_cli_arg("-Xcontext-parameters"));
+        assert!(g.has("ContextParameters"));
+        let mut backing = LangFeatures::new();
+        assert!(!backing.has("ExplicitBackingFields"));
+        assert!(backing.apply_cli_arg("-Xexplicit-backing-fields"));
+        assert!(backing.has("ExplicitBackingFields"));
         assert!(!g.apply_cli_arg("foo.kt"));
     }
 
