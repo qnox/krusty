@@ -137,6 +137,45 @@ fn physical_classfile_name_of(internal: TypeName) -> String {
     mapped.jvm_binary_name()
 }
 
+/// Whether `descriptor` is the object descriptor of `classifier` (`Lpkg/Foo;`). The comparison uses
+/// the classifier's internal spelling, not its mapped classfile name, and a miss does not intern
+/// the descriptor.
+pub(crate) fn descriptor_is_classifier(descriptor: &str, classifier: TypeName) -> bool {
+    let Some(raw) = object_descriptor_internal(descriptor) else {
+        return false;
+    };
+    if let Some(name) = crate::types::existing_type_name(raw) {
+        return name == classifier;
+    }
+    classifier.matches(raw)
+}
+
+/// Whether `descriptor` names the nested class `owner$nested` (`Lpkg/Owner$Companion;`). A miss
+/// does not intern that nested name.
+pub(crate) fn descriptor_is_nested_class(descriptor: &str, owner: TypeName, nested: &str) -> bool {
+    let Some(raw) = object_descriptor_internal(descriptor) else {
+        return false;
+    };
+    if let Some(name) = crate::types::existing_type_name(raw) {
+        return name.nested_owner() == Some(owner) && name.nested_segment_ref() == nested;
+    }
+    let (package, tail) = raw.rsplit_once('/').unwrap_or(("", raw));
+    owner.namespace().matches(package) && nested_class_tail(owner.segment_ref(), nested, tail)
+}
+
+fn object_descriptor_internal(descriptor: &str) -> Option<&str> {
+    let raw = descriptor
+        .strip_prefix('L')
+        .and_then(|value| value.strip_suffix(';'))?;
+    (!raw.is_empty()).then_some(raw)
+}
+
+fn nested_class_tail(owner_segment: &str, nested: &str, tail: &str) -> bool {
+    tail.strip_prefix(owner_segment)
+        .and_then(|rest| rest.strip_prefix("$"))
+        .is_some_and(|rest| rest == nested)
+}
+
 fn physical_classfile_name(internal: &str) -> String {
     if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_to_jvm(internal) {
         return intrinsic;
@@ -461,6 +500,54 @@ mod tests {
             classfile_internal_name("kotlin/Int.Companion"),
             "kotlin/jvm/internal/IntCompanionObject"
         );
+    }
+
+    #[test]
+    fn descriptor_comparison_does_not_intern_a_miss() {
+        let owner = crate::types::type_name("probe/desc6044/Outer$Inner");
+        let companion = "probe/desc6044/Outer$Inner$Companion";
+        let missing = "probe/desc6044/Missing";
+        assert!(crate::types::existing_type_name(companion).is_none());
+        assert!(crate::types::existing_type_name(missing).is_none());
+
+        assert!(descriptor_is_nested_class(
+            "Lprobe/desc6044/Outer$Inner$Companion;",
+            owner,
+            "Companion"
+        ));
+        assert!(!descriptor_is_nested_class(
+            "Lprobe/desc6044/Outer$Inner$Other;",
+            owner,
+            "Companion"
+        ));
+        assert!(descriptor_is_classifier(
+            "Lprobe/desc6044/Outer$Inner;",
+            owner
+        ));
+        assert!(!descriptor_is_classifier("Lprobe/desc6044/Missing;", owner));
+        assert!(!descriptor_is_classifier("I", owner));
+
+        let root = crate::types::type_name("Root6044");
+        assert!(descriptor_is_nested_class(
+            "LRoot6044$Companion;",
+            root,
+            "Companion"
+        ));
+
+        assert!(crate::types::existing_type_name(companion).is_none());
+        assert!(crate::types::existing_type_name(missing).is_none());
+        assert!(crate::types::existing_type_name("Root6044$Companion").is_none());
+
+        let interned = crate::types::type_name(companion);
+        assert!(descriptor_is_nested_class(
+            "Lprobe/desc6044/Outer$Inner$Companion;",
+            owner,
+            "Companion"
+        ));
+        assert!(descriptor_is_classifier(
+            "Lprobe/desc6044/Outer$Inner$Companion;",
+            interned
+        ));
     }
 
     #[test]
