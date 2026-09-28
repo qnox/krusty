@@ -2683,7 +2683,7 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
         Ty::String => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
         Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => {
-            Some(crate::jvm::names::classfile_internal_name(&n.render()))
+            Some(crate::jvm::names::classfile_internal_name_of(n))
         }
         _ => None,
     }
@@ -4147,9 +4147,9 @@ fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
         Ty::Float => VerifType::Float,
         Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
         t if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
-        Ty::Obj(n, _) => VerifType::Object(
-            cw.class_ref(&crate::jvm::names::classfile_internal_name(&n.render())),
-        ),
+        Ty::Obj(n, _) => {
+            VerifType::Object(cw.class_ref(&crate::jvm::names::classfile_internal_name_of(n)))
+        }
         Ty::Null => VerifType::Null,
         _ => VerifType::Top,
     }
@@ -10782,8 +10782,8 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
-                let owner = crate::jvm::names::classfile_internal_name(&owner.render());
-                let ty = crate::jvm::names::classfile_internal_name(&ty.render());
+                let owner = crate::jvm::names::classfile_internal_name_of(*owner);
+                let ty = crate::jvm::names::classfile_internal_name_of(*ty);
                 let f = self.cw.fieldref(&owner, field, &format!("L{ty};"));
                 code.getstatic(f, 1);
             }
@@ -12060,7 +12060,7 @@ impl<'a> Emitter<'a> {
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
             t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
             Ty::Obj(n, _) => {
-                VerifType::ObjectName(crate::jvm::names::classfile_internal_name(&n.render()))
+                VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n))
             }
             Ty::Nullable(_) | Ty::PlatformNullable(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
@@ -12596,9 +12596,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                         })
                         .unwrap_or(Ty::obj("java/lang/Object")),
                 ),
-                _ => Ty::obj(&crate::jvm::names::classfile_internal_name(
-                    &fq_name.render(),
-                )),
+                _ => Ty::obj(&crate::jvm::names::classfile_internal_name_of(fq_name)),
             }
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`

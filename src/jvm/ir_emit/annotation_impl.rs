@@ -347,9 +347,7 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
                     // illegal, so kotlinc falls back to `Object.hashCode` there, and so does this.
                     let owner = other
                         .obj_internal()
-                        .map(|internal| {
-                            crate::jvm::names::classfile_internal_name(&internal.render())
-                        })
+                        .map(|internal| crate::jvm::names::classfile_internal_name_of(internal))
                         .filter(|internal| {
                             !ir.classes.iter().any(|class| {
                                 class.fq_name() == *internal
