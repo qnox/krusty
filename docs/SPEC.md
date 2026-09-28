@@ -7735,6 +7735,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
+- **Local delegated properties (kotlinc's `PropertyReferenceLowering` and local accessors).** A
+  local `val x by d` keeps its `KProperty` in its lexical class's `$$delegatedProperties` (a
+  top-level function's in its file facade, flagged `1`), in source order among the class's members,
+  with signature `<v#N>`: N counts every local delegated property of that class in source order,
+  lambdas included, while a local class or anonymous object numbers its own. The checker builds the
+  getter (and a `var`'s setter) as a lifted local function, `<container>$lambda$N`, private static,
+  taking the delegate (and the value): it is emitted even when nothing reads the property, and every
+  read or write calls it. A lambda captures the delegate; a local class or object keeps it in a
+  `$x$delegate` field and reaches the accessor through `access$`. A statement `x++` keeps the value
+  it read in a temporary, and `++x` reads the property again after writing it; `dec` adds `-1`. An
+  inline operator that never reads the property gets `null` and no slot but still takes an N. Kotlin
+  metadata lists the class's or facade's local delegated properties (JvmProtoBuf field 102) in `<v#N>`
+  order; a container whose local property's type mentions a type parameter lists none yet, since
+  kotlinc gives such a property its own copies of the enclosing type parameters.
+  (`tests/local_delegated_property_references_e2e.rs`, `tests/local_delegated_accessors_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

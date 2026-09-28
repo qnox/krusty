@@ -21,8 +21,17 @@ pub(super) fn exists(env: &EmitEnv<'_>, owner: &str) -> bool {
 
 /// Declare `owner`'s array at the head of its field table, interned with the field visit.
 pub(super) fn declare(env: &EmitEnv<'_>, owner: &str, cw: &mut ClassWriter) {
+    declare_with(env, owner, cw, ACCESS);
+}
+
+/// Declare an interface's array: every interface field is `public`, so kotlinc's is too.
+pub(super) fn declare_in_interface(env: &EmitEnv<'_>, owner: &str, cw: &mut ClassWriter) {
+    declare_with(env, owner, cw, ACCESS | 0x0001);
+}
+
+fn declare_with(env: &EmitEnv<'_>, owner: &str, cw: &mut ClassWriter, access: u16) {
     if exists(env, owner) {
-        let field = (ACCESS, array::FIELD, array::DESCRIPTOR);
+        let field = (access, array::FIELD, array::DESCRIPTOR);
         cw.add_field_late_leading(field, Some(array::SIGNATURE), None);
     }
 }
@@ -43,5 +52,12 @@ impl Emitter<'_> {
         let reference = self.cw.fieldref(owner, array::FIELD, array::DESCRIPTOR);
         code.putstatic(reference, 1);
         self.cw.omit_method_lines("<clinit>", "()V");
+    }
+}
+
+impl<'a> EmitEnv<'a> {
+    /// The local delegated properties each class's Kotlin metadata lists.
+    pub(super) fn local_delegated(&self) -> &'a LocalDelegatedProperties {
+        &self.property_reference_realizations.local_delegated
     }
 }

@@ -1,6 +1,7 @@
 //! JVM realization of checked property-reference declarations.
 
 pub(crate) mod delegated_arrays;
+pub(crate) mod local_delegated_properties;
 mod realization;
 
 pub(crate) use delegated_arrays::DelegatedPropertyArrays;
@@ -100,6 +101,9 @@ pub(super) fn realize(
     current_facade: &str,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
+    realizations.local_delegated =
+        local_delegated_properties::LocalDelegatedProperties::collect(ir, stems)
+            .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
     let mut delegated_operands = Vec::new();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {

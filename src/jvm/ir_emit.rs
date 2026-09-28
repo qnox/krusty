@@ -18,8 +18,10 @@ use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
     reference_array_element, type_descriptor,
 };
+use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use companion_field::{add_companion_field, emit_companion_init};
 use field_visibility::{default_accessor_access, is_jvm_field, jvm_field_visibility};
 
 mod access_bridges;
@@ -39,6 +41,7 @@ mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+mod companion_field;
 mod copied_code;
 mod coroutine_machine;
 mod data_class_value_classes;
@@ -889,7 +892,7 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 fn build_class_metadata(
     ir: &IrFile,
     c: &crate::ir::IrClass,
-    opts: &EmitOptions,
+    (opts, locals): (&EmitOptions, &LocalDelegatedProperties),
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
@@ -2271,6 +2274,7 @@ fn build_class_metadata(
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
+            local_properties: locals.of(c.fq_name_id()),
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::local_classifiers::enum_entry_bodies(ir),
             is_enum: c.is_enum,
@@ -2973,46 +2977,6 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
 }
 
-fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    cw.add_field(
-        0x0019,
-        companion.nested_segment_ref(),
-        &format!("L{};", companion.render()),
-    );
-}
-
-fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    let companion_name = companion.render();
-    let descriptor = format!("L{companion_name};");
-    // An INTERFACE's companion self-hosts its singleton (`static final $$INSTANCE`, built in the
-    // companion's own `<clinit>`); the interface's `Companion` field merely aliases it.
-    if is_jvm_interface(class) {
-        let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
-        code.getstatic(instance, 1);
-        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-        code.putstatic(field, 1);
-        return;
-    }
-    let classifier = cw.class_ref(&companion_name);
-    code.new_obj(classifier);
-    code.dup();
-    code.aconst_null();
-    let constructor = cw.methodref(
-        &companion_name,
-        "<init>",
-        "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-    );
-    code.invokespecial(constructor, 1, 0);
-    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-    code.putstatic(field, 1);
-}
-
 /// Emit the companion/static surface shared by declarations that are JVM interfaces: Kotlin
 /// interfaces and annotation classes. Common IR keeps those source kinds distinct, but both use
 /// interface field constraints and the companion's self-hosted `$$INSTANCE` realization.
@@ -3024,6 +2988,7 @@ fn emit_jvm_interface_companion_surface(
     cw: &mut ClassWriter,
 ) {
     let fq_name = c.fq_name();
+    delegated_property_array::declare_in_interface(env, &fq_name, cw);
 
     // Ordinary companion constants/values precede the Companion field. A hoisted `@JvmField`
     // property is visited later because kotlinc places it after Companion.
@@ -3052,7 +3017,8 @@ fn emit_jvm_interface_companion_surface(
         })
         .map(|(index, s)| (index as u32, s))
         .collect();
-    if c.companion_class.is_some() || !clinit_statics.is_empty() {
+    let array = delegated_property_array::exists(env, &fq_name);
+    if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
         let mut emitter = Emitter::new(
@@ -3066,6 +3032,7 @@ fn emit_jvm_interface_companion_surface(
             clinit_statics.iter().map(|(_, property)| property.init),
         );
         let mut clinit = CodeBuilder::new(0);
+        emitter.emit_delegated_property_array(env, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
         for &(static_index, s) in &clinit_statics {
@@ -5113,7 +5080,8 @@ fn emit_class(
     // the same debug tables, so it is seeded like any class with a computed record.
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
-        && (c.is_anonymous_object || build_class_metadata(ir, c, opts).is_some());
+        && (c.is_anonymous_object
+            || build_class_metadata(ir, c, (opts, env.local_delegated())).is_some());
     let pool_seed = || PlainClassPoolSeed {
         ir,
         class: c,
@@ -5826,7 +5794,7 @@ fn emit_class(
     cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts))
+        .then(|| build_class_metadata(ir, c, (opts, env.local_delegated())))
         .flatten();
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
@@ -6129,7 +6097,7 @@ fn emit_annotation_class(
     cw.set_class_annotations(&user_annotations);
     cw.set_runtime_annotations(&mirrors);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts))
+        .then(|| build_class_metadata(ir, c, (opts, env.local_delegated())))
         .flatten();
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -6530,7 +6498,7 @@ fn emit_interface_class(
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts))
+        .then(|| build_class_metadata(ir, c, (opts, env.local_delegated())))
         .flatten();
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[]);
@@ -7272,7 +7240,7 @@ fn emit_enum_class(
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     let class_metadata = opts
         .emit_class_metadata
-        .then(|| build_class_metadata(ir, c, opts))
+        .then(|| build_class_metadata(ir, c, (opts, env.local_delegated())))
         .flatten();
     if class_metadata.is_some() {
         attach_synth_debug_tables(
@@ -14897,9 +14865,15 @@ mod invariant_tests {
         // are not declarations in Kotlin metadata.
         ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
 
-        let metadata =
-            build_class_metadata(&ir, &ir.classes[outer_id as usize], &EmitOptions::default())
-                .expect("plain source class metadata");
+        let metadata = build_class_metadata(
+            &ir,
+            &ir.classes[outer_id as usize],
+            (
+                &EmitOptions::default(),
+                &LocalDelegatedProperties::default(),
+            ),
+        )
+        .expect("plain source class metadata");
         assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
         assert!(!metadata.d2.iter().any(|entry| entry == "Impl3"));
     }

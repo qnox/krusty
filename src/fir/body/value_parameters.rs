@@ -20,6 +20,8 @@ pub enum FirValueParameterName {
     Unused,
     /// A lambda parameter written as a destructuring declaration `(a, b)`.
     Destructured,
+    /// The value a generated setter receives: a local delegated property's.
+    PropertySetterValue,
 }
 
 impl FirValueParameter {

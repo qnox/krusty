@@ -414,3 +414,39 @@ fn disassemble_with(name: &str, bytes: &[u8], flags: &[&str]) -> String {
     let _ = std::fs::remove_dir_all(dir);
     text
 }
+
+/// Compile `src` (file `<stem>.kt`, module `main`) with kotlinc and krusty, and assert each class in
+/// `classes` is byte-identical to kotlinc's.
+pub fn assert_classes_identical_to_kotlinc(stem: &str, src: &str, classes: &[&str]) {
+    let dir = super::common_core::scratch_dir().expect("scratch directory");
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let source = dir.join(format!("{stem}.kt"));
+    std::fs::write(&source, src).expect("write fixture");
+    let (code, stderr) = super::common_core::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
+        src,
+        stem,
+        &[super::common_core::stdlib_jar()],
+        "main",
+        None,
+    )
+    .expect("krusty compiles the fixture");
+    for class in classes {
+        let reference = std::fs::read(reference_dir.join(format!("{class}.class")))
+            .expect("kotlinc emits the class");
+        let ours = krusty
+            .iter()
+            .find(|(internal, _)| internal == class)
+            .map(|(_, bytes)| bytes)
+            .expect("krusty emits the class");
+        assert!(&reference == ours, "{class} differs from kotlinc's build");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

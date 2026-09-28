@@ -5,6 +5,9 @@
 use super::version_requirements::{
     needs_inline_parameter_null_check, VersionRequirementTable, INLINE_PARAMETER_NULL_CHECK,
 };
+use crate::metadata::local_properties::{
+    local_property_pb, LocalPropertyMeta, LOCAL_VARIABLE_FIELD,
+};
 use crate::metadata::type_encoder::{
     encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
     semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
@@ -864,7 +867,7 @@ pub fn build_package(
     funcs: &[FnMeta],
     props: &[PropMeta],
     aliases: &[TypeAliasMeta],
-    module_name: Option<&str>,
+    (module_name, locals): (Option<&str>, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
@@ -935,6 +938,11 @@ pub fn build_package(
         let module_idx = st.local(module);
         package.field_varint(101, module_idx as u64);
     }
+    // Local delegated properties (f102) intern after the module name.
+    for local in locals {
+        let record = local_property_pb(&mut st, local, &TypeParameters::new());
+        package.repeated_message(LOCAL_VARIABLE_FIELD, &record); // packageLocalVariable
+    }
     let stt = st.serialize_types();
 
     // Empirically required leading byte (kotlinc emits it and reads its own output): the metadata
@@ -968,7 +976,7 @@ mod tests {
             &[FnMeta::plain("f", vec![("a".into(), Ty::Int)], Ty::Int)],
             &[],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
@@ -989,7 +997,7 @@ mod tests {
             &[FnMeta::plain("f", vec![("a".into(), Ty::Int)], Ty::Int)],
             &[],
             &[],
-            Some("mymod"),
+            (Some("mymod"), &[]),
             true,
         );
         assert_eq!(
@@ -1084,7 +1092,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
@@ -1137,7 +1145,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         let d1 = String::from_iter(d1.into_iter().map(char::from));
@@ -1192,7 +1200,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
@@ -1235,7 +1243,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
@@ -1304,7 +1312,7 @@ mod tests {
             }],
             &[],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
@@ -1329,7 +1337,7 @@ mod tests {
             }],
             &[],
             &[],
-            None,
+            (None, &[]),
             true,
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);

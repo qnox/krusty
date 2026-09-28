@@ -1,4 +1,4 @@
-use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
+use super::delegate_calls::FirPropertyDelegatePlan;
 use super::local_callables::BodyLocalCallableDeclarationId;
 use super::local_class_names::FirGeneratedClassProvenance;
 use std::collections::HashMap;
@@ -366,13 +366,6 @@ pub(crate) enum DelegateStorage {
 }
 
 impl DelegateStorage {
-    pub(crate) const fn ty(self) -> ResolvedTy {
-        match self {
-            Self::Local(binding) => binding.ty,
-            Self::ClassField(binding) => binding.ty,
-        }
-    }
-
     pub(crate) const fn local(self) -> Option<LocalBinding> {
         match self {
             Self::Local(binding) => Some(binding),
@@ -384,12 +377,19 @@ impl DelegateStorage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalDelegateBinding {
     pub(crate) storage: DelegateStorage,
+    /// The name of the variable holding the delegate, `<name>$delegate`.
+    pub(crate) storage_name: Box<str>,
     pub(crate) property_ty: ResolvedTy,
-    pub(crate) get_value: FirDelegateCall,
-    pub(crate) set_value: Option<FirDelegateCall>,
-    pub(crate) name: Box<str>,
-    /// Its position among its lexical class's local delegated properties.
-    pub(crate) ordinal: u32,
+    /// The local functions its reads and writes call, as kotlinc generates them.
+    pub(crate) getter: LocalDelegateAccessor,
+    pub(crate) setter: Option<LocalDelegateAccessor>,
+}
+
+/// A local delegated property's generated accessor: a local function of the body declaring it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalDelegateAccessor {
+    pub(crate) declaration: BodyLocalCallableDeclarationId,
+    pub(crate) callable: LocalCallableId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1812,6 +1812,8 @@ pub struct FirBody {
     receiver_type: Option<ResolvedTy>,
     result_type: Option<ResolvedTy>,
     implicit_return: bool,
+    /// The body is an accessor generated for a local delegated property.
+    delegate_accessor: bool,
     default_fragment: bool,
     property_storage_type: Option<ResolvedTy>,
     property_delegate: Option<FirPropertyDelegatePlan>,
@@ -1870,6 +1872,7 @@ impl FirBody {
             receiver_type: None,
             result_type: None,
             implicit_return: false,
+            delegate_accessor: false,
             default_fragment: false,
             property_storage_type: None,
             property_delegate: None,
@@ -1987,6 +1990,14 @@ impl FirBody {
             "a FIR body may select implicit return only once"
         );
         self.implicit_return = true;
+    }
+
+    pub(crate) fn set_delegate_accessor(&mut self) {
+        self.delegate_accessor = true;
+    }
+
+    pub(crate) const fn is_delegate_accessor(&self) -> bool {
+        self.delegate_accessor
     }
 
     pub const fn has_implicit_return(&self) -> bool {

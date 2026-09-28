@@ -15,10 +15,29 @@ use super::BodyOwnerId;
 pub struct BodyLocalCallableDeclarationId {
     owner: BodyOwnerId,
     ordinal: u32,
+    role: BodyLocalCallableRole,
+}
+
+/// What a body-local callable declares, and so which declaration stream its ordinal counts: a
+/// source local function among the body's local functions, or an accessor kotlinc generates for a
+/// local delegated property among the body's local delegated properties.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BodyLocalCallableRole {
+    Function,
+    DelegateGetter,
+    DelegateSetter,
 }
 
 impl BodyLocalCallableDeclarationId {
-    pub(crate) const fn new(owner: BodyOwnerId, ordinal: u32) -> Self {
-        Self { owner, ordinal }
+    pub(crate) const fn with_role(
+        owner: BodyOwnerId,
+        ordinal: u32,
+        role: BodyLocalCallableRole,
+    ) -> Self {
+        Self {
+            owner,
+            ordinal,
+            role,
+        }
     }
 }

@@ -236,12 +236,10 @@ pub(super) fn enum_member_schedule(ir: &IrFile, class: &IrClass) -> EnumMemberSc
     }
 }
 
+/// Whether a lifted function implements a lambda, rather than a local function or a local delegated
+/// property's accessor (which, like a lambda, has no source name of its own).
 fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
-    ir.lifted_functions[&function]
-        .1
-        .path
-        .last()
-        .is_none_or(|step| step.name.is_none())
+    ir.lambda_origins.contains_key(&function)
 }
 
 /// Reorder the functions lowered from lambdas and local functions inside `members` into kotlinc's

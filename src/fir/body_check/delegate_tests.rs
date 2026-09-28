@@ -80,6 +80,67 @@ fn covariant_extension_receiver_widens_from_a_nullable_lambda_result() {
     );
 }
 
+/// The accessors the checker declared for `body`'s local delegated properties, with the name of
+/// the operator each one calls.
+fn delegate_accessors<'b>(
+    body: &'b FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+) -> Vec<(LocalCallableId, &'b FirBody, &'b FirCall)> {
+    (0..body.statement_count())
+        .filter_map(|raw| {
+            body.statement(FirStatementId::from_raw(
+                u32::try_from(raw).expect("too many FIR statements"),
+            ))
+        })
+        .filter_map(|statement| match &statement.kind {
+            FirStatementKind::LocalFunction { callable, body, .. }
+                if body.is_delegate_accessor() =>
+            {
+                let [call] = operator_calls(body, index)[..] else {
+                    panic!("an accessor calls exactly its delegate operator")
+                };
+                Some((*callable, body.as_ref(), call))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn operator_calls<'b>(
+    body: &'b FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+) -> Vec<&'b FirCall> {
+    expressions(body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::Call(call) if selected_name(call, index).is_some() => Some(call),
+            _ => None,
+        })
+        .collect()
+}
+
+fn selected_name<'i>(
+    call: &FirCall,
+    index: &'i crate::fir::ResolvedModuleIndex,
+) -> Option<&'i str> {
+    call.target
+        .module()
+        .and_then(|target| index.callable(target))
+        .and_then(|callable| index.callable_name(callable.id))
+}
+
+/// How many calls of `body` go to the local callable `callable` declared `body_depth` bodies out.
+fn local_calls(body: &FirBody, (body_depth, callable): (u32, LocalCallableId)) -> usize {
+    expressions(body)
+        .filter(|expression| {
+            matches!(
+                &expression.kind,
+                FirExprKind::LocalCall { target, .. }
+                    if target.body_depth == body_depth && target.callable == callable
+            )
+        })
+        .count()
+}
+
 #[test]
 fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_reference() {
     let (body, index) = checked_function_body(
@@ -90,26 +151,19 @@ fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_refe
         "box",
     );
 
-    let calls = expressions(&body)
-        .filter_map(|expression| match &expression.kind {
-            FirExprKind::Call(call) => Some(call),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let get_value = calls
-        .iter()
-        .find(|call| {
-            call.target
-                .module()
-                .and_then(|target| index.callable(target))
-                .and_then(|callable| index.callable_name(callable.id))
-                == Some("getValue")
-        })
-        .expect("delegated read must keep the selected getValue identity");
+    let [(getter, accessor, get_value)] = delegate_accessors(&body, &index)[..] else {
+        panic!("a read-only local delegated property declares exactly its getter")
+    };
+    assert_eq!(selected_name(get_value, &index), Some("getValue"));
     assert!(get_value.dispatch_receiver.is_some());
     assert!(get_value.extension_receiver.is_none());
     assert_eq!(get_value.arguments.len(), 2);
-    assert!(expressions(&body).any(|expression| {
+    assert!(
+        operator_calls(&body, &index).is_empty(),
+        "the body reads through its getter"
+    );
+    assert_eq!(local_calls(&body, (0, getter)), 1);
+    assert!(expressions(accessor).any(|expression| {
         matches!(
             &expression.kind,
             FirExprKind::LocalPropertyReference { name, property_type, mutable: false, ordinal: 0 }
@@ -143,37 +197,32 @@ fn local_delegate_increments_keep_checked_getter_and_setter_calls() {
         "update",
     );
 
-    let selected_names = expressions(&body)
-        .filter_map(|expression| match &expression.kind {
-            FirExprKind::Call(call) => call
-                .target
-                .module()
-                .and_then(|target| index.callable(target))
-                .and_then(|callable| index.callable_name(callable.id)),
-            _ => None,
-        })
+    let accessors = delegate_accessors(&body, &index)
+        .into_iter()
+        .map(|(callable, _, call)| (selected_name(call, &index), callable))
         .collect::<Vec<_>>();
-    assert_eq!(
-        selected_names
-            .iter()
-            .filter(|&&name| name == "getValue")
-            .count(),
-        3,
-        "postfix reads once and prefix re-reads after its checked setter: {selected_names:?}"
+    let [(Some("getValue"), getter), (Some("setValue"), setter)] = accessors[..] else {
+        panic!("a mutable local delegated property declares its getter and setter: {accessors:?}")
+    };
+    assert!(
+        operator_calls(&body, &index).is_empty(),
+        "the body goes through its accessors"
     );
     assert_eq!(
-        selected_names
-            .iter()
-            .filter(|&&name| name == "setValue")
-            .count(),
+        local_calls(&body, (0, getter)),
+        3,
+        "postfix reads once and prefix re-reads after its checked setter"
+    );
+    assert_eq!(
+        local_calls(&body, (0, setter)),
         2,
-        "each increment must retain the selected delegated setter: {selected_names:?}"
+        "each increment must call the delegated setter"
     );
 }
 
 #[test]
 fn lambda_read_of_local_delegate_captures_storage_identity() {
-    let (body, _) = checked_function_body(
+    let (body, index) = checked_function_body(
         "class Delegate {\n\
              operator fun getValue(owner: Any?, property: Any?): String = \"OK\"\n\
          }\n\
@@ -181,6 +230,9 @@ fn lambda_read_of_local_delegate_captures_storage_identity() {
         "make",
     );
 
+    let [(getter, _, _)] = delegate_accessors(&body, &index)[..] else {
+        panic!("a read-only local delegated property declares exactly its getter")
+    };
     let lambda = expressions(&body)
         .find_map(|expression| match &expression.kind {
             FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
@@ -192,15 +244,11 @@ fn lambda_read_of_local_delegate_captures_storage_identity() {
     };
     assert_eq!(capture.enclosing_depth, 0);
     assert!(!capture.shared_cell);
-    assert!(expressions(lambda).any(|expression| {
-        matches!(
-            expression.kind,
-            FirExprKind::CapturedValueRead {
-                enclosing_depth: 0,
-                source,
-            } if crate::fir::FirCaptureSource::Value(source) == capture.source
-        )
-    }));
+    assert_eq!(
+        local_calls(lambda, (1, getter)),
+        1,
+        "the lambda reads through the getter its enclosing body declares"
+    );
 }
 
 #[test]

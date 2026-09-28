@@ -17,16 +17,26 @@ impl BodyLowering<'_> {
         (name, property_type): (&str, Ty),
         (mutable, ordinal): (bool, u32),
     ) -> Result<IrLocalPropertyReference, FirLoweringFailure> {
+        // A class this file declares has its lowered name; one declared by another source file (an
+        // inline function's body lowered for its call site) keeps its header's, unless it is local.
         let class = match self.body.lexical_class_owner() {
-            Some(owner) => {
-                let class = self
+            Some(owner) => Some(
+                match self
                     .ir
                     .checked_classifier_classes
                     .get(&owner)
                     .or_else(|| self.ir.checked_enum_entry_classes.get(&owner))
-                    .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
-                Some(self.ir.classes[*class as usize].fq_name_id())
-            }
+                {
+                    Some(&class) => self.ir.classes[class as usize].fq_name_id(),
+                    None => {
+                        self.index
+                            .classifier_header(owner)
+                            .filter(|_| self.index.local_class_name_provenance(owner).is_none())
+                            .ok_or(FirLoweringFailure::MissingLocalClass(owner))?
+                            .classifier
+                    }
+                },
+            ),
             None => None,
         };
         let member = DeclarationId::from_raw(self.body.owner().raw());

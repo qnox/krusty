@@ -1,0 +1,83 @@
+//! kotlinc reads and writes a LOCAL delegated property through accessors it lifts like local
+//! functions: `<container>$lambda$N`, private static, taking the delegate (and a setter's value),
+//! declared on the property's line and emitted even when nothing reads the property. A lambda
+//! calls them with the delegate it captures; a local class or anonymous object keeps the delegate
+//! in a `$x$delegate` field and calls them through `access$` bridges. A statement `x++` keeps the
+//! value it read in a temporary, `--x` reads the property again, and `dec` adds `-1`. Kotlin
+//! metadata lists each class's and facade's local delegated properties in `<v#N>` order.
+//!
+//! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
+//! neutral names only.
+use super::common;
+
+const CELL: &str = "import kotlin.reflect.KProperty\n\
+     \n\
+     class Cell(var stored: Int) {\n\
+     \x20   operator fun getValue(owner: Any?, property: KProperty<*>): Int = stored\n\
+     \x20   operator fun setValue(owner: Any?, property: KProperty<*>, value: Int) {\n\
+     \x20       stored = value\n\
+     \x20   }\n\
+     }\n";
+
+#[test]
+fn local_delegated_properties_are_read_and_written_through_lifted_accessors() {
+    let src = format!(
+        "{CELL}\n\
+         class Counter {{\n\
+         \x20   fun post(): Int {{ var a by Cell(1); a++; return 0 }}\n\
+         \x20   fun pre(): Int {{ var a by Cell(1); ++a; return 0 }}\n\
+         \x20   fun postValue(): Int {{ var a by Cell(1); return a++ }}\n\
+         \x20   fun preValue(): Int {{ var a by Cell(1); return ++a }}\n\
+         \x20   fun down(): Int {{ var a by Cell(1); a--; --a; return 0 }}\n\
+         \x20   fun shared(): Int {{\n\
+         \x20       var a by Cell(1)\n\
+         \x20       a = a + 1\n\
+         \x20       val read = {{ a }}\n\
+         \x20       return read()\n\
+         \x20   }}\n\
+         \x20   fun unread(): Int {{\n\
+         \x20       val u by Cell(2)\n\
+         \x20       return 1\n\
+         \x20   }}\n\
+         }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc("CounterLocals", &src, &["Cell", "Counter"]);
+}
+
+#[test]
+fn local_classes_and_objects_keep_the_delegate_they_read() {
+    let src = format!(
+        "{CELL}\n\
+         class Shelf {{\n\
+         \x20   fun make(): Int {{\n\
+         \x20       val a by Cell(1)\n\
+         \x20       class Slot {{ fun read() = a }}\n\
+         \x20       val made = object {{ fun read() = a }}\n\
+         \x20       return Slot().read() + made.read()\n\
+         \x20   }}\n\
+         }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc(
+        "ShelfLocals",
+        &src,
+        &["Shelf", "Shelf$make$Slot", "Shelf$make$made$1"],
+    );
+}
+
+#[test]
+fn a_facade_lists_its_top_level_functions_local_delegated_properties() {
+    let src = format!(
+        "{CELL}\n\
+         fun first(): Int {{\n\
+         \x20   val a by Cell(1)\n\
+         \x20   return a\n\
+         }}\n\
+         \n\
+         fun second(): Int {{\n\
+         \x20   var b by Cell(2)\n\
+         \x20   b = 3\n\
+         \x20   return b\n\
+         }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc("FacadeAccessors", &src, &["FacadeAccessorsKt"]);
+}

@@ -192,6 +192,7 @@ impl BodyFirChecker<'_> {
         let class_capture_values = self.nested_class_capture_values()?;
         let class_delegates = self.nested_class_delegates()?;
         let class_receivers = self.nested_class_receivers()?;
+        let outer_callables = self.nested_outer_callables();
         let mut nested = BodyFirChecker {
             file: self.file,
             info: self.info,
@@ -241,30 +242,7 @@ impl BodyFirChecker<'_> {
             local_callable_scopes: vec![HashMap::new()],
             expression_substitutions: HashMap::new(),
             lambda_binding_name: None,
-            outer_callables: self
-                .outer_callables
-                .iter()
-                .map(|(statement, (depth, callable))| {
-                    (
-                        *statement,
-                        (
-                            depth.checked_add(1).expect("too many nested bodies"),
-                            *callable,
-                        ),
-                    )
-                })
-                .chain(self.local_callable_scopes.iter().flat_map(|scope| {
-                    scope.iter().filter_map(|(statement, callable)| {
-                        body_local_callable_declaration(
-                            self.file,
-                            self.index,
-                            self.body.owner(),
-                            *statement,
-                        )
-                        .map(|declaration| (declaration, (1, *callable)))
-                    })
-                }))
-                .collect(),
+            outer_callables,
             streamed_outer_callables: self.streamed_outer_callables.clone(),
             nested_body_depth: self
                 .nested_body_depth

@@ -583,6 +583,15 @@ impl BodyFirChecker<'_> {
                     .map(|declaration| (declaration, (1, *callable)))
                 })
             }))
+            // The accessors generated for this body's local delegated properties.
+            .chain(
+                self.delegate_scopes
+                    .iter()
+                    .flat_map(HashMap::values)
+                    .filter(|delegate| delegate.storage.local().is_some())
+                    .flat_map(|delegate| std::iter::once(delegate.getter).chain(delegate.setter))
+                    .map(|accessor| (accessor.declaration, (1, accessor.callable))),
+            )
             .collect()
     }
 }

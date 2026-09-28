@@ -1280,6 +1280,7 @@ fn local_function_parameter_identities(
     body: &FirBody,
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
     let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
+        None if body.is_delegate_accessor() => crate::ir::IrCapturingCallable::DelegateAccessor,
         None => crate::ir::IrCapturingCallable::LocalFunction,
         Some(crate::fir::FirLambdaForm::AnonymousFunction) => {
             crate::ir::IrCapturingCallable::AnonymousFunction
@@ -1365,6 +1366,9 @@ fn local_function_parameter_identities(
                     role: crate::ir::IrParameterRole::DestructuredValue,
                     provenance: crate::ir::IrParameterProvenance::SourceDeclared,
                 },
+                crate::fir::FirValueParameterName::PropertySetterValue => {
+                    crate::ir::IrParameterIdentity::property_setter_value()
+                }
             }),
     );
     Ok(identities)

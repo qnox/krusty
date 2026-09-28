@@ -8,6 +8,7 @@ use crate::backend::{
 use crate::diag::DiagSink;
 use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
+use crate::metadata::local_properties::LocalPropertyMeta;
 use crate::types::{type_name, Ty};
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
@@ -787,7 +788,15 @@ impl JvmBackend {
             diags.error(crate::diag::Span::new(0, 0), message);
             return Vec::new();
         }
-        let metadata = facade_package_metadata_from_ir(&ir, module_name, self.param_assertions);
+        let facade_locals = pass_facts
+            .property_reference_realizations
+            .local_delegated
+            .of(type_name(&facade_name));
+        let metadata = facade_package_metadata_from_ir(
+            &ir,
+            (module_name, facade_locals),
+            self.param_assertions,
+        );
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
             checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
@@ -1053,7 +1062,7 @@ impl Backend for JvmBackend {
 /// function names/descriptors chosen by JVM representation passes.
 pub fn facade_package_metadata_from_ir(
     ir: &crate::ir::IrFile,
-    module_name: &str,
+    (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
@@ -1276,7 +1285,7 @@ pub fn facade_package_metadata_from_ir(
         functions,
         properties,
         aliases,
-        module_name,
+        (module_name, locals),
         param_assertions,
     )
 }
@@ -1314,7 +1323,7 @@ fn build_facade_metadata(
     functions: Vec<crate::metadata::builder::FnMeta>,
     properties: Vec<crate::metadata::builder::PropMeta>,
     aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
-    module_name: &str,
+    (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
@@ -1322,7 +1331,7 @@ fn build_facade_metadata(
             &functions,
             &properties,
             &aliases,
-            (module_name != "main").then_some(module_name),
+            ((module_name != "main").then_some(module_name), locals),
             param_assertions,
         );
         crate::jvm::ir_emit::KotlinMetadata {
@@ -1493,7 +1502,7 @@ mod tests {
             source_order: 0,
         });
 
-        let metadata = facade_package_metadata_from_ir(&ir, "main", true)
+        let metadata = facade_package_metadata_from_ir(&ir, ("main", &[]), true)
             .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,

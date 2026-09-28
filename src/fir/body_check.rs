@@ -45,6 +45,7 @@ mod iterators;
 #[cfg(test)]
 mod lambda_tests;
 mod lambdas;
+mod local_callable_identity;
 #[cfg(test)]
 mod local_class_tests;
 mod local_classes;
@@ -80,6 +81,8 @@ pub use driver::{
 pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailure};
 
 use std::collections::HashMap;
+
+use local_callable_identity::{body_local_callable_declaration, delegate_accessor_declaration};
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};
 use crate::diag::Span;
@@ -135,36 +138,6 @@ fn checked_constant_value(constant: &crate::libraries::LibraryConst) -> FirConst
         crate::libraries::LibConst::Double(value) => FirConstant::Double(*value),
         crate::libraries::LibConst::Str(value) => FirConstant::String(value.clone()),
     }
-}
-
-/// Bind a parser-local statement to its declaration-stream identity without retaining either the
-/// parser id or a text coordinate. Parsing the same bounded declaration unit produces the same
-/// local-function stream; the identity is discarded with the active checker after use.
-fn body_local_callable_declaration(
-    file: &File,
-    index: &ResolvedModuleIndex,
-    owner: BodyOwnerId,
-    statement: StmtId,
-) -> Option<BodyLocalCallableDeclarationId> {
-    let mut declaration = DeclarationId::from_raw(owner.raw());
-    while let Some(parent) = index
-        .declaration_anchor(declaration)
-        .and_then(|anchor| anchor.owner)
-    {
-        declaration = parent;
-    }
-    let owner = BodyOwnerId::from_raw(declaration.raw());
-    let mut ordinal = 0u32;
-    for (raw, candidate) in file.stmt_arena.iter().enumerate() {
-        if !matches!(candidate, Stmt::LocalFun(_)) {
-            continue;
-        }
-        if raw == statement.0 as usize {
-            return Some(BodyLocalCallableDeclarationId::new(owner, ordinal));
-        }
-        ordinal = ordinal.checked_add(1).expect("too many local functions");
-    }
-    None
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3274,11 +3247,12 @@ impl BodyFirChecker<'_> {
                 name, dec, prefix, ..
             } => {
                 if let Some((depth, delegate)) = self.delegated_binding(name) {
-                    let write =
-                        self.delegated_inc_dec_statement(statement, *dec, depth, delegate, origin)?;
+                    let form = (*dec, *prefix);
+                    let update =
+                        self.delegated_inc_dec_statement(statement, form, depth, delegate, origin)?;
                     return Ok(self.body.add_statement(FirStatement {
                         origin,
-                        kind: FirStatementKind::Expression(write),
+                        kind: FirStatementKind::Expression(update),
                     }));
                 }
                 let target = self.local(name);

@@ -158,12 +158,16 @@ fn function_local_variable(
     }
     // kotlinc's `LocalDeclarationsLowering` keeps a captured variable's own name when a named
     // local function or an anonymous function captures it (a shared cell included), and
-    // `$`-prefixes a captured parameter and whatever a lambda literal captures.
+    // `$`-prefixes a captured parameter and whatever a lambda literal or a local delegated
+    // property's accessor (a local function with a special name) captures.
     if let (Some(name), IrParameterRole::CapturedValue { capture, .. }) =
         (&identity.source_name, identity.role)
     {
         if capture.declaration == IrCapturedDeclaration::Variable
-            && capture.capturer != IrCapturingCallable::Lambda
+            && !matches!(
+                capture.capturer,
+                IrCapturingCallable::Lambda | IrCapturingCallable::DelegateAccessor
+            )
         {
             return Some(name.clone());
         }

@@ -1482,7 +1482,11 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
     let local_function = body.add_statement(FirStatement {
         origin,
         kind: FirStatementKind::LocalFunction {
-            declaration: crate::fir::BodyLocalCallableDeclarationId::new(body.owner(), 0),
+            declaration: crate::fir::BodyLocalCallableDeclarationId::with_role(
+                body.owner(),
+                0,
+                crate::fir::BodyLocalCallableRole::Function,
+            ),
             callable,
             suspend: false,
             tailrec: false,
@@ -1498,9 +1502,10 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
             target: FirLocalCallableRef {
                 body_depth: 0,
                 callable,
-                declaration: Some(crate::fir::BodyLocalCallableDeclarationId::new(
+                declaration: Some(crate::fir::BodyLocalCallableDeclarationId::with_role(
                     body.owner(),
                     0,
+                    crate::fir::BodyLocalCallableRole::Function,
                 )),
                 external_capture_arguments: None,
             },
@@ -2770,7 +2775,11 @@ fn block_bodied_local_function_keeps_its_explicit_return() {
     let declaration = body.add_statement(FirStatement {
         origin,
         kind: FirStatementKind::LocalFunction {
-            declaration: crate::fir::BodyLocalCallableDeclarationId::new(body.owner(), 0),
+            declaration: crate::fir::BodyLocalCallableDeclarationId::with_role(
+                body.owner(),
+                0,
+                crate::fir::BodyLocalCallableRole::Function,
+            ),
             callable,
             suspend: false,
             tailrec: false,

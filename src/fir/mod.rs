@@ -38,6 +38,7 @@ pub use delegate_calls::*;
 pub use header::*;
 pub use inline_body::*;
 pub use local_callables::BodyLocalCallableDeclarationId;
+pub(crate) use local_callables::BodyLocalCallableRole;
 pub use local_class_capture::*;
 pub use local_class_names::*;
 pub(crate) use module_symbols::*;

@@ -58,6 +58,8 @@ pub enum IrCapturingCallable {
     AnonymousFunction,
     /// A lambda literal (`{ … }`).
     Lambda,
+    /// An accessor generated for a local delegated property.
+    DelegateAccessor,
 }
 
 /// A compiler-created parameter's semantic job. Targets own any physical spelling and flags.

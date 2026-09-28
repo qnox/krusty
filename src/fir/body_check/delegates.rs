@@ -1,7 +1,29 @@
 //! Checked FIR for local delegated properties.
 
 use super::*;
+use crate::fir::{FirValueParameter, FirValueParameterName, LocalDelegateAccessor};
 use crate::resolve::DelegateGetValueTarget;
+
+/// What a local delegated property's reference and accessors are built from.
+#[derive(Clone, Copy)]
+struct DelegatedLocal<'a> {
+    name: &'a str,
+    ty: ResolvedTy,
+    mutable: bool,
+    /// Its position among its lexical class's local delegated properties.
+    ordinal: u32,
+}
+
+/// One generated accessor of a local delegated property: the operator it calls, whether it is the
+/// setter, and where it is lifted to.
+struct DelegateAccessorPlan<'a> {
+    statement: StmtId,
+    origin: OriginId,
+    site: &'a crate::ast::LiftingSite,
+    setter: bool,
+    storage: LocalBinding,
+    operator: &'a FirDelegateCall,
+}
 
 impl BodyFirChecker<'_> {
     pub(super) fn local_delegate_statement(
@@ -32,11 +54,7 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedStatement(StatementForm::LocalDelegate),
             )
         })?;
-        let ordinal = provenance.ordinal;
-        for site in &provenance.accessors {
-            self.body
-                .add_bodiless_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
-        }
+        let (ordinal, sites) = (provenance.ordinal, provenance.accessors.clone());
         let (name, explicit_type) = (name.as_str(), explicit_type.as_ref());
         let delegate_ty = self.expression_type(delegate)?;
         let property_ty = match explicit_type {
@@ -114,8 +132,35 @@ impl BodyFirChecker<'_> {
             ty: storage_ty,
             lateinit: false,
         };
+        let storage_name = format!("{name}$delegate");
         self.body
-            .set_debug_value_name(storage.value, format!("{name}$delegate"));
+            .set_debug_value_name(storage.value, storage_name.clone());
+        let property = DelegatedLocal {
+            name,
+            ty: property_ty,
+            mutable,
+            ordinal,
+        };
+        let [getter_site, setter_site @ ..] = sites.as_slice() else {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget));
+        };
+        let accessor = |operator, site, setter| DelegateAccessorPlan {
+            statement,
+            origin,
+            site,
+            setter,
+            storage,
+            operator,
+        };
+        let getter =
+            self.local_delegate_accessor(accessor(&get_value, getter_site, false), property)?;
+        let setter = match (&set_value, setter_site) {
+            (Some(set_value), [site]) => {
+                Some(self.local_delegate_accessor(accessor(set_value, site, true), property)?)
+            }
+            (None, []) => None,
+            _ => return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)),
+        };
         self.delegate_scopes
             .last_mut()
             .expect("a local delegate belongs to a lexical scope")
@@ -123,11 +168,10 @@ impl BodyFirChecker<'_> {
                 name.to_string(),
                 LocalDelegateBinding {
                     storage: DelegateStorage::Local(storage),
+                    storage_name: storage_name.into(),
                     property_ty,
-                    get_value,
-                    set_value,
-                    name: name.into(),
-                    ordinal,
+                    getter,
+                    setter,
                 },
             );
         Ok(self.body.add_statement(FirStatement {
@@ -150,16 +194,8 @@ impl BodyFirChecker<'_> {
         delegate: LocalDelegateBinding,
     ) -> Result<FirExprId, BodyCheckFailure> {
         let origin = self.expression_origin(expression)?;
-        let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
-        let owner = self.synthetic_null(origin);
-        let property = self.delegate_property_reference(origin, &delegate);
-        let call = self.delegate_call(
-            delegate.get_value.target,
-            delegate.get_value.extension,
-            delegate.get_value.parameters,
-            receiver,
-            vec![owner, property],
-        );
+        let call =
+            self.delegate_accessor_call(origin, depth, &delegate, delegate.getter, vec![])?;
         self.add_expression_with_type(expression, delegate.property_ty, call)
     }
 
@@ -184,22 +220,13 @@ impl BodyFirChecker<'_> {
         delegate: LocalDelegateBinding,
         value: FirExprId,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        let target = delegate.set_value.clone().ok_or_else(|| {
+        let setter = delegate.setter.ok_or_else(|| {
             self.failure(
                 span,
                 BodyCheckFailureKind::UnsupportedStatement(StatementForm::Assign),
             )
         })?;
-        let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
-        let owner = self.synthetic_null(origin);
-        let property = self.delegate_property_reference(origin, &delegate);
-        Ok(self.delegate_call(
-            target.target,
-            target.extension,
-            target.parameters,
-            receiver,
-            vec![owner, property, value],
-        ))
+        self.delegate_accessor_call(origin, depth, &delegate, setter, vec![value])
     }
 
     pub(super) fn delegated_inc_dec_expression(
@@ -308,10 +335,13 @@ impl BodyFirChecker<'_> {
         })
     }
 
+    /// `a++` or `++a` as a statement on a local delegated property, as kotlinc lowers it: the
+    /// expression form with its value discarded. A postfix update holds the value it read in a
+    /// temporary; a prefix one reads the property again after writing it.
     pub(super) fn delegated_inc_dec_statement(
         &mut self,
         statement: StmtId,
-        decrement: bool,
+        (decrement, prefix): (bool, bool),
         depth: u32,
         delegate: LocalDelegateBinding,
         origin: OriginId,
@@ -330,14 +360,51 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(StatementForm::IncDec),
                 )
             })?;
-        let read = self.delegate_storage_read(origin, depth, &delegate)?;
+        let property_ty = delegate.property_ty;
+        let read = |checker: &mut Self| -> Result<FirExprId, BodyCheckFailure> {
+            let kind = checker.delegate_accessor_call(
+                origin,
+                depth,
+                &delegate,
+                delegate.getter,
+                vec![],
+            )?;
+            Ok(checker.body.add_expr(FirExpr {
+                origin,
+                ty: property_ty,
+                kind,
+            }))
+        };
+        let mut statements = Vec::new();
+        let operand = if prefix {
+            read(self)?
+        } else {
+            let temporary = self.allocate_local();
+            let initializer = read(self)?;
+            statements.push(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Local {
+                    target: temporary,
+                    ty: property_ty,
+                    mutable: false,
+                    lateinit: false,
+                    initializer: Some(initializer),
+                    conversion: None,
+                },
+            }));
+            self.body.add_expr(FirExpr {
+                origin,
+                ty: property_ty,
+                kind: FirExprKind::ValueRead(temporary),
+            })
+        };
         let convention = if decrement { "dec" } else { "inc" };
         let updated_kind = if self
             .info
             .resolved_stmt_operator_call(statement, convention)
             .is_some()
         {
-            self.zero_arg_statement_operator_call_on_value(statement, convention, read)?
+            self.zero_arg_statement_operator_call_on_value(statement, convention, operand)?
         } else {
             FirExprKind::Unary {
                 operation: if decrement {
@@ -345,7 +412,7 @@ impl BodyFirChecker<'_> {
                 } else {
                     FirUnaryOperation::Increment
                 },
-                operand: read,
+                operand,
             }
         };
         let updated = self.body.add_expr(FirExpr {
@@ -353,46 +420,211 @@ impl BodyFirChecker<'_> {
             ty: self.resolved_type(concrete_span, resolution.updated_ty)?,
             kind: updated_kind,
         });
-        let write_kind = self.delegated_write_value(origin, span, depth, delegate, updated)?;
-        Ok(self.body.add_expr(FirExpr {
+        let write_kind =
+            self.delegated_write_value(origin, span, depth, delegate.clone(), updated)?;
+        let write = self.body.add_expr(FirExpr {
             origin,
             ty: ResolvedTy::new(Ty::Unit).expect("Unit is publishable FIR"),
             kind: write_kind,
+        });
+        statements.push(self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(write),
+        }));
+        let (ty, result) = if prefix {
+            (property_ty, Some(read(self)?))
+        } else {
+            (
+                ResolvedTy::new(Ty::Unit).expect("Unit is publishable FIR"),
+                None,
+            )
+        };
+        Ok(self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::Block {
+                statements: statements.into_boxed_slice(),
+                result,
+            },
         }))
     }
 
-    fn delegate_storage_read(
+    /// Call `accessor`, a generated accessor of `delegate` declared `depth` bodies out (`u32::MAX`
+    /// for this one), with `arguments`. A member of a local class declared after the property
+    /// reaches the accessor through the class's field holding the delegate, which it passes as the
+    /// accessor's one capture.
+    fn delegate_accessor_call(
         &mut self,
         origin: OriginId,
         depth: u32,
         delegate: &LocalDelegateBinding,
-    ) -> Result<FirExprId, BodyCheckFailure> {
-        let kind = match delegate.storage {
-            DelegateStorage::ClassField(binding) => {
-                self.class_storage_read_kind(binding, origin)?
+        accessor: LocalDelegateAccessor,
+        arguments: Vec<FirExprId>,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let target = if depth == u32::MAX && matches!(delegate.storage, DelegateStorage::Local(_)) {
+            FirLocalCallableRef {
+                body_depth: 0,
+                callable: accessor.callable,
+                declaration: Some(accessor.declaration),
+                external_capture_arguments: None,
             }
-            DelegateStorage::Local(storage) if depth == u32::MAX => {
-                FirExprKind::ValueRead(storage.value)
-            }
-            DelegateStorage::Local(storage) => {
-                self.body.add_capture(FirCapture {
-                    origin,
-                    enclosing_depth: depth,
-                    source: FirCaptureSource::Value(storage.value),
-                    ty: storage.ty,
-                    shared_cell: false,
-                });
-                FirExprKind::CapturedValueRead {
-                    enclosing_depth: depth,
-                    source: storage.value,
+        } else {
+            let (body_depth, callable) = self
+                .outer_callables
+                .get(&accessor.declaration)
+                .copied()
+                .ok_or_else(|| {
+                self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
+            let external_capture_arguments = match delegate.storage {
+                DelegateStorage::ClassField(binding)
+                    if self
+                        .streamed_outer_callables
+                        .contains(&accessor.declaration) =>
+                {
+                    let kind = self.class_storage_read_kind(
+                        ClassCaptureBinding {
+                            shared_cell: false,
+                            ..binding
+                        },
+                        origin,
+                    )?;
+                    let field = self.body.add_expr(FirExpr {
+                        origin,
+                        ty: binding.ty,
+                        kind,
+                    });
+                    Some(Box::from([field]))
                 }
+                DelegateStorage::ClassField(_) | DelegateStorage::Local(_) => None,
+            };
+            FirLocalCallableRef {
+                body_depth,
+                callable,
+                declaration: Some(accessor.declaration),
+                external_capture_arguments,
             }
         };
-        Ok(self.body.add_expr(FirExpr {
+        Ok(FirExprKind::LocalCall {
+            target,
+            extension_receiver: None,
+            arguments: arguments
+                .into_iter()
+                .enumerate()
+                .map(|(parameter, value)| FirCallArgument::Expression {
+                    parameter: u32::try_from(parameter).expect("an accessor takes one value"),
+                    value,
+                    conversion: None,
+                })
+                .collect(),
+        })
+    }
+
+    /// Declare the accessor kotlinc generates for a local delegated property as a local function
+    /// of this body: `plan.operator` called on the delegate, which is its only capture, with no
+    /// owner and the property's reference, and for a setter the value it receives.
+    fn local_delegate_accessor(
+        &mut self,
+        plan: DelegateAccessorPlan<'_>,
+        property: DelegatedLocal<'_>,
+    ) -> Result<LocalDelegateAccessor, BodyCheckFailure> {
+        let setter = plan.setter;
+        let span = self.file.stmt_spans.get(plan.statement.0 as usize).copied();
+        let declaration = delegate_accessor_declaration(
+            self.file,
+            self.index,
+            self.body.owner(),
+            plan.statement,
+            setter,
+        )
+        .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let callable = self.body.allocate_local_callable();
+        let mut body = FirBody::new_local(self.body.owner(), callable);
+        if let Some(owner) = self.body.lexical_class_owner() {
+            body.set_lexical_class_owner(Some(owner));
+        }
+        let unit = ResolvedTy::new(Ty::Unit).expect("Unit is publishable FIR");
+        let result_ty = if setter { unit } else { property.ty };
+        body.set_result_type(result_ty);
+        body.set_implicit_return();
+        body.set_delegate_accessor();
+        body.set_lifting_site(crate::fir::FirLiftingSite::from_source(plan.site, true));
+        body.add_control_target(FirControlTarget {
+            origin: plan.origin,
+            kind: FirControlTargetKind::Body(self.body.owner()),
+        });
+        // Build the accessor with this checker's own helpers, then put the enclosing body back.
+        let enclosing = std::mem::replace(&mut self.body, body);
+        let origin = plan.origin;
+        self.body.add_capture(FirCapture {
             origin,
-            ty: delegate.storage.ty(),
+            enclosing_depth: 0,
+            source: FirCaptureSource::Value(plan.storage.value),
+            ty: plan.storage.ty,
+            shared_cell: false,
+        });
+        let receiver = self.body.add_expr(FirExpr {
+            origin,
+            ty: plan.storage.ty,
+            kind: FirExprKind::CapturedValueRead {
+                enclosing_depth: 0,
+                source: plan.storage.value,
+            },
+        });
+        let owner = self.synthetic_null(origin);
+        let reference = self.local_property_reference(
+            origin,
+            (property.name, property.ty),
+            (property.mutable, property.ordinal),
+        );
+        let mut arguments = vec![owner, reference];
+        if setter {
+            let value = self.allocate_local();
+            self.body.add_parameter(FirValueParameter {
+                origin,
+                value,
+                ty: property.ty,
+                name: FirValueParameterName::PropertySetterValue,
+            });
+            arguments.push(self.body.add_expr(FirExpr {
+                origin,
+                ty: property.ty,
+                kind: FirExprKind::ValueRead(value),
+            }));
+        }
+        let kind = self.delegate_call(
+            plan.operator.target.clone(),
+            plan.operator.extension,
+            plan.operator.parameters.clone(),
+            receiver,
+            arguments,
+        );
+        let result = self.body.add_expr(FirExpr {
+            origin,
+            ty: result_ty,
             kind,
-        }))
+        });
+        let root = self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(result),
+        });
+        self.body.push_root(root);
+        let body = std::mem::replace(&mut self.body, enclosing);
+        // Declared in the arena, outside any block: an accessor is reached only by its calls.
+        self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::LocalFunction {
+                declaration,
+                callable,
+                suspend: false,
+                tailrec: false,
+                body: Box::new(body),
+            },
+        });
+        Ok(LocalDelegateAccessor {
+            declaration,
+            callable,
+        })
     }
 
     fn synthetic_null(&mut self, cause: OriginId) -> FirExprId {
@@ -434,18 +666,6 @@ impl BodyFirChecker<'_> {
                 ordinal,
             },
         })
-    }
-
-    fn delegate_property_reference(
-        &mut self,
-        cause: OriginId,
-        delegate: &LocalDelegateBinding,
-    ) -> FirExprId {
-        self.local_property_reference(
-            cause,
-            (&delegate.name, delegate.property_ty),
-            (delegate.set_value.is_some(), delegate.ordinal),
-        )
     }
 
     fn delegate_call(

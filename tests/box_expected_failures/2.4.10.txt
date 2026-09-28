@@ -92,7 +92,6 @@ defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/getDelegateWithoutReflection.kt
-delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegation/delegationDifferentModule.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
