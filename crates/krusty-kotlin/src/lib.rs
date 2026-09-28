@@ -1,7 +1,8 @@
 //! Process front end for the Kotlin Toolchain CLI.
 //!
-//! The `kotlin` executable is separate from the `krusty` compiler. `kotlin build` reads a toolchain
-//! project and spawns `krusty` once per module. The compiler package does not depend on this one.
+//! The `krusty-kotlin` executable is separate from the `krusty` compiler. `krusty-kotlin build`
+//! reads a toolchain project and spawns `krusty` once per module. The compiler package does not
+//! depend on this one.
 
 mod cli;
 
@@ -11,12 +12,12 @@ use std::path::PathBuf;
 
 use krusty_build::kotlin_toolchain::{execute, BuildCommand};
 
-/// Run one `kotlin` invocation. Returns the process exit code.
+/// Run one `krusty-kotlin` invocation. Returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
         Err(message) => {
-            eprintln!("kotlin: {message}");
+            eprintln!("krusty-kotlin: {message}");
             return 1;
         }
     };
@@ -33,14 +34,14 @@ fn execute_build(command: &mut BuildCommand) -> i32 {
     match locate_from_process() {
         Ok(compiler) => command.compiler = compiler,
         Err(message) => {
-            eprintln!("kotlin: {message}");
+            eprintln!("krusty-kotlin: {message}");
             return 1;
         }
     }
     match std::env::current_dir() {
         Ok(directory) => command.directory = directory,
         Err(error) => {
-            eprintln!("kotlin: cannot determine the working directory: {error}");
+            eprintln!("krusty-kotlin: cannot determine the working directory: {error}");
             return 1;
         }
     }
@@ -55,7 +56,7 @@ fn execute_build(command: &mut BuildCommand) -> i32 {
             }
         }
         Err(message) => {
-            eprintln!("kotlin: {message}");
+            eprintln!("krusty-kotlin: {message}");
             1
         }
     }

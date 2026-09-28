@@ -1,6 +1,6 @@
 //! Load a Kotlin Toolchain project into build modules and compile it.
 //!
-//! `kotlin build` is the toolchain command this loads for JVM modules. The loader reads
+//! `krusty-kotlin build` is the toolchain command this loads for JVM modules. The loader reads
 //! `module.yaml` and `project.yaml` directly and compiles by spawning the `krusty` compiler. It
 //! does not consult Gradle or `.iml` metadata.
 
@@ -16,7 +16,7 @@ use crate::store::ArtifactStore;
 use super::discover::{self, ProjectKind};
 use super::yaml::{self, Yaml};
 
-/// Arguments of `kotlin build`, after the `build` subcommand has been taken off `argv`.
+/// Arguments of `krusty-kotlin build`, after the `build` subcommand has been taken off `argv`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildCommand {
     pub directory: PathBuf,
@@ -98,7 +98,7 @@ fn validate_flags(command: &BuildCommand) -> Result<(), String> {
         .collect();
     if !unknown_platforms.is_empty() {
         return Err(format!(
-            "kotlin build compiles the JVM. Unsupported platform(s): {}",
+            "krusty-kotlin build compiles the JVM. Unsupported platform(s): {}",
             unknown_platforms.join(", ")
         ));
     }
@@ -119,7 +119,7 @@ fn validate_flags(command: &BuildCommand) -> Result<(), String> {
 
 fn attach_distribution(modules: &mut [Module]) -> Result<(), String> {
     let stdlib = krusty::jvm::kotlin_stdlib_jar().ok_or_else(|| {
-        "cannot locate kotlin-stdlib.jar; kotlin build adds the standard library the Kotlin distribution provides"
+        "cannot locate kotlin-stdlib.jar; krusty-kotlin build adds the standard library the Kotlin distribution provides"
             .to_string()
     })?;
     require_absolute("kotlin-stdlib.jar", &stdlib)?;
@@ -373,7 +373,7 @@ fn parse_product(file: &Path, value: &Yaml) -> Result<Product, String> {
         "jvm/app" => Ok(Product::JvmApp),
         "jvm/lib" => Ok(Product::JvmLib),
         other => Err(format!(
-            "{file}: unsupported product type '{other}'; kotlin build compiles jvm/app and jvm/lib",
+            "{file}: unsupported product type '{other}'; krusty-kotlin build compiles jvm/app and jvm/lib",
             file = file.display()
         )),
     }
@@ -479,7 +479,7 @@ fn parse_scope(file: &Path, value: &str) -> Result<Scope, String> {
 fn dep_spec(file: &Path, notation: &str, exported: bool, scope: Scope) -> Result<DepSpec, String> {
     if notation.starts_with('$') {
         return Err(format!(
-            "{file}: dependency '{notation}' uses a version catalog; kotlin build does not resolve catalogs yet",
+            "{file}: dependency '{notation}' uses a version catalog; krusty-kotlin build does not resolve catalogs yet",
             file = file.display()
         ));
     }
@@ -494,7 +494,7 @@ fn dep_spec(file: &Path, notation: &str, exported: bool, scope: Scope) -> Result
     }
     if !notation.starts_with("//") && !notation.starts_with('.') {
         return Err(format!(
-            "{file}: dependency '{notation}' is an external library; kotlin build does not resolve Maven coordinates yet",
+            "{file}: dependency '{notation}' is an external library; krusty-kotlin build does not resolve Maven coordinates yet",
             file = file.display()
         ));
     }
@@ -1219,7 +1219,7 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "{}: dependency 'io.ktor:ktor-client-java:2.3.0' is an external library; kotlin build does not resolve Maven coordinates yet",
+                "{}: dependency 'io.ktor:ktor-client-java:2.3.0' is an external library; krusty-kotlin build does not resolve Maven coordinates yet",
                 external.0.join("module.yaml").display()
             )
         );
@@ -1244,7 +1244,7 @@ mod tests {
         assert_eq!(
             load(&command(&native.0)).unwrap_err(),
             format!(
-                "{}: unsupported product type 'linux/app'; kotlin build compiles jvm/app and jvm/lib",
+                "{}: unsupported product type 'linux/app'; krusty-kotlin build compiles jvm/app and jvm/lib",
                 native.0.join("module.yaml").display()
             )
         );
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(
             load(&command(&gradle.0)).unwrap_err(),
             format!(
-                "kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                "krusty-kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
                  {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
                 gradle.0.display()
             )
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(
             load(&command(&idea.0)).unwrap_err(),
             format!(
-                "kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                "krusty-kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
                  {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
                 idea.0.display()
             )
@@ -1308,7 +1308,7 @@ mod tests {
         assert_eq!(
             load(&command(&sample)).unwrap_err(),
             format!(
-                "kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+                "krusty-kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
                  {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
                 sample.display()
             )
@@ -1328,7 +1328,7 @@ mod tests {
         request.platforms = vec!["iosArm64".to_string()];
         assert_eq!(
             load(&request).unwrap_err(),
-            "kotlin build compiles the JVM. Unsupported platform(s): iosArm64"
+            "krusty-kotlin build compiles the JVM. Unsupported platform(s): iosArm64"
         );
         request.platforms.clear();
         request.variants = vec!["preview".to_string()];

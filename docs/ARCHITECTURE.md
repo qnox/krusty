@@ -43,8 +43,8 @@ boundary.
 - **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
   library and exposes frontend and backend contracts. `crates/krusty-cli` owns kotlinc-compatible
   batch argument parsing, filesystem output, and process exit behavior. `crates/krusty-kotlin` owns
-  the Kotlin Toolchain command line (`kotlin build`) and depends on `krusty-build`, not on the
-  compiler executable. `crates/krusty-lsp` owns its in-memory source-set analysis, JSON-RPC,
+  the Kotlin Toolchain command line (`krusty-kotlin build`) and depends on `krusty-build`, not on
+  the compiler executable. `crates/krusty-lsp` owns its in-memory source-set analysis, JSON-RPC,
   document lifecycle, and compact editor query snapshots. These packages depend toward the compiler
   library or the build layer; the compiler never depends on any process adapter or on the build
   layer. LSP compiler analysis is an internal module—not a single-consumer workspace
@@ -62,12 +62,15 @@ drives a compiler through an explicit environment boundary. The crate is a consu
 library; neither the compiler nor a target backend may depend on it.
 
 `krusty` (the `krusty-cli` executable) stays a drop-in for `kotlinc` and does not link this crate.
-The `kotlin` executable (`crates/krusty-kotlin`) is the drop-in for the Kotlin Toolchain CLI.
-`kotlin build` reads `module.yaml` and `project.yaml` and compiles JVM modules with the driver
-above, spawning `krusty` (`KRUSTY_COMPILER`, a sibling of the `kotlin` executable, or `PATH`). It
-does not extend the toolchain's plugin API, and it does not shell out to an upstream toolchain
-distribution. Gradle and JetBrains `.iml` projects remain language-server project models.
-`kotlin build` recognizes them and stops, so a Gradle tree is not parsed as a toolchain project.
+Upstream pairs that compiler with a driver named `kotlin` (`swiftc`/`swift build`, `scalac`/`scala`).
+krusty already ships the compiler as `krusty` and the language server as `krusty-lsp`, so the driver
+is `krusty-kotlin` rather than a binary named `kotlin`. `krusty-kotlin build` reads `module.yaml`
+and `project.yaml` and compiles JVM modules with the driver above, spawning `krusty`
+(`KRUSTY_COMPILER`, a sibling of the `krusty-kotlin` executable, or `PATH`). It accepts the same
+`build` options as the toolchain command. It does not extend the toolchain's plugin API, and it
+does not shell out to an upstream toolchain distribution. Gradle and JetBrains `.iml` projects
+remain language-server project models. `krusty-kotlin build` recognizes them and stops, so a Gradle
+tree is not parsed as a toolchain project.
 
 The build model is wider than an analysis-only project model. A build unit records resources, Java
 sources, module name, processor inputs, per-module JDK selection, friend paths, and output shape
