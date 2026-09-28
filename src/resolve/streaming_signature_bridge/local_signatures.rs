@@ -484,7 +484,7 @@ fn publish_checked_local_signatures_selected(
             return false;
         }
         let is_interface = |index: &crate::fir::ResolvedModuleIndex, ty: Ty| {
-            ty.non_null().obj_internal().is_some_and(|owner| {
+            crate::fir::ResolvedTypeParameterBound::is_interface_type(ty, |owner| {
                 index
                     .classifier_declaration(owner)
                     .and_then(|declaration| index.declaration_header(declaration))

@@ -50525,6 +50525,7 @@ impl<'a> Checker<'a> {
     fn value_type_claims_call(&self, scope: &CheckerScope<'_>, ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Fun(_))
             || !self.invoke_operator_candidates(ty).is_empty()
+            || !self.nominal_function_types(scope, ty).is_empty()
             || self
                 .member_extension_function_shapes(scope, ty, CALLABLE_INVOKE_OPERATOR)
                 .into_iter()
@@ -52578,11 +52579,12 @@ impl<'a> Checker<'a> {
         if checked.contains_error() {
             self.report_unresolved_type_ref(bound);
         }
-        let bound_is_interface = checked
-            .non_null()
-            .obj_internal()
-            .and_then(|owner| self.fed_source().classifier(owner))
-            .is_some_and(|classifier| classifier.is_interface());
+        let bound_is_interface =
+            crate::fir::ResolvedTypeParameterBound::is_interface_type(checked, |owner| {
+                self.fed_source()
+                    .classifier(owner)
+                    .is_some_and(|classifier| classifier.is_interface())
+            });
         self.resolved_type_bounds.insert(
             (bound.span.lo, bound.span.hi),
             (checked, bound_is_interface),
@@ -63060,27 +63062,7 @@ impl<'a> Checker<'a> {
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
             return vec![function];
         }
-
-        let mut functions = self.stable_classifier_callable_signatures(nominal);
-        for bound in nominal
-            .non_null()
-            .ty_param_bound()
-            .into_iter()
-            .chain(self.semantic_tparam_extra_bounds(scope, nominal.non_null()))
-        {
-            let bound = bound.non_null();
-            let callable_bounds = if matches!(bound, Ty::Fun(_)) {
-                vec![bound]
-            } else {
-                self.stable_classifier_callable_signatures(bound)
-            };
-            for callable in callable_bounds {
-                if !functions.contains(&callable) {
-                    functions.push(callable);
-                }
-            }
-        }
-        functions
+        self.nominal_function_types(scope, nominal)
     }
 
     /// Callable constituent of an expression used for a particular SAM target. A type parameter

@@ -59,6 +59,32 @@ impl SelectedInvokePlan {
 }
 
 impl Checker<'_> {
+    /// The function types a value of `nominal` type can be invoked as: the function supertypes of
+    /// its classifier, and for a type parameter those of every bound (`T : (Int) -> Int` makes a
+    /// `T` value callable exactly like a `(Int) -> Int` one).
+    pub(super) fn nominal_function_types(&self, scope: &CheckerScope<'_>, nominal: Ty) -> Vec<Ty> {
+        let mut functions = self.stable_classifier_callable_signatures(nominal);
+        for bound in nominal
+            .non_null()
+            .ty_param_bound()
+            .into_iter()
+            .chain(self.semantic_tparam_extra_bounds(scope, nominal.non_null()))
+        {
+            let bound = bound.non_null();
+            let callable_bounds = if matches!(bound, Ty::Fun(_)) {
+                vec![bound]
+            } else {
+                self.stable_classifier_callable_signatures(bound)
+            };
+            for callable in callable_bounds {
+                if !functions.contains(&callable) {
+                    functions.push(callable);
+                }
+            }
+        }
+        functions
+    }
+
     /// Select the property and its value's invoke operator once, while non-contextual arguments are
     /// already typed and lambda slots are still postponed. Only an exact overload produces a plan;
     /// ambiguity or incomplete declaration facts remain non-permissive and are diagnosed by the

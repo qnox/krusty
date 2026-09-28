@@ -14,6 +14,20 @@ pub struct ResolvedTypeParameterBound {
     pub is_interface: bool,
 }
 
+impl ResolvedTypeParameterBound {
+    /// Whether an upper bound is an interface type. A function type is a `kotlin.FunctionN`
+    /// interface type; a classifier type is one when its declaration is an interface.
+    pub fn is_interface_type(
+        bound: Ty,
+        classifier_is_interface: impl FnOnce(crate::types::TypeName) -> bool,
+    ) -> bool {
+        match bound.non_null() {
+            Ty::Fun(_) => true,
+            bound => bound.obj_internal().is_some_and(classifier_is_interface),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResolvedTypeParameterFlags(u8);
 

@@ -803,6 +803,8 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "function_value_conversion_e2e.rs"]
 mod function_value_conversion_e2e;
+#[path = "generic_argument_wildcards_e2e.rs"]
+mod generic_argument_wildcards_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
@@ -1964,6 +1966,8 @@ mod type_annotation_newline_e2e;
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "type_parameter_invoke_e2e.rs"]
+mod type_parameter_invoke_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]
 mod type_parameter_nullability_e2e;
 #[path = "typealias_abbreviated_type_e2e.rs"]

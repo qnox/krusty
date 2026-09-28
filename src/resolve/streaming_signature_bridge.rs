@@ -5575,16 +5575,17 @@ pub(crate) fn finalized_streamed_signature_index(
                 .unwrap_or_default()
                 .into_iter()
                 .map(|bound| {
-                    let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                        table
-                            .classes
-                            .get(&owner)
-                            .is_some_and(|classifier| classifier.is_interface())
-                            || table
-                                .libraries
-                                .classifier(owner)
+                    let is_interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            table
+                                .classes
+                                .get(&owner)
                                 .is_some_and(|classifier| classifier.is_interface())
-                    });
+                                || table
+                                    .libraries
+                                    .classifier(owner)
+                                    .is_some_and(|classifier| classifier.is_interface())
+                        });
                     (bound, is_interface)
                 });
             if index
@@ -5741,16 +5742,17 @@ pub(crate) fn finalized_streamed_signature_index(
             // as a classifier-owned captured slot now; waiting for checked body publication would
             // leave the supposedly finalized module index incomplete at the Pass-2 boundary.
             let ordinal = own_count + captured_ordinal;
-            let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                table
-                    .classes
-                    .get(&owner)
-                    .is_some_and(|classifier| classifier.is_interface())
-                    || table
-                        .libraries
-                        .classifier(owner)
+            let is_interface =
+                crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                    table
+                        .classes
+                        .get(&owner)
                         .is_some_and(|classifier| classifier.is_interface())
-            });
+                        || table
+                            .libraries
+                            .classifier(owner)
+                            .is_some_and(|classifier| classifier.is_interface())
+                });
             if index
                 .publish_type_parameter(
                     stub.id,

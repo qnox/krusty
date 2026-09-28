@@ -6245,6 +6245,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
   `::labelled_return_leaves_the_lambda_not_the_function`,
   `::inline_local_labeled_return`.
+- **A value whose type parameter is bounded by a function type can be invoked.** `t(5)` on
+  `t: T` with `T : (Int) -> Int` (or `where T : (Int) -> Int`) is the invoke convention over the
+  bound, exactly as on a `(Int) -> Int` value, and kotlinc calls the erased `Function1.invoke`. The
+  call-claiming check consulted only a function type itself and declared `invoke` members, so the
+  call reported "unresolved reference 't'". The bound is an interface bound (`T::…Function1…`) and,
+  like every type-parameter bound, is signed with all declaration-site wildcards. Tests:
+  `tests/type_parameter_invoke_e2e.rs`, `tests/generic_argument_wildcards_e2e.rs`.
 - **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
   `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
   arguments were typed with no expectation, so `it` came out as the erased upper bound and the call
