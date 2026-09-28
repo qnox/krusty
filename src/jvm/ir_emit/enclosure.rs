@@ -121,7 +121,7 @@ fn scope_enclosure(
                 parameters.splice(0..0, [Ty::String, Ty::Int]);
             }
             Some((
-                declaration.fq_name(),
+                declaration.fq_name().to_owned(),
                 Some((
                     "<init>".to_string(),
                     method_descriptor(&parameters, Ty::Unit),
@@ -130,7 +130,7 @@ fn scope_enclosure(
         }
         crate::ir::IrEnclosure::File => Some((facade.to_string(), None)),
         crate::ir::IrEnclosure::Classifier(class) => {
-            Some((ir.classes[class as usize].fq_name(), None))
+            Some((ir.classes[class as usize].fq_name().to_owned(), None))
         }
         crate::ir::IrEnclosure::ClassInitializer(class) => {
             let class = &ir.classes[class as usize];
@@ -144,10 +144,10 @@ fn scope_enclosure(
                 } else {
                     outer
                 };
-                return Some((holder.fq_name(), None));
+                return Some((holder.fq_name().to_owned(), None));
             }
             if static_storage(ir, class) {
-                return Some((class.fq_name(), None));
+                return Some((class.fq_name().to_owned(), None));
             }
             // An enum entry's class initializes its body through its `(String, int, ...)V`
             // constructor, which it declares with no primary constructor of its own.
@@ -157,11 +157,17 @@ fn scope_enclosure(
                     .chain(jvm_tys(arguments))
                     .collect();
                 let descriptor = method_descriptor(&parameters, Ty::Unit);
-                return Some((class.fq_name(), Some(("<init>".to_string(), descriptor))));
+                return Some((
+                    class.fq_name().to_owned(),
+                    Some(("<init>".to_string(), descriptor)),
+                ));
             }
             class.has_primary_ctor.then(|| {
                 let descriptor = method_descriptor(&class_ctor_jvm_tys(class), Ty::Unit);
-                (class.fq_name(), Some(("<init>".to_string(), descriptor)))
+                (
+                    class.fq_name().to_owned(),
+                    Some(("<init>".to_string(), descriptor)),
+                )
             })
         }
     }

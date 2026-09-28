@@ -260,6 +260,11 @@ fn arena_builders_append_and_index() {
     });
     assert_eq!(cid, 0);
     assert!(f.classes[cid as usize].fq_name_matches("demo/C"));
+    assert_eq!(f.classes[cid as usize].fq_name(), "demo/C");
+    assert!(std::ptr::eq(
+        f.classes[cid as usize].fq_name(),
+        f.classes[cid as usize].fq_name()
+    ));
 }
 
 #[test]

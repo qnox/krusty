@@ -85,7 +85,7 @@ impl Shape {
             })
             .collect::<Vec<_>>();
         Shape {
-            class: c.fq_name(),
+            class: c.fq_name().to_owned(),
             captures: lambda
                 .captures
                 .iter()
