@@ -12231,7 +12231,7 @@ impl<'a> Emitter<'a> {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
             Ty::Nullable(_) | Ty::PlatformNullable(_) => {
-                VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
+                VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty).to_owned())
             }
             Ty::Null => VerifType::Null,
             _ => VerifType::Top,
