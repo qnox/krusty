@@ -839,7 +839,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion` modifier; such a declaration's context parameters are its implicit receivers, ahead
   of its classifier's static scope, and `this` and `C`'s instance members are not in scope there
   (`companion_extensions_with_context_parameters_see_their_classifier_scope`,
-  `companion_extension_has_no_value_receiver`).
+  `companion_extension_has_no_value_receiver`). An untyped companion-extension property
+  infers its getter with those named context parameters in scope as leading value parameters,
+  so `context(c1: C1, c2: C2) companion val E.a get() = c1.o + c2.k` publishes `E.a: String`
+  (`several_context_parameters_reach_a_companion_extension`).
 - **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
   realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
   an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and

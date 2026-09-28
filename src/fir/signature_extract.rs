@@ -10,6 +10,7 @@ use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
 
 use super::coverage::ExpressionForm;
+use super::signature_source::{source_function, source_property, source_signature_expression};
 use super::{
     DeclarationId, DeclarationStub, DeferredCallableSelection, DeferredMemberSelection,
     DeferredValueSelection, OriginId, ResolvedTy, SigCallArgument, SigExpr, SigExprId,
@@ -266,6 +267,16 @@ impl SignatureConstraintExtractor {
                     }
                     parameters.insert(parameter.name.clone().into_boxed_str(), value);
                 }
+            } else if let Some(property) = source_property(file, stub.range) {
+                // A property getter is not a function, so its `context(...)` names are not in
+                // `function.params`. Named context parameters are leading value parameters of the
+                // property; without them an untyped getter that reads one never publishes.
+                self.bind_property_context_parameters(
+                    property,
+                    stub.id,
+                    &mut parameters,
+                    &mut callables,
+                );
             }
             let enclosing_classifier = file
                 .decls
@@ -2917,82 +2928,34 @@ impl SignatureConstraintExtractor {
             .collect::<Vec<_>>();
         self.graph.add_operands(arguments)
     }
-}
 
-fn source_function(file: &File, range: crate::diag::Span) -> Option<&crate::ast::FunDecl> {
-    for declaration in &file.decl_arena {
-        match declaration {
-            crate::ast::Decl::Fun(function) if function.span == range => return Some(function),
-            crate::ast::Decl::Class(class) => {
-                if let Some(function) = class
-                    .methods
-                    .iter()
-                    .chain(
-                        class
-                            .enum_entries
-                            .iter()
-                            .flat_map(|entry| entry.methods.iter()),
-                    )
-                    .find(|function| function.span == range)
-                {
-                    return Some(function);
-                }
+    /// Bind a property's named context parameters as leading value parameters of its inferred
+    /// signature. Anonymous and legacy context receivers have no source name.
+    fn bind_property_context_parameters(
+        &mut self,
+        property: &crate::ast::PropDecl,
+        declaration: DeclarationId,
+        parameters: &mut HashMap<Box<str>, SigExprId>,
+        callables: &mut HashMap<Box<str>, CompactLexicalCallable>,
+    ) {
+        for (index, parameter) in property.context_params.iter().enumerate() {
+            if parameter.context_kind != crate::types::ContextParameterKind::Named {
+                continue;
             }
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => {}
-        }
-    }
-    None
-}
-
-fn source_property(file: &File, range: crate::diag::Span) -> Option<&crate::ast::PropDecl> {
-    for declaration in &file.decl_arena {
-        match declaration {
-            crate::ast::Decl::Property(property) if property.span == range => {
-                return Some(property);
+            let value = self.graph.add_expr(SigExpr::Parameter {
+                declaration,
+                index: u32::try_from(index).expect("too many signature parameters"),
+            });
+            if parameter.ty.fun_has_receiver() {
+                callables.insert(
+                    parameter.name.clone().into_boxed_str(),
+                    CompactLexicalCallable {
+                        value,
+                        has_receiver: true,
+                    },
+                );
             }
-            crate::ast::Decl::Class(class) => {
-                if let Some(property) = class
-                    .body_props
-                    .iter()
-                    .chain(
-                        class
-                            .enum_entries
-                            .iter()
-                            .flat_map(|entry| entry.props.iter()),
-                    )
-                    .find(|property| property.span == range)
-                {
-                    return Some(property);
-                }
-            }
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => {}
+            parameters.insert(parameter.name.clone().into_boxed_str(), value);
         }
-    }
-    None
-}
-
-fn source_signature_expression(file: &File, stub: &DeclarationStub) -> Option<ExprId> {
-    match stub.kind {
-        super::DeclarationKind::Function => match source_function(file, stub.range)?.body {
-            crate::ast::FunBody::Expr(expression) => Some(expression),
-            crate::ast::FunBody::Block(_) | crate::ast::FunBody::None => None,
-        },
-        super::DeclarationKind::Property => {
-            let property = source_property(file, stub.range)?;
-            property
-                .delegate
-                .or(property.init)
-                .or_else(|| match property.getter.as_ref() {
-                    Some(crate::ast::FunBody::Expr(expression)) => Some(*expression),
-                    Some(crate::ast::FunBody::Block(_) | crate::ast::FunBody::None) | None => None,
-                })
-        }
-        super::DeclarationKind::Classifier
-        | super::DeclarationKind::EnumEntry
-        | super::DeclarationKind::TypeAlias
-        | super::DeclarationKind::Constructor
-        | super::DeclarationKind::Accessor
-        | super::DeclarationKind::Initializer
-        | super::DeclarationKind::Script => None,
     }
 }
