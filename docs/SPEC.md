@@ -7547,6 +7547,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type with the generic slot; the realized `unbox-impl` of that class marks the value as
   already the carrier, so no second unbox is inserted at the return. Tests:
   `tests/value_class_object_carrier_generic_result_e2e.rs`.
+- **A nullable value class over `Any?` passed as `Any?` keeps its box.** `W?` for
+  `value class W(val a: Any?)` is the box, since a null carrier cannot tell `W(null)` from a null
+  `W?`. Its coercion to `Any?` has the carrier's type, yet only a recorded read of the class's sole
+  property unboxes to the carrier; `result = vc` stores the box as it is, as kotlinc does. Tests:
+  `tests/value_class_nullable_any_carrier_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
