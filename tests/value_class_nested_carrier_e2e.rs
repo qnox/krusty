@@ -37,5 +37,5 @@ fn a_nested_value_class_property_reads_as_its_carrier() {
 
 #[test]
 fn a_nested_value_class_property_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassNestedCarrier");
 }

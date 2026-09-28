@@ -35,5 +35,5 @@ fn an_inherited_default_call_boxes_its_value_class_receiver() {
 
 #[test]
 fn an_inherited_default_call_on_a_value_class_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassInterfaceDefaultReceiver");
 }

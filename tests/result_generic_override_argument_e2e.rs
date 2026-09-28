@@ -53,7 +53,7 @@ fn the_override_does_not_null_check_its_boxed_result() {
 
 #[test]
 fn a_result_passed_to_a_generic_override_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ResultGenericOverride");
 }
 
 /// The override shares its name with an overload declared before it. Only the override the bridge
@@ -97,5 +97,5 @@ fn only_the_bridged_overload_receives_the_box() {
 
 #[test]
 fn an_overloaded_result_override_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(OVERLOADED, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(OVERLOADED, "ResultGenericOverrideOverload");
 }

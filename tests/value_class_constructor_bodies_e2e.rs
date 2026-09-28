@@ -74,5 +74,5 @@ fn a_class_in_a_value_class_constructor_is_enclosed_by_its_constructor_impl() {
 
 #[test]
 fn value_class_constructor_bodies_run() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassConstructorBodies");
 }

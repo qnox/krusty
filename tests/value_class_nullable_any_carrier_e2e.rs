@@ -37,5 +37,5 @@ fn a_boxed_nullable_value_class_passed_as_any_keeps_its_box() {
 
 #[test]
 fn a_boxed_nullable_value_class_passed_as_any_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassNullableAnyCarrier");
 }

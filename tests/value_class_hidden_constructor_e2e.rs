@@ -99,7 +99,7 @@ fn an_inner_class_reads_its_outer_value_class_as_the_carrier() {
         common::method_instructions(&built.krusty, constructor),
         reference
     );
-    assert_eq!(common::expect_box_run_with_stdlib(INNER_SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(INNER_SRC, "InnerHiddenConstructor");
 }
 
 #[test]

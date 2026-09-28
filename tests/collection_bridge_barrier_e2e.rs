@@ -71,7 +71,7 @@ fn a_map_checks_the_value_type_of_contains_value() {
 
 #[test]
 fn collection_bridges_reject_foreign_values() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "CollectionBridgeBarrier");
 }
 
 /// A value class that delegates a mutable collection forwards bulk updates (`addAll`, `putAll`)
@@ -102,5 +102,5 @@ const BULK: &str = "@JvmInline value class IC1<T>(val list: MutableList<T>) : Mu
 
 #[test]
 fn a_delegated_value_class_collection_forwards_bulk_updates() {
-    assert_eq!(common::expect_box_run_with_stdlib(BULK, "Bulk"), "OK");
+    common::expect_box_same_as_kotlinc(BULK, "BulkCollectionBridgeBarrier");
 }

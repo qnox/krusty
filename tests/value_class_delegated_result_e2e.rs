@@ -45,5 +45,5 @@ fn a_delegated_value_class_result_is_unboxed_once() {
 
 #[test]
 fn a_delegated_value_class_result_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassDelegatedResult");
 }

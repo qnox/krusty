@@ -19,5 +19,5 @@ const SRC: &str = "@JvmInline value class Outcome<out T>(val value: Any?) {\n\
 
 #[test]
 fn a_try_taking_its_value_class_from_a_handler_is_the_carrier() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassTryValue");
 }

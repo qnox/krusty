@@ -46,5 +46,5 @@ fn a_member_returning_a_value_class_is_boxed_without_a_null_test() {
 
 #[test]
 fn a_nested_value_class_property_runs() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassNestedSoleProperty");
 }

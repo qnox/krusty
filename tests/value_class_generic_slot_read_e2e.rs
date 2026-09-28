@@ -48,5 +48,5 @@ fn a_generic_slot_read_unboxes_a_carrier_nullable_value_class_null_safely() {
 
 #[test]
 fn generic_slot_reads_run() {
-    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassGenericSlotRead");
 }
