@@ -99,8 +99,9 @@ pub(super) fn splice_type_map(
 fn reified_class_internal(ty: Ty) -> Option<String> {
     let value = ty.non_null();
     if let Ty::Fun(signature) = value {
-        return (!signature.suspend)
-            .then(|| super::names::function_interface_internal_name(signature.params.len()));
+        return (!signature.suspend).then(|| {
+            super::names::function_interface_internal_name(signature.params.len()).to_owned()
+        });
     }
     if value.is_array() {
         return Some(super::names::instanceof_internal_name(value));
