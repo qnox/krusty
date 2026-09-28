@@ -145,7 +145,10 @@ mod tests {
             &mut self,
             documents: &[(&str, &str)],
             _open_uris: &[&str],
-        ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        ) -> (
+            Vec<DocumentAnalysis>,
+            Vec<(String, krusty_lsp::SharedSource)>,
+        ) {
             let group = ProjectAnalysisGroup::new(
                 None,
                 (0..documents.len()).collect(),

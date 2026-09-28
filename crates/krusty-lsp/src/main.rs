@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -1614,7 +1613,10 @@ impl krusty_lsp::Analysis for WorkerHost {
         &mut self,
         documents: &[(&str, &str)],
         open_uris: &[&str],
-    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+    ) -> (
+        Vec<DocumentAnalysis>,
+        Vec<(String, krusty_lsp::SharedSource)>,
+    ) {
         let module_assignments = project_module_assignments(
             self.sync.as_ref().and_then(ProjectSync::snapshot),
             documents,
@@ -1650,18 +1652,13 @@ impl krusty_lsp::Analysis for WorkerHost {
                 self.sync.as_ref().and_then(ProjectSync::model),
                 module_index,
             ) {
-                (Some(_), Some(_)) => self
-                    .project_sources
-                    .load(
-                        module_relations.expect("project model relation graph"),
-                        &modeled_documents,
-                        open_uris,
-                        krusty_lsp::MAX_SOURCE_SET_BYTES,
-                    )
-                    .map(|(sources, inferred_count, java_sources)| {
-                        (Cow::Borrowed(sources), inferred_count, java_sources)
-                    }),
-                _ => Ok((Cow::Owned(Vec::new()), 0, Vec::new())),
+                (Some(_), Some(_)) => self.project_sources.load(
+                    module_relations.expect("project model relation graph"),
+                    &modeled_documents,
+                    open_uris,
+                    krusty_lsp::MAX_SOURCE_SET_BYTES,
+                ),
+                _ => Ok((Vec::new(), 0, Vec::new())),
             };
             let (disk, inferred_count, java_sources) = match loaded {
                 Ok(loaded) => loaded,
@@ -1702,7 +1699,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             };
             let (friend_documents, dependency_documents) = visible_open_documents;
             let (group_support, inferred_support_count) = support_splice::spliced_support(
-                disk.as_ref(),
+                &disk,
                 inferred_count,
                 &friend_documents,
                 &dependency_documents,
@@ -1732,6 +1729,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             let (navigation_file_remaps, added_bytes) = register_canonical_support(
                 &open_documents,
                 &group_support,
+                &disk,
                 &mut support_documents,
                 &mut support_indices,
                 krusty_lsp::MAX_SOURCE_SET_BYTES.saturating_sub(retained_support_bytes),
@@ -2737,6 +2735,7 @@ mod tests {
         let (first_remaps, _) = register_canonical_support(
             &open_documents,
             &first_support,
+            &[],
             &mut support_documents,
             &mut support_indices,
             usize::MAX,
@@ -2746,6 +2745,7 @@ mod tests {
         let (second_remaps, _) = register_canonical_support(
             &open_documents,
             &second_support,
+            &[],
             &mut support_documents,
             &mut support_indices,
             usize::MAX,
@@ -2773,6 +2773,8 @@ mod tests {
             ("file:///shed.kt", "yy"),
             ("file:///also-shed.kt", "zzz"),
         ];
+        let kept = krusty_lsp::SharedSource::from("x");
+        let disk = [("file:///kept.kt".to_string(), kept.clone())];
         let mut support_documents = Vec::new();
         let mut support_indices = HashMap::new();
         let mut next_discarded = u32::MAX;
@@ -2780,6 +2782,7 @@ mod tests {
         let (remaps, added_bytes) = register_canonical_support(
             &OpenDocumentSlots::from_documents(&documents),
             &support,
+            &disk,
             &mut support_documents,
             &mut support_indices,
             1,
@@ -2788,10 +2791,14 @@ mod tests {
         );
 
         assert_eq!(added_bytes, 1);
+        assert!(
+            std::sync::Arc::ptr_eq(&disk[0].1, &support_documents[0].1),
+            "a retained support file must keep the cached allocation"
+        );
         assert_eq!(
             (
                 support_documents[0].0.as_str(),
-                support_documents[0].1.as_str()
+                support_documents[0].1.as_ref()
             ),
             support[0]
         );

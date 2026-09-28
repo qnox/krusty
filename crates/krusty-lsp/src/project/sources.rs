@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::model::{SourceModuleGraph, SourceModuleGraphKey};
 
@@ -12,7 +13,10 @@ const MAX_CACHED_MODULE_KEYS: usize = 32 * 1024;
 /// so reports must be rare enough that rendering them never competes with the walk itself.
 const SCAN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>);
+/// Kotlin source text retained by the project cache. A later load clones the handle, not the bytes.
+pub type SharedSource = Arc<str>;
+
+pub type LoadedProjectSources = (Vec<(String, SharedSource)>, usize, Vec<String>);
 
 #[derive(Default)]
 pub struct ProjectSources {
@@ -23,7 +27,7 @@ pub struct ProjectSources {
 
 struct Cache {
     key: CacheKey,
-    documents: Vec<(String, String)>,
+    documents: Vec<(String, SharedSource)>,
     java_documents: Vec<(String, String)>,
     inferred_count: usize,
     kotlin_bytes: usize,
@@ -78,7 +82,7 @@ impl ProjectSources {
         documents: &[(&str, &str)],
         open_uris: &[&str],
         max_bytes: usize,
-    ) -> Result<LoadedProjectSources<'_>, String> {
+    ) -> Result<LoadedProjectSources, String> {
         let model = module_relations.model();
         if self.model_key.as_ref() != Some(module_relations.cache_key()) {
             self.model_key = Some(module_relations.cache_key().clone());
@@ -172,7 +176,7 @@ impl ProjectSources {
             }
             let java_sources =
                 sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
-            return Ok((&cache.documents, cache.inferred_count, java_sources));
+            return Ok((cache.documents.clone(), cache.inferred_count, java_sources));
         }
 
         // Every root in one walk: a source root is usually a few dozen package directories, and a
@@ -271,6 +275,10 @@ impl ProjectSources {
         inferred_paths.extend(dependency_paths);
 
         let (documents, kotlin_bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
+        let documents = documents
+            .into_iter()
+            .map(|(uri, source)| (uri, SharedSource::from(source)))
+            .collect();
         let java_documents = load_java_documents_by_import_closure(
             java_paths,
             &cache_key.import_seed,
@@ -298,7 +306,7 @@ impl ProjectSources {
         let cache = self.caches.last().unwrap();
         let java_sources =
             sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
-        Ok((&cache.documents, cache.inferred_count, java_sources))
+        Ok((cache.documents.clone(), cache.inferred_count, java_sources))
     }
 
     #[cfg(test)]
@@ -308,7 +316,7 @@ impl ProjectSources {
         documents: &[(&str, &str)],
         open_uris: &[&str],
         max_bytes: usize,
-    ) -> Result<LoadedProjectSources<'_>, String> {
+    ) -> Result<LoadedProjectSources, String> {
         let snapshot = model.clone().into_source_module_graph();
         self.load(&snapshot, documents, open_uris, max_bytes)
     }
@@ -816,6 +824,13 @@ mod tests {
         }
     }
 
+    fn source_text(loaded: &[(String, SharedSource)]) -> Vec<(String, String)> {
+        loaded
+            .iter()
+            .map(|(uri, source)| (uri.clone(), source.to_string()))
+            .collect()
+    }
+
     fn dependency_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, ProjectModel) {
         let directory = temp_path(label);
         let app = directory.join("app");
@@ -894,7 +909,7 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            loaded,
+            source_text(&loaded),
             [(file_uri(&lib_kt), "fun libFun() {}".to_string())],
             "a stale build must not shadow newer dependency source"
         );
@@ -924,7 +939,34 @@ mod tests {
         let loaded = loaded.to_vec();
 
         fs::remove_dir_all(directory).ok();
-        assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
+        assert_eq!(
+            source_text(&loaded),
+            [(file_uri(&lib_kt), "fun libFun() {}".to_string())]
+        );
+    }
+
+    #[test]
+    fn repeated_load_shares_cached_support_text() {
+        let (directory, use_kt, _lib_kt, _lib_classes, model) =
+            dependency_fixture("dep-shared-text");
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), "fun use() {}")];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (first, _, _) = sources
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        let (second, _, _) = sources
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(first.len(), 1);
+        assert!(
+            Arc::ptr_eq(&first[0].1, &second[0].1),
+            "a cache hit must hand out the stored text, not a fresh copy"
+        );
     }
 
     #[test]
@@ -942,7 +984,10 @@ mod tests {
         let loaded = loaded.to_vec();
 
         fs::remove_dir_all(directory).ok();
-        assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
+        assert_eq!(
+            source_text(&loaded),
+            [(file_uri(&lib_kt), "fun libFun() {}".to_string())]
+        );
     }
 
     #[test]
@@ -996,7 +1041,10 @@ mod tests {
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
-        assert_eq!(loaded, [(file_uri(&support_kt), "val s=1".to_string())]);
+        assert_eq!(
+            source_text(&loaded),
+            [(file_uri(&support_kt), "val s=1".to_string())]
+        );
         assert_eq!(inferred_count, 1);
         assert!(java_docs.is_empty());
     }
@@ -1259,11 +1307,11 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            first_loaded,
+            source_text(&first_loaded),
             [(file_uri(&first_support), "fun first() {}".to_string())]
         );
         assert_eq!(
-            second_loaded,
+            source_text(&second_loaded),
             [(file_uri(&second_support), "fun second() {}".to_string())]
         );
         assert_eq!(first_cached, first_loaded);
@@ -1311,7 +1359,7 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            with_dependency,
+            source_text(&with_dependency),
             [(file_uri(&support), "fun support() {}".to_string())]
         );
         assert!(without_dependency.is_empty());
@@ -1429,7 +1477,7 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            loaded,
+            source_text(&loaded),
             [(file_uri(&support), "val support = 1".to_string())]
         );
         assert_eq!(inferred_count, 1);
@@ -1501,7 +1549,7 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            loaded,
+            source_text(&loaded),
             [
                 (
                     file_uri(&local),
@@ -1556,7 +1604,7 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
-            loaded,
+            source_text(&loaded),
             [(
                 file_uri(&associated_source),
                 "package sample\nfun available() = 1\n".to_string()
@@ -1578,7 +1626,7 @@ mod tests {
                 .map(|index| {
                     (
                         format!("{module_index}/{index}.kt"),
-                        "x".repeat(bytes / entries),
+                        SharedSource::from("x".repeat(bytes / entries)),
                     )
                 })
                 .collect(),

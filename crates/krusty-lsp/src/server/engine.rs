@@ -144,7 +144,7 @@ impl AnalysisJob {
 pub struct AnalysisBatch {
     pub analyzed: Vec<(String, i64)>,
     pub analyses: Vec<DocumentAnalysis>,
-    pub support_documents: Vec<(String, String)>,
+    pub support_documents: Vec<(String, crate::SharedSource)>,
     pub pending: bool,
 }
 
@@ -1609,7 +1609,7 @@ mod tests {
                 &mut self,
                 documents: &[(&str, &str)],
                 _open_uris: &[&str],
-            ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+            ) -> (Vec<DocumentAnalysis>, Vec<(String, crate::SharedSource)>) {
                 let state = if self.reconfigured {
                     "reconfigured"
                 } else {
@@ -1620,7 +1620,7 @@ mod tests {
                         .iter()
                         .map(|_| DocumentAnalysis::empty())
                         .collect(),
-                    vec![("state".to_string(), state.to_string())],
+                    vec![("state".to_string(), state.into())],
                 )
             }
         }
@@ -1651,7 +1651,7 @@ mod tests {
         }
         assert_eq!(
             support,
-            Some(vec![("state".to_string(), "reconfigured".to_string())]),
+            Some(vec![("state".to_string(), "reconfigured".into())]),
             "analysis published after a reconfigure must reflect the reconfigured worker"
         );
         engine.join();

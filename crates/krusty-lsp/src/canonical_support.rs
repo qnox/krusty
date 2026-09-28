@@ -25,7 +25,8 @@ impl<'a> OpenDocumentSlots<'a> {
 pub(super) fn register_canonical_support(
     open_documents: &OpenDocumentSlots<'_>,
     group_support: &[(&str, &str)],
-    support_documents: &mut Vec<(String, String)>,
+    disk: &[(String, krusty_lsp::SharedSource)],
+    support_documents: &mut Vec<(String, krusty_lsp::SharedSource)>,
     support_indices: &mut HashMap<String, usize>,
     mut remaining_bytes: usize,
     mut remaining_entries: usize,
@@ -41,7 +42,12 @@ pub(super) fn register_canonical_support(
         } else if remaining_entries > 0 && source.len() <= remaining_bytes {
             let index = support_documents.len();
             support_indices.insert(uri.to_string(), index);
-            support_documents.push((uri.to_string(), source.to_string()));
+            let shared = disk
+                .iter()
+                .find(|(cached_uri, _)| cached_uri == uri)
+                .map(|(_, cached)| cached.clone())
+                .unwrap_or_else(|| krusty_lsp::SharedSource::from(source));
+            support_documents.push((uri.to_string(), shared));
             remaining_bytes -= source.len();
             remaining_entries -= 1;
             added_bytes += source.len();
@@ -78,6 +84,7 @@ mod tests {
         let (remaps, added_bytes) = register_canonical_support(
             &open_documents,
             &support,
+            &[],
             &mut support_documents,
             &mut support_indices,
             usize::MAX,
@@ -87,9 +94,8 @@ mod tests {
 
         assert_eq!(remaps, [(2, 0), (3, 2)]);
         assert_eq!(added_bytes, "fun new() {}".len());
-        assert_eq!(
-            support_documents,
-            [(support[1].0.to_string(), support[1].1.to_string())]
-        );
+        assert_eq!(support_documents.len(), 1);
+        assert_eq!(support_documents[0].0, support[1].0);
+        assert_eq!(support_documents[0].1.as_ref(), support[1].1);
     }
 }

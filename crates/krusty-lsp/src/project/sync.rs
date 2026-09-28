@@ -606,7 +606,10 @@ mod tests {
             .to_vec();
 
         assert_eq!(
-            first,
+            first
+                .iter()
+                .map(|(uri, source)| (uri.clone(), source.to_string()))
+                .collect::<Vec<_>>(),
             [(
                 url::Url::from_file_path(tree.path("dependency/Support.kt"))
                     .unwrap()

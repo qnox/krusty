@@ -1,8 +1,9 @@
 //! Splice order for one analysis group's support tail.
 //!
-//! Disk support stays borrowed from the source cache. Friend and dependency
-//! files stay borrowed from the open buffers. The cache lookup hashes and
-//! budgets those borrows; it does not own a second copy of the text.
+//! Disk support is one shared allocation per file. `load` hands out `Arc`
+//! handles, and this splice borrows those handles as `&str`. Friend and
+//! dependency files stay borrowed from the open buffers. The cache lookup
+//! hashes and budgets those borrows; it does not own a second copy of the text.
 
 /// Support order is the inferred disk prefix, then open friends, then open
 /// dependencies, then the remaining disk files.
@@ -11,7 +12,7 @@
 /// are visible to the group, but they are not part of the inferred prefix the
 /// worker treats as generated sources.
 pub(super) fn spliced_support<'a>(
-    disk: &'a [(String, String)],
+    disk: &'a [(String, krusty_lsp::SharedSource)],
     inferred_count: usize,
     friends: &[(usize, &'a str, &'a str)],
     dependencies: &[(usize, &'a str, &'a str)],
@@ -20,14 +21,14 @@ pub(super) fn spliced_support<'a>(
     let mut pairs = Vec::with_capacity(disk.len() + friends.len() + dependencies.len());
     pairs.extend(
         head.iter()
-            .map(|(uri, source)| (uri.as_str(), source.as_str())),
+            .map(|(uri, source)| (uri.as_str(), source.as_ref())),
     );
     pairs.extend(friends.iter().map(|(_, uri, source)| (*uri, *source)));
     let inferred_support_count = pairs.len();
     pairs.extend(dependencies.iter().map(|(_, uri, source)| (*uri, *source)));
     pairs.extend(
         tail.iter()
-            .map(|(uri, source)| (uri.as_str(), source.as_str())),
+            .map(|(uri, source)| (uri.as_str(), source.as_ref())),
     );
     (pairs, inferred_support_count)
 }
@@ -39,8 +40,14 @@ mod tests {
     #[test]
     fn friends_stay_in_the_inferred_prefix_and_dependencies_follow_it() {
         let disk = [
-            ("file:///inferred.kt".into(), "fun inferred() {}".into()),
-            ("file:///rest.kt".into(), "fun rest() {}".into()),
+            (
+                "file:///inferred.kt".into(),
+                krusty_lsp::SharedSource::from("fun inferred() {}"),
+            ),
+            (
+                "file:///rest.kt".into(),
+                krusty_lsp::SharedSource::from("fun rest() {}"),
+            ),
         ];
         let friends = [(1, "file:///friend.kt", "fun friend() {}")];
         let dependencies = [(2, "file:///dep.kt", "fun dep() {}")];

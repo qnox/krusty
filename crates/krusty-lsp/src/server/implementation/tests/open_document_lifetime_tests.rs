@@ -90,7 +90,7 @@ fn close_reopen_with_reused_version_discards_in_flight_batch() {
             &mut self,
             documents: &[(&str, &str)],
             _open_uris: &[&str],
-        ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        ) -> (Vec<DocumentAnalysis>, Vec<(String, crate::SharedSource)>) {
             self.hashes.borrow_mut().extend(
                 documents
                     .iter()

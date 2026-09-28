@@ -31,5 +31,5 @@ pub use model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, Source
 pub use provider::{ProbeError, ProjectProvider};
 pub use report::model_json;
 pub use runner::{Command, CommandOutput, CommandRunner, ProcessRunner};
-pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources};
+pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources, SharedSource};
 pub use sync::{ProjectSync, RefreshOutcome};

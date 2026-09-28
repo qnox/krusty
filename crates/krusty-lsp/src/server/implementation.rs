@@ -285,7 +285,7 @@ pub trait Analysis {
         &mut self,
         documents: &[(&str, &str)],
         _open_uris: &[&str],
-    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+    ) -> (Vec<DocumentAnalysis>, Vec<(String, crate::SharedSource)>) {
         let sources = documents
             .iter()
             .map(|(_, source)| *source)
@@ -484,7 +484,7 @@ impl Analysis for DocumentAnalyzer {
         &mut self,
         documents: &[(&str, &str)],
         _open_uris: &[&str],
-    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+    ) -> (Vec<DocumentAnalysis>, Vec<(String, crate::SharedSource)>) {
         (
             crate::analysis::analyze_documents_for_lsp(documents),
             Vec::new(),
@@ -1023,7 +1023,7 @@ struct RetainedDependencyLocation {
 
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
-    source_set: Vec<(String, String)>,
+    source_set: Vec<(String, crate::SharedSource)>,
     workspace_symbols: WorkspaceSymbolIndex,
     /// Declarations from every workspace file the background sweep has reached, opened or not.
     /// Unlike `workspace_symbols` this survives analysis batches: coverage is what it is for, and
@@ -1384,7 +1384,7 @@ where
                 ));
             }
             if batch_is_fresh {
-                analyzed_documents.push((uri, open.text.clone()));
+                analyzed_documents.push((uri, crate::SharedSource::from(open.text.as_str())));
             }
         }
         if batch_is_fresh {
@@ -2668,7 +2668,7 @@ where
                     .map(|document| document.text.as_str())
                     .or_else(|| {
                         self.source_set.iter().find_map(|(source_uri, source)| {
-                            (source_uri == uri).then_some(source.as_str())
+                            (source_uri == uri).then_some(source.as_ref())
                         })
                     })?;
                 Some(json!({
