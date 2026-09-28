@@ -56,9 +56,17 @@ pub(super) fn initializer_property_stores(
                 let IrExpr::SetField { index, .. } = ir.expr(expression) else {
                     unreachable!("initializer was checked as a SetField block")
                 };
+                // A constructor property's store line is its own; a body property's is its
+                // initializer's, which common lowering recorded on the store.
+                let line = match class.fields.get(*index as usize) {
+                    Some(field) if field.constructor_store_line == 0 => {
+                        ir.expr_lines.get(&expression).copied()
+                    }
+                    _ => None,
+                };
                 PropertyStore {
                     expression,
-                    line: property_line(ir, class, *index),
+                    line: line.or_else(|| property_line(ir, class, *index)),
                 }
             })
             .collect(),
