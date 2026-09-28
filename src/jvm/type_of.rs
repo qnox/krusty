@@ -225,7 +225,7 @@ fn class_instance(ty: Ty) -> Result<TypeOfInsn, TypeOfError> {
             if signature.suspend {
                 return Err(TypeOfError::SuspendFunctionType);
             }
-            crate::jvm::names::function_interface_internal_name(signature.params.len())
+            crate::jvm::names::function_interface_internal_name(signature.params.len()).to_owned()
         }
         Ty::Obj(name, _)
             if name.matches("kotlin/Array") || crate::types::prim_array_element(name).is_some() =>

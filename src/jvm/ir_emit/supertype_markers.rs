@@ -66,9 +66,12 @@ fn declared_interfaces(class: &IrClass) -> Vec<String> {
         .supertypes
         .iter()
         .filter_map(|supertype| match supertype.non_null() {
-            Ty::Fun(function) => Some(crate::jvm::names::function_interface_internal_name(
-                function.params.len() + usize::from(function.suspend),
-            )),
+            Ty::Fun(function) => Some(
+                crate::jvm::names::function_interface_internal_name(
+                    function.params.len() + usize::from(function.suspend),
+                )
+                .to_owned(),
+            ),
             nominal => nominal
                 .obj_internal()
                 .filter(|classifier| class.interfaces.contains_name(*classifier))
