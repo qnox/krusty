@@ -172,3 +172,34 @@ impl crate::jvm::inline::MethodBodies for Classpath {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::Classpath;
+    use crate::jvm::inline::MethodBodies;
+    use crate::types::type_name;
+
+    #[test]
+    fn interned_interface_probe_agrees_with_the_classfile_spelling() {
+        let Some(jar) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let classpath = Classpath::new(vec![jar]);
+        for spelling in [
+            "kotlin/collections/List",
+            "java/util/List",
+            "kotlin/Number",
+            "java/lang/Number",
+            "kotlin/String",
+            "java/lang/String",
+        ] {
+            assert_eq!(
+                classpath.owner_is_interface_name(type_name(spelling)),
+                classpath.owner_is_interface(spelling),
+                "{spelling}"
+            );
+        }
+        assert!(classpath.owner_is_interface_name(type_name("kotlin/collections/List")));
+        assert!(!classpath.owner_is_interface_name(type_name("java/lang/String")));
+    }
+}
