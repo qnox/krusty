@@ -15,8 +15,8 @@ use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
-    reference_array_element, type_descriptor,
+    boxed_descriptor, mapped_builtin_virtual_name, method_descriptor, property_getter_name,
+    property_setter_name, reference_array_element, type_descriptor,
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
@@ -11052,7 +11052,7 @@ impl<'a> Emitter<'a> {
                                 if descriptor_is_reference(physical) {
                                     boxed_descriptor(logical)
                                 } else {
-                                    type_descriptor(logical).to_owned()
+                                    type_descriptor(logical)
                                 }
                             })
                             .collect();
@@ -11061,11 +11061,11 @@ impl<'a> Emitter<'a> {
                             // body can therefore materialize `kotlin.Unit`. The instantiated method
                             // type still exposes the interface's physical `void` boundary; the
                             // metafactory discards any implementation value.
-                            "V".to_string()
+                            "V"
                         } else if descriptor_is_reference(sam_ret) {
                             boxed_descriptor(impl_ret)
                         } else {
-                            type_descriptor(impl_ret).to_owned()
+                            type_descriptor(impl_ret)
                         };
                         let inst_desc = format!("({params}){ret}");
                         (
@@ -11077,10 +11077,12 @@ impl<'a> Emitter<'a> {
                     }
                     None => {
                         let iface = jvm_function_interface(*arity);
-                        let inst_params: Vec<String> =
-                            lam_tys.iter().map(|t| boxed_descriptor(*t)).collect();
-                        let inst_desc =
-                            format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
+                        let mut inst_desc = String::from("(");
+                        for ty in lam_tys {
+                            inst_desc.push_str(boxed_descriptor(*ty));
+                        }
+                        inst_desc.push(')');
+                        inst_desc.push_str(boxed_descriptor(impl_ret));
                         (
                             iface.to_owned(),
                             "invoke".to_string(),
@@ -12291,21 +12293,6 @@ fn jvm_function_interface(arity: u8) -> &'static str {
 /// Past arity 22 every call shares `([Ljava/lang/Object;)Ljava/lang/Object;`.
 fn jvm_function_invoke_descriptor(arity: u8) -> &'static str {
     crate::jvm::names::function_invoke_descriptor(usize::from(arity))
-}
-
-/// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
-fn boxed_descriptor(t: Ty) -> String {
-    if t.non_null().is_unsigned() {
-        let owner = t
-            .non_null()
-            .kotlin_class_internal()
-            .expect("unsigned scalar must name its Kotlin classifier");
-        return format!("L{};", owner.render());
-    }
-    match crate::jvm::jvm_class_map::wrapper_internal(t) {
-        Some(w) => format!("L{w};"),
-        None => type_descriptor(t).to_owned(),
-    }
 }
 
 /// Whether one already-parsed JVM field descriptor occupies a reference slot.
