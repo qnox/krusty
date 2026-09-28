@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
@@ -950,13 +950,54 @@ impl PreparedClasspath {
     }
 }
 
+/// How often a worker rewalks its classpath to notice a class file that changed underneath it.
+///
+/// `snapshot_is_current` stats every jar and walks every directory entry. Doing that on each
+/// keystroke makes a typing burst pay for the whole output tree. The same path list is trusted
+/// for this long; a different path list is checked immediately.
+const CLASSPATH_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+
+struct SnapshotGate {
+    interval: Duration,
+    last_paths: Vec<PathBuf>,
+    last_check: Option<Instant>,
+}
+
+impl SnapshotGate {
+    fn every(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_paths: Vec::new(),
+            last_check: None,
+        }
+    }
+
+    /// True when the classpath walk should run. A matching path list inside the interval is not
+    /// due, so the caller keeps the previous answer.
+    fn due(&mut self, paths: &[PathBuf], now: Instant) -> bool {
+        let same_paths = self.last_paths == paths;
+        let elapsed = self
+            .last_check
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.interval);
+        if !same_paths || elapsed {
+            self.last_paths = paths.to_vec();
+            self.last_check = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub fn run_analysis_worker<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
     classpath: Vec<PathBuf>,
 ) -> io::Result<()> {
+    let default_paths = classpath.clone();
     let mut prepared = PreparedClasspath::launch(classpath);
     write_framed(writer, WORKER_READY)?;
+    let mut snapshot_gate = SnapshotGate::every(CLASSPATH_SNAPSHOT_INTERVAL);
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
@@ -1131,8 +1172,13 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             classpath.clear_stub_overlay();
         }
         let response = encode_response(&analyses)?;
-        // A clean EOF makes the supervisor retry the request in a fresh worker.
-        if !classpath.snapshot_is_current() {
+        // A clean EOF makes the supervisor retry the request in a fresh worker. The walk is
+        // skipped while the path list is unchanged and the last walk is still inside the interval.
+        let snapshot_paths = request
+            .classpath
+            .as_deref()
+            .unwrap_or(default_paths.as_slice());
+        if snapshot_gate.due(snapshot_paths, Instant::now()) && !classpath.snapshot_is_current() {
             return Ok(());
         }
         write_framed(writer, &response)?;
@@ -1548,6 +1594,7 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn worker_discards_dump_when_reused_classpath_contents_change() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1662,6 +1709,87 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
+    }
+
+    #[test]
+    fn snapshot_gate_skips_a_repeat_of_the_same_paths_until_the_interval_elapses() {
+        let mut gate = SnapshotGate::every(Duration::from_secs(1));
+        let first = vec![PathBuf::from("/classes")];
+        let other = vec![PathBuf::from("/other")];
+        let start = Instant::now();
+
+        assert!(gate.due(&first, start));
+        assert!(!gate.due(&first, start + Duration::from_millis(200)));
+        assert!(gate.due(&other, start + Duration::from_millis(200)));
+        assert!(!gate.due(&other, start + Duration::from_millis(500)));
+        assert!(gate.due(
+            &other,
+            start + Duration::from_millis(200) + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn worker_keeps_answering_when_a_directory_changes_inside_the_snapshot_interval() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-worker-snapshot-interval-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("create classpath directory");
+
+        let sources = ["fun use() = 1"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[],
+            classpath: None,
+        })
+        .unwrap();
+        let mut first = Vec::new();
+        write_framed(&mut first, &request).unwrap();
+        let mut second = Vec::new();
+        write_framed(&mut second, &request).unwrap();
+        let split = first.len();
+        first.extend(second);
+
+        let generated = directory.join("generated");
+        let mut reader = MutateAfter {
+            inner: Cursor::new(first),
+            after: split as u64,
+            mutation: Some(Box::new(move || {
+                std::fs::create_dir(&generated).expect("mutate classpath directory");
+            })),
+        };
+        let mut output = Vec::new();
+        run_analysis_worker(&mut reader, &mut output, vec![directory.clone()]).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_some(),
+            "the first analysis walks the classpath"
+        );
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_some(),
+            "a directory change inside the snapshot interval must not drop the next keystroke"
+        );
+        std::fs::remove_dir_all(directory).expect("remove classpath directory");
     }
 
     #[test]
