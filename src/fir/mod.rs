@@ -11,6 +11,7 @@ mod capture;
 pub mod coverage;
 mod declaration_stub;
 mod delegate_calls;
+mod entry_point;
 mod header;
 mod identities;
 mod inline_body;
@@ -35,6 +36,7 @@ pub use body_check::*;
 pub use body_work::*;
 pub use capture::*;
 pub use delegate_calls::*;
+pub use entry_point::{MainEntryShape, ResolvedEntryPoint};
 pub use header::*;
 pub use inline_body::*;
 pub use local_callables::BodyLocalCallableDeclarationId;
@@ -51,6 +53,8 @@ pub use type_parameters::*;
 
 #[cfg(test)]
 mod body_check_tests;
+#[cfg(test)]
+mod entry_point_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]

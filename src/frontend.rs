@@ -1237,7 +1237,12 @@ where
             &mut symbols,
             diags,
         );
-        crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
+        crate::resolve::finalize_streamed_top_level_conflicts(
+            &pass1_headers,
+            &mut index,
+            &mut symbols,
+            diags,
+        );
         // An `actual` that actualizes nothing is named by the reference compiler's declaration
         // renderer over its RESOLVED signature, so it is reported only once finalization has
         // published one: an inferred return (`actual fun f() = 1`) is `<not determined>` before
