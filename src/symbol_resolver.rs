@@ -3638,18 +3638,7 @@ impl<'a> SymbolResolver<'a> {
                 Some((o, value_params, o.callable.ret, bindings))
             })
             .collect();
-        let fits = |p: &Ty, a: &CallArgKind| {
-            if a.is_omitted_default() {
-                return true;
-            }
-            if a.is_lambda_literal() && a.ty() == Ty::Error {
-                return untyped_lambda_pertinent(self.lib, &self.src, *p);
-            }
-            let function = a.function_type().unwrap_or_else(|| a.ty());
-            let sam = (a.is_lambda_literal() || a.function_type().is_some())
-                && sam_arg_matches(self.lib, &self.src, *p, function);
-            sam || self.arg_fits_or_subtype(p, &a.type_for(*p))
-        };
+        let fits = |p: &Ty, a: &CallArgKind| a.fits_parameter(self.lib, &self.src, *p);
         let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
 
         // Kotlin removes low-priority declarations only when an ordinary declaration is actually

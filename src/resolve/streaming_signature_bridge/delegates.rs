@@ -79,7 +79,8 @@ impl ProductionSignatureSemantics<'_> {
                         dispatch,
                         "provideDelegate",
                         super::lookups::SignatureMemberExtensionArguments {
-                            types: &provide_arguments,
+                            arguments: &provide_arguments
+                                .map(crate::symbol_resolver::CallArgKind::Typed),
                             ..Default::default()
                         },
                         None,
@@ -190,7 +191,8 @@ impl ProductionSignatureSemantics<'_> {
                         dispatch,
                         "getValue",
                         super::lookups::SignatureMemberExtensionArguments {
-                            types: &get_arguments,
+                            arguments: &get_arguments
+                                .map(crate::symbol_resolver::CallArgKind::Typed),
                             ..Default::default()
                         },
                         None,
@@ -273,17 +275,21 @@ impl ProductionSignatureSemantics<'_> {
                     crate::resolve::delegated_properties::DelegateConventionSelection::None(
                         extensions,
                     ) => {
-                        if !members.is_empty() || !excluded.is_empty() || !extensions.is_empty() {
+                        let families = crate::resolve::delegated_properties::DelegateConventionFamilies {
+                            members,
+                            member_extensions: excluded,
+                            extensions,
+                        };
+                        if !families.is_empty() {
+                            let candidates =
+                                self.delegate_convention_candidates(&families, "getValue", demand)?;
                             return Err(self.record_inapplicable_delegate_convention_failure(
                                 scope,
                                 site,
                                 stored.get(),
                                 "getValue",
                                 this_ref,
-                                &members,
-                                &excluded,
-                                &extensions,
-                                demand,
+                                &candidates,
                             ));
                         }
                     }
@@ -479,7 +485,44 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// The candidates a total `getValue` failure names, each with its result determined: a
+    /// declaration whose own return is still being inferred is demanded from the solver.
+    fn delegate_convention_candidates(
+        &self,
+        families: &crate::resolve::delegated_properties::DelegateConventionFamilies,
+        name: &str,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<
+        Vec<crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate>,
+        crate::fir::DiagnosticId,
+    > {
+        families.diagnostic_candidates(name, &mut |candidate| match candidate {
+            crate::resolve::delegated_properties::DelegateConventionCandidate::Function(
+                function,
+            ) => self.determined_candidate_result(function, demand),
+            crate::resolve::delegated_properties::DelegateConventionCandidate::MemberExtension(
+                candidate,
+            ) if candidate.ret.mentions_pending() => {
+                let declaration = candidate
+                    .stable_declaration
+                    .expect("an undetermined excluded delegate candidate retains its declaration");
+                match demand(declaration) {
+                    Ok(signature) => Ok(signature.result.get()),
+                    Err(diagnostic) if diagnostic.raw() == 0 => {
+                        panic!("a demanded excluded delegate candidate failed without a diagnostic")
+                    }
+                    Err(diagnostic) => Err(diagnostic),
+                }
+            }
+            crate::resolve::delegated_properties::DelegateConventionCandidate::MemberExtension(
+                candidate,
+            ) => Ok(candidate.ret),
+        })
+    }
+
     fn record_inapplicable_delegate_convention_failure(
         &self,
         scope: crate::fir::SignatureScope,
@@ -487,13 +530,7 @@ impl ProductionSignatureSemantics<'_> {
         delegate: Ty,
         name: &str,
         this_ref: Ty,
-        members: &[crate::libraries::FunctionInfo],
-        member_extensions: &[super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
-        extensions: &[crate::libraries::FunctionInfo],
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        candidates: &[crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate],
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
@@ -501,61 +538,6 @@ impl ProductionSignatureSemantics<'_> {
             "a delegate convention site must belong to its retained signature scope",
         );
         let convention_site = self.delegate_convention_site(&site, by_span);
-        let candidates = if !members.is_empty() {
-            match crate::resolve::delegated_properties::delegate_convention_candidates_from_functions(
-                members,
-                name,
-                &mut |candidate| self.determined_candidate_result(candidate, demand),
-            ) {
-                Ok(candidates) => candidates,
-                Err(diagnostic) => return diagnostic,
-            }
-        } else if !member_extensions.is_empty() {
-            match member_extensions
-            .iter()
-            .map(|candidate| {
-                let result = if candidate.ret.mentions_pending() {
-                    let declaration = candidate.stable_declaration.expect(
-                        "an undetermined excluded delegate candidate retains its declaration",
-                    );
-                    match demand(declaration) {
-                        Ok(signature) => signature.result.get(),
-                        Err(diagnostic) if diagnostic.raw() == 0 => {
-                            panic!("a demanded excluded delegate candidate failed without a diagnostic")
-                        }
-                        Err(diagnostic) => return Err(diagnostic),
-                    }
-                } else {
-                    candidate.ret
-                };
-                let context_count = candidate.context_count.min(candidate.params.len());
-                let (context, value) = candidate.params.split_at(context_count);
-                Ok(
-                    crate::resolve::delegated_properties::delegate_convention_diagnostic_candidate(
-                        name,
-                        Some(candidate.extension_receiver),
-                        context,
-                        value,
-                        &candidate.parameter_names,
-                        result,
-                    ),
-                )
-            })
-            .collect::<Result<Vec<_>, crate::fir::DiagnosticId>>()
-            {
-                Ok(candidates) => candidates,
-                Err(diagnostic) => return diagnostic,
-            }
-        } else {
-            match crate::resolve::delegated_properties::delegate_convention_candidates_from_functions(
-                extensions,
-                name,
-                &mut |candidate| self.determined_candidate_result(candidate, demand),
-            ) {
-                Ok(candidates) => candidates,
-                Err(diagnostic) => return diagnostic,
-            }
-        };
         let message =
             crate::resolve::delegated_properties::delegate_convention_message_with_candidates(
                 convention_site,
@@ -564,7 +546,7 @@ impl ProductionSignatureSemantics<'_> {
                 this_ref,
                 None,
                 None,
-                &candidates,
+                candidates,
             )
             .expect("retained delegate candidates must produce a diagnostic");
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)

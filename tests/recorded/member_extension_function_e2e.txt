@@ -13,3 +13,6 @@
   Main.kt:6:53: no value passed for parameter 'type'.
 2.4.20:
   Main.kt:6:46: none of the following candidates is applicable:
+
+[member_extension_overloads_differing_in_a_value_parameter_type_are_selected_by_it]
+2.4.0..2.4.20:

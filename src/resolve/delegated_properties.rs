@@ -29,15 +29,7 @@ enum OrdinaryDelegateSelection {
 
 enum DelegateOperatorFailure {
     AmbiguousOrdinary(Vec<crate::libraries::FunctionInfo>),
-    InapplicableCandidates {
-        // Keep the convention tower's semantic rungs separate. Selection may continue to a lower
-        // rung to find an applicable declaration, but on total failure Kotlin diagnoses only the
-        // earliest rung that contributed same-name candidates.
-        members: Vec<crate::libraries::FunctionInfo>,
-        member_extensions:
-            Vec<super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
-        extensions: Vec<crate::libraries::FunctionInfo>,
-    },
+    InapplicableCandidates(DelegateConventionFamilies),
     AmbiguousMemberExtensions(Vec<MemberExtensionFunctionCandidate>),
 }
 
@@ -529,6 +521,78 @@ pub(super) fn delegate_convention_candidates_from_functions(
         .collect::<Result<Vec<_>, crate::fir::DiagnosticId>>()
 }
 
+/// The same-name convention candidates each rung of the delegate tower offered when none of them
+/// applied: members, member extensions reached through an implicit dispatch receiver, then
+/// extensions. Selection may continue to a lower rung to find an applicable declaration, so the
+/// rungs stay separate until a total failure decides which of them it names.
+pub(crate) struct DelegateConventionFamilies {
+    pub(crate) members: Vec<crate::libraries::FunctionInfo>,
+    pub(crate) member_extensions:
+        Vec<super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
+    pub(crate) extensions: Vec<crate::libraries::FunctionInfo>,
+}
+
+/// A candidate whose result type a delegate diagnostic renders; the phase reporting the failure
+/// knows how to read a result it has not finalized yet.
+pub(crate) enum DelegateConventionCandidate<'a> {
+    Function(&'a crate::libraries::FunctionInfo),
+    MemberExtension(
+        &'a super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate,
+    ),
+}
+
+impl DelegateConventionFamilies {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.members.is_empty() && self.member_extensions.is_empty() && self.extensions.is_empty()
+    }
+
+    /// The candidates a total failure names. Kotlin 2.4.20 lists every rung's candidates, members
+    /// first; earlier releases named only the earliest rung that contributed any.
+    pub(crate) fn diagnostic_candidates(
+        &self,
+        name: &str,
+        result: &mut dyn FnMut(
+            DelegateConventionCandidate<'_>,
+        ) -> Result<Ty, crate::fir::DiagnosticId>,
+    ) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
+        let every_rung =
+            crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20);
+        let members = every_rung || !self.members.is_empty();
+        let member_extensions = every_rung || !members && !self.member_extensions.is_empty();
+        let extensions = every_rung || !members && !member_extensions;
+        let mut candidates = Vec::new();
+        if members {
+            candidates.extend(delegate_convention_candidates_from_functions(
+                &self.members,
+                name,
+                &mut |candidate| result(DelegateConventionCandidate::Function(candidate)),
+            )?);
+        }
+        if member_extensions {
+            for candidate in &self.member_extensions {
+                let context_count = candidate.context_count.min(candidate.params.len());
+                let (context, value) = candidate.params.split_at(context_count);
+                candidates.push(delegate_convention_diagnostic_candidate(
+                    name,
+                    Some(candidate.extension_receiver),
+                    context,
+                    value,
+                    &candidate.parameter_names,
+                    result(DelegateConventionCandidate::MemberExtension(candidate))?,
+                ));
+            }
+        }
+        if extensions {
+            candidates.extend(delegate_convention_candidates_from_functions(
+                &self.extensions,
+                name,
+                &mut |candidate| result(DelegateConventionCandidate::Function(candidate)),
+            )?);
+        }
+        Ok(candidates)
+    }
+}
+
 fn delegate_convention_failure(
     resolver: &crate::symbol_resolver::SymbolResolver,
     delegate_ty: Ty,
@@ -881,61 +945,27 @@ impl Checker<'_> {
         this_ref: Ty,
         property: Option<Ty>,
         value: Option<Ty>,
-        members: &[crate::libraries::FunctionInfo],
-        member_extensions: &[super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
-        extensions: &[crate::libraries::FunctionInfo],
+        families: &DelegateConventionFamilies,
     ) {
-        let ordinary = |functions: &[crate::libraries::FunctionInfo]| {
-            delegate_convention_candidates_from_functions(functions, name, &mut |candidate| {
-                Ok(candidate.callable.ret)
+        let candidates = families
+            .diagnostic_candidates(name, &mut |candidate| {
+                Ok(match candidate {
+                    DelegateConventionCandidate::Function(function) => function.callable.ret,
+                    DelegateConventionCandidate::MemberExtension(candidate)
+                        if candidate.ret.mentions_pending() =>
+                    {
+                        let declaration = candidate.stable_declaration.expect(
+                            "an undetermined excluded delegate candidate retains its declaration",
+                        );
+                        self.resolved_index
+                            .and_then(|index| index.signature(declaration))
+                            .map(|signature| signature.result.get())
+                            .expect("an excluded delegate candidate has a finalized result")
+                    }
+                    DelegateConventionCandidate::MemberExtension(candidate) => candidate.ret,
+                })
             })
-            .expect("a checked delegate convention candidate has a finalized result")
-        };
-        let member_extension_candidates =
-            |checker: &Self| -> Vec<DelegateConventionDiagnosticCandidate> {
-                member_extensions
-                    .iter()
-                    .map(|candidate| {
-                        let result = if candidate.ret.mentions_pending() {
-                            let declaration = candidate.stable_declaration.expect(
-                        "an undetermined excluded delegate candidate retains its declaration",
-                    );
-                            checker
-                                .resolved_index
-                                .and_then(|index| index.signature(declaration))
-                                .map(|signature| signature.result.get())
-                                .expect("an excluded delegate candidate has a finalized result")
-                        } else {
-                            candidate.ret
-                        };
-                        let context_count = candidate.context_count.min(candidate.params.len());
-                        let (context, parameters) = candidate.params.split_at(context_count);
-                        delegate_convention_diagnostic_candidate(
-                            name,
-                            Some(candidate.extension_receiver),
-                            context,
-                            parameters,
-                            &candidate.parameter_names,
-                            result,
-                        )
-                    })
-                    .collect()
-            };
-        // Kotlin 2.4.20 lists every rung's candidates, members first; earlier releases diagnosed
-        // only the earliest rung that contributed any.
-        let candidates =
-            if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20) {
-                let mut all = ordinary(members);
-                all.extend(member_extension_candidates(self));
-                all.extend(ordinary(extensions));
-                all
-            } else if !members.is_empty() {
-                ordinary(members)
-            } else if !member_extensions.is_empty() {
-                member_extension_candidates(self)
-            } else {
-                ordinary(extensions)
-            };
+            .expect("a checked delegate convention candidate has a finalized result");
         let message = delegate_convention_message_with_candidates(
             site.clone(),
             delegate_ty,
@@ -971,21 +1001,16 @@ impl Checker<'_> {
                     value,
                     &candidates,
                 ),
-            DelegateOperatorFailure::InapplicableCandidates {
-                members,
-                member_extensions,
-                extensions,
-            } => self.report_inapplicable_delegate_convention_failure(
-                site,
-                delegate_ty,
-                name,
-                this_ref,
-                property,
-                value,
-                &members,
-                &member_extensions,
-                &extensions,
-            ),
+            DelegateOperatorFailure::InapplicableCandidates(families) => self
+                .report_inapplicable_delegate_convention_failure(
+                    site,
+                    delegate_ty,
+                    name,
+                    this_ref,
+                    property,
+                    value,
+                    &families,
+                ),
             DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => self
                 .report_member_extension_delegate_convention_ambiguity(
                     site,
@@ -1510,17 +1535,16 @@ impl Checker<'_> {
                         (selected, ret, applied_receiver)
                     }
                     OrdinaryDelegateSelection::None(extensions) => {
-                        return if optional
-                            || (members.is_empty() && excluded.is_empty() && extensions.is_empty())
-                        {
+                        let families = DelegateConventionFamilies {
+                            members,
+                            member_extensions: excluded,
+                            extensions,
+                        };
+                        return if optional || families.is_empty() {
                             DelegateOperatorSelection::None
                         } else {
                             DelegateOperatorSelection::Failure(
-                                DelegateOperatorFailure::InapplicableCandidates {
-                                    members,
-                                    member_extensions: excluded,
-                                    extensions,
-                                },
+                                DelegateOperatorFailure::InapplicableCandidates(families),
                             )
                         };
                     }

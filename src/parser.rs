@@ -20,6 +20,7 @@ mod declaration_modifiers;
 mod declaration_stream;
 mod expressions;
 mod file_features;
+mod function_types;
 mod incdec;
 mod lambda_literals;
 mod lexical_type_parameters;
@@ -4302,33 +4303,13 @@ impl<'a> Parser<'a> {
         }
         // Function type: `(A, B) -> R` — starts with `(`.
         if self.at(TokenKind::LParen) {
-            self.bump(); // '('
-            self.skip_newlines();
-            let fun_context_count = context_types.len() as u32;
-            let mut fun_params = std::mem::take(&mut context_types);
-            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                // Skip optional parameter name prefix `name: Type` — consume up to a colon if present.
-                // Peek ahead: if next two tokens are Ident + Colon, skip them.
-                if self.at(TokenKind::Ident)
-                    && self
-                        .t
-                        .get(self.i + 1)
-                        .map_or(false, |t| t.kind == TokenKind::Colon)
-                {
-                    self.bump(); // name
-                    self.bump(); // ':'
-                }
-                fun_params.push(self.parse_type());
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_newlines();
-            }
-            self.skip_newlines();
-            self.expect(TokenKind::RParen, "')'");
+            let params = self.parse_function_type_parameters();
             if self.eat(TokenKind::Arrow) {
                 let ret = self.parse_type();
                 let nullable = self.eat_type_nullable();
+                let fun_context_count = context_types.len() as u32;
+                let mut fun_params = context_types;
+                fun_params.extend(params);
                 TypeRef {
                     name: "<fun>".to_string(),
                     flags: TrFlags::default()
@@ -4341,30 +4322,28 @@ impl<'a> Parser<'a> {
                     fun_params,
                     fun_context_count,
                 }
-            } else if fun_params.len() == 1 && !fun_suspend {
+            } else if let [_] = params.as_slice() {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
                 // a function type nullable: `(() -> Unit)?` ≡ `Function0<Unit>?`. The parens wrap a single
                 // type; an optional trailing `?` applies to it. (Kotlin permits redundant parens around any
-                // type — `(Int)`, `(String)?`.)
-                let mut inner = fun_params.into_iter().next().unwrap();
+                // type — `(Int)`, `(String)?`.) A grouped type may be an extension function type's
+                // receiver: `context(C) (String).() -> R`.
+                let mut inner = params.into_iter().next().unwrap();
                 if self.eat_type_nullable() {
                     inner.set_nullable(true);
                 }
-                inner
+                if self.at_extension_function_type_tail() {
+                    self.parse_extension_function_type(inner, context_types, fun_suspend, span)
+                } else if fun_suspend || !context_types.is_empty() {
+                    self.diags.error(span, "expected '->' for function type");
+                    Self::error_type_ref(span)
+                } else {
+                    inner
+                }
             } else {
                 // Parenthesized multi-element type (a tuple) — krusty doesn't support tuple types.
                 self.diags.error(span, "expected '->' for function type");
-                TypeRef {
-                    name: "<error>".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(false)
-                        .with_definitely_non_null(false),
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_context_count: 0,
-                }
+                Self::error_type_ref(span)
             }
         } else if self.at(TokenKind::Ident) {
             let mut name = self.text().to_string();
@@ -4426,50 +4405,8 @@ impl<'a> Parser<'a> {
             // parameter, exactly how Kotlin lowers an extension-function type to `FunctionN` — so the
             // rest of the pipeline sees a plain `(Recv, …) -> R`. (The dotted-path loop above stops at
             // `.` `(` since `(` is not an `Ident`, leaving us positioned here.)
-            if !self.parsing_anonymous_function_receiver
-                && self.at(TokenKind::Dot)
-                && self
-                    .t
-                    .get(self.i + 1)
-                    .map_or(false, |t| t.kind == TokenKind::LParen)
-            {
-                self.bump(); // '.'
-                self.bump(); // '('
-                let fun_context_count = context_types.len() as u32;
-                let mut fun_params = std::mem::take(&mut context_types);
-                fun_params.push(base);
-                while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                    if self.at(TokenKind::Ident)
-                        && self
-                            .t
-                            .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::Colon)
-                    {
-                        self.bump(); // name
-                        self.bump(); // ':'
-                    }
-                    fun_params.push(self.parse_type());
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::RParen, "')'");
-                self.expect(TokenKind::Arrow, "'->'");
-                let ret = self.parse_type();
-                let fnull = self.eat_type_nullable();
-                return TypeRef {
-                    name: "<fun>".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(fnull)
-                        .with_definitely_non_null(false)
-                        .with_fun_has_receiver(true)
-                        .with_fun_suspend(fun_suspend),
-                    arg: Some(Box::new(ret)),
-                    targs: Vec::new(),
-                    span,
-                    fun_params,
-                    fun_context_count,
-                };
+            if self.at_extension_function_type_tail() {
+                return self.parse_extension_function_type(base, context_types, fun_suspend, span);
             }
             // A `context(…)` receiver must precede a FUNCTION type; on a plain type it is invalid — reject
             // rather than silently dropping the context receivers (which would mis-type the value).
@@ -4478,32 +4415,12 @@ impl<'a> Parser<'a> {
                     span,
                     "krusty: a context receiver is only valid on a function type".to_string(),
                 );
-                return TypeRef {
-                    name: "<error>".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(false)
-                        .with_definitely_non_null(false),
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_context_count: 0,
-                };
+                return Self::error_type_ref(span);
             }
             base
         } else {
             self.diags.error(span, "expected a type");
-            TypeRef {
-                name: "<error>".to_string(),
-                flags: TrFlags::default()
-                    .with_nullable(false)
-                    .with_definitely_non_null(false),
-                arg: None,
-                targs: Vec::new(),
-                span,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            }
+            Self::error_type_ref(span)
         }
     }
 
