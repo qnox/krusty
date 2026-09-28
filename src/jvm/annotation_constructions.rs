@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{IrClass, IrCtorArg, IrExpr, IrField, IrFile};
+use crate::ir::{IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
 use crate::types::{type_name, Ty, TypeName};
 
 pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
@@ -47,20 +47,34 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
             continue;
         };
         let implementation = *implementations.entry(site.interface).or_insert_with(|| {
-            let lexical_owner = lexical_owners
-                .get(&site.interface)
-                .copied()
-                .flatten()
+            let owner = lexical_owners.get(&site.interface).copied().flatten();
+            let lexical_owner = owner
                 .map(TypeName::render)
                 .unwrap_or_else(|| facade.to_string());
+            // kotlinc encloses the implementation in its owner as a whole, with no method.
+            let enclosure = owner.map_or(IrEnclosure::File, |owner| {
+                let class = class_order[&owner];
+                IrEnclosure::Classifier(
+                    u32::try_from(class).expect("too many classes for a class id"),
+                )
+            });
             let interface_fragment = site.interface.render().replace(['/', '$'], "_");
-            let implementation = type_name(&format!(
-                "{lexical_owner}$annotationImpl${interface_fragment}$0"
-            ));
+            let segment = format!("annotationImpl${interface_fragment}$0");
+            let implementation = type_name(&format!("{lexical_owner}${segment}"));
+            // kotlinc declares the implementation as a child of its owner, which its
+            // `InnerClasses` order reads.
+            crate::jvm::local_class_names::record_generated_child_path(
+                ir,
+                implementation,
+                owner,
+                facade,
+                &segment,
+            );
             generated.push(annotation_implementation(
                 implementation,
                 site.interface,
                 &site.members,
+                enclosure,
             ));
             if site.defaults.iter().any(Option::is_some) {
                 ir.insert_class_ctor_defaults_name(implementation, site.defaults.clone());
@@ -96,12 +110,13 @@ fn annotation_implementation(
     fq_name: TypeName,
     interface: TypeName,
     members: &[(String, Ty)],
+    enclosure: IrEnclosure,
 ) -> IrClass {
     IrClass {
         fq_name,
         is_source_declared: false,
         is_anonymous_object: false,
-        enclosure: None,
+        enclosure: Some(enclosure),
         is_inner_class: false,
         is_local_class: false,
         is_value: false,

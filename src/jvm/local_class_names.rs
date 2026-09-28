@@ -132,6 +132,19 @@ fn outer_is_interface(ir: &IrFile, outer: TypeName) -> bool {
         .any(|class| class.fq_name == outer && (class.is_interface || class.is_annotation))
 }
 
+/// Record kotlinc's `fqNameWhenAvailable` of `class`, which the backend generates as a direct
+/// child of `host` (of the file facade when `None`) under the simple name `segment`.
+pub(crate) fn record_generated_child_path(
+    ir: &mut IrFile,
+    class: TypeName,
+    host: Option<TypeName>,
+    facade: &str,
+    segment: &str,
+) {
+    let path = format!("{}.{segment}", host_path(ir, host, facade));
+    ir.declaration_paths.insert(class, path);
+}
+
 /// kotlinc's `fqNameWhenAvailable` of the class a suspend function's continuation class is
 /// declared in: `host`'s, or the file facade's when the function has no dispatch receiver.
 fn host_path(ir: &IrFile, host: Option<TypeName>, facade: &str) -> String {

@@ -21,7 +21,7 @@ mod common {
     pub use super::bytecode_comparison_support::*;
     pub use super::common_core::*;
     pub use super::e2e_support::*;
-    pub use super::inner_class_rows_support::assert_same_inner_classes;
+    pub use super::inner_class_rows_support::{assert_same_inner_classes, compile_with_kotlinc};
     pub use super::recorded_support::{recorded, recorded_line, recorded_named};
 }
 
@@ -45,6 +45,8 @@ mod annotation_class_element_e2e;
 mod annotation_emission_e2e;
 #[path = "annotation_impl_class_e2e.rs"]
 mod annotation_impl_class_e2e;
+#[path = "annotation_instance_class_rows_e2e.rs"]
+mod annotation_instance_class_rows_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]

@@ -88,6 +88,17 @@ impl InnerClasses {
                 });
                 continue;
             }
+            // An annotation implementation is anonymous and synthetic too: its `$annotationImpl$`
+            // name is a generated spelling, not a member of any class.
+            if class.annotation_impl_of.is_some() {
+                specs.push(InnerClassSpec {
+                    inner: identity.render(),
+                    outer: None,
+                    name: None,
+                    access: 0x1000 | 0x0019,
+                });
+                continue;
+            }
             // A callable reference class is anonymous too, and synthetic; it is public only where
             // spliced inline code constructs it from elsewhere.
             if class.func_ref.is_some() || class.prop_ref.is_some() {
