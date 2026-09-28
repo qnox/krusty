@@ -154,8 +154,6 @@ inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
 inlineClasses/callableRefClassMergingNestedValueClass.kt
 inlineClasses/equalityForIndyLambdaParameter.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/hiddenConstructor/innerClassConstructor.kt
 inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
@@ -218,7 +216,6 @@ reified/lambdaNameClash.kt
 reified/safecast.kt
 safeCall/parenthesizedSafeCallsAndOperators.kt
 sam/constructors/sameWrapperClass.kt
-sam/constructors/sameWrapperClass2.kt
 sam/topLevelConversions.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/localClasses.kt

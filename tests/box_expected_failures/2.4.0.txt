@@ -128,8 +128,6 @@ inline/callableReferenceOfLocalFun.kt
 inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
 inlineClasses/equalityForIndyLambdaParameter.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/hiddenConstructor/innerClassConstructor.kt
 inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
@@ -189,7 +187,6 @@ reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
 safeCall/parenthesizedSafeCallsAndOperators.kt
 sam/constructors/sameWrapperClass.kt
-sam/constructors/sameWrapperClass2.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt

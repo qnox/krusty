@@ -117,6 +117,13 @@ impl BodyLowering<'_> {
                     suspend: conversion.suspend,
                     overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                     function_adapter,
+                    wraps_function_value: !function_adapter,
+                    kotlin_interface: conversion.kotlin_interface,
+                    parameter_names: conversion
+                        .parameter_names
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect(),
                 }),
                 inline_body: None,
             }),

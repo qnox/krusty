@@ -339,6 +339,7 @@ fn blank_class(fq: &str) -> IrClass {
         prop_ref: None,
         func_ref: None,
         lambda: None,
+        sam_wrapper: None,
         bridges: Vec::new(),
         interfaces: Default::default(),
         is_object: false,

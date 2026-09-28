@@ -23,4 +23,11 @@ pub struct IrSamTarget {
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,
+    /// The conversion wraps an existing function value (neither a lambda literal nor a callable
+    /// reference): the lambda only forwards to the captured value's `invoke`.
+    pub wraps_function_value: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub kotlin_interface: bool,
+    /// The method's declared parameter names.
+    pub parameter_names: Vec<String>,
 }
