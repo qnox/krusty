@@ -170,6 +170,10 @@ fn run_backend_passes_after_plugins(
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
     // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
+    // A bridge to a value-class override asks which dependency classes are value classes.
+    if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
+        return Err(SkipReason::ValueClasses);
+    }
     facts.override_results = crate::jvm::override_results::box_primitive_override_results(ir);
     crate::jvm::bridges::derive_bridges(ir, classpath, &facts.override_results)?;
     apply_collection_bridge_barriers(ir);

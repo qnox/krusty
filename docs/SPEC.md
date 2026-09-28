@@ -7567,6 +7567,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   static `-impl` method of the value class, so the continuation of its state machine calls
   `Tag.twice-<hash>(String, Continuation)` on that class, as kotlinc does, not on the file facade.
   Tests: `tests/value_class_suspend_member_reentry_e2e.rs`.
+- **An override of a dependency's value class gets its bridge.** Bridge derivation reads which
+  classes are value classes, including ones declared in a dependency such as `Result`, so those are
+  recorded before bridges are derived. A `suspend fun execute(): Result<String>` overriding a
+  generic `execute(): T` gets kotlinc's erased `execute(Continuation)` bridge.
+  Tests: `tests/value_class_dependency_bridge_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

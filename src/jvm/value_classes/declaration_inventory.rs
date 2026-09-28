@@ -12,6 +12,16 @@ use crate::ir::IrFile;
 use crate::types::TypeName;
 use std::collections::{HashMap, HashSet};
 
+/// Publish the value classes this file references into its value-class facts, ahead of the
+/// passes that ask about them before the value-class pass runs (bridge derivation).
+pub(crate) fn record_referenced(
+    ir: &mut IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> bool {
+    let mut declarations = super::representation::declared_underlyings(ir);
+    merge_referenced(ir, classifiers, &mut declarations).is_some()
+}
+
 pub(super) fn merge_referenced(
     ir: &mut IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
