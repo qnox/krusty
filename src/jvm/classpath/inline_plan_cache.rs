@@ -9,13 +9,14 @@ use std::hash::{Hash, Hasher};
 
 /// The full input set a plan decode reads. The same physical method can surface through distinct
 /// provider views whose semantic receiver, result, generic signature, physical parameter shape,
-/// suspend shape, and default realization differ, so every decoder input participates in the key.
+/// suspend shape, and default realization differ, so every independent decoder input participates
+/// in the key. Parameter slots are the JVM widths of `physical_parameters`, so they are not stored
+/// again.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PlanKey {
     owner: TypeName,
     name: String,
     body_descriptor: String,
-    parameter_slots: Vec<u16>,
     physical_parameters: Vec<Ty>,
     context_count: usize,
     source_receiver: Option<Ty>,
@@ -46,7 +47,6 @@ pub(in crate::jvm) struct InlinePlanCacheInput<'a> {
     pub(in crate::jvm) owner: TypeName,
     pub(in crate::jvm) name: &'a str,
     pub(in crate::jvm) body_descriptor: &'a str,
-    pub(in crate::jvm) parameter_slots: &'a [u16],
     pub(in crate::jvm) physical_parameters: &'a [Ty],
     pub(in crate::jvm) context_count: usize,
     pub(in crate::jvm) source_receiver: Option<Ty>,
@@ -124,7 +124,6 @@ fn plan_key(input: &InlinePlanCacheInput<'_>) -> PlanKey {
         owner: input.owner,
         name: input.name.to_owned(),
         body_descriptor: input.body_descriptor.to_owned(),
-        parameter_slots: input.parameter_slots.to_vec(),
         physical_parameters: input.physical_parameters.to_vec(),
         context_count: input.context_count,
         source_receiver: input.source_receiver,
@@ -148,7 +147,6 @@ impl PlanKey {
         self.owner == input.owner
             && self.name == input.name
             && self.body_descriptor == input.body_descriptor
-            && self.parameter_slots == input.parameter_slots
             && self.physical_parameters == input.physical_parameters
             && self.context_count == input.context_count
             && self.source_receiver == input.source_receiver
@@ -183,7 +181,6 @@ fn fingerprint(input: &InlinePlanCacheInput<'_>) -> u64 {
     input.owner.hash(&mut hasher);
     input.name.hash(&mut hasher);
     input.body_descriptor.hash(&mut hasher);
-    input.parameter_slots.hash(&mut hasher);
     input.physical_parameters.hash(&mut hasher);
     input.context_count.hash(&mut hasher);
     input.source_receiver.hash(&mut hasher);
@@ -383,7 +380,6 @@ mod tests {
             owner,
             name: "run",
             body_descriptor: "()V",
-            parameter_slots: &[0],
             physical_parameters: &[Ty::String],
             context_count,
             source_receiver: None,
@@ -414,7 +410,6 @@ mod tests {
                 owner,
                 name: "run",
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
@@ -434,7 +429,6 @@ mod tests {
                 owner,
                 name: &owned_name,
                 body_descriptor: &owned_descriptor,
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
@@ -476,7 +470,6 @@ mod tests {
                 owner,
                 name: "unrelated",
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
@@ -494,7 +487,6 @@ mod tests {
                 owner,
                 name: "unrelated",
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
@@ -537,7 +529,6 @@ mod tests {
                 owner,
                 name: "run",
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
@@ -560,7 +551,6 @@ mod tests {
                 owner,
                 name: "run",
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: physical,
                 context_count: 0,
                 source_receiver: None,
@@ -604,7 +594,6 @@ mod tests {
                 owner,
                 name,
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
