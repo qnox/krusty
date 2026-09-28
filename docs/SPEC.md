@@ -4982,12 +4982,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   evaluates `default_i` into the slot then `invokestatic`s the real facade method) and routes an
   omitted-default call to it via `Callee::LocalDefault` (`lower_toplevel_default_call`: provided arguments
   evaluated in source order into temps, omitted slots get a zero placeholder + their mask bit, marker
-  `null`). Gated by `toplevel_default_stub_safe` to a SOUND subset — an unmangled function whose default
-  expressions are simple (no lambda, object/value-class construction, `invoke`, value-class-mangled call,
-  or reference beyond the parameters), and no user function already named `<name>$default`. A value-class
-  or lambda/wide-shape default falls back to the (unchanged) inline fill / skip, never a miscompile (this
-  gate was added after an ungated version regressed value-class-parameter + lambda-default corpus files
-  with `VerifyError`/`ClassCastException`). Test: `tests/default_args_synthetic_e2e.rs`.
+  `null`). `toplevel_default_stub_safe` emits that stub when every default expression can be
+  re-evaluated in the synthetic frame: a constant, a call, an object or value-class construction the
+  representation pass adapts, a lambda (only its captures are in this frame; the body is a separate
+  method), and an invocation of such a function value. A `Ref` allocation, a value-class-mangled call
+  the representation pass has not recorded, a read or write of a value slot that is neither a
+  parameter nor a local the default itself declares, or a user function already named `<name>$default`
+  suppresses the stub. An immediately-invoked lambda default (`x: Double = { log += "x"; 1.0 }()`)
+  therefore runs inside `name$default`, after the call site has evaluated the provided arguments in
+  source order. Tests: `tests/default_args_synthetic_e2e.rs`
+  (`invoked_lambda_default_runs_after_provided_arguments`).
   A default may reference an EARLIER parameter (`fun f(a: Int, c: Int = a + 1)`): it is realized inside the
   single `$default` synthetic where the parameters are in scope (the checker declares each parameter as it
   checks defaults, left-to-right). This is still rejected for an OVERLOADED function (its overloads share
