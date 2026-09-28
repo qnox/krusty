@@ -67,6 +67,8 @@ pub enum IrGeneratedParameterRole {
         ordinal: u32,
     },
     Continuation,
+    /// The dispatch receiver stored by a generated continuation class.
+    ContinuationDispatchReceiver,
     HolderReceiver,
     /// The enclosing instance an inner class's constructor takes first.
     OuterInstance,
