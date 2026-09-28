@@ -656,6 +656,7 @@ pub(super) fn protected_property_access(
         owner: bridge.owner.render(),
         name: format!("access${}", bridge.name),
         descriptor: method_descriptor(&parameters, bridge.result),
+        takes_receiver: true,
     }
 }
 
@@ -686,6 +687,7 @@ pub(super) fn private_member_read_access(
         owner: owner.to_string(),
         name,
         descriptor: method_descriptor(&bridge_parameters, result),
+        takes_receiver: true,
     }
 }
 

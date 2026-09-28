@@ -729,8 +729,8 @@ fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool 
                     |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
                 )
         }
-        // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
-        PropertyAccess::AccessBridge { .. } => true,
+        // An instance bridge takes the receiver; a named object's static field bridge does not.
+        PropertyAccess::AccessBridge { takes_receiver, .. } => *takes_receiver,
     }
 }
 
@@ -8938,16 +8938,15 @@ impl<'a> Emitter<'a> {
                 owner,
                 name,
                 descriptor,
+                ..
             } => {
-                // Receiver + value are both arguments of the synthetic static.
-                let words = crate::jvm::names::parse_method_descriptor(&descriptor)
-                    .map(|(params, _)| {
-                        params
-                            .iter()
-                            .map(|p| slot_words(ty_from_field_descriptor(p)) as i32)
-                            .sum()
-                    })
-                    .unwrap_or(2);
+                // The bridge's arguments are already on the stack.
+                let (parameters, _) = crate::jvm::names::parse_method_descriptor(&descriptor)
+                    .expect("a planned property access bridge has a valid JVM descriptor");
+                let words = parameters
+                    .iter()
+                    .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                    .sum();
                 let m = self.cw.methodref(&owner, &name, &descriptor);
                 self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
@@ -9124,11 +9123,9 @@ impl<'a> Emitter<'a> {
                 .and_then(|i| class.fields.get(i as usize))
                 .map_or(declared.ty, |f| f.ty);
             let d = type_descriptor(jvm_declared_ty(&ty));
-            return Some(PropertyAccess::AccessBridge {
-                owner: owner.to_string(),
-                name: format!("access${}$p", crate::names::property_setter_name(name)),
-                descriptor: format!("(L{owner};{d})V"),
-            });
+            return Some(static_accessors::member_property_field_bridge(
+                self.ir, class, owner, declared, &d, false,
+            ));
         }
         if let Some(setter) = declared.and_then(|p| p.setter) {
             let f = &self.ir.functions[setter as usize];
@@ -9277,11 +9274,10 @@ impl<'a> Emitter<'a> {
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
                 .map_or(declared.ty, |f| f.ty);
-            return Some(PropertyAccess::AccessBridge {
-                owner: owner.to_string(),
-                name: format!("access${}$p", crate::names::property_getter_name(name)),
-                descriptor: format!("(L{owner};){}", type_descriptor(jvm_declared_ty(&ty))),
-            });
+            let d = type_descriptor(jvm_declared_ty(&ty));
+            return Some(static_accessors::member_property_field_bridge(
+                self.ir, class, owner, declared, &d, true,
+            ));
         }
         // A class of THIS compilation is answered from its declaration, always — never by falling through
         // to the naming-convention guess, which has no class file to ask and would mistake an interface

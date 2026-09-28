@@ -34,11 +34,13 @@ pub enum PropertyAccess {
         is_static: bool,
         is_interface: bool,
     },
-    /// `invokestatic <owner>.<name>(<owner>)<ret>` — a synthetic static access bridge.
+    /// `invokestatic <owner>.<name>…` — a synthetic static access bridge. An instance member's
+    /// bridge takes the receiver as its first argument; a named object's static field does not.
     AccessBridge {
         owner: String,
         name: String,
         descriptor: String,
+        takes_receiver: bool,
     },
 }
 

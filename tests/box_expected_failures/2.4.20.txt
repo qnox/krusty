@@ -81,7 +81,6 @@ defaultArguments/convention/incWithDefaultInGetter.kt
 defaultArguments/function/kt36188.kt
 defaultArguments/function/kt36188_2.kt
 defaultArguments/kt47073_nested.kt
-defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/getDelegateWithoutReflection.kt
@@ -269,7 +268,6 @@ specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/explicitSuperCall.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
-statics/syntheticAccessor.kt
 suspendConversion/suspendConversionNullableCCE.kt
 syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
