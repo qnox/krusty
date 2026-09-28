@@ -214,7 +214,6 @@ properties/backingField/typeCheckSupertypeWithValueClassExplicitBackingField.kt
 properties/classFieldInsideLocalInSetter.kt
 properties/classFieldInsideNested.kt
 properties/complexPropertyInitializer.kt
-properties/fieldInsideField.kt
 properties/fieldInsideNested.kt
 properties/lateinit/topLevel/accessorException.kt
 properties/lateinit/topLevel/uninitializedMemberAccess.kt
