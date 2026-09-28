@@ -222,6 +222,7 @@ fn publish_property(
                 property.declaration,
                 header.visibility,
             ),
+            setter_parameter: index.property_setter_parameter_identity(target).cloned(),
             annotations: index
                 .declaration_annotations(property.declaration)
                 .to_vec()
