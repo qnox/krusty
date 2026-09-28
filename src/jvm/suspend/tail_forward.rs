@@ -1,10 +1,12 @@
 //! Detection and body rewriting for a suspend function that directly forwards its continuation.
 
 use super::bottom_completion::unwrap_suspend_cast;
+use super::value_class_results::boxed_on_resume;
 use super::{
     expr_calls_suspend, is_suspension_point, recorded_suspension_result, suspend_call_fid,
+    value_class_suspension_result,
 };
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
 use crate::types::Ty;
 use std::collections::HashSet;
 
@@ -57,21 +59,35 @@ impl TailForward {
 /// value-returning body when each one is returned ([`all_returned_tail_calls`]).
 pub(super) fn tail_forward(
     ir: &IrFile,
+    function: u32,
     body: ExprId,
     suspend_functions: &HashSet<u32>,
     declared_return: Ty,
     original_returns: &[Ty],
 ) -> Option<TailForward> {
-    if let Some(call) = tail_forward_call(
+    let forward = match tail_forward_call(
         ir,
+        function,
         body,
         suspend_functions,
         declared_return,
         original_returns,
     ) {
-        return Some(TailForward::Single(call));
-    }
-    all_returned_tail_calls(ir, body, suspend_functions, declared_return).map(TailForward::Returned)
+        Some(call) => TailForward::Single(call),
+        None => TailForward::Returned(all_returned_tail_calls(
+            ir,
+            body,
+            suspend_functions,
+            declared_return,
+        )?),
+    };
+    // A callee's continuation completes with its value class boxed, so the caller unboxes the
+    // resumed result and cannot hand its own continuation over.
+    let boxes_on_resume = forward
+        .calls()
+        .iter()
+        .any(|&call| boxed_on_resume(ir, call, suspend_functions).is_some());
+    (!boxes_on_resume).then_some(forward)
 }
 
 /// Rewrite the body so each forwarded call's CPS `Object` is what the function returns.
@@ -103,10 +119,26 @@ fn uses_carrier(ir: &IrFile, ty: Ty) -> bool {
         })
 }
 
+/// Whether `function` returns a value class as its box and `call` completes with that same box.
+fn crosses_as_same_box(
+    ir: &IrFile,
+    function: u32,
+    call: ExprId,
+    suspend_functions: &HashSet<u32>,
+) -> bool {
+    let boxed = |result: Option<IrValueClassSuspendResult>| match result {
+        Some(IrValueClassSuspendResult::Boxed { classifier, .. }) => Some(classifier),
+        _ => None,
+    };
+    let own = boxed(ir.value_class_suspend_returns.get(&function).copied());
+    own.is_some() && own == boxed(value_class_suspension_result(ir, call, suspend_functions))
+}
+
 /// If the body contains one suspension directly in tail position, select the physical call whose
 /// result can be returned with this function's continuation and no local state machine.
 fn tail_forward_call(
     ir: &IrFile,
+    function: u32,
     body: ExprId,
     suspend_functions: &HashSet<u32>,
     declared_return: Ty,
@@ -120,13 +152,19 @@ fn tail_forward_call(
 
     // A dependency call's CPS `Object` result is coerced to its declared type. When that is this
     // function's own result, the physical value can be forwarded verbatim. Value-class and unsigned
-    // results keep the coercion because their carrier, not their declared type, crosses the ABI.
+    // results keep the coercion because their carrier, not their declared type, crosses the ABI,
+    // unless both this function and the call hand over the same value class's box.
     let tail = match ir.exprs[tail as usize] {
         IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
-        } if type_operand == declared_return && !uses_carrier(ir, type_operand) => arg,
+        } if type_operand == declared_return
+            && (!uses_carrier(ir, type_operand)
+                || crosses_as_same_box(ir, function, arg, suspend_functions)) =>
+        {
+            arg
+        }
         _ => tail,
     };
     // A generic suspend call can carry a redundant reference cast around its erased result.

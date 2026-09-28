@@ -348,8 +348,8 @@ pub(crate) fn inherited_by_delegation(
 /// A declaration returning its own type parameter is recorded as that parameter, as top-level
 /// callables and source declarations are: `fun <T : A?> f(): T` hands back `A`'s carrier, while a
 /// `T : Any?` result is a box read out of an erased slot. Only the declaration can tell them apart.
-fn metadata_declared_nonnull_nonsuspend_return(function: &super::metadata::MetaFn) -> Option<Ty> {
-    if function.ret_nullable() || function.is_suspend() {
+fn metadata_declared_nonnull_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    if function.ret_nullable() {
         return None;
     }
     function.ret_class.map(Ty::obj_name).or_else(|| {
@@ -796,11 +796,11 @@ impl JvmLibraries {
             });
             // Declaration identity, not descriptor comparison, distinguishes an Object-underlying
             // value-class carrier (`Result<T>`) from a genuinely boxed value read out of an erased
-            // generic slot. Keep the full metadata return for every non-null, non-suspend callable;
-            // the representation pass filters it through the actual value-class inventory. The old
+            // generic slot. Keep the full metadata return for every non-null callable, a suspend one
+            // included; the representation pass filters it through the actual value-class inventory. The old
             // `value_class_ret` projection necessarily returned `None` for the ambiguous Object/Object
             // shape and lost the one fact capable of resolving that ambiguity.
-            let declared_ret = (!suspend && !ret_metadata.nullable)
+            let declared_ret = (!ret_metadata.nullable)
                 .then_some(
                     meta.declared_ret
                         .or_else(|| ret_metadata.class.map(Ty::non_null)),
@@ -1795,7 +1795,7 @@ impl JvmLibraries {
                     member.set_is_operator(declaration.is_operator());
                     member.set_is_infix(declaration.is_infix());
                     member.call_sig = declaration.member_call_sig();
-                    member.declared_ret = metadata_declared_nonnull_nonsuspend_return(declaration);
+                    member.declared_ret = metadata_declared_nonnull_return(declaration);
                 } else if let Some(declaration) = constructor_declaration {
                     if declaration.params.types.contains(&Ty::Error) {
                         crate::trace_compiler!(
@@ -4584,7 +4584,7 @@ impl JvmLibraries {
                     mf.has_reified_type_params(),
                     bytecode_public,
                 );
-                let declared_ret = (!mf.ret_nullable() && !mf.is_suspend())
+                let declared_ret = (!mf.ret_nullable())
                     .then(|| {
                         generic_sig
                             .as_ref()

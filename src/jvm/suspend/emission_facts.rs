@@ -18,6 +18,39 @@ pub struct ContinuationMetadata {
 
 pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
 
-/// JVM return nodes whose forwarded suspend result preserves `COROUTINE_SUSPENDED` but otherwise
-/// becomes `Unit.INSTANCE` for the selected Kotlin target version.
-pub(crate) type UnitResultTailForwards = std::collections::HashSet<crate::ir::ExprId>;
+/// What a JVM return node makes of the suspend result it returns when that result is not
+/// `COROUTINE_SUSPENDED`, which it returns as is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SuspendedResultReturn {
+    /// A forwarded `Unit` result becomes `Unit.INSTANCE`, for the selected Kotlin target version.
+    Unit,
+    /// A value class's carrier, as a function returns it, becomes the value class's box, as a
+    /// continuation's `invokeSuspend` hands it to its completion. A nullable carrier boxes all but
+    /// `null`.
+    ValueClassBox {
+        classifier: crate::types::TypeName,
+        carrier: crate::types::Ty,
+    },
+}
+
+/// The return nodes that reshape a suspend result, and how.
+pub(crate) type SuspendedResultReturns =
+    std::collections::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
+
+/// What building a file's machines records for their emission.
+pub(super) struct MachineOutputs<'b> {
+    pub(super) continuation_metadata: &'b mut ContinuationMetadataMap,
+    pub(super) default_call_operands:
+        &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
+    pub(super) suspended_result_returns: &'b mut SuspendedResultReturns,
+}
+
+/// The function an IR state machine is built for: its body, whether it returns `Unit`, the
+/// suspension scopes captured before inline bodies were spliced, and its suspension lines.
+pub(super) struct MachineSubject<'a> {
+    pub(super) fid: u32,
+    pub(super) body: crate::ir::ExprId,
+    pub(super) unit_ret: bool,
+    pub(super) captured_scopes: Option<super::SuspensionScopes>,
+    pub(super) suspension_lines: &'a std::collections::HashMap<crate::ir::ExprId, (u32, u32)>,
+}

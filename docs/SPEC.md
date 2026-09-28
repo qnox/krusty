@@ -700,19 +700,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/suspend_operator_convention_cross_file_e2e.rs` (one test per convention, plus
   `::compare_to_and_contains_cross_file_execute` and
   `::invoke_convention_cross_file_executes`).
-- **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
-  A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
-  kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
-  side. The value-class pass runs BEFORE the coroutine pass and erases `X` to its underlying everywhere,
-  so it now boxes such a suspend function's tail (the same `box_ref_tail` a lambda's erased `Object`
-  result uses) and records the class in `ir.suspend_boxed_value_class_returns`; the coroutine pass's
-  `bind_from_r` consults that record and unwraps the box instead of applying the ordinary
-  `Object`→declared-type coercion. Value-class knowledge stays in the value-class pass — the record
-  carries only the erasure it deliberately did NOT apply. Byte-identical to kotlinc for
-  `suspend fun distance(): Meters` (`constructor-impl` → `box-impl` → `areturn`). A CROSS-UNIT suspend
-  call whose logical return is a value class (`ir.suspend_calls`, a callee in another file with no such
-  record) still skips the file. Proven: `runBlocking { compute() }` where `compute` binds `distance()`
-  and reads `m.v` → 42 (`tests/feature_coverage_s_e2e.rs::suspend_returns_value_class`).
+- **A suspend function's value-class result across a suspension.** A suspend function whose
+  declared result is a value class `X` over a non-null reference returns the carrier where it does
+  not suspend (`IrValueClassSuspendResult::Carrier`). Its continuation hands the value to its
+  completion typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
+  (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; checkcast carrier; X.box-impl; areturn`, a
+  nullable carrier keeping `null`). A caller resumed with the value therefore unboxes it
+  (`checkcast X; unbox-impl`), and it cannot hand its own continuation to such a call: kotlinc builds
+  a state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
+  or null-capable carrier crosses as the box on both paths (`Boxed`). Following kotlinc's
+  `originalReturnTypeOfSuspendFunctionReturningUnboxedInlineClass`, a suspend override also returns
+  the box when a declaration it overrides, in this module or a dependency, returns another
+  classifier, a type parameter included (`override suspend fun generic(): X` over
+  `fun generic(): T`). A call to a callee that declares no value-class result, in this module or a
+  dependency, receives the box on either path and unboxes it. A dependency's suspend callable
+  therefore keeps its declared result like any other, so a call through `Base<X>.value(): T` knows
+  it reads a box. When the caller returns that same box it forwards its continuation, with neither
+  an unbox nor a cast (`jvm/value_classes/suspend_results.rs`,
+  `jvm/suspend/value_class_results.rs`). Tests: `tests/suspend_value_class_results_e2e.rs`.
+- **A private suspend member's `access$` bridge is the one every other class uses.** A
+  continuation re-enters a private member with an ordinary call from its own class, so the owner's
+  single `access$<name>` bridge serves both it and a suspend lambda class calling the member.
+  kotlinc marks a bridge to a suspend member at its first instruction, and an ordinary bridge at
+  the call. Test: `tests/suspend_value_class_results_e2e.rs::a_private_suspend_member_called_from_a_lambda_class_has_one_access_bridge`.
 - **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
   a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
   classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only

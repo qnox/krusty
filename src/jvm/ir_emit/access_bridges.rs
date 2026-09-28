@@ -716,6 +716,12 @@ pub(super) fn emit_private_member_access_bridge(
             .map(|parameter| slot_words(*parameter))
             .sum(),
     );
+    // kotlinc's bridge to a suspend member is itself a suspend call, whose line starts with its
+    // receiver; an ordinary bridge's line marks the call.
+    let suspend = ir.suspend_funs.contains(&fid);
+    if suspend && line != 0 {
+        code.mark_line(line);
+    }
     code.aload(0);
     let mut slot = 1;
     for parameter in &parameters {
@@ -731,7 +737,7 @@ pub(super) fn emit_private_member_access_bridge(
         .iter()
         .map(|parameter| slot_words(*parameter) as i32)
         .sum();
-    if line != 0 {
+    if !suspend && line != 0 {
         code.mark_line(line);
     }
     code.invokespecial(target, argument_words, slot_words(result) as i32);
