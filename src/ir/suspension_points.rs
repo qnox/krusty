@@ -11,7 +11,7 @@ use crate::types::TypeName;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrValueClassSuspendResult {
     Boxed { classifier: TypeName, carrier: Ty },
-    Carrier(Ty),
+    Carrier { classifier: TypeName, carrier: Ty },
 }
 
 impl IrValueClassSuspendResult {
@@ -20,7 +20,7 @@ impl IrValueClassSuspendResult {
     pub fn boundary_ty(self) -> Ty {
         match self {
             Self::Boxed { classifier, .. } => Ty::obj_name(classifier),
-            Self::Carrier(carrier) => carrier,
+            Self::Carrier { carrier, .. } => carrier,
         }
     }
 }

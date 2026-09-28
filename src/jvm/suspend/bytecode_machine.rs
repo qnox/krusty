@@ -19,26 +19,24 @@ use std::collections::HashSet;
 use super::cps::{
     calls_an_inline_function, spliced_inline_suspensions, TransformedMachine, TransformedSuspension,
 };
-use super::emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
+use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
     ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
     suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
+use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrValueClassSuspendResult};
 use crate::jvm::local_class_names::name_continuation;
 use crate::types::Ty;
 
 /// What a routed function needs from the rest of the pass.
-pub(super) struct Route<'a, 'b> {
+pub(super) struct Route<'a, 'b, 'o> {
     pub(super) facade: &'a str,
     pub(super) suspend_set: &'a HashSet<u32>,
     pub(super) context: &'a MachineContext<'a>,
     pub(super) machines: &'b mut EmitTimeMachines,
-    pub(super) continuation_metadata: &'b mut ContinuationMetadataMap,
-    pub(super) default_call_operands:
-        &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
+    pub(super) outputs: &'b mut MachineOutputs<'o>,
 }
 
 /// What the transformer is asked to take: a named function, whose continuation is a class of its
@@ -58,7 +56,12 @@ pub(super) enum Routed {
 }
 
 /// Route `fid`, whose body is `body`, to the transformer when it is one of the shapes it takes.
-pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_, '_>) -> Routed {
+pub(super) fn route(
+    ir: &mut IrFile,
+    fid: u32,
+    body: ExprId,
+    mut route: Route<'_, '_, '_>,
+) -> Routed {
     if eligible_points(ir, fid, body, &route, Subject::NamedFunction).is_none() {
         return Routed::NotEligible;
     }
@@ -87,7 +90,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
             ir,
             suspension.call,
             continuation,
-            route.default_call_operands,
+            route.outputs.default_call_operands,
         ) {
             return Routed::Failed;
         }
@@ -112,7 +115,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
         &continuation_class,
         fid,
         &SpillLayout::default(),
-        &[],
+        route.outputs.suspended_result_returns,
         receiver,
         &declared_params,
     );
@@ -130,7 +133,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
             None => (name, function.params.clone()),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
-    route.continuation_metadata.insert(
+    route.outputs.continuation_metadata.insert(
         continuation_class.clone(),
         ContinuationMetadata {
             m: method.clone(),
@@ -162,7 +165,7 @@ pub(super) fn owned_suspensions(
     ir: &mut IrFile,
     fid: u32,
     body: ExprId,
-    route: &mut Route<'_, '_>,
+    route: &mut Route<'_, '_, '_>,
     subject: Subject,
 ) -> Option<Vec<TransformedSuspension>> {
     // Common IR is a DAG: the CPS rewrites change nodes in place, so this body first owns one node
@@ -171,7 +174,11 @@ pub(super) fn owned_suspensions(
         let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
             continue;
         };
-        if !route.default_call_operands.clone_call(source, target, args) {
+        if !route
+            .outputs
+            .default_call_operands
+            .clone_call(source, target, args)
+        {
             return None;
         }
     }
@@ -196,7 +203,7 @@ pub(super) fn eligible_points(
     ir: &IrFile,
     fid: u32,
     body: ExprId,
-    route: &Route<'_, '_>,
+    route: &Route<'_, '_, '_>,
     subject: Subject,
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
@@ -276,7 +283,12 @@ pub(super) fn eligible_points(
             ir.exprs[call as usize],
             IrExpr::Call { .. } | IrExpr::MethodCall { .. }
         ) && !ir.intrinsic_suspension_points.contains_key(&call)
-            && value_class_suspension_result(ir, call, route.suspend_set).is_none()
+            // A boxed result arrives as the box on either path, which the call's own unbox
+            // consumes; a carrier result arrives boxed only on resume, which the IR machine handles.
+            && !matches!(
+                value_class_suspension_result(ir, call, route.suspend_set),
+                Some(IrValueClassSuspendResult::Carrier { .. })
+            )
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };

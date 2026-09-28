@@ -36,6 +36,7 @@ mod representation;
 mod result_tail_boxing;
 mod return_unboxing;
 mod substitution_coercions;
+mod suspend_results;
 mod synth_members;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
@@ -53,6 +54,7 @@ pub(crate) use representation::{
 };
 use result_tail_boxing::box_vc_tail;
 use std::collections::{HashMap, HashSet};
+use suspend_results::{record_suspend_results, suspend_result_representation};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -605,31 +607,6 @@ pub(crate) fn lower_value_classes(
     // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
     // fn-references) — keyed BEFORE any name mangling so every site agrees on the same mangled name.
     let suspend_fids: std::collections::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
-    // A suspend override whose supertype observes a non-value-class result must preserve the concrete
-    // value class's box across `Object`, even when its carrier happens to have the same JVM descriptor.
-    // Each bridge carries the exact selected target function; emitted names are never lookup input.
-    let force_boxed_suspend_returns: HashSet<u32> = ir
-        .classes
-        .iter()
-        .flat_map(|class| class.bridges.iter())
-        .filter_map(|bridge| {
-            let target = bridge
-                .target_function
-                .filter(|target| suspend_fids.contains(target))?;
-            let classifier = bridge
-                .concrete_ret
-                .non_null()
-                .obj_internal()
-                .filter(|classifier| under.contains_key(classifier))?;
-            let supertype_uses_same_value_class_carrier = bridge
-                .erased_ret
-                .non_null()
-                .obj_internal()
-                .is_some_and(|result| result == classifier)
-                && (!bridge.erased_ret.is_nullable() || !nullable_is_boxed(classifier, &under));
-            (!supertype_uses_same_value_class_carrier).then_some(target)
-        })
-        .collect();
     let suspend_sig: std::collections::HashSet<(Option<TypeName>, String, usize)> = ir
         .functions
         .iter()
@@ -638,26 +615,9 @@ pub(crate) fn lower_value_classes(
         .map(|(fid, f)| (f.dispatch_receiver, f.name.clone(), orig_params[fid].len()))
         .collect();
     // A suspend result crosses the erased `Continuation` boundary in the representation selected by
-    // the value-class ABI. Record that representation against both local declarations and exact call
-    // identities before either pass rewrites expressions. This includes nullable value classes:
-    // `X<String>?` can use `String` itself as the nullable carrier, whereas `X<Int>?` must remain the
-    // boxed `X` because an `int` cannot represent null.
-    for &fid in &suspend_fids {
-        if let Some(realization) = orig_rets.get(fid as usize).and_then(|result| {
-            suspend_result_representation(
-                result,
-                &under,
-                force_boxed_suspend_returns.contains(&fid),
-            )
-        }) {
-            ir.value_class_suspend_returns.insert(fid, realization);
-        }
-    }
-    ir.value_class_suspend_calls
-        .extend(ir.suspend_calls.iter().filter_map(|(&call, result)| {
-            suspend_result_representation(result, &under, false)
-                .map(|realization| (call, realization))
-        }));
+    // the value-class ABI. Record it against both local declarations and exact call identities
+    // before either pass rewrites expressions.
+    let force_boxed_suspend_returns = record_suspend_results(ir, &under, &orig_rets, &suspend_fids);
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -3104,8 +3064,10 @@ pub(crate) fn lower_value_classes(
                 // the carrier to the box and invoking `unbox-impl` would double-unbox it.
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
                     let carrier = erase(&under[&target], &under);
-                    if let Some(crate::ir::IrValueClassSuspendResult::Carrier(boundary)) =
-                        ir.value_class_suspend_calls.get(arg).copied()
+                    if let Some(crate::ir::IrValueClassSuspendResult::Carrier {
+                        carrier: boundary,
+                        ..
+                    }) = ir.value_class_suspend_calls.get(arg).copied()
                     {
                         if boundary.canonical_semantic() == carrier.canonical_semantic() {
                             retarget.push((id, boundary));
@@ -3837,7 +3799,7 @@ pub(crate) fn lower_value_classes(
             BoxOp::Unbox(x)
                 if matches!(
                     ir.value_class_suspend_calls.get(&id).copied(),
-                    Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
+                    Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
                         if carrier.canonical_semantic()
                             == erase(&under[&x], &under).canonical_semantic()
                 ) =>
@@ -4028,7 +3990,7 @@ pub(crate) fn lower_value_classes(
                                 },
                             );
                         }
-                        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
+                        Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
                             ir.functions[fid].ret = carrier;
                             // A safe coroutine primitive produces `T` through the generic
                             // `SafeContinuation<T>` slot, so a value-class `T` is boxed even when this
@@ -5247,7 +5209,20 @@ fn restore_boxed_suspension_tails(ir: &mut IrFile, id: ExprId, unboxes: &HashSet
             else {
                 return;
             };
-            ir.exprs[id as usize] = ir.exprs[boxed as usize].clone();
+            // The CPS result is already the box, so it needs no cast to it either. The call keeps
+            // its own identity, which its suspension and representation facts are keyed by.
+            let value = match ir.exprs[boxed as usize] {
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::Cast,
+                    arg,
+                    ..
+                } => arg,
+                _ => boxed,
+            };
+            ir.exprs[id as usize] = IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(value),
+            };
         }
         _ => {}
     }
@@ -5546,32 +5521,6 @@ fn erase(t: &Ty, under: &Under) -> Ty {
         under,
         &JvmUnderlyingProjection,
     )
-}
-
-/// Select the physical result carried through a suspend function's erased `Object` boundary.
-///
-/// The declared type remains the semantic identity used for overloads and metadata. This target pass
-/// records only how that already-selected value crosses CPS. Scalar and null-capable carriers require a
-/// box; a non-null reference carrier crosses directly unless an exact override edge requires the concrete
-/// value-class identity at the supertype boundary. Nullable value classes keep their ordinary erasure.
-fn suspend_result_representation(
-    declared: &Ty,
-    under: &Under,
-    force_boxed: bool,
-) -> Option<crate::ir::IrValueClassSuspendResult> {
-    let classifier = declared
-        .non_null()
-        .obj_internal()
-        .filter(|classifier| under.contains_key(classifier))?;
-    let carrier = erase(declared, under);
-    if !declared.is_nullable() && (force_boxed || nullable_is_boxed(classifier, under)) {
-        Some(crate::ir::IrValueClassSuspendResult::Boxed {
-            classifier,
-            carrier,
-        })
-    } else {
-        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
-    }
 }
 
 /// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class

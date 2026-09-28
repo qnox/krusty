@@ -74,7 +74,12 @@ impl SpillName {
 
 /// Route the lifted body of a suspend lambda to kotlinc's transformer, making the lambda a class of
 /// its own, when it is one of the shapes the transformer takes.
-pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_, '_>) -> Routed {
+pub(super) fn route(
+    ir: &mut IrFile,
+    fid: u32,
+    body: ExprId,
+    mut route: Route<'_, '_, '_>,
+) -> Routed {
     let Some(site) = site(ir, fid) else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no class site");
         return Routed::NotEligible;
@@ -133,7 +138,7 @@ pub(super) fn route(ir: &mut IrFile, fid: u32, body: ExprId, mut route: Route<'_
             ir,
             suspension.call,
             continuation,
-            route.default_call_operands,
+            route.outputs.default_call_operands,
         ) {
             return Routed::Failed;
         }

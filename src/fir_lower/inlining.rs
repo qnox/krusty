@@ -1135,7 +1135,9 @@ fn specialize_expression_facts(
     if let Some(result) = ir.value_class_suspend_calls.get_mut(&expression) {
         match result {
             IrValueClassSuspendResult::Boxed { carrier, .. }
-            | IrValueClassSuspendResult::Carrier(carrier) => specialize_ty(carrier, bindings),
+            | IrValueClassSuspendResult::Carrier { carrier, .. } => {
+                specialize_ty(carrier, bindings)
+            }
         }
     }
     if let Some(point) = ir.intrinsic_suspension_points.get_mut(&expression) {
