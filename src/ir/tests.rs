@@ -392,6 +392,57 @@ fn toplevel_default_stub_safe_accepts_a_lambda_capturing_only_parameters() {
 }
 
 #[test]
+fn toplevel_default_stub_safe_accepts_an_immediately_invoked_lambda() {
+    // `x = { 1.0 }()` is an invocation of a lambda with no captures. The stub builds the
+    // closure and calls `invoke`.
+    let mut f = IrFile::default();
+    let fid = add_toplevel_fn(&mut f, "test", Ty::Double);
+    let lambda = f.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![],
+        sam: None,
+        inline_body: None,
+    });
+    let invoked = f.add_expr(IrExpr::InvokeFunction {
+        func: lambda,
+        args: vec![],
+        params: vec![],
+        ret: Ty::Double,
+    });
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(invoked)]),
+    );
+    assert!(toplevel_default_stub_safe(&f, fid));
+}
+
+#[test]
+fn toplevel_default_stub_safe_rejects_an_invoked_lambda_capturing_a_spilled_temp() {
+    let mut f = IrFile::default();
+    let fid = add_toplevel_fn(&mut f, "test", Ty::Double);
+    let capture = f.add_expr(IrExpr::GetValue(7));
+    let lambda = f.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![capture],
+        sam: None,
+        inline_body: None,
+    });
+    let invoked = f.add_expr(IrExpr::InvokeFunction {
+        func: lambda,
+        args: vec![],
+        params: vec![],
+        ret: Ty::Double,
+    });
+    f.fn_params.insert(
+        fid,
+        FnParamInfo::source_defaults(Vec::new(), vec![Some(invoked)]),
+    );
+    assert!(!toplevel_default_stub_safe(&f, fid));
+}
+
+#[test]
 fn toplevel_default_stub_safe_rejects_a_lambda_capturing_a_spilled_temp() {
     // A capture beyond the parameter range (a spilled temp / enclosing local) is not in scope in
     // the static stub frame — rejected.

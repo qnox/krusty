@@ -20,6 +20,21 @@ fun box(): String {\n\
     assert_eq!(run(SRC).expect("reordered named args"), "OK");
 }
 
+/// Official box `argumentOrder/defaults.kt`: explicit arguments run in source order, then each
+/// omitted default runs in parameter order.
+#[test]
+fn omitted_defaults_run_after_explicit_arguments() {
+    const SRC: &str = "var invokeOrder: String = \"\"\n\
+fun test(x: Double = { invokeOrder += \"x\"; 1.0 }(), a: String, y: Long = { invokeOrder += \"y\"; 1L }(), b: String): String {\n\
+    return \"\" + x.toInt() + a + b + y\n\
+}\n\
+fun box(): String {\n\
+    val funResult = test(b = { invokeOrder += \"K\"; \"K\" }(), a = { invokeOrder += \"O\"; \"O\" }())\n\
+    return if (invokeOrder == \"KOxy\" && funResult == \"1OK1\") \"OK\" else \"fail: $invokeOrder $funResult\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "defaults");
+}
+
 #[test]
 fn reordered_named_args_three_params() {
     const SRC: &str = "fun test(a: String, b: String, c: String): String = a + b + c\n\

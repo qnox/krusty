@@ -376,11 +376,12 @@ fn default_expr_stub_safe_with_locals(
         // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
         // only reads its captures, and those are checked as children (a capture of a spilled temp /
         // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN
-        // value numbering, but it is never emitted by the stub (the stub instantiates the closure), so
-        // a false child rejection there is merely conservative. A callable-ref (`RefNew`) or an
-        // `invoke` still reaches state the static stub layout doesn't carry.
-        IrExpr::Lambda { .. } => {}
-        IrExpr::RefNew { .. } | IrExpr::InvokeFunction { .. } => {
+        // value numbering and is emitted as the lambda's implementation, not into the stub frame.
+        // An immediate call of that lambda (`x = { 1.0 }()`) is the same: the stub emits
+        // `FunctionN.invoke` on the value it just built. A callable reference (`RefNew`) still
+        // reaches state the static stub layout doesn't carry.
+        IrExpr::Lambda { .. } | IrExpr::InvokeFunction { .. } => {}
+        IrExpr::RefNew { .. } => {
             return false;
         }
         IrExpr::Call {

@@ -4937,6 +4937,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getX()` accessor). This removes the init-ordering hazard that gated such an object out; a computed
   (non-literal) const keeps the object gated. Test: `tests/object_const_val_e2e.rs`.
 
+- **Omitted default arguments run after the explicit arguments, in parameter order.**
+  `test(b = { "K" }(), a = { "O" }())` on
+  `fun test(x = { "x" }(), a: String, y = { "y" }(), b: String)` logs `KOxy`: the written arguments
+  run first, then each masked default inside `test$default`. An immediate lambda
+  (`x = { 1.0 }()`) is part of that stub. A default that captures a spilled temporary, or a callable
+  reference, still has no stub. Test: `tests/named_arg_source_order_e2e.rs::omitted_defaults_run_after_explicit_arguments`
+  (official box `argumentOrder/defaults.kt`).
+
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a
   SIDE-EFFECTING argument out of source order, `lower_args_defaulted` spills each argument to a fresh temp

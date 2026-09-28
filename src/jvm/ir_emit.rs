@@ -2231,11 +2231,12 @@ fn emit_pass(
                 &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
             );
         }
-        // A top-level function (or extension) with SIMPLE parameter defaults gets kotlinc's
+        // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
-        // cross-module — resolves against the same ABI kotlinc emits. A value-class-mangled function or a
-        // complex default (lambda / construction / spilled temp) is skipped (`toplevel_default_stub_safe`).
+        // cross-module — resolves against the same ABI kotlinc emits. A default the stub frame cannot
+        // re-emit (a callable reference, or a capture of a spilled temp) is skipped
+        // (`toplevel_default_stub_safe`).
         if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
             let defaults = ir.param_defaults(i as u32).unwrap();
             // A top-level function's `$default` marker is a plain `Object` (kotlinc's function ABI).
