@@ -1,0 +1,40 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_bound_violating_generic_candidate_leaves_the_unit_candidate]
+2.4.0..2.4.20:
+
+[a_lambda_result_selects_between_a_function_type_and_a_sam]
+2.4.0..2.4.20:
+
+[a_lambda_result_selects_between_a_suspend_and_a_plain_function_type]
+2.4.0..2.4.20:
+
+[a_lambda_result_selects_between_a_suspend_function_type_and_a_sam]
+2.4.0..2.4.20:
+
+[a_lambda_result_violating_a_type_parameter_bound_eliminates_the_candidate]
+2.4.0..2.4.20:
+
+[members_are_told_apart_by_their_bounds_before_specificity]
+2.4.0..2.4.20:
+
+[members_extensions_and_constructors_select_like_kotlinc]
+2.4.0..2.4.20:
+
+[the_lambda_results_select_like_kotlinc]
+2.4.0..2.4.20:
+
+[when_no_candidate_fits_the_first_reports_the_mismatch]
+2.4.0..2.4.20:
+  Main.kt:4:35: return type mismatch: expected 'Int', actual 'Boolean'.
+
+[without_the_feature_a_function_type_beats_a_sam]
+2.4.0..2.4.20:
+
+[without_the_feature_the_lambda_does_not_select]
+2.4.0..2.4.20:
+  Main.kt:3:21: overload resolution ambiguity between candidates:
+
+[without_the_feature_the_unit_candidate_is_chosen]
+2.4.0..2.4.20:

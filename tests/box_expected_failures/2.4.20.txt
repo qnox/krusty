@@ -155,9 +155,6 @@ increment/argumentWithSideEffects.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedTypeAsLambdaInputType.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
-inference/eagerLambdaAnalysisSamAndLambda.kt
-inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
-inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/kt67609.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
