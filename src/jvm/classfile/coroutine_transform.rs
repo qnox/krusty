@@ -23,8 +23,9 @@ use crate::jvm::bytecode_passes::coroutines::{
 pub(crate) struct CoroutineRequest {
     /// The internal name of the function's continuation class.
     pub continuation_class: String,
-    /// The function's first line.
-    pub line_number: u16,
+    /// The function's first line. A synthetic function has none, and then no suspension point
+    /// either, so no state machine whose code the line would be attributed to.
+    pub line_number: Option<u16>,
     /// The physical slot of the `$completion` parameter, as the emitter assigned it.
     pub completion_slot: u16,
     /// The internal name of the dispatch receiver the continuation's constructor takes, for a
@@ -138,7 +139,9 @@ impl ClassWriter {
             let lambda = SuspendLambda {
                 class: &owner,
                 source_file: &source_file,
-                line_number: request.line_number,
+                line_number: request
+                    .line_number
+                    .ok_or("a suspend lambda's invokeSuspend has no declaration line")?,
                 declared_spill_fields: &declared_spill_fields,
             };
             let machine =

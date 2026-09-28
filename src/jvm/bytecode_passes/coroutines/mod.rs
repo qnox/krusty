@@ -61,8 +61,9 @@ pub(crate) struct NamedFunction<'a> {
     /// The internal name of the function's continuation class (`AKt$f$1`).
     pub continuation_class: &'a str,
     pub source_file: &'a str,
-    /// The function's first line: the machine's own code is attributed to it.
-    pub line_number: u16,
+    /// The function's first line: the machine's own code is attributed to it. `None` only for a
+    /// synthetic function, which the emitter hands over with no suspension point.
+    pub line_number: Option<u16>,
     /// The physical local slot assigned to the source-level `$completion` parameter. This is
     /// recorded by codegen; the transformer must not reconstruct parameter identity from a JVM
     /// descriptor.
