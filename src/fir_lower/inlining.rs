@@ -221,6 +221,14 @@ impl BodyLowering<'_> {
                 operand.map(|operand| self.specialized_inline_operand(operand, &bindings))
             })
             .collect::<Vec<_>>();
+        let read = crate::ir::read_values(self.ir, template);
+        for (value, operand) in operands.iter().enumerate() {
+            if let Some(operand) = *operand {
+                if !read.contains(&(value as u32)) {
+                    self.ir.mark_unread_inline_operand(operand);
+                }
+            }
+        }
         let defaults = if operands.iter().any(Option::is_none) {
             if self.ir.param_defaults_stub_only(function) {
                 return None;

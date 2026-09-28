@@ -392,12 +392,14 @@ fn materialize_member_extension_property(
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_member_extension_delegate(
             index,
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             class_id,
             receiver,
-            context_parameters,
             ir,
             realizations,
             initialization,
@@ -544,11 +546,13 @@ fn materialize_top_level_property(
 ) -> Result<(), FirFileLoweringFailure> {
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_top_level_delegate(
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             extension_receiver,
-            context_parameters,
             index,
             ir,
             realizations,
@@ -756,6 +760,7 @@ fn materialize_top_level_property(
             setter,
             receiver: extension_receiver,
             context_parameters,
+            delegate: None,
         },
     );
     Ok(())
@@ -898,11 +903,13 @@ fn materialize_member_property(
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_member_delegate(
             index,
-            source_order,
-            property_id,
-            property,
+            super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            },
             class_id,
-            context_parameters,
             ir,
             realizations,
             initialization,
@@ -1288,6 +1295,11 @@ pub(super) fn add_accessor_function(
     // CHECKED types differ — so the accessor carries one adaptation node and never one wrapping
     // another. Whether the node costs an unbox, a `checkcast` or no instruction at all is the
     // backend's to decide from the physical types.
+    // A getter returns at the line its value is stated on: after an inlined call there, the return
+    // marks that line again, as kotlinc's does.
+    let line = returns_value
+        .then(|| ir.expr_source_lines.get(&value).copied())
+        .flatten();
     let crosses_boundary = match result {
         AccessorResult::Delegated(checked) => returns_value && checked != ret,
         AccessorResult::AsDeclared => false,
@@ -1302,6 +1314,9 @@ pub(super) fn add_accessor_function(
         value
     };
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
+    if let Some(line) = line {
+        ir.expr_source_lines.insert(returned, line);
+    }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],

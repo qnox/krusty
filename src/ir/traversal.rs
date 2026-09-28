@@ -233,6 +233,23 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
     }
 }
 
+/// Every value the tree under `root` reads.
+pub fn read_values(ir: &IrFile, root: ExprId) -> std::collections::HashSet<u32> {
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    let mut read = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::GetValue(value) = ir.expr(expression) {
+            read.insert(*value);
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    read
+}
+
 /// Whether evaluating `expr` can run NO code at all — a literal or a local read. Strictly conservative:
 /// anything that touches a type (a static read, an enum entry, a singleton) can trigger that type's
 /// initializer, which is arbitrary user code, so it is NOT in this set. Used where a value the source
