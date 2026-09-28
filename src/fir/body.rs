@@ -1,7 +1,7 @@
 use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
 use super::local_callables::BodyLocalCallableDeclarationId;
 use super::local_class_names::FirGeneratedClassProvenance;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod context_parameters;
 pub(super) mod value_parameters;
@@ -1816,6 +1816,9 @@ pub struct FirBody {
     /// Checked execution-scope fact; nested callable bodies own their own value.
     pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
+    /// Loop variables a destructuring `for ((a, b) in xs)` binds: compiler-generated containers
+    /// that only the prepended destructuring reads, with no source identity.
+    destructuring_loop_containers: HashSet<LocalValueId>,
     /// Line-only source metadata for debug output; see `debug_lines`.
     debug_lines: debug_lines::FirBodyDebugLines,
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
@@ -1873,6 +1876,7 @@ impl FirBody {
             source_lambda: None,
             direct_suspension: false,
             debug_value_names: HashMap::new(),
+            destructuring_loop_containers: HashSet::new(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::new(),
             lifting_site: None,
@@ -2087,6 +2091,16 @@ impl FirBody {
 
     pub fn debug_value_name(&self, value: LocalValueId) -> Option<&str> {
         self.debug_value_names.get(&value).map(Box::as_ref)
+    }
+
+    pub(crate) fn mark_destructuring_loop_container(&mut self, value: LocalValueId) {
+        self.destructuring_loop_containers.insert(value);
+    }
+
+    /// Whether `value` is a destructuring loop's compiler-generated container rather than a named
+    /// source variable.
+    pub fn is_destructuring_loop_container(&self, value: LocalValueId) -> bool {
+        self.destructuring_loop_containers.contains(&value)
     }
 
     pub fn set_context_receiver_types(&mut self, receivers: Vec<ResolvedTy>) {
@@ -2728,6 +2742,7 @@ impl FirBody {
                 .values()
                 .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
                 .sum::<usize>()
+            + self.destructuring_loop_containers.len() * std::mem::size_of::<LocalValueId>()
             + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
