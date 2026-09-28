@@ -2065,7 +2065,7 @@ impl<'a> SymbolResolver<'a> {
         let mut work = vec![crate::types::type_name(internal)];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = work.pop() {
-            if cur.matches("java/lang/Object") || cur.matches("kotlin/Any") || !seen.insert(cur) {
+            if crate::types::wk::is_any_or_object(cur) || !seen.insert(cur) {
                 continue;
             }
             let Some(t) = self.src.classifier(cur) else {
@@ -5368,7 +5368,7 @@ impl ReceiverMro {
         }
         // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included
         // — at lowest precedence.
-        want.is_some_and(|n| n.matches("kotlin/Any"))
+        want.is_some_and(|n| n == crate::types::wk::any())
             .then_some((u32::MAX - 1, self.recv))
     }
 
@@ -6752,7 +6752,7 @@ fn fun_return_compatible(
         || pr
             .non_null()
             .obj_internal()
-            .is_some_and(|n| n.matches("kotlin/Any"))
+            .is_some_and(|n| n == crate::types::wk::any())
         || (allow_unit_coercion && pr == Ty::Unit)
     {
         return true;
