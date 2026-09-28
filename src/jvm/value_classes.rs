@@ -37,6 +37,7 @@ mod module_members;
 mod operand_nullness;
 mod property_references;
 mod representation;
+use representation::is_ref;
 mod result_tail_boxing;
 mod return_unboxing;
 mod substitution_coercions;
@@ -2887,7 +2888,20 @@ pub(crate) fn lower_value_classes(
                 // class; consequently a `NotVc` operand under this checked coercion is a boxed
                 // value-class reference, never a raw carrier discovered by guesswork. Coerced to `X?`
                 // over a reference carrier, the box may be null and unboxes null-safely.
+                // A sole-property read yielding a nested value class over a reference carrier
+                // (`zn.z!!` for `ZN(val z: Z1?)`) already is that class's carrier.
+                let mut operand = *arg;
+                while let IrExpr::NotNullAssert { operand: inner, .. } = ir.exprs[operand as usize]
+                {
+                    operand = inner;
+                }
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
+                    if sole_property_coercions.contains(&operand)
+                        && repr_ctx.unboxed_value_class(operand, &under) == Some(target)
+                    {
+                        retarget.push((id, erase(&under[&target], &under)));
+                        continue;
+                    }
                     if matches!(repr_ctx.repr(*arg), Repr::NotVc)
                         && !repr_ctx.operand_null_only(*arg)
                     {
@@ -5195,7 +5209,6 @@ fn is_ref(t: &Ty) -> bool {
         None => false,
     }
 }
-
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —
 /// reframing an instance-lowered body (`this` at slot 0) as a static one (params at slot 0).
 fn shift_slots(ir: &mut IrFile, root: ExprId) {
