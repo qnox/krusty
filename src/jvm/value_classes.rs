@@ -53,6 +53,7 @@ use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
+pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};

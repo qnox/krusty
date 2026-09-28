@@ -1325,6 +1325,8 @@ mod value_class_constructor_bodies_e2e;
 mod value_class_constructor_default_e2e;
 #[path = "value_class_delegated_result_e2e.rs"]
 mod value_class_delegated_result_e2e;
+#[path = "value_class_dependency_bridge_e2e.rs"]
+mod value_class_dependency_bridge_e2e;
 #[path = "value_class_equality_e2e.rs"]
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
