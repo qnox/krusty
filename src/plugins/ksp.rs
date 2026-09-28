@@ -257,7 +257,7 @@ pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext) -> Vec<KsClass> 
         .iter()
         .enumerate()
         .map(|(i, c)| KsClass {
-            fq_name: c.fq_name(),
+            fq_name: c.fq_name().to_owned(),
             annotations: ctx
                 .class_annotations
                 .get(&(i as u32))
