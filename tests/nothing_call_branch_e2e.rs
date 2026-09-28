@@ -127,9 +127,12 @@ fun box(): String {\n\
     }\n\
     return a\n\
 }\n";
+    run_both(SRC, "Nothing property getter");
+    let (krusty, kotlinc) = compile_both_for_bytecode(SRC);
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "Nothing property getter"),
-        "OK"
+        method_body(&krusty, "BottomKt", "box"),
+        method_body(&kotlinc, "BottomKt", "box"),
+        "Nothing property getter branch bytecode"
     );
 }
 
