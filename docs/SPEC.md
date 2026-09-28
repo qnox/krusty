@@ -8161,6 +8161,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the field as `LZ;` and failed with `NoSuchFieldError`. Tests:
   `tests/value_class_hidden_constructor_e2e.rs`. Corpus: `inlineClasses/kt27705`, `kt27706` and
   their `Generic` forms, `fullValueClasses/inner`.
+- **A generic `T?` slot holds a value class as its box.** A read of `val held: T?` coerced to a
+  nullable value class `X?` is the erased reference: when `X?` is itself the box (a primitive
+  carrier), kotlinc narrows it with `checkcast X` and returns it as is; when `X?` is the carrier
+  (a non-null reference carrier), it unboxes null-safely (`dup; ifnull; unbox-impl`). krusty treated
+  the read as the carrier and passed it through `box-impl`, or unboxed it without the null check.
+  Tests: `tests/value_class_generic_slot_read_e2e.rs`. Corpus: `inlineClasses/boxNullableValueOf…Generic2`,
+  `unboxNullableValueOf…Generic` and `…GWI2`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
