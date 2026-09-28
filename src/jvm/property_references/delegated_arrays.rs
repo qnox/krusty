@@ -97,7 +97,9 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
         }
         let unread = dependency_unread_arguments(
             bodies,
-            (&owner.render(), name, descriptor),
+            *owner,
+            name,
+            descriptor,
             dispatch_receiver.is_some(),
             args,
         );
@@ -140,11 +142,13 @@ fn elide(ir: &mut IrFile, expression: ExprId) {
 /// takes local 0 ahead of the descriptor's parameters.
 fn dependency_unread_arguments(
     bodies: &dyn MethodBodies,
-    (owner, name, descriptor): (&str, &str, &str),
+    owner: TypeName,
+    name: &str,
+    descriptor: &str,
     instance: bool,
     args: &[ExprId],
 ) -> Vec<ExprId> {
-    let Some(body) = bodies.body(owner, name, descriptor) else {
+    let Some(body) = bodies.body_name(owner, name, descriptor) else {
         return Vec::new();
     };
     let Ok(callee) = MethodNode::read(ACC_STATIC, name, descriptor, &body) else {
