@@ -10,6 +10,14 @@ const SOURCE: &str = "package store\n\
     \x20   operator fun component1(): Int = first\n\
     \x20   operator fun component2(): String = second\n\
     }\n\
+    class PairCursor(private val values: Array<Pair2>) {\n\
+    \x20   private var index = 0\n\
+    \x20   operator fun hasNext(): Boolean = index < values.size\n\
+    \x20   operator fun next(): Pair2 = values[index++]\n\
+    }\n\
+    class PairItems(private val values: Array<Pair2>) {\n\
+    \x20   operator fun iterator(): PairCursor = PairCursor(values)\n\
+    }\n\
     \n\
     suspend fun step(x: Int): Int = x\n\
     \n\
@@ -22,7 +30,7 @@ const SOURCE: &str = "package store\n\
     \x20       }\n\
     \x20       return s\n\
     \x20   }\n\
-    \x20   fun iterable(items: List<Pair2>): Int {\n\
+    \x20   fun iterable(items: PairItems): Int {\n\
     \x20       var total = 0\n\
     \x20       for ((a, _) in items) total += a\n\
     \x20       return total\n\
@@ -30,7 +38,7 @@ const SOURCE: &str = "package store\n\
     }\n\
     \n\
     class SuspendLoops {\n\
-    \x20   suspend fun sum(items: List<Pair2>): Int {\n\
+    \x20   suspend fun sum(items: PairItems): Int {\n\
     \x20       var total = 0\n\
     \x20       for ((a, b) in items) {\n\
     \x20           total = step(a) + total + b.length\n\
