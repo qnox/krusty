@@ -3227,11 +3227,14 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "Z" => Ty::Boolean,
         "C" => Ty::Char,
         "V" => Ty::Unit,
-        s if s == type_descriptor(Ty::String) => Ty::String,
         s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
-            Ty::obj(to_kotlin_internal(raw_internal))
+            if let Some(name) = crate::types::existing_type_name(raw_internal) {
+                Ty::obj_name(super::jvm_class_map::to_kotlin_type_name(name))
+            } else {
+                Ty::obj(to_kotlin_internal(raw_internal))
+            }
         }
         _ => Ty::Error,
     }
@@ -6864,6 +6867,16 @@ mod tests {
     fn descriptor_void_and_java_void_are_distinct() {
         assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::obj("java/lang/Void"));
         assert_eq!(desc_to_ty("V"), Ty::Unit);
+        assert_eq!(desc_to_ty("Ljava/lang/String;"), Ty::String);
+        assert_eq!(desc_to_ty("Ljava/lang/Object;"), Ty::obj("kotlin/Any"));
+        assert_eq!(
+            desc_to_ty("Ljava/util/List;"),
+            Ty::obj("kotlin/collections/List")
+        );
+        assert_eq!(
+            desc_to_ty("Ldemo/NotYetInterned;"),
+            Ty::obj("demo/NotYetInterned")
+        );
     }
 
     #[test]

@@ -107,7 +107,9 @@ pub(super) fn suspend_return_from_gsig(
                     // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
                     // the call site unboxes it to the source primitive only when the return is non-nullable
                     // (a `Long?` return must keep the boxed form).
-                    Some(kotlin_name_to_ty(to_kotlin_internal(&name.render())))
+                    Some(Ty::obj_name(
+                        crate::jvm::jvm_class_map::to_kotlin_type_name(name),
+                    ))
                 }
                 // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
                 // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
