@@ -5171,6 +5171,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`dup; Intrinsics.checkNotNull`) and only then applies the `checkcast` to the substituted type.
   The assertion reads the call's selected erasure, whether the declaration is in the same file,
   another file of the module, or a dependency. Tests: `tests/generic_result_assertion_e2e.rs`.
+- **A primitive class literal is the primitive's class.** `Int::class` loads `Integer.TYPE` (the
+  `int` class) before `Reflection.getOrCreateKotlinClass`, as kotlinc's `generateClassInstance`
+  does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
+  boxed class even when an inlined call substitutes a primitive for it (`ldc Integer`), so the IR
+  literal records that it names a type parameter. Test: `tests/class_literal_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.
