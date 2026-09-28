@@ -1001,6 +1001,9 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+mod coverage;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

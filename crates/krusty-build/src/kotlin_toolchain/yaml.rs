@@ -538,4 +538,102 @@ dependencies:
         let modules = yaml.as_map().unwrap()[0].1.as_seq().unwrap();
         assert_eq!(modules[0], Yaml::Scalar("libs/*".to_string()));
     }
+
+    #[test]
+    fn comments_quotes_and_block_scalars_keep_their_text() {
+        let yaml = parse(
+            "\
+---
+# header
+product: \"jvm/app\" # trailing
+description: >
+  folded
+  lines
+note: 'it''s # not a comment'
+",
+        )
+        .expect("parse");
+        let map = yaml.as_map().expect("mapping");
+        assert_eq!(
+            map[0],
+            ("product".to_string(), Yaml::Scalar("jvm/app".to_string()))
+        );
+        assert_eq!(map[1].1, Yaml::Scalar("folded\nlines".to_string()));
+        assert_eq!(map[2].1, Yaml::Scalar("it's # not a comment".to_string()));
+    }
+
+    #[test]
+    fn escapes_and_structural_errors_are_reported_in_full() {
+        assert_eq!(
+            parse("description: \"a\\nb\\t\\\"c\\\\\"")
+                .unwrap()
+                .as_map()
+                .unwrap()[0]
+                .1,
+            Yaml::Scalar("a\nb\t\"c\\".to_string())
+        );
+        assert_eq!(parse("").unwrap_err().to_string(), "document is empty");
+        assert_eq!(
+            parse("# only\n").unwrap_err().to_string(),
+            "document is empty"
+        );
+        assert_eq!(
+            parse("product: \"jvm/app").unwrap_err().to_string(),
+            "line 1: unterminated quote"
+        );
+        assert_eq!(
+            parse("product: \"jvm\\\\\"").unwrap().as_map().unwrap()[0].1,
+            Yaml::Scalar("jvm\\".to_string())
+        );
+        assert_eq!(
+            parse("product: &app jvm/app").unwrap_err().to_string(),
+            "line 1: flow collections, anchors, and aliases are not supported"
+        );
+        assert_eq!(
+            parse("product: *app").unwrap_err().to_string(),
+            "line 1: flow collections, anchors, and aliases are not supported"
+        );
+        assert_eq!(
+            parse("product:\n    type: jvm/app\n  layout: amper")
+                .unwrap_err()
+                .to_string(),
+            "line 3: indentation does not match the enclosing block"
+        );
+        assert_eq!(
+            parse("product: jvm/app\n  layout: amper")
+                .unwrap_err()
+                .to_string(),
+            "line 1: 'jvm/app' cannot be followed by a nested block"
+        );
+        assert_eq!(
+            parse("dependencies:\n  -\n").unwrap_err().to_string(),
+            "line 2: expected a nested block"
+        );
+        assert_eq!(
+            parse("description: |\n  one\n two")
+                .unwrap_err()
+                .to_string(),
+            "line 3: block scalar indentation decreased"
+        );
+        assert_eq!(
+            parse("- item\nproduct: jvm/app").unwrap_err().to_string(),
+            "line 2: unexpected content after the document"
+        );
+        assert_eq!(
+            parse("jvm/app").unwrap_err().to_string(),
+            "line 1: expected 'key: value', found 'jvm/app'"
+        );
+        assert_eq!(
+            parse("- one\n  - two").unwrap_err().to_string(),
+            "line 2: indentation does not match the enclosing block"
+        );
+        assert_eq!(
+            parse("description: |+\n  kept\n")
+                .unwrap()
+                .as_map()
+                .unwrap()[0]
+                .1,
+            Yaml::Scalar("kept".to_string())
+        );
+    }
 }
