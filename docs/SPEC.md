@@ -8838,6 +8838,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every signed primitive, both bounds, both value-class carriers and all four unsigned forms, plus
   runtime interface dispatch.
 
+- **A primitive collection parameter rejects a value that is not its wrapper.** `contains`,
+  `indexOf`, `lastIndexOf`, `remove`, `containsKey`, `containsValue`, and `get`, specialized to a
+  signed primitive (`containsValue(value: Int)`), erase the parameter to `Object`. The bridge
+  tests `instanceof` of that primitive's wrapper (`java/lang/Integer`) and returns the operation's
+  neutral result (`false`, `-1`, or `null`) when the test fails, including for `null`. A value
+  that passes is unboxed through `Number` (`Boolean` and `Char` through their own wrappers) and
+  delegated to the primitive method. A nullable primitive (`Int?`) stays on the reference barrier,
+  which admits `null`. Test: `tests/collection_special_member_stub_e2e.rs`
+  (`primitive_collection_bridges_reject_null_and_foreign_wrappers`).
+
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
   `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
   `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.

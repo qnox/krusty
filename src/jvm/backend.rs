@@ -319,7 +319,7 @@ fn collection_bridge_semantics(
         {
             (CollectionOwner::List, BridgeBarrierOutcome::NotFound)
         }
-        "containsKey"
+        "containsKey" | "containsValue"
             if bridge.erased_ret == crate::types::Ty::Boolean
                 && bridge.concrete_ret == crate::types::Ty::Boolean =>
         {
@@ -334,10 +334,33 @@ fn collection_bridge_semantics(
     (bridge.erased_params.len() == 1
         && bridge.concrete_params.len() == 1
         && bridge.erased_params[parameter].is_erased_top()
-        && bridge.concrete_params[parameter].is_reference()
-        && !bridge.concrete_params[parameter].is_erased_top())
+        && narrow_collection_parameter(bridge.concrete_params[parameter]))
     .then_some((parameter, outcome))
     .map(|(parameter, outcome)| (owner, BridgeBarrier { parameter, outcome }))
+}
+
+/// A collection parameter that is narrower than the erased `Object` slot.
+///
+/// A signed primitive (`containsValue(value: Int)`) is that parameter too: its JVM method takes
+/// the primitive, so the erased bridge must test the boxed wrapper before unboxing. Unsigned
+/// values are inline classes and are not this case. `Nothing` is not a reference and not a
+/// primitive; it stays out of this predicate.
+fn narrow_collection_parameter(ty: crate::types::Ty) -> bool {
+    signed_jvm_primitive(ty) || (ty.is_reference() && !ty.is_erased_top())
+}
+
+fn signed_jvm_primitive(ty: crate::types::Ty) -> bool {
+    matches!(
+        ty,
+        crate::types::Ty::Boolean
+            | crate::types::Ty::Byte
+            | crate::types::Ty::Short
+            | crate::types::Ty::Int
+            | crate::types::Ty::Long
+            | crate::types::Ty::Char
+            | crate::types::Ty::Float
+            | crate::types::Ty::Double
+    )
 }
 
 pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier> {
@@ -1696,6 +1719,77 @@ mod tests {
             offenders.is_empty(),
             "common lowering must leave JVM storage choices to the backend:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    #[test]
+    fn primitive_collection_parameters_take_the_type_safe_barrier() {
+        fn bridge(
+            name: &str,
+            param: crate::types::Ty,
+            erased_ret: crate::types::Ty,
+            concrete_ret: crate::types::Ty,
+        ) -> crate::ir::Bridge {
+            crate::ir::Bridge {
+                kind: crate::ir::BridgeKind::Function,
+                target_function: None,
+                parameters: Vec::new(),
+                name: name.to_string(),
+                erased_params: vec![crate::types::Ty::obj("kotlin/Any")],
+                erased_ret,
+                concrete_params: vec![param],
+                concrete_ret,
+                target_ret: None,
+                type_safe_barrier: false,
+                special: false,
+                target_name: None,
+            }
+        }
+        let boolean = crate::types::Ty::Boolean;
+        let any = crate::types::Ty::obj("kotlin/Any");
+        let string = crate::types::Ty::obj("kotlin/String");
+        assert_eq!(
+            collection_bridge_semantics(&bridge(
+                "containsValue",
+                crate::types::Ty::Int,
+                boolean,
+                boolean
+            ))
+            .map(|(_, barrier)| barrier.outcome),
+            Some(BridgeBarrierOutcome::False)
+        );
+        assert_eq!(
+            collection_bridge_semantics(&bridge("containsValue", string, boolean, boolean))
+                .map(|(_, barrier)| barrier.outcome),
+            Some(BridgeBarrierOutcome::False)
+        );
+        assert!(
+            collection_bridge_semantics(&bridge("containsValue", any, boolean, boolean)).is_none()
+        );
+        assert_eq!(
+            collection_bridge_semantics(&bridge(
+                "contains",
+                crate::types::Ty::Int,
+                boolean,
+                boolean
+            ))
+            .map(|(_, barrier)| barrier.outcome),
+            Some(BridgeBarrierOutcome::False)
+        );
+        assert_eq!(
+            collection_bridge_semantics(&bridge(
+                "indexOf",
+                crate::types::Ty::Int,
+                crate::types::Ty::Int,
+                crate::types::Ty::Int,
+            ))
+            .map(|(_, barrier)| barrier.outcome),
+            Some(BridgeBarrierOutcome::NotFound)
+        );
+        assert_eq!(
+            collection_bridge_semantics(&bridge("get", crate::types::Ty::Int, any, string,))
+                .map(|(_, barrier)| barrier.outcome),
+            Some(BridgeBarrierOutcome::Null)
         );
     }
 

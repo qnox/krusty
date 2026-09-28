@@ -37,6 +37,13 @@ fn finish_bridge(
     }
 }
 
+fn barrier_instanceof_name(semantic: Ty, jvm: Ty) -> String {
+    semantic.jvm_boxed_ref().map_or_else(
+        || crate::jvm::names::instanceof_internal_name(jvm),
+        |boxed| crate::jvm::names::instanceof_internal_name(boxed),
+    )
+}
+
 fn emit_bridge_barrier_outcome(
     outcome: crate::jvm::backend::BridgeBarrierOutcome,
     cw: &mut ClassWriter,
@@ -269,7 +276,10 @@ fn emit_bridge(
             code.ifnull(dispatch);
         }
         code.aload(parameter_slot);
-        let concrete = crate::jvm::names::instanceof_internal_name(cp[barrier.parameter]);
+        // A primitive parameter's JVM type is the scalar. `instanceof` names its boxed wrapper
+        // (`Int` → `java/lang/Integer`); the unbox below still goes through `Number`.
+        let concrete =
+            barrier_instanceof_name(b.concrete_params[barrier.parameter], cp[barrier.parameter]);
         let concrete_class = cw.class_ref(&concrete);
         code.instance_of(concrete_class);
         code.ifne(dispatch);
