@@ -41,6 +41,7 @@ pub(super) fn local_variable(
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
+            IrGeneratedParameterRole::ContinuationDispatchReceiver => Some("this$0".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
             // kotlinc names the parameter like the field it initializes.
             IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
@@ -314,6 +315,21 @@ pub(super) fn constructor_identities(
                 }
                 crate::types::ContextParameterKind::LegacyReceiver => {
                     IrParameterIdentity::context_receiver(context_ordinal)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver =>
+                {
+                    IrParameterIdentity::generated(
+                        IrGeneratedParameterRole::ContinuationDispatchReceiver,
+                        None,
+                    )
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::Continuation =>
+                {
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
                 }
                 crate::types::ContextParameterKind::None
                     if argument.provenance

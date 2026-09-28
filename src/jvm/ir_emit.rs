@@ -3062,7 +3062,9 @@ fn emit_class(
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
     let is_continuation = is_continuation_class(c);
-    let has_continuation_receiver = c.fields.iter().any(|field| field.name == "this$0");
+    let has_continuation_receiver = c.ctor_args.iter().any(|argument| {
+        argument.provenance == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver
+    });
     let ctor_signature = continuation_metadata
         .map(|metadata| {
             if has_continuation_receiver {
@@ -3320,9 +3322,7 @@ fn emit_class(
         let ctor_desc = primary_ctor_descriptor(c);
         let ctor_parameters = if env.java_parameters {
             if is_continuation {
-                super::method_parameters::continuation_constructor(
-                    c.fields.iter().any(|field| field.name == "this$0"),
-                )
+                super::method_parameters::continuation_constructor(c)
             } else {
                 super::method_parameters::primary_constructor(c, &param_tys)
             }
@@ -3547,32 +3547,22 @@ fn emit_class(
         // A continuation's constructor table is attached HERE, not in the trailing debug pass:
         // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
         // the next one, so batching every table at the end reordered the pool from `<init>` onward.
-        if let Some(metadata) = continuation_metadata {
-            let has_this0 = c.fields.iter().any(|field| field.name == "this$0");
+        if continuation_metadata.is_some() {
             let mut ctor_locals: Vec<(String, String, u16)> =
                 vec![("this".to_string(), format!("L{fq_name};"), 0)];
             let mut slot = 1u16;
-            if has_this0 {
-                ctor_locals.push((
-                    "this$0".to_string(),
-                    format!("L{};", metadata.enclosing_class),
-                    slot,
-                ));
+            let identities = crate::jvm::parameter_names::constructor_identities(&c.ctor_args);
+            assert_eq!(
+                identities.len(),
+                c.ctor_args.len(),
+                "a continuation constructor's local identities must match its parameters"
+            );
+            for (argument, identity) in c.ctor_args.iter().zip(&identities) {
+                let name = crate::jvm::parameter_names::local_variable(identity, "<init>")
+                    .expect("a continuation constructor parameter has a JVM local name");
+                ctor_locals.push((name, ir_type_desc(&argument.ty), slot));
                 slot += 1;
             }
-            ctor_locals.push((
-                "$completion".to_string(),
-                "Lkotlin/coroutines/Continuation;".to_string(),
-                slot,
-            ));
-            let ctor_desc = if has_this0 {
-                format!(
-                    "(L{};Lkotlin/coroutines/Continuation;)V",
-                    metadata.enclosing_class
-                )
-            } else {
-                "(Lkotlin/coroutines/Continuation;)V".to_string()
-            };
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same

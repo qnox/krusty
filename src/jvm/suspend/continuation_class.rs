@@ -226,7 +226,7 @@ pub(super) fn build_continuation_class(
             check: None,
             anonymous_super_forward: None,
             capture: None,
-            provenance: crate::ir::IrCtorParameterProvenance::Value,
+            provenance: crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver,
             capture_identity: None,
         });
         arg_idx += 1;
@@ -244,7 +244,7 @@ pub(super) fn build_continuation_class(
         check: None,
         anonymous_super_forward: None,
         capture: None,
-        provenance: crate::ir::IrCtorParameterProvenance::Value,
+        provenance: crate::ir::IrCtorParameterProvenance::Continuation,
         capture_identity: None,
     });
     let super_completion_idx = arg_idx;

@@ -324,13 +324,32 @@ pub(super) fn holder_forward(
         .collect()
 }
 
-pub(super) fn continuation_constructor(has_outer_receiver: bool) -> Vec<MethodParameter> {
-    let mut parameters = Vec::with_capacity(usize::from(has_outer_receiver) + 1);
-    if has_outer_receiver {
-        parameters.push(parameter("this$0", 0));
-    }
-    parameters.push(parameter("$completion", 0));
-    parameters
+pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> {
+    let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
+    assert_eq!(
+        identities.len(),
+        class.ctor_args.len(),
+        "a continuation constructor's identities must match its physical parameters"
+    );
+    identities
+        .iter()
+        .map(|identity| {
+            assert!(
+                matches!(
+                    identity.role,
+                    IrParameterRole::Generated(
+                        IrGeneratedParameterRole::ContinuationDispatchReceiver
+                            | IrGeneratedParameterRole::Continuation
+                    )
+                ),
+                "a continuation constructor accepts only its recorded receiver and completion"
+            );
+            (
+                crate::jvm::parameter_names::method_parameter(identity, "<init>"),
+                0,
+            )
+        })
+        .collect()
 }
 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
