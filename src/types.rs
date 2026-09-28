@@ -7,6 +7,7 @@ mod spelling;
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::InlineParameterModifier;
 use crate::name_tree::{NameId, NameTree};
+pub(crate) use interning::intern_text;
 use interning::ShardedInterner;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::collections::HashMap;
