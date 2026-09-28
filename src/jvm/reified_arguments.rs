@@ -16,10 +16,11 @@ pub(in crate::jvm) struct ReifiedArguments {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::jvm) enum ReifiedArgument {
     /// A concrete JVM class (internal name): the marker is erased and its type-bearing op
-    /// repointed. `nullable`, `intrinsic` and `rendered` (the type as kotlinc spells it in a failed
+    /// repointed. The name is a static spelling, mapped once from the argument's classifier.
+    /// `nullable`, `intrinsic` and `rendered` (the type as kotlinc spells it in a failed
     /// cast's message) decide the code an `is`, `as` or `as?` needs around that op.
     Class {
-        internal: String,
+        internal: &'static str,
         nullable: bool,
         intrinsic: Option<crate::ir::TypeCheckRole>,
         rendered: String,
