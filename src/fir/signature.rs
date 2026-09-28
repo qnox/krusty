@@ -1738,6 +1738,9 @@ pub enum ResolvedInterfaceDelegateSource {
     /// Declared primary-constructor parameter ordinal. Common lowering adds the already-materialized
     /// compiler prefix before reading the physical constructor value.
     ConstructorParameter(u32),
+    /// Declared primary-constructor parameter ordinal whose read-only property's backing field is
+    /// the delegate, as kotlinc realizes it: no separate delegate field is synthesized.
+    ConstructorProperty(u32),
     /// Exact physical ordinal in the compiler-supplied constructor prefix. Pass 2 fixes this after
     /// anonymous-object capture discovery and carries the checked value on the construction FIR.
     SyntheticConstructorParameter(u32),

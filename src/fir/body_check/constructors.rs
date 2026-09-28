@@ -1226,6 +1226,7 @@ pub(super) fn check_and_dispatch_constructor_body(
         {
             match resolved.source {
                 crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(_)
+                | crate::fir::ResolvedInterfaceDelegateSource::ConstructorProperty(_)
                 | crate::fir::ResolvedInterfaceDelegateSource::SyntheticConstructorParameter(_) => {
                 }
                 crate::fir::ResolvedInterfaceDelegateSource::ConstructorBodyInitializer => {
