@@ -757,8 +757,8 @@ impl JvmLibraries {
             let ret = if suspend {
                 match ret_metadata.class {
                     Some(ty) if ty.is_jvm_scalar() && ret_metadata.nullable => {
-                        super::jvm_class_map::wrapper_internal(ty)
-                            .map(Ty::obj)
+                        super::jvm_class_map::wrapper_type_name(ty)
+                            .map(Ty::obj_name)
                             .unwrap_or(ty)
                     }
                     Some(ty) => ty,
