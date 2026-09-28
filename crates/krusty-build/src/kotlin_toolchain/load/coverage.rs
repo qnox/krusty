@@ -553,7 +553,7 @@ fn module_schema_outside_jvm_products_and_project_dependencies_is_rejected() {
         ),
         (
             "product: jvm/app\ndependencies:\n  - $libs.ktor\n",
-            "dependency '$libs.ktor' uses a version catalog; krusty-toolchain build does not resolve catalogs yet",
+            "dependency '$libs.ktor' needs a project catalog; looked for libs.versions.toml and gradle/libs.versions.toml",
         ),
         (
             "product: jvm/app\ndependencies:\n  - bom:imports\n",
@@ -692,6 +692,114 @@ fn an_empty_selected_module_and_a_dependency_cycle_are_reported() {
     assert_eq!(
         graph.build_order().unwrap_err().to_string(),
         "module dependency cycle among: app:main, lib:main"
+    );
+}
+
+#[test]
+fn a_project_catalog_alias_becomes_the_maven_coordinate_it_names() {
+    let tree = Temp::new("catalog");
+    tree.write(
+        "libs.versions.toml",
+        "\
+[versions]
+ktor = \"2.3.0\"
+
+[libraries]
+ktor-client-java = { module = \"io.ktor:ktor-client-java\", version.ref = \"ktor\" }
+",
+    );
+    tree.write(
+        "module.yaml",
+        "product: jvm/app\ndependencies:\n  - $libs.ktor.client.java: compile-only\n",
+    );
+    tree.write("src/main.kt", "fun main() {}\n");
+    assert_eq!(
+        load(&command(&tree.0)).unwrap_err(),
+        file_error(
+            &tree,
+            "module.yaml",
+            "dependency 'io.ktor:ktor-client-java:2.3.0' is an external library; krusty-toolchain build does not resolve Maven coordinates yet"
+        )
+    );
+
+    let gradle = Temp::new("gradle-catalog");
+    gradle.write(
+        "gradle/libs.versions.toml",
+        "[libraries]\ncommons-lang3 = \"org.apache.commons:commons-lang3:3.14.0\"\n",
+    );
+    gradle.write(
+        "module.yaml",
+        "product: jvm/app\ndependencies:\n  - $libs.commons.lang3\n",
+    );
+    gradle.write("src/main.kt", "fun main() {}\n");
+    assert_eq!(
+        load(&command(&gradle.0)).unwrap_err(),
+        file_error(
+            &gradle,
+            "module.yaml",
+            "dependency 'org.apache.commons:commons-lang3:3.14.0' is an external library; krusty-toolchain build does not resolve Maven coordinates yet"
+        )
+    );
+}
+
+#[test]
+fn a_project_catalog_that_cannot_be_read_fails_the_load() {
+    let both = Temp::new("two-catalogs");
+    both.write("libs.versions.toml", "[libraries]\na = \"g:n:1\"\n");
+    both.write("gradle/libs.versions.toml", "[libraries]\nb = \"g:n:2\"\n");
+    both.write("module.yaml", "product: jvm/app\n");
+    both.write("src/main.kt", "fun main() {}\n");
+    assert_eq!(
+        load(&command(&both.0)).unwrap_err(),
+        format!(
+            "project catalog is declared in both {} and {}",
+            both.0.join("libs.versions.toml").display(),
+            both.0.join("gradle/libs.versions.toml").display()
+        )
+    );
+
+    let broken = Temp::new("broken-catalog");
+    broken.write("libs.versions.toml", "[bundles]\nkotor = [\"a\"]\n");
+    broken.write(
+        "module.yaml",
+        "product: jvm/app\ndependencies:\n  - //lib\n",
+    );
+    broken.write("src/main.kt", "fun main() {}\n");
+    assert_eq!(
+        load(&command(&broken.0)).unwrap_err(),
+        file_error(
+            &broken,
+            "libs.versions.toml",
+            "line 1: [bundles] is not supported"
+        )
+    );
+
+    let missing = Temp::new("missing-alias");
+    missing.write("libs.versions.toml", "[libraries]\na = \"g:n:1\"\n");
+    missing.write(
+        "module.yaml",
+        "product: jvm/app\ndependencies:\n  - $libs.missing\n  - $compose.ui\n",
+    );
+    missing.write("src/main.kt", "fun main() {}\n");
+    assert_eq!(
+        load(&command(&missing.0)).unwrap_err(),
+        file_error(
+            &missing,
+            "module.yaml",
+            "dependency '$libs.missing' is not in the project catalog"
+        )
+    );
+    missing.write(
+        "module.yaml",
+        "product: jvm/app\ndependencies:\n  - $compose.ui\n",
+    );
+    assert_eq!(
+        load(&command(&missing.0)).unwrap_err(),
+        file_error(
+            &missing,
+            "module.yaml",
+            "dependency '$compose.ui' uses catalog 'compose'; krusty-toolchain build resolves the project catalog 'libs' only"
+        )
     );
 }
 

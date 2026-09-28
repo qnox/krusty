@@ -13,6 +13,7 @@ use crate::graph::ModuleGraph;
 use crate::model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
 use crate::store::ArtifactStore;
 
+use super::catalog::Catalog;
 use super::discover::{self, ProjectKind};
 use super::yaml::{self, Yaml};
 
@@ -220,6 +221,7 @@ impl SourceFiles {
 }
 
 fn read_project(root: &Path) -> Result<Vec<Declared>, String> {
+    let catalog = Catalog::load(root)?;
     let project_file = root.join("project.yaml");
     let root_module = root.join("module.yaml");
     let relatives = if project_file.is_file() {
@@ -255,7 +257,9 @@ fn read_project(root: &Path) -> Result<Vec<Declared>, String> {
     }
     let mut parsed = Vec::with_capacity(skeletons.len());
     for (relative, directory, file) in &skeletons {
-        parsed.push(parse_module_file(root, relative, directory, file)?);
+        parsed.push(parse_module_file(
+            root, relative, directory, file, &catalog,
+        )?);
     }
     let index_of = |relative: &str| {
         skeletons
@@ -314,6 +318,7 @@ fn parse_module_file(
     _relative: &str,
     _directory: &Path,
     file: &Path,
+    catalog: &Catalog,
 ) -> Result<ModuleSpec, String> {
     let document = read_yaml(file)?;
     let entries = document
@@ -327,8 +332,8 @@ fn parse_module_file(
         match key.as_str() {
             "product" => product = Some(parse_product(file, value)?),
             "layout" => layout = parse_layout(file, value)?,
-            "dependencies" => dependencies = parse_dep_list(file, value)?,
-            "test-dependencies" => test_dependencies = parse_dep_list(file, value)?,
+            "dependencies" => dependencies = parse_dep_list(file, value, catalog)?,
+            "test-dependencies" => test_dependencies = parse_dep_list(file, value, catalog)?,
             "description" => {}
             other => {
                 return Err(format!("{}: unsupported key '{other}'", file.display()));
@@ -387,19 +392,22 @@ fn parse_layout(file: &Path, value: &Yaml) -> Result<Layout, String> {
     }
 }
 
-fn parse_dep_list(file: &Path, value: &Yaml) -> Result<Vec<DepSpec>, String> {
+fn parse_dep_list(file: &Path, value: &Yaml, catalog: &Catalog) -> Result<Vec<DepSpec>, String> {
     let Some(items) = value.as_seq() else {
         if matches!(value, Yaml::Scalar(text) if text.is_empty()) {
             return Ok(Vec::new());
         }
         return Err(format!("{}: dependencies must be a list", file.display()));
     };
-    items.iter().map(|item| parse_dep(file, item)).collect()
+    items
+        .iter()
+        .map(|item| parse_dep(file, item, catalog))
+        .collect()
 }
 
-fn parse_dep(file: &Path, item: &Yaml) -> Result<DepSpec, String> {
+fn parse_dep(file: &Path, item: &Yaml, catalog: &Catalog) -> Result<DepSpec, String> {
     match item {
-        Yaml::Scalar(notation) => dep_spec(file, notation, false, Scope::All),
+        Yaml::Scalar(notation) => dep_spec(file, catalog, notation, false, Scope::All),
         Yaml::Map(entries) if entries.len() == 1 => {
             let (notation, value) = &entries[0];
             let (exported, scope) = match value {
@@ -413,7 +421,7 @@ fn parse_dep(file: &Path, item: &Yaml) -> Result<DepSpec, String> {
                     ));
                 }
             };
-            dep_spec(file, notation, exported, scope)
+            dep_spec(file, catalog, notation, exported, scope)
         }
         _ => Err(format!(
             "{}: a dependency must be a module path or a Maven coordinate",
@@ -476,13 +484,19 @@ fn parse_scope(file: &Path, value: &str) -> Result<Scope, String> {
     }
 }
 
-fn dep_spec(file: &Path, notation: &str, exported: bool, scope: Scope) -> Result<DepSpec, String> {
-    if notation.starts_with('$') {
-        return Err(format!(
-            "{file}: dependency '{notation}' uses a version catalog; krusty-toolchain build does not resolve catalogs yet",
-            file = file.display()
-        ));
-    }
+fn dep_spec(
+    file: &Path,
+    catalog: &Catalog,
+    notation: &str,
+    exported: bool,
+    scope: Scope,
+) -> Result<DepSpec, String> {
+    let resolved = if notation.starts_with('$') {
+        Some(catalog.resolve(file, notation)?)
+    } else {
+        None
+    };
+    let notation = resolved.as_deref().unwrap_or(notation);
     if notation.starts_with("bom:")
         || notation.starts_with("swiftPackage:")
         || notation.starts_with("localSwiftPackage:")

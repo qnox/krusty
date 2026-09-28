@@ -31,8 +31,10 @@ compiler. A directory containing `project.yaml`, or a single `module.yaml` that 
 `krusty`. A source error is printed as the compiler printed it, so the diagnostic is the same
 `file:line:column: error: message` kotlinc reports for that source. `//` dependencies become module
 edges; an `exported` dependency is visible to dependents, and a `runtime-only` dependency is not on
-the compile classpath. Maven coordinates, version catalogs, `settings`, and non-JVM product types
-fail the command.
+the compile classpath. A `$libs` reference is read from `libs.versions.toml` or
+`gradle/libs.versions.toml` and replaced with its Maven coordinate. Fetching that coordinate still
+fails the command, as do other Maven coordinates, toolchain catalogs, `settings`, and non-JVM
+product types.
 
 Gradle and `.iml` detection in the language server is unchanged. `krusty-toolchain build` only recognizes
 those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,
