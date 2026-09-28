@@ -238,10 +238,30 @@ Decoded from kotlinc output over a top-level property shape matrix (`Package.pro
 | `var e: Double? = null` | 1798 | `isVar`(1<<8)+`hasSetter`(1<<10); field entry records desc `Ljava/lang/Double;` (boxed) |
 | `lateinit var f: String` | 5894 | + `isLateinit`(1<<12) |
 | `private val p1 = 3` | 8706 | visibility bits (f>>1)&7: INTERNAL=0, PRIVATE=1, PUBLIC=3; NO getter sig |
+| `private var p3 = ""` | 1794 | neither getter nor setter sig: a private property's default accessors are never generated. f100 names exactly the accessors the facade declares, so a private property with a declared setter records only that setter. Test: `tests/metadata_property_flags_e2e.rs` |
 | `internal val p2` | 8704 | getter sig present, unmangled |
 | `var s1 … set(v){…}` | 1798 | f6 = setter value parameter `{name,type}`; f8 = 70 |
 | `val String.doubled get()` | omitted | f5 receiver; f7 = 70; NO field entry |
 | `val lz by lazy { … }` | 33286 | + `isDelegated`(1<<15); field entry `{name="lz$delegate", desc="Lkotlin/Lazy;"}` |
+
+Accessor words (f7/f8) follow the class-property rule: each is written only when it differs from
+the default word the property implies (its visibility, final modality). A declared or delegated
+accessor sets `isNotDefault`, so a private property's declared getter writes 66 and a public one's
+70. A `private set` writes the setter as private (66, `isNotDefault` when the property itself is
+not private). A private property's declared accessors are private methods. The setter's value
+parameter (f6) is recorded exactly when the setter is not the default one, under `value` or
+`<set-?>` when no name was written, and it interns before the property's name. Test:
+`tests/metadata_property_flags_e2e.rs`.
+
+A property with one declared accessor still gets the other as the default method
+(`var x = 0; set(v) {…}` has a public `getX`), and f100 names both. A bodiless `private set`
+keeps the default setter, which is private and so never generated: f100 names only the getter,
+f8 is still 66 with a `<set-?>` parameter, and another class in the file writes through
+`access$set<X>$p`.
+
+Still open (kotlinc 2.4.20): a delegated top-level property records `isDelegated` and its
+`x$delegate` field. A facade keeps an empty `<clinit>` when every non-const initializer is a
+default value (`var x = 0`); krusty drops it.
 
 Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
 8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.

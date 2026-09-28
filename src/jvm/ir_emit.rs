@@ -977,7 +977,8 @@ fn build_class_metadata(
                 .iter()
                 .enumerate()
                 .filter(|(property, p)| {
-                    p.backing_field.is_none() && hoisted_static_for(ir, c, *property).is_some()
+                    p.backing_field.is_none()
+                        && static_fields::hoisted_static_for(ir, c, *property).is_some()
                 })
                 .map(|(_, p)| (p.name.as_str(), p.ty)),
         )
@@ -1234,16 +1235,16 @@ fn build_class_metadata(
                     }) && property
                         .initializer
                         .is_some_and(|init| static_fields::literal_initializer(ir, init))
-                        || hoisted_static_for(ir, c, property_index).is_some_and(|s| {
-                            !s.is_var && static_fields::literal_initializer(ir, s.init)
-                        }),
+                        || static_fields::hoisted_static_for(ir, c, property_index).is_some_and(
+                            |s| !s.is_var && static_fields::literal_initializer(ir, s.init),
+                        ),
                     is_const: false,
                     modifiers: property.modifiers,
                     setter_visibility: property.setter_visibility,
                     has_backing_field: !c.is_annotation
                         && (backing.is_some()
                             || delegate.is_some()
-                            || hoisted_static_for(ir, c, property_index).is_some())
+                            || static_fields::hoisted_static_for(ir, c, property_index).is_some())
                         && !c.is_interface,
                     tparam: match property.ty {
                         Ty::TyParam(name, _) => Some(name),
@@ -1301,7 +1302,7 @@ fn build_class_metadata(
                     // kotlinc marks an interface companion's `@JvmField` property record: the
                     // backing field was MOVED onto the interface itself.
                     moved_from_interface_companion: companion_of_interface(ir, c)
-                        && jvm_field_static_for(ir, c, property_index),
+                        && static_fields::jvm_field_static_for(ir, c, property_index),
                     companion: false,
                 },
             )
@@ -2464,29 +2465,6 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
     }
 }
 
-/// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
-/// the companion has no field for it, so field-driven attribute passes need this lookup instead.
-fn hoisted_static_for<'a>(
-    ir: &'a IrFile,
-    c: &crate::ir::IrClass,
-    property: usize,
-) -> Option<&'a crate::ir::IrStatic> {
-    if !c.is_companion {
-        return None;
-    }
-    let static_id = ir.jvm_companion_property_static(c.fq_name_id(), property as u32)?;
-    ir.statics.get(static_id as usize)
-}
-
-/// Whether this companion property's hoisted static is the `@JvmField` realization — a public owner
-/// field with NO companion accessors, so accessor-shaped emission must skip it entirely.
-fn jvm_field_static_for(ir: &IrFile, c: &crate::ir::IrClass, property: usize) -> bool {
-    c.is_companion
-        && ir
-            .jvm_companion_property_static(c.fq_name_id(), property as u32)
-            .is_some_and(|static_id| ir.is_jvm_field_static(static_id))
-}
-
 fn attach_synth_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -2652,10 +2630,12 @@ fn attach_synth_debug_tables(
     // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
     // A `@JvmField` property has NO accessors — nothing to describe.
     for (property_index, property) in c.properties.iter().enumerate() {
-        if property.backing_field.is_some() || jvm_field_static_for(ir, c, property_index) {
+        if property.backing_field.is_some()
+            || static_fields::jvm_field_static_for(ir, c, property_index)
+        {
             continue;
         }
-        let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
+        let Some(hoisted) = static_fields::hoisted_static_for(ir, c, property_index) else {
             continue;
         };
         let pline = if property.decl_line != 0 {
@@ -2854,10 +2834,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     // (reference getter return; a `var` reference setter's parameter). `@JvmField` emits no
     // accessors, so there is nothing to annotate (the FIELD's annotations ride the owner class).
     for (property_index, property) in c.properties.iter().enumerate() {
-        if property.backing_field.is_some() || jvm_field_static_for(ir, c, property_index) {
+        if property.backing_field.is_some()
+            || static_fields::jvm_field_static_for(ir, c, property_index)
+        {
             continue;
         }
-        let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
+        let Some(hoisted) = static_fields::hoisted_static_for(ir, c, property_index) else {
             continue;
         };
         let Some(a) = ann(&property.name, hoisted.ty) else {
@@ -3647,14 +3629,15 @@ fn emit_pass(
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
-            member_schedule::FacadeMember::PropertyAccessors(static_index) => {
-                static_fields::emit_static_accessors(
+            member_schedule::FacadeMember::DefaultAccessor(static_index, accessor) => {
+                static_fields::emit_default_static_accessor(
                     ir,
                     facade,
                     &mut cw,
                     env,
                     opts.param_assertions,
                     static_index,
+                    accessor,
                 );
                 continue;
             }
@@ -4617,14 +4600,15 @@ fn emit_scheduled_member(
             }
             return;
         }
-        SourceOrderedMember::StaticProperty(static_index) => {
-            static_fields::emit_static_accessors(
+        SourceOrderedMember::StaticDefaultAccessor(static_index, accessor) => {
+            static_fields::emit_default_static_accessor(
                 ir,
                 fq_name,
                 cw,
                 env,
                 param_assertions,
                 static_index,
+                accessor,
             );
             return;
         }

@@ -109,3 +109,21 @@ fn private_computed_property_uses_its_checked_accessors() {
     fun box(): String = if (Secret().verify() == 13) \"OK\" else \"fail\"\n";
     common::expect_box_ok_with_stdlib(SRC, "PrivateComputed");
 }
+
+#[test]
+fn a_top_level_property_with_one_declared_accessor_publishes_the_default_other() {
+    // Only one accessor is declared; the facade still publishes the other as the default method,
+    // so another module can both read and write the property.
+    const LIB: &str = "package lib\n\
+var written = 0\n\
+    set(value) { field = value + 1 }\n\
+var read = 0\n\
+    get() = field * 2\n";
+    const MAIN: &str = "import lib.*\n\
+fun box(): String {\n\
+    written = 1\n\
+    read = 3\n\
+    return if (written == 2 && read == 6) \"OK\" else \"fail $written $read\"\n\
+}\n";
+    common::expect_box_ok_against("DefaultOtherAccessor", LIB, MAIN);
+}

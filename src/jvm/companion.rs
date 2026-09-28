@@ -262,7 +262,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             visibility: candidate.visibility,
             setter_jvm_name: None,
             erased_declared_ty: None,
-            custom_accessor: false,
+            accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: candidate.decl_line,
             source_order: candidate.source_order,
         });

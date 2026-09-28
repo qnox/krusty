@@ -425,6 +425,33 @@ fn block_property_accessors_are_statics_of_their_class() {
     assert_eq!(run(SRC).expect("block property accessors"), "OK");
 }
 
+/// A block property with exactly one declared accessor keeps the compiler-default other one, and
+/// other classes reach each side through its own accessor.
+#[test]
+fn block_property_with_one_declared_accessor_keeps_the_default_other() {
+    const SRC: &str = "class C {\n\
+        \x20   companion {\n\
+        \x20       var log: Int = 0\n\
+        \x20       var written: Int = 1\n\
+        \x20           set(value) { log = value }\n\
+        \x20       var read: Int = 2\n\
+        \x20           get() = log + 10\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   C.written = 3\n\
+        \x20   C.read = 4\n\
+        \x20   val r = C.written + C.read\n\
+        \x20   return if (r == 14) \"OK\" else r.toString()\n\
+        }\n";
+    assert_members_and_metadata_match_kotlinc(
+        "OneDeclaredAccessor",
+        SRC,
+        &["C", "OneDeclaredAccessorKt"],
+    );
+    assert_eq!(run(SRC).expect("one declared block accessor"), "OK");
+}
+
 #[test]
 fn bare_classifier_call_invokes_block_and_extension_operators() {
     const SRC: &str = "class C(val s: String) {\n\

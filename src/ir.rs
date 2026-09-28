@@ -53,6 +53,7 @@ mod properties;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod sam_target;
+mod static_properties;
 mod type_check_role;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
@@ -86,6 +87,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
 };
 pub use sam_target::IrSamTarget;
+pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
@@ -1861,67 +1863,6 @@ pub enum CtorDelegateTarget {
     ImplicitEnumBase,
 }
 
-/// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.
-#[derive(Clone, Debug)]
-pub struct IrStatic {
-    pub name: String,
-    pub ty: Ty,
-    /// The initializer expression (run in `<clinit>` in declaration order).
-    pub init: ExprId,
-    /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
-    pub is_var: bool,
-    /// `const val` ⇒ kotlinc keeps the field `static final` (inlined at use) with no accessor, at the
-    /// DECLARATION's own visibility: `private const val` is a private field, while `internal` and
-    /// `public` are both public (`internal` is a Kotlin boundary with no JVM spelling). A plain
-    /// top-level `val`/`var` is `private static [final]` + a `public static` getter/setter whatever
-    /// the source said, because every reader goes through the accessor.
-    pub is_const: bool,
-    /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
-    /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
-    /// `public static final` + `ConstantValue` there), not the facade.
-    pub owner: Option<TypeName>,
-    /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
-    /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
-    /// (kotlinc's shape).
-    pub visibility: crate::types::Visibility,
-    /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
-    /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
-    pub setter_jvm_name: Option<String>,
-    /// The type this static was DECLARED with, when the JVM pass erased its storage to a value
-    /// class's carrier (a file facade's property, which kotlinc erases the same way). `None` ⇒ the
-    /// storage keeps the boxed value-class object, or holds no value class at all.
-    ///
-    /// The whole declared type, not just the classifier: once `ty` holds the carrier, every fact
-    /// the accessors still need — which value class it is AND whether it was nullable — is only
-    /// here. Reading them back off the erased type made a `var x: Label?` publish a non-null
-    /// `String` setter, which then refused the `null` the property accepts. Every reader consults
-    /// this rather than re-deciding, so a read of the field and the field itself cannot disagree.
-    pub erased_declared_ty: Option<Ty>,
-    /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
-    /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
-    /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
-    /// bodies lowered with `field` bound to this static). Prevents a duplicate-accessor collision.
-    pub custom_accessor: bool,
-    /// 1-based source line of the property declaration (0 = unknown). kotlinc maps the accessors'
-    /// LineNumberTables and the `<clinit>` initializer store to this line.
-    pub line: u32,
-    /// Source byte offset of the declaration (`u32::MAX` for a target/plugin synthetic). This is the
-    /// exact ordering key when class metadata interleaves static and instance properties.
-    pub source_order: u32,
-}
-
-impl IrStatic {
-    pub fn is_facade_owned(&self) -> bool {
-        self.owner.is_none()
-    }
-
-    pub fn owner_matches(&self, internal: &str) -> bool {
-        self.owner
-            .as_ref()
-            .is_some_and(|owner| owner.matches(internal))
-    }
-}
-
 /// One sequence of lifted local callables: the source file that declares it, the lexical owner,
 /// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2789,7 +2730,11 @@ pub struct IrPackageProperty {
     pub flags: crate::fir::DeclarationFlags,
     pub spellings: crate::spelling::DeclaredSpellings,
     pub has_backing_field: bool,
-    pub has_declared_getter: bool,
+    /// How the accessors are declared: source-written, delegated, or the compiler default.
+    pub modifiers: IrPropertyModifiers,
+    /// The setter's own visibility: its declaration's (`internal set`, `private set`), else the
+    /// property's.
+    pub setter_visibility: crate::types::Visibility,
     pub source_order: u32,
 }
 
