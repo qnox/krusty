@@ -3702,56 +3702,25 @@ impl<'a> Parser<'a> {
                 // Class delegation: `: Iface by delegate`. Preserve both the simple-name field form
                 // and a general delegate expression; representation support belongs to later phases.
                 if self.at(TokenKind::Ident) && self.keyword_text("by") {
-                    self.bump(); // 'by'
-                    if self.at(TokenKind::Ident) {
-                        let delegate = self.text().to_string();
-                        let after = self.t.get(self.i + 1).map(|t| t.kind);
-                        // A bare variable name (a `val`-param field) is the simple delegate form; any
-                        // other shape (`by Impl()`, `by a.b`, …) is an EXPRESSION delegate.
-                        if matches!(
-                            after,
-                            Some(TokenKind::Comma)
-                                | Some(TokenKind::LBrace)
-                                | Some(TokenKind::Newline)
-                        ) {
-                            let value_span = self.tok().span;
-                            self.bump();
-                            let value =
-                                self.file.add_expr(Expr::Name(delegate.clone()), value_span);
-                            interface_delegations.push(InterfaceDelegation {
-                                supertype: delegation_supertype,
-                                interface: effective.clone(),
-                                value,
-                                bare_name: Some(delegate),
-                                has_primitive_type_argument: has_primitive_targ,
-                            });
-                        } else {
-                            // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
-                            let saved = self.no_trailing_lambda;
-                            self.no_trailing_lambda = true;
-                            let e = self.parse_expr();
-                            self.no_trailing_lambda = saved;
-                            interface_delegations.push(InterfaceDelegation {
-                                supertype: delegation_supertype,
-                                interface: effective.clone(),
-                                value: e,
-                                bare_name: None,
-                                has_primitive_type_argument: has_primitive_targ,
-                            });
-                        }
-                    } else {
-                        let saved = self.no_trailing_lambda;
-                        self.no_trailing_lambda = true;
-                        let e = self.parse_expr();
-                        self.no_trailing_lambda = saved;
-                        interface_delegations.push(InterfaceDelegation {
-                            supertype: delegation_supertype,
-                            interface: effective.clone(),
-                            value: e,
-                            bare_name: None,
-                            has_primitive_type_argument: has_primitive_targ,
-                        });
-                    }
+                    self.bump();
+                    // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
+                    let saved = self.no_trailing_lambda;
+                    self.no_trailing_lambda = true;
+                    let value = self.parse_expr();
+                    self.no_trailing_lambda = saved;
+                    // Parentheses leave no node, so `by d` and `by (d)` both name the delegate
+                    // directly; any other shape (`by Impl()`, `by a.b`, …) is an EXPRESSION delegate.
+                    let bare_name = match self.file.expr(value) {
+                        Expr::Name(name) => Some(name.clone()),
+                        _ => None,
+                    };
+                    interface_delegations.push(InterfaceDelegation {
+                        supertype: delegation_supertype,
+                        interface: effective.clone(),
+                        value,
+                        bare_name,
+                        has_primitive_type_argument: has_primitive_targ,
+                    });
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
