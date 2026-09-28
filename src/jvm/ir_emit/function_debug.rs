@@ -75,7 +75,11 @@ pub(super) fn attach_declared_function_debug(
             body_pc += aload_len(slot) + cw.string_ldc_len(&guarded).unwrap_or(2) + 3;
         }
         if let Some(name) = name {
-            locals.push((name, crate::jvm::names::type_descriptor(*ty), slot));
+            locals.push((
+                name,
+                crate::jvm::names::type_descriptor(*ty).to_owned(),
+                slot,
+            ));
         }
         slot += slot_words(*ty);
     }

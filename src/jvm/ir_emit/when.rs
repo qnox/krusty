@@ -95,7 +95,7 @@ impl Emitter<'_> {
             let internal = |ty: &Ty| -> Option<String> {
                 match *ty {
                     Ty::String => Some("java/lang/String".to_string()),
-                    _ if ty.is_array() => Some(type_descriptor(*ty)),
+                    _ if ty.is_array() => Some(type_descriptor(*ty).to_owned()),
                     Ty::Obj(name, _) => Some(name.to_string()),
                     _ => None,
                 }

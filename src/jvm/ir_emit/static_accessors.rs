@@ -861,7 +861,7 @@ impl Accessor<'_> {
             None,
             &[
                 ("$this".to_string(), format!("L{internal};"), 0),
-                ("<set-?>".to_string(), type_descriptor(ty), 1),
+                ("<set-?>".to_string(), type_descriptor(ty).to_owned(), 1),
             ],
         );
     }
@@ -1029,7 +1029,7 @@ impl Accessor<'_> {
             &name,
             &descriptor,
             None,
-            &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+            &[("<set-?>".to_string(), type_descriptor(ty).to_owned(), 0)],
         );
     }
 
@@ -1064,7 +1064,7 @@ impl Accessor<'_> {
                 .as_ref()
                 .and_then(|names| names.get(ordinal).cloned().flatten())
             {
-                locals.push((local, type_descriptor(ty), slot));
+                locals.push((local, type_descriptor(ty).to_owned(), slot));
             }
             slot += slot_words(ty);
         }

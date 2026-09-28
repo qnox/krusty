@@ -130,7 +130,7 @@ pub(super) fn declared_method_signature(
     }
     let primitive = type_descriptor(jvm_declared_ty(&declaration.ret));
     let parameters = signature
-        .strip_suffix(primitive.as_str())
+        .strip_suffix(primitive)
         .expect("a boxed override result is signed as its primitive");
     let wrapper = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
     Some(format!("{parameters}{wrapper}"))

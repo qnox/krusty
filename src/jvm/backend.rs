@@ -242,7 +242,7 @@ fn run_backend_passes_after_plugins(
 }
 
 fn jvm_plugin_type_descriptor(ty: Ty) -> Option<String> {
-    Some(type_descriptor(ty))
+    Some(type_descriptor(ty).to_owned())
 }
 
 /// The JVM backend holds the shared classpath (`Rc`, same instance as `JvmLibraries`) so the emitter
@@ -1195,7 +1195,7 @@ fn delegate_field(
     let field = &ir.statics[*storage as usize];
     Some((
         ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
+        crate::jvm::names::type_descriptor(field.ty).to_owned(),
     ))
 }
 
@@ -1223,7 +1223,7 @@ fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> Str
         if declaration.suspend {
             "Ljava/lang/Object;".to_owned()
         } else {
-            crate::jvm::names::type_descriptor(declaration.ret)
+            crate::jvm::names::type_descriptor(declaration.ret).to_owned()
         }
     )
 }
