@@ -11,6 +11,9 @@ impl IrfFlags {
     pub(super) const IS_FINAL: u8 = 1 << 1;
     pub(super) const IS_PRIVATE: u8 = 1 << 2;
     pub(super) const IS_LATEINIT: u8 = 1 << 3;
+    /// Storage the compiler introduces with no source declaration behind it, such as an interface
+    /// delegation's `$$delegate_N`.
+    pub(super) const COMPILER_GENERATED: u8 = 1 << 4;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -41,5 +44,22 @@ impl IrfFlags {
     #[inline]
     pub const fn with_is_lateinit(self, on: bool) -> Self {
         self.with(Self::IS_LATEINIT, on)
+    }
+    #[inline]
+    pub const fn with_compiler_generated(self, on: bool) -> Self {
+        self.with(Self::COMPILER_GENERATED, on)
+    }
+}
+
+impl super::IrField {
+    /// See [`IrfFlags::COMPILER_GENERATED`].
+    #[inline]
+    pub fn is_compiler_generated(&self) -> bool {
+        self.flags.has(IrfFlags::COMPILER_GENERATED)
+    }
+    #[inline]
+    pub fn with_compiler_generated(mut self, on: bool) -> Self {
+        self.flags = self.flags.with_compiler_generated(on);
+        self
     }
 }

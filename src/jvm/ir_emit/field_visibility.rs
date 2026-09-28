@@ -47,6 +47,22 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
     })
 }
 
+/// A declared backing field's JVM access. Its visibility maps from the platform-neutral one: a
+/// `private` field is `ACC_PRIVATE` (the default: Kotlin backing fields are reached via accessors)
+/// and a non-private one `ACC_PUBLIC`, unless [`jvm_field_visibility`] publishes it otherwise.
+/// Compiler-generated storage is `ACC_SYNTHETIC`, as kotlinc marks `$$delegate_N`.
+pub(super) fn declared_field_access(c: &IrClass, field_index: usize, is_static: bool) -> u16 {
+    let field = &c.fields[field_index];
+    jvm_field_visibility(c, field_index).unwrap_or(if field.is_private() { 0x0002 } else { 0x0001 })
+        | if field.is_final() { 0x0010 } else { 0 }
+        | if is_static { 0x0008 } else { 0 }
+        | if field.is_compiler_generated() {
+            0x1000
+        } else {
+            0
+        }
+}
+
 /// A default accessor's JVM access. Visibility is an exact checked declaration fact; the backend
 /// only maps it to classfile flags. Private accessors remain final, while an open property lets a
 /// public/protected accessor dispatch virtually.

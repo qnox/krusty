@@ -437,6 +437,9 @@ pub struct HeaderTypeBound {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderInterfaceDelegateSource {
     ConstructorParameter(u32),
+    /// A primary-constructor parameter declaring a read-only property: that property's backing
+    /// field is the delegate.
+    ConstructorProperty(u32),
     ConstructorBodyInitializer,
 }
 
@@ -2635,8 +2638,15 @@ pub fn extract_file_header_syntax(
                             .iter()
                             .position(|parameter| parameter.name == *parameter_name)
                     })
-                    .and_then(|parameter| u32::try_from(parameter).ok())
-                    .map(HeaderInterfaceDelegateSource::ConstructorParameter)
+                    .and_then(|position| {
+                        let ordinal = u32::try_from(position).ok()?;
+                        let parameter = &class.props[position];
+                        Some(if parameter.is_property && !parameter.is_var {
+                            HeaderInterfaceDelegateSource::ConstructorProperty(ordinal)
+                        } else {
+                            HeaderInterfaceDelegateSource::ConstructorParameter(ordinal)
+                        })
+                    })
                     .unwrap_or(HeaderInterfaceDelegateSource::ConstructorBodyInitializer);
                 Some(HeaderInterfaceDelegation { supertype, source })
             }),

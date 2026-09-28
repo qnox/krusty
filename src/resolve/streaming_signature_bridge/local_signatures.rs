@@ -443,9 +443,17 @@ fn publish_checked_local_signatures_selected(
                 });
                 let source = match parameter {
                     Some(parameter) => {
-                        crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(
-                            u32::try_from(parameter).ok()?,
-                        )
+                        let ordinal = u32::try_from(parameter).ok()?;
+                        let declared = &class.props[parameter];
+                        if declared.is_property && !declared.is_var {
+                            crate::fir::ResolvedInterfaceDelegateSource::ConstructorProperty(
+                                ordinal,
+                            )
+                        } else {
+                            crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(
+                                ordinal,
+                            )
+                        }
                     }
                     None if anonymous_construction.is_some() => {
                         let parameter = anonymous_capture_count

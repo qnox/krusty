@@ -5348,6 +5348,9 @@ pub(crate) fn finalized_streamed_signature_index(
                     crate::fir::HeaderInterfaceDelegateSource::ConstructorParameter(parameter) => {
                         crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(parameter)
                     }
+                    crate::fir::HeaderInterfaceDelegateSource::ConstructorProperty(parameter) => {
+                        crate::fir::ResolvedInterfaceDelegateSource::ConstructorProperty(parameter)
+                    }
                     crate::fir::HeaderInterfaceDelegateSource::ConstructorBodyInitializer => {
                         crate::fir::ResolvedInterfaceDelegateSource::ConstructorBodyInitializer
                     }

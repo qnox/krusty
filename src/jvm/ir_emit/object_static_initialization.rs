@@ -46,11 +46,7 @@ pub(super) fn emit(
 
     // Backing fields follow INSTANCE in the field table.
     for (field_index, field) in c.fields.iter().enumerate() {
-        let private = field.is_private();
-        let acc =
-            jvm_field_visibility(c, field_index).unwrap_or(if private { 0x0002 } else { 0x0001 })
-                | if field.is_final() { 0x0010 } else { 0 }
-                | 0x0008;
+        let acc = declared_field_access(c, field_index, true);
         let type_parameter = ir
             .field_signatures(fq_name)
             .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
