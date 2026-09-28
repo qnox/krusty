@@ -4474,20 +4474,22 @@ where
 
     let engine = AnalysisEngine::spawn(analyze, engine_events);
     let backend = EngineBackend::new(engine, false);
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
     let service = LspService::with_backend(backend).with_dev(dev);
-    run_async_loop(service, &mut writer, incoming)
+    run_async_loop(service, io::stdout(), incoming)
 }
 
-fn run_async_loop<W>(
+pub(super) fn run_async_loop<W>(
     mut service: LspService<EngineBackend>,
-    writer: &mut W,
+    writer: W,
     incoming: Receiver<Incoming>,
 ) -> io::Result<i32>
 where
-    W: Write,
+    W: Write + Send + 'static,
 {
+    // Stdout is written on its own thread. A client that stops reading must not block this loop:
+    // the analysis engine publishes on `incoming`, and a blocked write would stall that queue.
+    let mut writer = super::output_queue::OutputQueue::spawn(writer);
+    let writer = &mut writer;
     let mut pending = VecDeque::new();
     let mut input_dispatches_since_maintenance = 0usize;
     let outcome = loop {
@@ -5289,8 +5291,7 @@ mod tests {
 
         sender.send(Incoming::Eof).unwrap();
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let code = run_async_loop(service, Vec::new(), incoming).unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -5324,10 +5325,16 @@ mod tests {
             .unwrap();
         sender.send(Incoming::Eof).unwrap();
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let code = run_async_loop(
+            service,
+            crate::server::output_queue::SharedWriter::from_arc(std::sync::Arc::clone(&out)),
+            incoming,
+        )
+        .unwrap();
         assert_eq!(code, 0);
 
+        let out = out.lock().expect("shutdown output");
         let messages = decode_messages(&out);
         assert!(
             messages
@@ -5384,8 +5391,7 @@ mod tests {
 
         let service = LspService::with_backend(EngineBackend::new(engine, false));
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let code = run_async_loop(service, Vec::new(), incoming).unwrap();
 
         assert_eq!(code, 0);
         assert!(
