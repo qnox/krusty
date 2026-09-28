@@ -948,7 +948,6 @@ impl JvmLibraries {
         &self,
         path: TypeName,
     ) -> Option<(TypeName, crate::libraries::SingletonDispatch)> {
-        let rendered = path.render();
         // A plain `object` is `TypeKind::Object` — it carries its own `INSTANCE`. A COMPANION object does
         // not: its singleton is a static field on the OUTER class. Both facts already belong to the
         // backend-neutral `LibraryType` contract (`kind` and `companion_object`), so consume that one
@@ -956,22 +955,23 @@ impl JvmLibraries {
         // classifiers, this keeps named companions and non-JVM symbol providers on the same boundary.
         let singleton =
             |candidate: TypeName| -> Option<(TypeName, crate::libraries::SingletonDispatch)> {
-                let name = candidate.render();
                 let dispatch = crate::libraries::SingletonDispatch {
                     classifier: candidate,
                 };
                 let classifier = self.classifier_record(candidate)?;
-                if let Some((outer, simple)) = name.rsplit_once('$') {
-                    let outer = type_name(outer);
-                    if let Some((holder_name, companion_type)) = self
-                        .classifier_record(outer)
-                        .and_then(|outer_type| outer_type.companion_object.clone())
-                    {
-                        // A companion is also an object, but its singleton field belongs to the
-                        // enclosing class. Test that declaration relationship before the ordinary
-                        // object storage shape.
-                        if companion_type == candidate && holder_name == simple {
-                            return Some((candidate, dispatch));
+                if candidate.segment_ref().contains('$') {
+                    if let Some(outer) = candidate.nested_owner() {
+                        let simple = candidate.nested_segment_ref();
+                        if let Some((holder_name, companion_type)) = self
+                            .classifier_record(outer)
+                            .and_then(|outer_type| outer_type.companion_object.clone())
+                        {
+                            // A companion is also an object, but its singleton field belongs to the
+                            // enclosing class. Test that declaration relationship before the ordinary
+                            // object storage shape.
+                            if companion_type == candidate && holder_name == simple {
+                                return Some((candidate, dispatch));
+                            }
                         }
                     }
                 }
@@ -983,14 +983,21 @@ impl JvmLibraries {
         if let Some(hit) = singleton(path) {
             return Some(hit);
         }
-        // Nesting is a SUFFIX property, so convert trailing separators one at a time, keeping the ones
-        // already converted: `a/b/Outer/Inner` → `a/b/Outer$Inner` → `a/b$Outer$Inner`.
-        let mut candidate = rendered.clone();
-        for (at, _) in rendered.match_indices('/').rev() {
-            candidate.replace_range(at..=at, "$");
-            if let Some(hit) = singleton(type_name(&candidate)) {
+        // Nesting is a suffix of the import path. `a/b/Outer/Inner` is tried as `a/b/Outer$Inner`,
+        // then `a/b$Outer$Inner`. Each step peels one `/` segment and keeps it on the nested name.
+        let mut suffix = String::new();
+        let mut cursor = path;
+        while let Some(parent) = cursor.parent().filter(|parent| *parent != TypeName::ROOT) {
+            if suffix.is_empty() {
+                suffix = cursor.segment_ref().to_string();
+            } else {
+                suffix = format!("{}${}", cursor.segment_ref(), suffix);
+            }
+            let candidate = crate::types::type_name_nested_child(parent, &suffix);
+            if let Some(hit) = singleton(candidate) {
                 return Some(hit);
             }
+            cursor = parent;
         }
         None
     }
