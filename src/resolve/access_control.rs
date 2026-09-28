@@ -36,10 +36,7 @@ impl<'a> Checker<'a> {
                 let friend = self.libraries.internal_accessible(owner);
                 module_owned || friend
             }
-            Visibility::PackagePrivate => {
-                let declared = owner.package();
-                self.source_package_name().matches(&declared)
-            }
+            Visibility::PackagePrivate => self.source_package_name() == owner.namespace(),
             Visibility::Private | Visibility::Protected => {
                 // Access is LEXICAL, so the ENCLOSING chain is walked, not the receiver chain: a
                 // NESTED (non-`inner`) class has no outer receiver at all, yet it sits inside its

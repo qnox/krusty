@@ -501,9 +501,8 @@ fn import_path_diagnostic(
                 if let Some(classifier) = symbols.classifier_name {
                     if terminal {
                         let shape = source.classifier(classifier)?;
-                        let declared_package = classifier.package();
                         if shape.access == crate::libraries::ClassifierAccess::PackagePrivate
-                            && !access_package.matches(&declared_package)
+                            && access_package != classifier.namespace()
                         {
                             return Some((
                                 *span,
@@ -19224,7 +19223,6 @@ impl<'a> Checker<'a> {
                 // classpath internal and match a constructor. Lowering emits `new …; invokespecial`.
                 {
                     if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
-                        let qualified = internal.render();
                         let mut constructor_mapping_error = None;
                         match self.record_resolved_library_constructor(
                             scope,
@@ -19238,7 +19236,8 @@ impl<'a> Checker<'a> {
                             Ok(LibraryConstructorSelection::Selected) => {
                                 crate::trace_compiler!(
                                     "resolve",
-                                    "classpath nested constructor {qualified} -> {internal}"
+                                    "classpath nested constructor {} -> {internal}",
+                                    internal.render(),
                                 );
                                 return self.ctor_result_name(
                                     scope,
