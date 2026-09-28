@@ -100,3 +100,21 @@ fun box(): String {
         "OK"
     );
 }
+
+/// kotlinc's `generateTypeOfArguments` reads `KTypeProjection.star` and calls the class's static
+/// `invariant`/`contravariant`/`covariant`, never the companion, so the facade names no
+/// `KTypeProjection$Companion` and lists no row for it.
+#[test]
+fn type_of_projections_call_the_static_factories() {
+    let source = "import kotlin.reflect.*\n\
+                  class Item\n\
+                  class Holder<T>\n\
+                  class Couple<A, B>\n\
+                  fun star() = typeOf<Holder<*>>()\n\
+                  fun plain() = typeOf<Holder<Item>>()\n\
+                  fun lower() = typeOf<Holder<in Item>>()\n\
+                  fun upper() = typeOf<Couple<Item, out Item>>()\n";
+    let compared = common::compile_with_kotlinc("Projections", source, &[], &["ProjectionsKt"]);
+    let (expected, actual) = &compared[0];
+    assert!(actual == expected, "ProjectionsKt differs from kotlinc");
+}
