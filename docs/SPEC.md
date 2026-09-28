@@ -8605,7 +8605,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-infix binary operator (`?:`, `+`, `..`, `in`, …) name nothing. A label written on the literal
   replaces the call's, and an anonymous function has none. The parser records the label
   (`parser::lambda_literals`); a receiver lambda's receiver local is `$this$<label>`, or `<this>`
-  without one. Test: `tests/lambda_receiver_label_e2e.rs`.
+  without one. The lambda's lifted implementation takes that receiver as a named value parameter,
+  so its `checkNotNullParameter` guard quotes the same `$this$<label>` rather than an extension
+  function's `<this>`. Test: `tests/lambda_receiver_label_e2e.rs`.
 - **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
   native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
