@@ -55,6 +55,7 @@ mod overrides;
 mod package_declarations;
 mod progression;
 mod properties;
+mod property_layouts;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod sam_target;
@@ -91,6 +92,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
 };
+pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
 };
@@ -389,53 +391,6 @@ pub struct IrCheckedProperty {
     pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
     pub getter: Option<ExprId>,
     pub setter: Option<ExprId>,
-}
-
-/// Common-IR declaration layout for a source property. This records which semantic storage and
-/// accessor declarations were materialized, but deliberately does not choose how an ordinary
-/// property access uses them. That choice belongs to the target realization pass.
-#[derive(Clone, Debug)]
-pub enum IrLocalPropertyLayout {
-    TopLevelStorage {
-        storage: u32,
-        getter: Option<FunId>,
-        setter: Option<FunId>,
-        /// Semantic singleton qualifier for a classifier-associated constant. `None` denotes a
-        /// genuinely receiverless package property.
-        qualifier: Option<TypeName>,
-    },
-    TopLevelAccessor {
-        getter: FunId,
-        setter: Option<FunId>,
-        receiver: Option<Ty>,
-        context_parameters: Vec<Ty>,
-        /// Index into `statics` of a delegated property's delegate.
-        delegate: Option<u32>,
-    },
-    Member {
-        class: ClassId,
-        owner: TypeName,
-        backing_field: Option<u32>,
-        getter: Option<FunId>,
-        setter: Option<FunId>,
-        interface: bool,
-        name: String,
-        ty: Ty,
-        mutable: bool,
-        private: bool,
-        context_parameters: Vec<Ty>,
-        property: u32,
-    },
-    MemberExtension {
-        owner: TypeName,
-        interface: bool,
-        name: String,
-        getter: FunId,
-        setter: Option<FunId>,
-        receiver: Ty,
-        ty: Ty,
-        context_parameters: Vec<Ty>,
-    },
 }
 
 #[derive(Clone, Debug)]

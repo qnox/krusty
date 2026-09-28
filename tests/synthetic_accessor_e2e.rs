@@ -178,3 +178,60 @@ fn a_class_reaches_a_private_top_level_declared_accessor() {
         "PrivateAccessor",
     );
 }
+
+#[test]
+fn a_class_reaches_a_private_delegated_top_level_property() {
+    // A private delegated property's accessors are private facade methods too.
+    common::expect_box_ok_with_stdlib(
+        "import kotlin.reflect.KProperty\n\
+         class D(var v: String) {\n  operator fun getValue(t: Any?, p: KProperty<*>): String = v\n  operator fun setValue(t: Any?, p: KProperty<*>, x: String) { v = x }\n}\n\
+         private var hidden: String by D(\"\")\n\
+         class Writer {\n  fun write(): String {\n    hidden = \"O\"\n    return hidden + \"K\"\n  }\n}\n\
+         fun box(): String = Writer().write()\n",
+        "PrivateDelegated",
+    );
+}
+
+#[test]
+fn a_private_delegated_top_level_property_is_reached_through_facade_accessors() {
+    // Its accessors are private facade methods, so `Writer.write` calls kotlinc's
+    // `access$setHidden` / `access$getHidden`, which forward to them.
+    const LIB: &str = "package lib\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        class D(var v: String) {\n\
+        \x20   operator fun getValue(t: Any?, p: KProperty<*>): String = v\n\
+        \x20   operator fun setValue(t: Any?, p: KProperty<*>, x: String) { v = x }\n\
+        }\n";
+    const SRC: &str = "import lib.D\n\
+        \n\
+        private var hidden: String by D(\"\")\n\
+        \n\
+        class Writer {\n\
+        \x20   fun write(): String {\n\
+        \x20       hidden = \"O\"\n\
+        \x20       return hidden + \"K\"\n\
+        \x20   }\n\
+        }\n";
+    let classes = common::classes_against_kotlinc_lib("PrivateDelegated", &[("Lib.kt", LIB)], SRC)
+        .expect("reference kotlinc is provisioned");
+    let (kotlinc, krusty) = classes
+        .method_declarations("PrivateDelegatedKt")
+        .expect("both compilers write the facade");
+    assert_eq!(krusty, kotlinc);
+    for (class, declaration) in [
+        ("Writer", "public final java.lang.String write();"),
+        (
+            "PrivateDelegatedKt",
+            "public static final void access$setHidden(java.lang.String);",
+        ),
+        (
+            "PrivateDelegatedKt",
+            "public static final java.lang.String access$getHidden();",
+        ),
+    ] {
+        let (kotlinc, krusty) = classes.method_listing(class, declaration);
+        assert_eq!(krusty, kotlinc, "{class}: {declaration}");
+    }
+}

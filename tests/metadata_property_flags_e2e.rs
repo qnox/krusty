@@ -100,6 +100,15 @@ fn a_lateinit_property_records_lateinit() {
 }
 
 #[test]
+fn a_top_level_lateinit_property_records_lateinit() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Payload\n\
+        lateinit var payload: Payload\n";
+    assert_identical("top_level_lateinit", SRC, "app/Top_level_lateinitKt");
+}
+
+#[test]
 fn a_delegated_var_records_its_delegate_field_and_setter_parameter() {
     const SRC: &str = "package app\n\
         \n\
@@ -115,6 +124,31 @@ fn a_delegated_var_records_its_delegate_field_and_setter_parameter() {
         \x20   val y: String by D()\n\
         }\n";
     assert_identical("delegated_var", SRC, "app/A");
+}
+
+#[test]
+fn a_delegated_top_level_property_records_its_delegate_field() {
+    // Package properties follow the member rule: `isDelegated` (bit 15), and the signature names
+    // the `x$delegate` storage with its descriptor. A private one's accessors are private methods.
+    const SRC: &str = "package app\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        class Payload(val code: Int)\n\
+        class D(var v: Payload) {\n\
+        \x20   operator fun getValue(t: Any?, p: KProperty<*>): Payload = v\n\
+        \x20   operator fun setValue(t: Any?, p: KProperty<*>, x: Payload) { v = x }\n\
+        }\n\
+        \n\
+        var stored: Payload by D(Payload(1))\n\
+        val read: Payload by D(Payload(2))\n\
+        private var hidden: Payload by D(Payload(4))\n\
+        \n\
+        fun touch(): Int {\n\
+        \x20   hidden = stored\n\
+        \x20   return hidden.code + read.code\n\
+        }\n";
+    assert_identical("DelegatedTopLevel", SRC, "app/DelegatedTopLevelKt");
 }
 
 #[test]
