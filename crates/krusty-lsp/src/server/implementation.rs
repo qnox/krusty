@@ -27,6 +27,10 @@ use super::super::{
 };
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
+use super::response_page::{
+    limit_signature_help, limit_text, page_json_array, page_semantic_token_data,
+    partial_result_token, response_item_budget, ArrayBudget, HOVER_TEXT_BYTES,
+};
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::analysis::serialized_json_wire_bytes;
 use crate::compiler_analysis::LibraryRef;
@@ -2217,9 +2221,10 @@ where
         let Some(hover) = open.hover.get(offset) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
+        let value = limit_text(hover.value, HOVER_TEXT_BYTES);
         let contents = json!({
             "kind": "markdown",
-            "value": format!("````kotlin\n{}\n````\n", hover.value),
+            "value": format!("````kotlin\n{value}\n````\n"),
         });
         Dispatch::messages(vec![rpc_result(
             id,
@@ -2237,22 +2242,21 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        Dispatch::messages(vec![rpc_result(
-            id,
-            Value::Array(open.document_symbols.encode()),
-        )])
+        dispatch_paged_array(id, open.document_symbols.encode(), token.as_ref())
     }
 
     fn workspace_symbols(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<WorkspaceSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2294,7 +2298,7 @@ where
             self.backend
                 .locate_dependencies(self.dependency_symbols_generation, missing);
         }
-        Dispatch::messages(vec![rpc_result(id, Value::Array(symbols))])
+        dispatch_paged_array(id, symbols, token.as_ref())
     }
 
     fn formatting(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2348,16 +2352,14 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        Dispatch::messages(vec![rpc_result(
-            id,
-            Value::Array(open.folding_ranges.encode(&open.text)),
-        )])
+        dispatch_paged_array(id, open.folding_ranges.encode(&open.text), token.as_ref())
     }
 
     fn completion(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2376,7 +2378,7 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        let is_incomplete =
+        let mut is_incomplete =
             self.analysis_dirty || self.analysis_in_flight || !open.completion.is_complete();
         let items: Vec<_> = open
             .completion
@@ -2407,6 +2409,11 @@ where
                 item
             })
             .collect();
+        let offered = items.len();
+        let items = page_json_array(items, None).items;
+        if items.len() < offered {
+            is_incomplete = true;
+        }
         Dispatch::messages(vec![rpc_result(
             id,
             json!({"isIncomplete": is_incomplete, "items": items}),
@@ -2428,7 +2435,7 @@ where
         };
         Dispatch::messages(vec![rpc_result(
             id,
-            open.signature_help.encode(offset).unwrap_or(Value::Null),
+            limit_signature_help(open.signature_help.encode(offset).unwrap_or(Value::Null)),
         )])
     }
 
@@ -2436,6 +2443,7 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2445,13 +2453,17 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        let locations = self.navigation_locations(&open.definitions, offset);
+        let locations = self.navigation_locations(
+            &open.definitions,
+            offset,
+            response_item_budget(progress.is_some()),
+        );
         let library_ref = locations
             .is_empty()
             .then(|| open.library_definitions.get(offset).cloned())
             .flatten();
         if !locations.is_empty() || library_ref.is_none() {
-            return Dispatch::messages(vec![rpc_result(id, Value::Array(locations))]);
+            return dispatch_paged_array(id, locations, progress.as_ref());
         }
         const MAX_PENDING_MATERIALIZATIONS: usize = 128;
         if self.pending_materializations.len() >= MAX_PENDING_MATERIALIZATIONS {
@@ -2546,6 +2558,7 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2555,21 +2568,14 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        let locations = self.navigation_locations(&open.type_definitions, offset);
-        Dispatch::messages(vec![rpc_result(
-            id,
-            if locations.is_empty() {
-                Value::Null
-            } else {
-                Value::Array(locations)
-            },
-        )])
+        self.navigation_response(id, &open.type_definitions, offset, progress.as_ref())
     }
 
     fn implementation(&self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2579,47 +2585,67 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        let locations = self.navigation_locations(&open.implementations, offset);
-        Dispatch::messages(vec![rpc_result(
-            id,
-            if locations.is_empty() {
-                Value::Null
-            } else {
-                Value::Array(locations)
-            },
-        )])
+        self.navigation_response(id, &open.implementations, offset, progress.as_ref())
     }
 
-    fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
+    fn navigation_response(
+        &self,
+        id: Value,
+        index: &DefinitionIndex,
+        offset: u32,
+        progress: Option<&Value>,
+    ) -> Dispatch {
+        let locations =
+            self.navigation_locations(index, offset, response_item_budget(progress.is_some()));
+        if locations.is_empty() {
+            Dispatch::messages(vec![rpc_result(id, Value::Null)])
+        } else {
+            dispatch_paged_array(id, locations, progress)
+        }
+    }
+
+    fn navigation_locations(
+        &self,
+        index: &DefinitionIndex,
+        offset: u32,
+        budget: usize,
+    ) -> Vec<Value> {
         let targets = index.get(offset).collect::<Vec<_>>();
         if targets.is_empty() {
             return Vec::new();
         }
-        targets
-            .into_iter()
-            .filter_map(|target| {
-                let (uri, source) = self.source_set.get(target.file as usize)?;
-                Some(json!({
-                    "uri": uri,
-                    "range": {
-                        "start": byte_offset_to_position(
-                            source,
-                            target.span.lo as usize
-                        ),
-                        "end": byte_offset_to_position(
-                            source,
-                            target.span.hi as usize
-                        ),
-                    }
-                }))
-            })
-            .collect()
+        let mut locations = Vec::new();
+        let mut room = ArrayBudget::new(budget);
+        for target in targets {
+            let Some((uri, source)) = self.source_set.get(target.file as usize) else {
+                continue;
+            };
+            let location = json!({
+                "uri": uri,
+                "range": {
+                    "start": byte_offset_to_position(
+                        source,
+                        target.span.lo as usize
+                    ),
+                    "end": byte_offset_to_position(
+                        source,
+                        target.span.hi as usize
+                    ),
+                }
+            });
+            if !room.admit(&location) {
+                break;
+            }
+            locations.push(location);
+        }
+        locations
     }
 
     fn references(&self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_result_token(&params);
         let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2659,28 +2685,34 @@ where
         }
         occurrences.sort_unstable_by_key(|(uri, span)| (*uri, span.lo, span.hi));
         occurrences.dedup();
-        let locations = occurrences
-            .into_iter()
-            .filter_map(|(uri, span)| {
-                let source = self
-                    .documents
-                    .get(uri)
-                    .map(|document| document.text.as_str())
-                    .or_else(|| {
-                        self.source_set.iter().find_map(|(source_uri, source)| {
-                            (source_uri == uri).then_some(source.as_str())
-                        })
-                    })?;
-                Some(json!({
-                    "uri": uri,
-                    "range": {
-                        "start": byte_offset_to_position(source, span.lo as usize),
-                        "end": byte_offset_to_position(source, span.hi as usize),
-                    }
-                }))
-            })
-            .collect::<Vec<_>>();
-        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
+        let mut locations = Vec::new();
+        let mut room = ArrayBudget::new(response_item_budget(progress.is_some()));
+        for (uri, span) in occurrences {
+            let Some(source) = self
+                .documents
+                .get(uri)
+                .map(|document| document.text.as_str())
+                .or_else(|| {
+                    self.source_set.iter().find_map(|(source_uri, source)| {
+                        (source_uri == uri).then_some(source.as_str())
+                    })
+                })
+            else {
+                continue;
+            };
+            let location = json!({
+                "uri": uri,
+                "range": {
+                    "start": byte_offset_to_position(source, span.lo as usize),
+                    "end": byte_offset_to_position(source, span.hi as usize),
+                }
+            });
+            if !room.admit(&location) {
+                break;
+            }
+            locations.push(location);
+        }
+        dispatch_paged_array(id, locations, progress.as_ref())
     }
 
     fn rename(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -3144,6 +3176,7 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_result_token(&params);
         let parsed = if range {
             serde_json::from_value::<SemanticTokensRangeParams>(params)
                 .map(|params| (params.text_document, Some(params.range)))
@@ -3163,10 +3196,13 @@ where
             end_line: range.end.line,
             end_character: range.end.character,
         });
-        Dispatch::messages(vec![rpc_result(
-            id,
-            json!({"data": open.semantic_tokens.encode(range)}),
-        )])
+        let data = open
+            .semantic_tokens
+            .encode_capped(range, response_item_budget(token.is_some()));
+        let paged = page_semantic_token_data(data, token.as_ref());
+        let mut messages = paged.progress;
+        messages.push(rpc_result(id, json!({ "data": paged.data })));
+        Dispatch::messages(messages)
     }
 }
 
@@ -3648,6 +3684,13 @@ fn rpc_result(id: Value, result: Value) -> Value {
     object.insert("id".to_string(), id);
     object.insert("result".to_string(), result);
     response
+}
+
+fn dispatch_paged_array(id: Value, items: Vec<Value>, token: Option<&Value>) -> Dispatch {
+    let paged = page_json_array(items, token);
+    let mut messages = paged.progress;
+    messages.push(rpc_result(id, Value::Array(paged.items)));
+    Dispatch::messages(messages)
 }
 
 struct BoundedJsonWriter {
@@ -5736,6 +5779,65 @@ mod tests {
         assert_eq!(cancelled.messages[0]["error"]["code"], -32800);
         assert!(service.pending_analysis_requests.is_empty());
         assert_eq!(service.pending_analysis_request_bytes, 0);
+    }
+
+    #[test]
+    fn semantic_token_responses_are_paged_instead_of_one_unbounded_array() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///wide.kt";
+        service.open_document_for_test(uri, "fun box() = 1\n", 1);
+        let entries: Vec<[u32; 4]> = (0..80_000).map(|line| [line, 0, 1, 0]).collect();
+        service.documents.get_mut(uri).unwrap().semantic_tokens =
+            crate::analysis::SemanticTokenIndex::from_entries_for_test(entries);
+        let full = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "tokens",
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }));
+        assert_eq!(full.messages.len(), 1);
+        assert!(full.messages[0].get("error").is_none());
+        let data = full.messages[0]["result"]["data"].as_array().unwrap();
+        assert!(!data.is_empty());
+        assert_eq!(data.len() % 5, 0);
+        assert!(
+            serde_json::to_vec(data).unwrap().len()
+                <= super::super::response_page::RESPONSE_ITEMS_PAGE_BYTES
+        );
+
+        let streamed = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "tokens",
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": {"uri": uri},
+                "partialResultToken": "sem/1"
+            }
+        }));
+        assert!(streamed.messages.len() > 1);
+        assert_eq!(streamed.messages.last().unwrap()["id"], "tokens");
+        let mut combined = Vec::new();
+        for message in &streamed.messages {
+            assert!(message.get("error").is_none());
+            let page = message
+                .pointer("/params/value/data")
+                .or_else(|| message.pointer("/result/data"))
+                .and_then(serde_json::Value::as_array)
+                .unwrap();
+            assert!(
+                serde_json::to_vec(page).unwrap().len()
+                    <= super::super::response_page::RESPONSE_ITEMS_PAGE_BYTES
+            );
+            assert_eq!(page.len() % 5, 0);
+            combined.extend(page.iter().map(|number| number.as_u64().unwrap() as u32));
+        }
+        let expected = service.documents[uri].semantic_tokens.encode(None);
+        assert_eq!(combined, expected);
     }
 
     #[test]
