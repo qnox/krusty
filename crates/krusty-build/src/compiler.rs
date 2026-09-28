@@ -416,33 +416,75 @@ fn collect_kotlin(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+/// Flags whose value is the following argument. The value has to sit in this list: the driver
+/// appends its own `-no-stdlib` and `-d` after `kotlinc_args`, and a missing value would consume
+/// one of those.
+const SEPARATE_VALUE_FLAGS: &[&str] = &[
+    "-language-version",
+    "-api-version",
+    "-opt-in",
+    "-Xexplicit-api",
+];
+
 /// Raw CLI arguments may carry sources or path-bearing compiler inputs that have no corresponding
 /// field in [`Module`]. Scalar switches are already part of the key and are safe; opaque argument
 /// files, positional arguments, and the path-bearing options understood by the current CLI are
 /// refused until their referenced bytes have an owned model.
-fn unsupported_opaque_argument(arguments: &[String]) -> Option<&str> {
-    arguments.iter().map(String::as_str).find(|argument| {
-        argument.starts_with('@')
-            || !argument.starts_with('-')
-            || matches!(
-                *argument,
-                "-d" | "-cp"
-                    | "-classpath"
-                    | "-class-path"
-                    | "-jdk-home"
-                    | "-module-name"
-                    | "-jvm-target"
-            )
-            || argument.starts_with("-Xfriend-paths=")
-            || argument.starts_with("-Xplugin=")
-            || argument.starts_with("-module-name=")
-            || argument.starts_with("-jvm-target=")
-            || argument.starts_with("-jdk-home=")
-            || argument.starts_with("-classpath=")
-            || argument.starts_with("-class-path=")
-            || argument.starts_with("-cp=")
-            || argument.starts_with("-d=")
-    })
+pub(crate) fn unsupported_opaque_argument(arguments: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if opaque_argument(argument) {
+            return Some(argument);
+        }
+        if SEPARATE_VALUE_FLAGS.contains(&argument) {
+            match arguments.get(index + 1).map(String::as_str) {
+                Some(value) if separate_flag_value(value) => {
+                    index += 2;
+                    continue;
+                }
+                _ => return Some(argument),
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn separate_flag_value(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('-') && !value.starts_with('@')
+}
+
+fn opaque_argument(argument: &str) -> bool {
+    argument.starts_with('@')
+        || !argument.starts_with('-')
+        || matches!(
+            argument,
+            "-d" | "-cp"
+                | "-classpath"
+                | "-class-path"
+                | "-jdk-home"
+                | "-kotlin-home"
+                | "-module-name"
+                | "-jvm-target"
+                | "-e"
+                | "-expression"
+                | "-script"
+                | "-script-templates"
+                | "-P"
+        )
+        || argument.starts_with("-Xfriend-paths=")
+        || argument.starts_with("-Xplugin=")
+        || argument.starts_with("-Xcompiler-plugin")
+        || argument.starts_with("-module-name=")
+        || argument.starts_with("-jvm-target=")
+        || argument.starts_with("-jdk-home=")
+        || argument.starts_with("-kotlin-home=")
+        || argument.starts_with("-classpath=")
+        || argument.starts_with("-class-path=")
+        || argument.starts_with("-cp=")
+        || argument.starts_with("-d=")
+        || argument.starts_with("-P=")
 }
 
 /// Read every file under `directory` as `(path relative to `base`, bytes)`.
@@ -681,6 +723,36 @@ mod tests {
             unsupported_opaque_argument(&["-Xno-param-assertions".into()]),
             None,
             "a scalar output switch is itself completely represented in the key"
+        );
+    }
+
+    #[test]
+    fn a_valued_compiler_flag_keeps_its_value_in_the_same_list() {
+        assert_eq!(
+            unsupported_opaque_argument(&[
+                "-api-version".into(),
+                "1.9".into(),
+                "-language-version".into(),
+                "2.0".into(),
+                "-opt-in".into(),
+                "kotlin.Experimental".into(),
+                "-Xexplicit-api".into(),
+                "strict".into(),
+                "-Xcontext-parameters".into(),
+            ]),
+            None
+        );
+        assert_eq!(
+            unsupported_opaque_argument(&["-language-version".into()]),
+            Some("-language-version")
+        );
+        assert_eq!(
+            unsupported_opaque_argument(&["-language-version".into(), "-nowarn".into()]),
+            Some("-language-version")
+        );
+        assert_eq!(
+            unsupported_opaque_argument(&["-nowarn".into(), "Extra.kt".into()]),
+            Some("Extra.kt")
         );
     }
 

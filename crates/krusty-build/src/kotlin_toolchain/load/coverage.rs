@@ -696,6 +696,196 @@ fn an_empty_selected_module_and_a_dependency_cycle_are_reported() {
 }
 
 #[test]
+fn kotlin_settings_become_the_compiler_arguments() {
+    let tree = Temp::new("kotlin-settings");
+    let name = tree.0.file_name().unwrap().to_string_lossy().into_owned();
+    tree.write(
+        "module.yaml",
+        "\
+product: jvm/app
+settings:
+  kotlin:
+    apiVersion: \"1.9\"
+    languageVersion: 2.0
+    optIns:
+      - kotlin.ExperimentalStdlibApi
+      - kotlin.io.path.ExperimentalPathApi
+    allWarningsAsErrors: true
+    progressiveMode: true
+    suppressWarnings: false
+    verbose: true
+    explicitApi: strict
+    compileIncrementally: false
+    freeCompilerArgs:
+      - -Xcontext-parameters
+",
+    );
+    tree.write("src/main.kt", "fun main() {}\n");
+    tree.write("test/MainTest.kt", "fun test() {}\n");
+
+    let loaded = load(&command(&tree.0)).expect("load");
+    let args = |values: &[&str]| -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    };
+    assert_eq!(
+        module(&loaded.modules, &format!("{name}:main")).kotlinc_args,
+        args(&[
+            "-api-version",
+            "1.9",
+            "-language-version",
+            "2.0",
+            "-opt-in",
+            "kotlin.ExperimentalStdlibApi",
+            "-opt-in",
+            "kotlin.io.path.ExperimentalPathApi",
+            "-Werror",
+            "-progressive",
+            "-verbose",
+            "-Xexplicit-api",
+            "strict",
+            "-Xcontext-parameters",
+        ])
+    );
+    assert_eq!(
+        module(&loaded.modules, &format!("{name}:test")).kotlinc_args,
+        args(&[
+            "-api-version",
+            "1.9",
+            "-language-version",
+            "2.0",
+            "-opt-in",
+            "kotlin.ExperimentalStdlibApi",
+            "-opt-in",
+            "kotlin.io.path.ExperimentalPathApi",
+            "-Werror",
+            "-progressive",
+            "-verbose",
+            "-Xcontext-parameters",
+        ])
+    );
+}
+
+#[test]
+fn kotlin_settings_that_are_off_add_no_compiler_arguments() {
+    let tree = Temp::new("kotlin-settings-off");
+    let name = tree.0.file_name().unwrap().to_string_lossy().into_owned();
+    tree.write(
+        "module.yaml",
+        "\
+product: jvm/app
+settings:
+  kotlin:
+    explicitApi: disable
+    compileIncrementally: false
+    allWarningsAsErrors: false
+    progressiveMode: false
+    suppressWarnings: false
+    verbose: false
+    optIns:
+    freeCompilerArgs:
+",
+    );
+    tree.write("src/main.kt", "fun main() {}\n");
+    let loaded = load(&command(&tree.0)).expect("load");
+    assert!(module(&loaded.modules, &format!("{name}:main"))
+        .kotlinc_args
+        .is_empty());
+}
+
+#[test]
+fn kotlin_settings_outside_compiler_options_are_rejected() {
+    let cases = [
+        (
+            "product: jvm/app\nsettings:\n  - kotlin\n",
+            "settings must be a mapping",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  java:\n    release: 21\n",
+            "unsupported settings key 'java'",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin: 2.0\n",
+            "settings.kotlin must be a mapping",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    version: 2.2.21\n",
+            "unsupported settings.kotlin key 'version'; krusty-toolchain build does not select a Kotlin compiler version yet",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    serialization: json\n",
+            "unsupported settings.kotlin key 'serialization'; krusty-toolchain build does not run compiler plugins yet",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    allOpen:\n      enabled: true\n",
+            "unsupported settings.kotlin key 'allOpen'; krusty-toolchain build does not run compiler plugins yet",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    linkerOptions:\n      - -lz\n",
+            "settings.kotlin key 'linkerOptions' applies to native targets; krusty-toolchain build compiles the JVM",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    debug: true\n",
+            "settings.kotlin key 'debug' applies to native targets; krusty-toolchain build compiles the JVM",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    compileIncrementally: true\n",
+            "settings.kotlin.compileIncrementally cannot be enabled; krusty-toolchain build compiles each module as a whole",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    fancy: true\n",
+            "unsupported settings.kotlin key 'fancy'",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    languageVersion:\n      - 2.0\n",
+            "languageVersion must be a string",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    languageVersion: \"\"\n",
+            "languageVersion must not be empty",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    apiVersion: 1.9\n    optIns: kotlin.Experimental\n",
+            "optIns must be a list",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    optIns:\n      - \"\"\n",
+            "optIns entries must not be empty",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    allWarningsAsErrors: yes\n",
+            "allWarningsAsErrors must be true or false, found 'yes'",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    explicitApi: error\n",
+            "explicitApi must be strict, warning, or disable, found 'error'",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    freeCompilerArgs:\n      - -cp\n      - lib.jar\n",
+            "settings.kotlin.freeCompilerArgs entry '-cp' can introduce an unmodelled input; record that input in the module model instead",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    freeCompilerArgs:\n      - -language-version\n",
+            "settings.kotlin.freeCompilerArgs flag '-language-version' needs its value in the same list",
+        ),
+        (
+            "product: jvm/app\nsettings:\n  kotlin:\n    freeCompilerArgs:\n      - \"@compiler.args\"\n",
+            "settings.kotlin.freeCompilerArgs entry '@compiler.args' can introduce an unmodelled input; record that input in the module model instead",
+        ),
+        (
+            "product: jvm/app\ntest-settings:\n  kotlin:\n    languageVersion: 2.0\n",
+            "unsupported key 'test-settings'",
+        ),
+        (
+            "product: jvm/app\nsettings@jvm:\n  kotlin:\n    languageVersion: 2.0\n",
+            "unsupported key 'settings@jvm'",
+        ),
+    ];
+    for (contents, message) in cases {
+        expect_module_error(contents, message);
+    }
+}
+
+#[test]
 fn discovery_stops_after_sixteen_ancestors_and_names_gradle_and_jps() {
     let deep = Temp::new("ancestors");
     deep.write("module.yaml", "product: jvm/app\n");

@@ -31,8 +31,11 @@ compiler. A directory containing `project.yaml`, or a single `module.yaml` that 
 `krusty`. A source error is printed as the compiler printed it, so the diagnostic is the same
 `file:line:column: error: message` kotlinc reports for that source. `//` dependencies become module
 edges; an `exported` dependency is visible to dependents, and a `runtime-only` dependency is not on
-the compile classpath. Maven coordinates, version catalogs, `settings`, and non-JVM product types
-fail the command.
+the compile classpath. `settings.kotlin` language version, API version, opt-ins, explicit API,
+warning flags, and `freeCompilerArgs` become that module's compiler arguments. `explicitApi` is not
+applied to test sources. Selecting a Kotlin version, compiler plugins, native-only settings,
+`test-settings`, and platform-qualified settings fail the command, as do Maven coordinates, version
+catalogs, and non-JVM product types.
 
 Gradle and `.iml` detection in the language server is unchanged. `krusty-toolchain build` only recognizes
 those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,

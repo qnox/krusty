@@ -203,6 +203,8 @@ struct Declared {
     test_dependencies: Vec<Dep>,
     main: SourceFiles,
     test: SourceFiles,
+    main_args: Vec<String>,
+    test_args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -292,6 +294,8 @@ fn read_project(root: &Path) -> Result<Vec<Declared>, String> {
             test_dependencies,
             main,
             test,
+            main_args: spec.kotlin.main_args.clone(),
+            test_args: spec.kotlin.test_args.clone(),
         });
     }
     Ok(declared)
@@ -301,6 +305,7 @@ struct ModuleSpec {
     layout: Layout,
     dependencies: Vec<DepSpec>,
     test_dependencies: Vec<DepSpec>,
+    kotlin: kotlin_settings::KotlinSettings,
 }
 
 struct DepSpec {
@@ -323,12 +328,14 @@ fn parse_module_file(
     let mut layout = Layout::Amper;
     let mut dependencies = Vec::new();
     let mut test_dependencies = Vec::new();
+    let mut kotlin = kotlin_settings::KotlinSettings::default();
     for (key, value) in entries {
         match key.as_str() {
             "product" => product = Some(parse_product(file, value)?),
             "layout" => layout = parse_layout(file, value)?,
             "dependencies" => dependencies = parse_dep_list(file, value)?,
             "test-dependencies" => test_dependencies = parse_dep_list(file, value)?,
+            "settings" => kotlin = kotlin_settings::parse(file, value)?,
             "description" => {}
             other => {
                 return Err(format!("{}: unsupported key '{other}'", file.display()));
@@ -346,6 +353,7 @@ fn parse_module_file(
         layout,
         dependencies,
         test_dependencies,
+        kotlin,
     })
 }
 
@@ -895,6 +903,11 @@ fn unit(root: &Path, declared: &[Declared], index: usize, test: bool) -> Result<
         .collect();
     built.resources = sources.resources.clone();
     built.java_sources = sources.java.clone();
+    built.kotlinc_args = if test {
+        module.test_args.clone()
+    } else {
+        module.main_args.clone()
+    };
     built.outputs = vec![ModuleOutput::ClassDirectory(output_path(
         root,
         &module.display_name,
@@ -969,7 +982,7 @@ fn read_yaml(path: &Path) -> Result<Yaml, String> {
     yaml::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn scalar(file: &Path, field: &str, value: &Yaml) -> Result<String, String> {
+pub(super) fn scalar(file: &Path, field: &str, value: &Yaml) -> Result<String, String> {
     match value {
         Yaml::Scalar(text) => Ok(text.clone()),
         _ => Err(format!("{}: {field} must be a string", file.display())),
@@ -999,6 +1012,8 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     }
     normalized
 }
+
+mod kotlin_settings;
 
 #[cfg(test)]
 mod coverage;
@@ -1236,7 +1251,7 @@ mod tests {
         assert_eq!(
             load(&command(&settings.0)).unwrap_err(),
             format!(
-                "{}: unsupported key 'settings'",
+                "{}: unsupported settings.kotlin key 'version'; krusty-toolchain build does not select a Kotlin compiler version yet",
                 settings.0.join("module.yaml").display()
             )
         );
