@@ -191,6 +191,16 @@ fn type_parameters(arity: usize) -> (Vec<String>, Vec<Ty>, Vec<Vec<Ty>>, Vec<Typ
     (names, arguments, bounds, variances)
 }
 
+/// The call shape of a synthesized `invoke`, whose parameters kotlinc's function class descriptor
+/// names `p1` to `pN`: an override's bridge carries those names.
+fn synthesized_invoke_call_sig(arity: usize) -> CallSig {
+    let mut call_sig = CallSig::metadata_plain(arity);
+    call_sig.parameter_identities = (1..=arity)
+        .map(|ordinal| crate::fir::ResolvedParameterIdentity::Source(format!("p{ordinal}").into()))
+        .collect();
+    call_sig
+}
+
 fn ensure_invoke(
     shape: &mut LibraryType,
     identity: TypeName,
@@ -221,7 +231,7 @@ fn ensure_invoke(
         callable.suspend = suspend;
         let mut declaration =
             FunctionInfo::plain(FnKind::Member, Some(Ty::obj_name(identity)), callable);
-        declaration.call_sig = CallSig::metadata_plain(parameters.len());
+        declaration.call_sig = synthesized_invoke_call_sig(parameters.len());
         declaration.flags.operator = true;
         declaration.flags.is_abstract = true;
         shape.insert_declared_callables(
@@ -255,7 +265,7 @@ fn ensure_invoke(
                 .push(Ty::obj("kotlin/coroutines/Continuation"));
             member.physical_ret = Ty::obj("kotlin/Any");
         }
-        member.call_sig = CallSig::metadata_plain(parameters.len());
+        member.call_sig = synthesized_invoke_call_sig(parameters.len());
         shape.members.push(member);
     }
 }

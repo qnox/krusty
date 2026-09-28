@@ -209,7 +209,9 @@ fn superclass_method_bridges(
         let mut concrete_ret = own_fid
             .map(|function| ir.functions[function as usize].ret)
             .unwrap_or(edge.implementation_result);
-        let mut parameter_identities = edge.implementation_parameter_identities.clone();
+        // A bridge carries the overridden declaration's signature, so kotlinc names its parameters
+        // after that declaration's, not the override's.
+        let mut parameter_identities = edge.overridden_parameter_identities.clone();
         let suspend_function_supertype =
             crate::libraries::function_classifiers::classifier(edge.overridden_owner)
                 .is_some_and(|function| function.is_suspend() && !function.is_reflective());

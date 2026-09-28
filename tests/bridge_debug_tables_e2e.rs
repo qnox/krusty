@@ -6,8 +6,9 @@
 //! and names its receiver and parameters in a `LocalVariableTable`, and a debugger stepping into
 //! `Sink<String>.accept` reads those.
 //!
-//! The parameter NAMES come from the concrete override the bridge delegates to; their descriptors
-//! are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`).
+//! The parameter NAMES come from the overridden declaration whose signature the bridge carries;
+//! their descriptors are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`,
+//! not `String`).
 //!
 //! Every Kotlin class that implements a generic supertype emits at least one, so the gap was in
 //! every such class — and in every `@Serializable` class twice over, since a generated `$serializer`
@@ -32,10 +33,8 @@ fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
         reference.to_string_lossy().into_owned(),
         source.to_string_lossy().into_owned(),
     ];
-    let Some((status, stderr)) = common::kotlinc_compile(&args) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    let (status, stderr) =
+        common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
     assert_eq!(status, 0, "{name}: kotlinc failed: {stderr}");
     let classes = common::compile_in_process_metadata_cp(src, name, &[])
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
@@ -81,7 +80,7 @@ fn an_erased_bridge_is_byte_identical_to_kotlinc() {
 /// Two parameters, so the names cannot come out right by accident: a bridge that took them from
 /// its own position, or reused one spelling, would order them `key`, `value` only by luck.
 #[test]
-fn a_bridge_names_its_parameters_after_the_override() {
+fn a_bridge_names_both_of_its_parameters() {
     let src = "interface Store<K, V> {\n\
                \x20   fun put(key: K, value: V)\n\
                }\n\
@@ -261,4 +260,55 @@ fn bridges_to_generated_members_use_their_published_parameter_identities() {
             "complete {method} LocalVariableTable"
         );
     }
+}
+
+/// The override renames the parameter; the bridge keeps the overridden declaration's `item`.
+#[test]
+fn a_bridge_names_its_parameters_after_the_overridden_declaration() {
+    let src = "interface Sink<T> {\n\
+               \x20   fun accept(item: T): T\n\
+               }\n\
+               \n\
+               class Renamed : Sink<String> {\n\
+               \x20   override fun accept(text: String): String = text\n\
+               }\n";
+    common::byte_diff_against_kotlinc("RenamedBridgeParameter", src, "Renamed")
+        .expect("reference kotlinc is provisioned")
+        .expect("Renamed byte-identical to kotlinc");
+}
+
+/// The overridden declaration two rungs up names the bridge's parameter, not the nearer abstract
+/// class that only inherits it.
+#[test]
+fn an_inherited_bridge_names_its_parameters_after_the_declaring_supertype() {
+    let src = "abstract class Base<T> {\n\
+               \x20   abstract fun take(first: T): T\n\
+               }\n\
+               \n\
+               abstract class Middle : Base<String>()\n\
+               \n\
+               class Leaf : Middle() {\n\
+               \x20   override fun take(other: String): String = other\n\
+               }\n";
+    common::byte_diff_against_kotlinc("InheritedBridgeParameter", src, "Leaf")
+        .expect("reference kotlinc is provisioned")
+        .expect("Leaf byte-identical to kotlinc");
+}
+
+/// A context parameter is named after the overridden declaration too: the bridge takes `scope`,
+/// the override `outer`.
+#[test]
+fn a_bridge_names_its_context_parameter_after_the_overridden_declaration() {
+    let src = "class Scope(val prefix: String)\n\
+               \n\
+               interface Renderer<T> {\n\
+               \x20   context(scope: Scope)\n\
+               \x20   fun render(item: T): T\n\
+               }\n\
+               \n\
+               class Upper : Renderer<String> {\n\
+               \x20   context(outer: Scope)\n\
+               \x20   override fun render(text: String): String = outer.prefix + text\n\
+               }\n";
+    assert_code_and_debug_identical("RenamedContextBridgeParameter", src, "Upper");
 }

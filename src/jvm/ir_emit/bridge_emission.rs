@@ -522,10 +522,10 @@ fn emit_bridge(
 /// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
 /// `LocalVariableTable` naming its receiver and parameters.
 ///
-/// The bridge has no source of its own — it exists because a supertype's erased signature differs
-/// from the override's — so the NAMES come from the override it delegates to, while the descriptors
-/// are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`). A
-/// parameter the override does not name keeps the JVM's positional spelling. A property-setter
+/// The bridge carries the signature of the supertype declaration it overrides, so the NAMES come
+/// from that declaration, while the descriptors are the ERASED ones the bridge actually receives
+/// (`item Ljava/lang/Object;`, not `String`). A parameter the declaration does not name keeps the
+/// JVM's positional spelling. A property-setter
 /// bridge has no source function identity; its generated parameter uses kotlinc's accessor spelling.
 /// Attached as each bridge is written, not in a pass afterwards: the local-variable table's
 /// strings are interned when they are recorded, and kotlinc interns them with the method they
