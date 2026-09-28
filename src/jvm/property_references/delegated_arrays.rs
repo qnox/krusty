@@ -53,11 +53,20 @@ pub(super) struct DelegatedOperand {
     pub(super) operand: ExprId,
     /// The class whose array holds the reference: the class declaring the property's accessors.
     pub(super) owner: TypeName,
-    pub(super) property: PropertyId,
-    /// The property's position among its class's declarations.
-    pub(super) source_order: u32,
+    pub(super) property: DelegatedProperty,
+    /// The property's position among its class's delegated properties: its declaration's source
+    /// order, then, for a local one, its ordinal within the member declaring it.
+    pub(super) source_order: (u32, u32),
     /// The reflected property value, built once per property in its class's `<clinit>`.
     pub(super) element: IrExpr,
+}
+
+/// A delegated property of a class: a member or top-level one, or a local one by its ordinal among
+/// the class's local delegated properties.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum DelegatedProperty {
+    Declared(PropertyId),
+    Local(u32),
 }
 
 /// Pass `null` for a delegated reference whose inline operator never reads it, as kotlinc does

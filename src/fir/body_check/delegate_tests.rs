@@ -112,7 +112,7 @@ fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_refe
     assert!(expressions(&body).any(|expression| {
         matches!(
             &expression.kind,
-            FirExprKind::LocalPropertyReference { name, property_type }
+            FirExprKind::LocalPropertyReference { name, property_type, mutable: false, ordinal: 0 }
                 if name.as_ref() == "value" && property_type.get() == Ty::String
         )
     }));

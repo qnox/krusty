@@ -300,7 +300,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         IrExpr::KClassLiteral { value, .. } => map_option(value, &mut map),
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
-        | IrExpr::LocalPropertyReference { .. }
+        | IrExpr::LocalPropertyReference(_)
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
         | IrExpr::GetStatic(_)

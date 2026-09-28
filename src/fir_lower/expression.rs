@@ -494,10 +494,14 @@ impl BodyLowering<'_> {
             FirExprKind::LocalPropertyReference {
                 name,
                 property_type,
-            } => self.ir.add_expr(IrExpr::LocalPropertyReference {
-                name: name.clone(),
-                property_type: property_type.get(),
-            }),
+                mutable,
+                ordinal,
+            } => {
+                let reference = self
+                    .local_property_reference((name, property_type.get()), (*mutable, *ordinal))?;
+                self.ir
+                    .add_expr(IrExpr::LocalPropertyReference(Box::new(reference)))
+            }
             FirExprKind::PropertyReference {
                 target,
                 function_type,

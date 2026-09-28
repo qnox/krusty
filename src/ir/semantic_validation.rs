@@ -268,8 +268,8 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::KClassLiteral { classifier, .. } => {
             classifier.map_or(Ok(()), |ty| reject("class literal", ty))
         }
-        IrExpr::LocalPropertyReference { property_type, .. } => {
-            reject("local property reference", *property_type)
+        IrExpr::LocalPropertyReference(reference) => {
+            reject("local property reference", reference.property_type)
         }
         IrExpr::Call { callee, .. } => validate_callee(callee),
         IrExpr::PluginPlaceholder { types, .. } => {

@@ -9,6 +9,23 @@
 
 use super::*;
 
+/// The reflected local delegated property its conventions receive, and where it sits among its
+/// lexical class's delegated properties.
+#[derive(Clone, Debug)]
+pub struct IrLocalPropertyReference {
+    pub name: Box<str>,
+    pub property_type: Ty,
+    pub mutable: bool,
+    /// The class lexically declaring it, or `None` in a top-level declaration, whose container is
+    /// `source`'s file facade.
+    pub class: Option<TypeName>,
+    pub source: IrModuleSource,
+    /// Its position among the class's local delegated properties, in source order.
+    pub ordinal: u32,
+    /// The source order of the member declaration whose body declares it.
+    pub member_order: u32,
+}
+
 /// Language-level identity of a callable-reference value whose invocation has already been lowered
 /// to a common-IR adapter. The target is used for Kotlin reflection/equality only; a backend must
 /// never recover it from the adapter's generated name.
@@ -258,7 +275,7 @@ impl IrFile {
     pub fn is_delegated_property_operand(&self, expression: ExprId) -> bool {
         match self.expr(expression) {
             IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
-            IrExpr::LocalPropertyReference { .. } => true,
+            IrExpr::LocalPropertyReference(_) => true,
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,

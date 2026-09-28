@@ -286,12 +286,14 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier } => name(classifier, names),
+        IrExpr::LocalPropertyReference(reference) => {
+            if let Some(class) = &mut reference.class {
+                name(class, names);
+            }
+            reference.property_type = ty(reference.property_type, names);
+        }
         IrExpr::KClassLiteral {
             classifier: Some(classifier),
-            ..
-        }
-        | IrExpr::LocalPropertyReference {
-            property_type: classifier,
             ..
         }
         | IrExpr::TypeOp {

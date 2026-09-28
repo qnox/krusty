@@ -2,8 +2,9 @@
 //!
 //! A delegated property is two generated things: a static (or field) holding the delegate, and a
 //! pair of accessors that call the delegate's `getValue`/`setValue` operators, passing the
-//! property's own reference. Where that reference is stored is the backend's choice. The operator is resolved by the checker; what this module owns
-//! is the handoff — which value reaches which slot, and at what SEMANTIC type.
+//! property's own reference, whose storage is the backend's choice. The operator is resolved by the
+//! checker; what this module owns is the handoff — which value reaches which slot, and at what
+//! SEMANTIC type.
 //!
 //! Every value crossing into or out of the operator is adapted here, against the type the checker
 //! recorded for the other side and nothing else: the delegate into the operator's receiver slot,

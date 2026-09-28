@@ -80,7 +80,8 @@ pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp};
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
+    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrLocalPropertyReference, PropRef,
+    ReflectedCallable,
 };
 pub use sam_target::IrSamTarget;
 pub use type_check_role::TypeCheckRole;
@@ -673,10 +674,7 @@ pub enum IrExpr {
         value: Option<ExprId>,
     },
     /// Backend-neutral reflection value passed to local delegated-property conventions.
-    LocalPropertyReference {
-        name: Box<str>,
-        property_type: Ty,
-    },
+    LocalPropertyReference(Box<IrLocalPropertyReference>),
     /// Checked Kotlin singleton value. Its classifier is the semantic identity selected by the
     /// frontend; a backend decides how that singleton is stored on its target platform.
     SingletonValue {

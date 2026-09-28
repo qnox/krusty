@@ -388,6 +388,8 @@ pub(crate) struct LocalDelegateBinding {
     pub(crate) get_value: FirDelegateCall,
     pub(crate) set_value: Option<FirDelegateCall>,
     pub(crate) name: Box<str>,
+    /// Its position among its lexical class's local delegated properties.
+    pub(crate) ordinal: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1299,10 +1301,13 @@ pub enum FirExprKind {
         extension_receiver: Option<FirReceiver>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
     },
-    /// Reflection value supplied to a checked local delegated-property convention call.
+    /// Reflection value supplied to a checked local delegated-property convention call: the
+    /// property, and its `ordinal` among its lexical class's local delegated properties.
     LocalPropertyReference {
         name: Box<str>,
         property_type: ResolvedTy,
+        mutable: bool,
+        ordinal: u32,
     },
     PropertyReference {
         target: FirPropertyReferenceTarget,

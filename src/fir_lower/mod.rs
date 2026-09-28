@@ -39,6 +39,7 @@ mod inline_returns;
 mod inlining;
 mod interface_delegation;
 mod local_callables;
+mod local_property_references;
 mod loops;
 mod module_declarations;
 mod package_declarations;

@@ -982,8 +982,8 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
             specialize_reference_adaptation(&mut reference.adaptation, bindings);
         }
         IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, bindings),
-        IrExpr::LocalPropertyReference { property_type, .. } => {
-            specialize_ty(property_type, bindings)
+        IrExpr::LocalPropertyReference(reference) => {
+            specialize_ty(&mut reference.property_type, bindings)
         }
         IrExpr::Call { callee, .. } => specialize_callee(callee, bindings),
         IrExpr::TypeOp {

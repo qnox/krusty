@@ -103,12 +103,16 @@ pub(super) fn realize(
     let mut delegated_operands = Vec::new();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
-        if let IrExpr::LocalPropertyReference {
-            name,
-            property_type,
-        } = ir.exprs[raw].clone()
-        {
-            ir.exprs[raw] = local_property_reference(ir, name, property_type);
+        if let IrExpr::LocalPropertyReference(reference) = &ir.exprs[raw] {
+            let reference = (**reference).clone();
+            let (owner, element) = local_property_reference(ir, stems, &reference)?;
+            delegated_operands.push(delegated_arrays::DelegatedOperand {
+                operand: raw as u32,
+                owner,
+                property: delegated_arrays::DelegatedProperty::Local(reference.ordinal),
+                source_order: (reference.member_order, reference.ordinal + 1),
+                element,
+            });
             continue;
         }
         let IrExpr::Checked(IrCheckedOperation::PropertyReference {
@@ -246,8 +250,8 @@ pub(super) fn realize(
             delegated_operands.push(delegated_arrays::DelegatedOperand {
                 operand: raw as u32,
                 owner,
-                property: target,
-                source_order,
+                property: delegated_arrays::DelegatedProperty::Declared(target),
+                source_order: (source_order, 0),
                 element,
             });
             continue;
@@ -351,26 +355,44 @@ fn synthesize_delegated(
     ))
 }
 
-fn local_property_reference(ir: &mut IrFile, name: Box<str>, property_type: Ty) -> IrExpr {
-    let owner = ir.add_expr(IrExpr::ClassConst { internal: None });
-    let name_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
-        name.to_string().into(),
+/// The reflected local delegated property kotlinc builds in its class's `$$delegatedProperties`:
+/// named `<v#N>` by its ordinal, owned by the class lexically declaring it (a top-level
+/// declaration's file facade, flagged as such), and receiver-less.
+fn local_property_reference(
+    ir: &mut IrFile,
+    stems: &[String],
+    reference: &crate::ir::IrLocalPropertyReference,
+) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
+    let container = match reference.class {
+        Some(class) => class,
+        None => super::module_calls::facade_for(reference.source, stems)
+            .ok_or(PropertyReferenceRealizationTarget::Invalid)?,
+    };
+    let owner = ir.add_expr(IrExpr::ClassConst {
+        internal: Some(container),
+    });
+    let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        reference.name.to_string().into(),
     )));
-    let getter = crate::names::property_getter_name(&name);
-    let descriptor = crate::jvm::names::method_descriptor(&[], property_type);
     let signature = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
-        format!("{getter}{descriptor}").into(),
+        format!("<v#{}>", reference.ordinal).into(),
     )));
-    let flags = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-    IrExpr::New {
-        internal: type_name("kotlin/jvm/internal/PropertyReference0Impl"),
-        args: vec![owner, name_value, signature, flags],
+    let flags = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(i32::from(
+        reference.class.is_none(),
+    ))));
+    let mutability = if reference.mutable { "Mutable" } else { "" };
+    let element = IrExpr::New {
+        internal: type_name(&format!(
+            "kotlin/jvm/internal/{mutability}PropertyReference0Impl"
+        )),
+        args: vec![owner, name, signature, flags],
         ctor_params: None,
         ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
-    }
+    };
+    Ok((container, element))
 }
 
 fn classifier_property(

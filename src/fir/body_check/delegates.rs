@@ -26,13 +26,14 @@ impl BodyFirChecker<'_> {
             ));
         };
         let (mutable, delegate) = (*mutable, *delegate);
-        for site in self
-            .file
-            .local_delegate_lifting_sites
-            .get(&statement)
-            .into_iter()
-            .flatten()
-        {
+        let provenance = self.file.local_delegates.get(&statement).ok_or_else(|| {
+            self.failure(
+                span,
+                BodyCheckFailureKind::UnsupportedStatement(StatementForm::LocalDelegate),
+            )
+        })?;
+        let ordinal = provenance.ordinal;
+        for site in &provenance.accessors {
             self.body
                 .add_bodiless_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
         }
@@ -71,7 +72,8 @@ impl BodyFirChecker<'_> {
         let mut initializer = self.expression(delegate)?;
         let storage_ty = if let Some(provide) = self.info.delegate_provide(delegate) {
             let provide = self.delegate_call_target(delegate, delegate_ty, provide)?;
-            let property = self.local_property_reference(origin, name, property_ty);
+            let property =
+                self.local_property_reference(origin, (name, property_ty), (mutable, ordinal));
             let owner = self.synthetic_null(origin);
             let result = provide.result;
             initializer = self.body.add_expr(FirExpr {
@@ -125,6 +127,7 @@ impl BodyFirChecker<'_> {
                     get_value,
                     set_value,
                     name: name.into(),
+                    ordinal,
                 },
             );
         Ok(self.body.add_statement(FirStatement {
@@ -149,7 +152,7 @@ impl BodyFirChecker<'_> {
         let origin = self.expression_origin(expression)?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
+        let property = self.delegate_property_reference(origin, &delegate);
         let call = self.delegate_call(
             delegate.get_value.target,
             delegate.get_value.extension,
@@ -189,7 +192,7 @@ impl BodyFirChecker<'_> {
         })?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
+        let property = self.delegate_property_reference(origin, &delegate);
         Ok(self.delegate_call(
             target.target,
             target.extension,
@@ -411,8 +414,8 @@ impl BodyFirChecker<'_> {
     fn local_property_reference(
         &mut self,
         cause: OriginId,
-        name: &str,
-        property_type: ResolvedTy,
+        (name, property_type): (&str, ResolvedTy),
+        (mutable, ordinal): (bool, u32),
     ) -> FirExprId {
         let origin = self
             .origins
@@ -427,8 +430,22 @@ impl BodyFirChecker<'_> {
             kind: FirExprKind::LocalPropertyReference {
                 name: name.into(),
                 property_type,
+                mutable,
+                ordinal,
             },
         })
+    }
+
+    fn delegate_property_reference(
+        &mut self,
+        cause: OriginId,
+        delegate: &LocalDelegateBinding,
+    ) -> FirExprId {
+        self.local_property_reference(
+            cause,
+            (&delegate.name, delegate.property_ty),
+            (delegate.set_value.is_some(), delegate.ordinal),
+        )
     }
 
     fn delegate_call(
