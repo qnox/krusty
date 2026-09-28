@@ -120,6 +120,7 @@ mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
 mod postponed_applicability;
+mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_write_selection;
 mod qualified_call_shaping;
@@ -217,6 +218,7 @@ pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
 };
 pub(crate) use override_plans::publish_override_plans;
+use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
@@ -2129,95 +2131,6 @@ struct GenericMemberQuery<'a> {
     expected_result: Option<Ty>,
 }
 
-#[derive(Clone, Default)]
-struct PostponedCallConstraints {
-    formals: Vec<String>,
-    lower: crate::symbol_resolver::GSigBinds,
-    upper: HashMap<String, Vec<Ty>>,
-    /// Diagnostics whose validity depends on the call solution. A lambda parameter still expressed
-    /// as the callee's type variable cannot answer member lookup yet; the finalized recheck either
-    /// resolves the expression or emits the error from its concrete receiver.
-    deferred_member_errors: Vec<(ExprId, Span, String)>,
-}
-
-impl PostponedCallConstraints {
-    fn for_formals(formals: &[String]) -> Self {
-        Self {
-            formals: formals.to_vec(),
-            ..Self::default()
-        }
-    }
-
-    fn mentions_formal(&self, ty: Ty) -> bool {
-        ty_mentions_param(ty, &self.formals)
-    }
-
-    fn constrain_assignable(
-        &mut self,
-        expected: Ty,
-        actual: Ty,
-        inferred: &crate::symbol_resolver::AssignabilityConstraints,
-        shadowed_formals: &std::collections::HashSet<String>,
-    ) {
-        crate::trace_compiler!(
-            "lambda_apply",
-            "postponed constrain expected={expected:?} actual={actual:?}"
-        );
-        for (formal, actual) in inferred.lower.iter().filter(|(formal, _)| {
-            self.formals.iter().any(|allowed| allowed == *formal)
-                && !shadowed_formals.contains(formal.as_str())
-        }) {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), *actual);
-            self.lower.insert(formal.clone(), merged);
-        }
-
-        for (formal, upper) in inferred.upper.iter().filter(|(formal, _)| {
-            self.formals.iter().any(|allowed| allowed == *formal)
-                && !shadowed_formals.contains(formal.as_str())
-        }) {
-            self.upper
-                .entry(formal.clone())
-                .or_default()
-                .extend(upper.iter().copied());
-        }
-    }
-
-    fn constrain_equal(&mut self, formal: &str, actual: Ty) {
-        if !self.formals.iter().any(|allowed| allowed == formal) {
-            return;
-        }
-        let merged =
-            crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), actual);
-        self.lower.insert(formal.to_string(), merged);
-        self.upper
-            .entry(formal.to_string())
-            .or_default()
-            .push(actual);
-    }
-
-    fn merge(&mut self, other: Self) {
-        for formal in other.formals {
-            if !self.formals.contains(&formal) {
-                self.formals.push(formal);
-            }
-        }
-        for (formal, actual) in other.lower {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
-            self.lower.insert(formal, merged);
-        }
-        for (formal, upper) in other.upper {
-            self.upper.entry(formal).or_default().extend(upper);
-        }
-        for diagnostic in other.deferred_member_errors {
-            if !self.deferred_member_errors.contains(&diagnostic) {
-                self.deferred_member_errors.push(diagnostic);
-            }
-        }
-    }
-}
-
 fn generic_member_lambda_params(
     source: &dyn SymbolSource,
     plan: &GenericMemberPlan,
@@ -3233,7 +3146,9 @@ struct MemberExtensionProperty {
 enum PropertyReadSelection {
     Member(Box<PropertyReadMemberSelection>),
     MemberExtension(Box<MemberExtensionProperty>),
-    Extension(Box<ResolvedPropertyAccess>),
+    /// The selected extension, with the actual receiver when it mentions a postponed call's type
+    /// variables: reading the property adds that receiver constraint to the call.
+    Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
 }
 
 struct PropertyReadMemberSelection {
@@ -13888,7 +13803,7 @@ impl<'a> Checker<'a> {
                             })
                         }
                         PropertyReadSelection::MemberExtension(_)
-                        | PropertyReadSelection::Extension(_) => false,
+                        | PropertyReadSelection::Extension(_, _) => false,
                     };
                     if private {
                         continue;
@@ -13911,7 +13826,9 @@ impl<'a> Checker<'a> {
         // Extension properties are a lower scope-tower level than members. Do not even collect
         // them while a member declaration can win: an ambiguous or inapplicable extension family
         // cannot poison an otherwise exact member read.
-        let extension = match self.resolver().select_extension_property(receiver, name) {
+        let type_variables = self.postponed_type_variables_in(receiver);
+        let resolver = self.resolver().with_type_variables(&type_variables);
+        let extension = match resolver.select_extension_property(receiver, name) {
             Ok(property) => property,
             Err(_) => return Err(PropertyReadAmbiguity::Extension),
         };
@@ -13928,12 +13845,13 @@ impl<'a> Checker<'a> {
                 self.select_context_arguments(scope, context_types)
                     .ok_or(PropertyReadAmbiguity::MissingContext)?
             };
-            return Ok(Some(PropertyReadSelection::Extension(Box::new(
-                ResolvedPropertyAccess {
+            return Ok(Some(PropertyReadSelection::Extension(
+                Box::new(ResolvedPropertyAccess {
                     property,
                     context_args,
-                },
-            ))));
+                }),
+                (!type_variables.is_empty()).then_some(receiver),
+            )));
         }
         Ok(None)
     }
@@ -14434,7 +14352,7 @@ impl<'a> Checker<'a> {
                     member.source_member,
                     member.stable_declaration,
                 ),
-                PropertyReadSelection::Extension(access) => {
+                PropertyReadSelection::Extension(access, _) => {
                     self.property_inference_failed(&access.property)
                 }
                 PropertyReadSelection::MemberExtension(_) => false,
@@ -14512,7 +14430,11 @@ impl<'a> Checker<'a> {
                     },
                 );
             }
-            PropertyReadSelection::Extension(access) => {
+            PropertyReadSelection::Extension(access, postponed_receiver) => {
+                if let Some((actual, declared)) = postponed_receiver.zip(access.property.receiver) {
+                    let span = self.span(expression);
+                    self.expect_assignable(declared, actual, span, "extension receiver");
+                }
                 self.expr_lowers
                     .insert(expression, ExprLowering::ExtensionPropertyGet { access });
             }
@@ -25265,11 +25187,22 @@ impl<'a> Checker<'a> {
         } else {
             Ok(None)
         };
+        let type_variables = self.postponed_type_variables_in(rt);
         let extension_property = if matches!(member_extension, Ok(None)) {
-            self.resolver().select_extension_property(rt, &name)
+            let resolver = self.resolver().with_type_variables(&type_variables);
+            resolver.select_extension_property(rt, &name)
         } else {
             Ok(None)
         };
+        if let Ok(Some(declared)) = extension_property
+            .as_ref()
+            .map(|property| property.as_ref().and_then(|property| property.receiver))
+        {
+            if !type_variables.is_empty() {
+                let span = self.span(receiver);
+                self.expect_assignable(declared, rt, span, "extension receiver");
+            }
+        }
         crate::trace_compiler!(
             "resolve",
             "member assignment name={name} receiver={rt:?} source_property={source_property:?} member_setter={} classpath_property={} member_extension={} extension_property={}",
@@ -68861,6 +68794,11 @@ impl<'a> Checker<'a> {
                     "extension receiver",
                 );
             }
+        } else if self.postponed_call_mentions(rt) {
+            // An implicit receiver over a postponed call's type variables adds the same receiver
+            // constraint to that call's system as an explicit one.
+            let span = self.call_callee_name_span(e);
+            self.expect_assignable(selected_receiver, rt, span, "extension receiver");
         }
         if selected.source_key.is_none() && selected.stable_declaration.is_none() {
             let slots = self

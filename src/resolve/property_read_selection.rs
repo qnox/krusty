@@ -10,7 +10,7 @@ impl PropertyReadSelection {
         match self {
             Self::Member(member) => member.ty,
             Self::MemberExtension(property) => property.ty,
-            Self::Extension(access) => access.property.ty,
+            Self::Extension(access, _) => access.property.ty,
         }
     }
 
@@ -21,14 +21,14 @@ impl PropertyReadSelection {
             // ModuleSymbols is constructed for the current source file: it excludes private
             // extensions from every sibling file and admits the current file's declaration. Once
             // admitted, a second file-blind visibility check would reject the legal same-file read.
-            Self::Extension(access)
+            Self::Extension(access, _)
                 if matches!(access.property.getter.origin, Origin::Module { .. })
                     && (access.property.stable_declaration.is_some()
                         || access.property.source_key.is_some()) =>
             {
                 None
             }
-            Self::Extension(access) => Some((access.property.visibility, access.property.owner)),
+            Self::Extension(access, _) => Some((access.property.visibility, access.property.owner)),
         }
     }
 
@@ -42,7 +42,7 @@ impl PropertyReadSelection {
                 .getter
                 .as_ref()
                 .and_then(|getter| getter.external_property_identity),
-            Self::Extension(access) => access.property.getter.external_property_identity,
+            Self::Extension(access, _) => access.property.getter.external_property_identity,
         }
     }
 }
