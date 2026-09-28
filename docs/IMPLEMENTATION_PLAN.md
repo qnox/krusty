@@ -4778,10 +4778,10 @@ shadow with no output change.
 - ⬜ A rejected member whose argument TYPES mismatch (not its mapping) is not weighed against the
   extensions: `catalog.loadAll(true)` against `loadAll(String)` and `Catalog.loadAll(Int)` reports
   the extension's mismatch; kotlinc reports the member's (2.4.10) or both together (2.4.20).
-- ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: `c.equals()`
-  names parameter `p0` where kotlinc names `other`, and 2.4.20 `s?.equals()` on a `String?` joins
-  the member with `String?.equals` but kotlinc also reports the member's missing `other`. Pinned as
-  a divergence (`equals-arity`) until `kotlin/Any` takes an authoritative Kotlin scope.
+- ⬜ `java.lang.Object`'s members are not mapped onto `kotlin.Any`'s declaration: 2.4.20
+  `s?.equals()` on a `String?` joins the member with `String?.equals` but kotlinc also reports the
+  member's missing `other`. A builtin receiver's `equals` (`i?.equals()` on `Int?`) already names
+  `other` from `.kotlin_builtins`.
 - ⬜ NONE_APPLICABLE: the header matches, but kotlinc's candidate list (one entry per candidate with
   its reasons, anchored at the callee name) differs from krusty's.
 
