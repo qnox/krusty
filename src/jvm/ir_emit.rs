@@ -120,6 +120,7 @@ mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_accessors;
 mod static_fields;
+mod string_concatenation;
 mod string_members;
 mod supertype_markers;
 mod type_operation_emission;
@@ -10717,57 +10718,7 @@ impl<'a> Emitter<'a> {
                     _ => code.ineg(),
                 }
             }
-            IrExpr::StringConcat(parts) => {
-                let parts = parts.clone();
-                if parts.len() == 1 {
-                    let p = parts[0];
-                    if matches!(self.ir.expr(p), IrExpr::Const(IrConst::String(_))) {
-                        // A lone string constant is already a `String`.
-                        self.emit_value(p, code);
-                    } else {
-                        // A single interpolation `"$x"` → `String.valueOf(x)` (kotlinc's form).
-                        let pty = self.value_ty(p);
-                        self.emit_value(p, code);
-                        let m = self
-                            .cw
-                            .methodref("java/lang/String", "valueOf", valueof_desc(pty));
-                        code.invokestatic(m, slot_words(pty) as i32, 1);
-                    }
-                } else if self.try_emit_indy_concat(&parts, code) {
-                    // Emitted `invokedynamic makeConcatWithConstants` (kotlinc's Java-9+ form).
-                } else {
-                    let sb = self.cw.class_ref("java/lang/StringBuilder");
-                    let init = self
-                        .cw
-                        .methodref("java/lang/StringBuilder", "<init>", "()V");
-                    // A part that cannot carry the operand stack (`"${try {…} finally {}}"`) is
-                    // spilled with every other part to a temp first, then the builder is built.
-                    if parts.iter().any(|&p| self.spills_operand_prefix(p)) {
-                        let temps = self.spill_to_temps(&parts, code);
-                        code.new_obj(sb);
-                        code.dup();
-                        code.invokespecial(init, 0, 0);
-                        for &(slot, t, _) in &temps {
-                            load(t, slot, code);
-                            self.append_top(t, code);
-                        }
-                        self.release_operand_spills(&temps);
-                    } else {
-                        code.new_obj(sb);
-                        code.dup();
-                        code.invokespecial(init, 0, 0);
-                        for &p in &parts {
-                            self.append_part(p, code);
-                        }
-                    }
-                    let ts = self.cw.methodref(
-                        "java/lang/StringBuilder",
-                        "toString",
-                        "()Ljava/lang/String;",
-                    );
-                    code.invokevirtual(ts, 0, 1);
-                }
-            }
+            IrExpr::StringConcat(parts) => self.emit_string_concat(parts, code),
             IrExpr::EnumEntry { classifier, name } => {
                 let fq_name = classifier.render();
                 let desc = format!("L{fq_name};");
@@ -11376,160 +11327,6 @@ impl<'a> Emitter<'a> {
         }
         let (operation, words) = array_store_op(element, reference_array);
         code.array_store(operation, words);
-    }
-
-    fn append(&mut self, e: u32, code: &mut CodeBuilder) {
-        let ty = self.value_ty(e);
-        let semantic = self.ir.logical_types.get(&e).copied().unwrap_or(ty);
-        self.emit_value(e, code);
-        // An unsigned operand already rendered by its `toString-impl` is appended at the value
-        // class's static type, like any other value class.
-        if matches!(
-            self.ir.expr(e),
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::UnsignedToString { .. },
-                    ..
-                },
-                ..
-            }
-        ) {
-            self.append_top(Ty::obj("java/lang/Object"), code);
-            return;
-        }
-        if !semantic.is_nullable() {
-            if let Some((owner, carrier)) = native_unsigned_impl_target(semantic) {
-                let descriptor = method_descriptor(&[carrier], Ty::String);
-                let method = self
-                    .cw
-                    .methodref(&owner.render(), "toString-impl", &descriptor);
-                code.invokestatic(method, slot_words(carrier) as i32, 1);
-                self.append_top(Ty::String, code);
-                return;
-            }
-            // A value class rendered through its `toString-impl` is appended at its own static type,
-            // which selects `append(Object)` as kotlinc does, although the rendered text is a String.
-            if self.is_value_class_ty(&semantic) {
-                self.append_top(Ty::obj("java/lang/Object"), code);
-                return;
-            }
-        }
-        self.append_top(ty, code);
-    }
-
-    /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
-    /// `invokedynamic makeConcatWithConstants` when targeting JVM 9+ — a `StringConcatFactory`
-    /// bootstrap with a recipe string, `` marking each dynamic argument and literal text inline.
-    /// Below JVM 9 (and for the branchy-operand shape, whose frame handling this doesn't model yet)
-    /// returns `false` so the caller keeps the `StringBuilder` form.
-    fn try_emit_indy_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) -> bool {
-        const TAG_ARG: char = '\u{1}';
-        const TAG_CONST: char = '\u{2}';
-        // JVM 9 = major 53; kotlinc's `-Xstring-concat` default flips to `indy-with-constants` there.
-        if self.cw.major() < 53 {
-            return false;
-        }
-        // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
-        // that is the same open problem as elsewhere, so leave those on the StringBuilder path.
-        if parts.iter().any(|&p| self.emits_control_flow(p)) {
-            return false;
-        }
-        if parts.iter().any(|part| {
-            self.ir
-                .logical_types
-                .get(part)
-                .is_some_and(|ty| !ty.is_nullable() && ty.is_unsigned())
-        }) {
-            return false;
-        }
-        // The recipe is itself a string CONSTANT, so it carries whatever code units the literal
-        // parts hold — including an unpaired surrogate, which no Rust `String` can spell.
-        let mut recipe = KtStringBuf::new();
-        let mut arg_parts: Vec<u32> = Vec::new();
-        for &p in parts {
-            if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
-                // A literal carrying a recipe tag would have to move to the constants array — rare;
-                // fall back rather than encode it wrong.
-                if s.units()
-                    .any(|u| u == TAG_ARG as u16 || u == TAG_CONST as u16)
-                {
-                    return false;
-                }
-                recipe.push_kt(s);
-            } else {
-                recipe.push(TAG_ARG);
-                arg_parts.push(p);
-            }
-        }
-        let recipe = recipe.finish();
-        let arg_descs: String = arg_parts
-            .iter()
-            .map(|&p| type_descriptor(self.value_ty(p)))
-            .collect();
-        // kotlinc interns constants in instruction order: the operands' entries first, then the
-        // call site's, with the recipe (the bootstrap's static argument) before the bootstrap
-        // method handle.
-        let mut arg_words = 0i32;
-        for &p in &arg_parts {
-            let ty = self.value_ty(p);
-            self.emit_value(p, code);
-            arg_words += slot_words(ty) as i32;
-        }
-        let recipe_const = self.cw.const_string_kt(&recipe);
-        let mh = self.cw.method_handle_static(
-            "java/lang/invoke/StringConcatFactory",
-            "makeConcatWithConstants",
-            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;\
-             Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
-        );
-        let bsm = self.cw.add_bootstrap(mh, vec![recipe_const]);
-        let indy = self.cw.invoke_dynamic(
-            bsm,
-            "makeConcatWithConstants",
-            &format!("({arg_descs})Ljava/lang/String;"),
-        );
-        code.invokedynamic(indy, arg_words, 1);
-        true
-    }
-
-    /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
-    /// constant appends as a `char` (kotlinc emits `append(C)` with the char constant, not `append(String)`).
-    fn append_part(&mut self, p: u32, code: &mut CodeBuilder) {
-        // "single character" is one UTF-16 code UNIT — the width of a `Char` — so a supplementary
-        // character (two units) stays on the `append(String)` path, as it must.
-        let single_unit = if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
-            s.single_unit()
-        } else {
-            None
-        };
-        if let Some(unit) = single_unit {
-            code.push_int(unit as i32, self.cw);
-            self.append_top(Ty::Char, code);
-        } else {
-            self.append(p, code);
-        }
-    }
-
-    /// Append a value already on the operand stack (of type `ty`) to a `StringBuilder` beneath it.
-    fn append_top(&mut self, ty: Ty, code: &mut CodeBuilder) {
-        // A `String` value reaches here either as `Ty::String` or as `Ty::Obj("java/lang/String")` —
-        // the latter when its type was parsed from a method-return descriptor (e.g. a classpath call
-        // or the data-class `Arrays.toString(field)` wrapper). Both must pick the `append(String)`
-        // overload kotlinc uses, not the less-specific `append(Object)`.
-        let is_string = matches!(ty, Ty::String)
-            || matches!(ty, Ty::Obj(n, _) if n == "java/lang/String" || n == "kotlin/String");
-        let desc = match ty {
-            _ if is_string => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",
-            Ty::Long => "(J)Ljava/lang/StringBuilder;",
-            Ty::Boolean => "(Z)Ljava/lang/StringBuilder;",
-            Ty::Char => "(C)Ljava/lang/StringBuilder;",
-            Ty::Double => "(D)Ljava/lang/StringBuilder;",
-            Ty::Float => "(F)Ljava/lang/StringBuilder;",
-            _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
-        };
-        let m = self.cw.methodref("java/lang/StringBuilder", "append", desc);
-        code.invokevirtual(m, slot_words(ty) as i32, 1);
     }
 
     /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead
@@ -12707,19 +12504,6 @@ fn icmp_branch(op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
         (Ne, true) => code.if_icmpne(target),
         (Ne, false) => code.if_icmpeq(target),
         _ => unreachable!(),
-    }
-}
-
-/// The `String.valueOf` overload descriptor for a single interpolated value's type (`"$x"`).
-fn valueof_desc(t: Ty) -> &'static str {
-    match t {
-        Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
-        Ty::Long => "(J)Ljava/lang/String;",
-        Ty::Float => "(F)Ljava/lang/String;",
-        Ty::Double => "(D)Ljava/lang/String;",
-        Ty::Boolean => "(Z)Ljava/lang/String;",
-        Ty::Char => "(C)Ljava/lang/String;",
-        _ => "(Ljava/lang/Object;)Ljava/lang/String;",
     }
 }
 
