@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
@@ -34,6 +34,11 @@ const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long to wait for a killed worker, or for its stdout reader, before the engine continues.
+///
+/// `Child::wait` and a blocking read of a frame have no deadline of their own. After the analysis
+/// timeout fires, either one can sit forever and the indexing queue never moves again.
+const WORKER_REAP_GRACE: Duration = Duration::from_secs(2);
 const WORKER_READY: &[u8] = b"ready";
 
 #[derive(Serialize)]
@@ -482,6 +487,30 @@ fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
     names
 }
 
+/// `true` when the child has exited or was already reaped. `false` when it is still running at the
+/// deadline, so the caller can continue instead of blocking in `Child::wait`.
+fn wait_for_child_exit(child: &mut Child, grace: Duration) -> bool {
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .unwrap_or_else(Instant::now);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if Instant::now() >= deadline => return false,
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
+fn abandon_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = wait_for_child_exit(child, WORKER_REAP_GRACE);
+}
+
+fn recv_within<T>(receiver: &mpsc::Receiver<T>, grace: Duration) -> Option<T> {
+    receiver.recv_timeout(grace).ok()
+}
+
 fn framed_read_receiver<R>(
     mut reader: R,
     max_bytes: usize,
@@ -564,9 +593,8 @@ impl WorkerProcess {
                 response
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                if let Ok((stdout, _)) = receiver.recv() {
+                abandon_child(&mut self.child);
+                if let Some((stdout, _)) = recv_within(&receiver, WORKER_REAP_GRACE) {
                     self.stdout = Some(stdout);
                 }
                 Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
@@ -651,8 +679,7 @@ impl WorkerProcess {
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        abandon_child(&mut self.child);
     }
 }
 
@@ -681,8 +708,7 @@ impl AnalysisWorker {
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        abandon_child(&mut self.process.child);
         self.restart_required = true;
         let replacement = WorkerProcess::spawn(&self.executable, &self.classpath)?;
         self.process = replacement;
@@ -712,8 +738,7 @@ impl AnalysisWorker {
                 Ok(())
             };
         }
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        abandon_child(&mut self.process.child);
         self.restart_required = true;
         let replacement = WorkerProcess::spawn(&self.executable, &classpath)?;
         self.classpath = classpath;
@@ -1705,6 +1730,37 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
+    }
+
+    #[test]
+    fn a_live_worker_child_is_not_waited_on_past_the_reap_grace() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let started = Instant::now();
+
+        assert!(!wait_for_child_exit(&mut child, Duration::from_millis(40)));
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        abandon_child(&mut child);
+        assert!(matches!(child.try_wait(), Ok(Some(_))));
+    }
+
+    #[test]
+    fn a_stuck_worker_reader_returns_before_the_reap_grace_elapses() {
+        let (sender, receiver) = mpsc::sync_channel::<()>(1);
+        let started = Instant::now();
+
+        assert!(recv_within(&receiver, Duration::from_millis(40)).is_none());
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(sender);
+    }
+
+    #[test]
+    fn a_finished_worker_reader_is_recovered_within_the_reap_grace() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(()).unwrap();
+
+        assert!(recv_within(&receiver, WORKER_REAP_GRACE).is_some());
     }
 
     #[test]
