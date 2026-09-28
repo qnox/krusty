@@ -82,8 +82,12 @@ pub trait MethodBodies {
     }
 
     /// [`Self::owner_is_interface`] for a classifier that is already interned.
-    fn owner_is_interface_name(&self, owner: TypeName) -> bool {
-        self.owner_is_interface(&owner.render())
+    ///
+    /// The string method's default ignores its argument, so this default answers the same `false`
+    /// without rendering the identity. An implementation that can tell an interface from a class
+    /// overrides this method directly.
+    fn owner_is_interface_name(&self, _owner: TypeName) -> bool {
+        false
     }
 
     /// Whether an instruction-level method or field reference is private to its defining class.
@@ -141,5 +145,38 @@ pub trait MethodBodies {
     /// JVM storage for an already-resolved semantic singleton classifier.
     fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::MethodBodies;
+    use crate::jvm::classreader::MethodCode;
+    use crate::types::type_name;
+
+    struct StringProbe {
+        called: Cell<bool>,
+    }
+
+    impl MethodBodies for StringProbe {
+        fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+
+        fn owner_is_interface(&self, _owner: &str) -> bool {
+            self.called.set(true);
+            true
+        }
+    }
+
+    #[test]
+    fn default_interface_probe_ignores_the_string_method() {
+        let probe = StringProbe {
+            called: Cell::new(false),
+        };
+        assert!(!probe.owner_is_interface_name(type_name("java/util/List")));
+        assert!(!probe.called.get());
     }
 }
