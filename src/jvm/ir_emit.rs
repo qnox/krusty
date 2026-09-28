@@ -15,8 +15,8 @@ use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
-    reference_array_element, type_descriptor,
+    mapped_builtin_virtual_name, mapped_builtin_virtual_name_of, method_descriptor,
+    property_getter_name, property_setter_name, reference_array_element, type_descriptor,
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
@@ -10638,8 +10638,9 @@ impl<'a> Emitter<'a> {
                         }
                         return;
                     }
+                    let owner_name = *owner;
                     let (owner, name, descriptor) = (
-                        owner.render(),
+                        owner_name.render(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                     );
@@ -10736,7 +10737,7 @@ impl<'a> Emitter<'a> {
                         self.value_ty(recv),
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
+                    let jvm_name = mapped_builtin_virtual_name_of(owner_name, &name, &descriptor);
                     let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                         let mut operands = Vec::with_capacity(args.len() + 1);
                         operands.push(recv);
