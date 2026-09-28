@@ -13,7 +13,7 @@ impl Emitter<'_> {
     /// `None` deliberately means the external bytecode-provider path must decide.
     fn selected_local_property_read_access(
         &self,
-        owner: &str,
+        owner: TypeName,
         name: &str,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         self.declared_property_read_access(owner, name, None, false)
@@ -22,11 +22,11 @@ impl Emitter<'_> {
     /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
     /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
     /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
-    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+    fn is_lateinit_field(&self, owner: TypeName, name: &str) -> bool {
         self.ir
             .classes
             .iter()
-            .find(|class| class.fq_name_matches(owner))
+            .find(|class| class.fq_name == owner)
             .and_then(|class| class.fields.iter().find(|field| field.name == name))
             .is_some_and(|field| field.is_lateinit())
     }
@@ -34,13 +34,13 @@ impl Emitter<'_> {
     /// Whether this property read emits the uninitialized guard inline. A direct field load does.
     /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
     /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
-    pub(super) fn lateinit_read_guards_inline(&self, owner: &str, name: &str) -> bool {
+    pub(super) fn lateinit_read_guards_inline(&self, owner: TypeName, name: &str) -> bool {
         use crate::jvm::inline::PropertyAccess;
         let Some(access) = self.selected_local_property_read_access(owner, name) else {
             return false;
         };
         match access {
-            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(&owner, &name),
+            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(owner, &name),
             PropertyAccess::AccessBridge {
                 inline_uninitialized_guard,
                 ..
@@ -76,21 +76,16 @@ impl Emitter<'_> {
         let access_owner = match &access {
             PropertyAccess::Field { owner, .. }
             | PropertyAccess::Accessor { owner, .. }
-            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
+            | PropertyAccess::AccessBridge { owner, .. } => *owner,
         };
         let takes_receiver = accessor_takes_receiver(&access);
-        let receiver_ty = accessor_receiver_ty(&access, &access_owner);
+        let receiver_ty = accessor_receiver_ty(&access, access_owner);
         if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
-            self.emit_property_receiver(
-                receiver,
-                &access_owner,
-                takes_receiver,
-                &receiver_ty,
-                code,
-            );
+            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
         } else if takes_receiver {
             self.run.set_emit_error(format!(
-                "receiver-less property realization requires an instance receiver: {access_owner}"
+                "receiver-less property realization requires an instance receiver: {}",
+                access_owner.render()
             ));
             return;
         }
@@ -102,7 +97,8 @@ impl Emitter<'_> {
                 is_static,
             } => {
                 let jt = ty_from_field_descriptor(&descriptor);
-                let lateinit = self.is_lateinit_field(&owner, &name);
+                let lateinit = self.is_lateinit_field(owner, &name);
+                let owner = owner.render();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
                     code.getstatic(fref, slot_words(jt) as i32);
@@ -132,6 +128,7 @@ impl Emitter<'_> {
                 is_static,
                 is_interface,
             } => {
+                let owner = owner.render();
                 // A `void` accessor (a `Unit` property) leaves NOTHING on the stack — `descriptor_ret_words`
                 // is the authority on that, since `ty_from_descriptor_ret` maps `V` to a 1-word `Unit` for
                 // type flow. Nothing is left, so there is nothing to bridge.
@@ -167,6 +164,7 @@ impl Emitter<'_> {
             } => {
                 // The bridge's arguments are already on the stack: the receiver when it takes one,
                 // and nothing when the field is a named object's static.
+                let owner = owner.render();
                 let words = descriptor_ret_words(&descriptor);
                 let (parameters, _) = crate::jvm::names::parse_method_descriptor(&descriptor)
                     .expect("a planned property access bridge has a valid JVM descriptor");

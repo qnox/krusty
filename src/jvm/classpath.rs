@@ -5392,7 +5392,7 @@ fn finish_package_tree(tree: &mut PackageTree) {
 /// it when the owner actually declares a matching public static field (non-final for a write).
 fn companion_owner_field_access(
     classpath: &Classpath,
-    owner: &str,
+    owner: TypeName,
     property: &str,
     writable: bool,
 ) -> Option<super::inline::PropertyAccess> {
@@ -5402,7 +5402,7 @@ fn companion_owner_field_access(
     // conventional accessor name when the signature is omitted, so `MetaProp::getter` presence
     // alone cannot discriminate). An arbitrary `$`-named owner, a Java nested class, or a property
     // whose accessor really exists never reaches the outer-field probe.
-    let companion = classpath.find_name(type_name(owner))?;
+    let companion = classpath.find_name(owner)?;
     let declared = super::metadata::class_properties(&companion)
         .iter()
         .find(|p| p.name == property && !p.is_extension)?;
@@ -5420,8 +5420,13 @@ fn companion_owner_field_access(
     if accessor_realized {
         return None;
     }
-    let (outer, _) = owner.rsplit_once('$')?;
-    let ci = classpath.find_name(type_name(outer))?;
+    // A `@JvmField` companion property is stored on the enclosing class. Only a `$` nesting is that
+    // layout; a dotted builtin such as `Map.Entry` is not a companion field owner.
+    if !owner.segment_ref().contains('$') {
+        return None;
+    }
+    let outer = owner.nested_owner()?;
+    let ci = classpath.find_name(outer)?;
     let field = ci.fields.iter().find(|f| {
         f.name == property
             && f.access & super::classreader::ACC_PUBLIC != 0
@@ -5429,7 +5434,7 @@ fn companion_owner_field_access(
             && (!writable || f.access & 0x0010 == 0) // a write needs a non-final field
     })?;
     Some(super::inline::PropertyAccess::Field {
-        owner: outer.to_string(),
+        owner: outer,
         name: field.name.clone(),
         descriptor: field.descriptor.clone(),
         is_static: true,
@@ -5452,13 +5457,13 @@ fn ordinary_builtin_property_jvm_name(owner: TypeName, property: &str) -> String
 /// here prevents the two operations from drifting as new classpath shapes are added.
 fn inherited_property_access(
     classpath: &Classpath,
-    owner: &str,
+    owner: TypeName,
     property: &str,
     declared_access: fn(&ClassInfo, &str) -> Option<super::inline::PropertyAccess>,
 ) -> Option<super::inline::PropertyAccess> {
     let mut queue = std::collections::VecDeque::new();
     let mut seen = std::collections::HashSet::new();
-    queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
+    queue.push_back(super::jvm_class_map::to_jvm_type_name(owner));
     while let Some(current) = queue.pop_front() {
         if !seen.insert(current) {
             continue;
@@ -5482,9 +5487,9 @@ fn class_property_write_access(
     property: &str,
 ) -> Option<super::inline::PropertyAccess> {
     use super::inline::PropertyAccess;
-    let owner = ci.this_class().to_string();
+    let owner = ci.this_class;
     let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner: owner.clone(),
+        owner,
         name: method.name.clone(),
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
@@ -5536,9 +5541,9 @@ fn class_property_read_access(
     property: &str,
 ) -> Option<super::inline::PropertyAccess> {
     use super::inline::PropertyAccess;
-    let owner = ci.this_class().to_string();
+    let owner = ci.this_class;
     let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner: owner.clone(),
+        owner,
         name: method.name.clone(),
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
