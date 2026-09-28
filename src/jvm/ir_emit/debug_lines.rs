@@ -29,6 +29,14 @@ pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut 
     }
 }
 
+/// Withdraw a line marked where a positionless expression begins; see
+/// [`CodeBuilder::withdraw_line`].
+pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
+    if ir.is_positionless(expression) {
+        code.withdraw_line();
+    }
+}
+
 /// Mark a call's line at its physical dispatch: its own source line, or the line a generated call
 /// enters only there.
 pub(super) fn mark_dispatch(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {

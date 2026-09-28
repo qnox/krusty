@@ -17,6 +17,9 @@ pub enum SyntheticOriginKind {
     /// inlines, such as the `toInt()` an unsigned counted loop converts a bound with: the call
     /// leaves no dispatch of its own, only the end of an inlined call.
     InlinedCall,
+    /// An implicit context argument a call passes. kotlinc builds it without source offsets, so it
+    /// carries no line of its own: the call's line is marked at its dispatch.
+    ContextArgument,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

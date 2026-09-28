@@ -33,6 +33,7 @@ pub(crate) fn of_file(
                 FirExpressionDebugLines {
                     source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
                     end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
+                    positionless: false,
                 },
             )
         })
@@ -67,6 +68,9 @@ pub(crate) fn of_file(
 pub struct FirExpressionDebugLines {
     pub source: u32,
     pub end: u32,
+    /// kotlinc builds this expression without source offsets, so no line may begin at it: an
+    /// implicit context argument, whose call's line is marked only at its dispatch.
+    pub positionless: bool,
 }
 
 /// The same, for a STATEMENT. `target` is an assignment's lvalue line — where the member it writes
@@ -154,22 +158,34 @@ impl FirBody {
         statement_lines: &HashMap<Span, FirStatementDebugLines>,
     ) {
         self.debug_lines.source_line_count = source_line_count;
+        // `Err` for a positionless origin, which no line may begin at.
         let source_span = |origin| {
             let mut current = origin;
             loop {
-                match origins.get(current)? {
-                    Origin::Source { file, span } => return (file == source).then_some(span),
-                    Origin::Synthetic { cause, .. } => current = cause,
+                match origins.get(current) {
+                    None => return Ok(None),
+                    Some(Origin::Source { file, span }) => {
+                        return Ok((file == source).then_some(span))
+                    }
+                    Some(Origin::Synthetic {
+                        kind: SyntheticOriginKind::ContextArgument,
+                        ..
+                    }) => return Err(()),
+                    Some(Origin::Synthetic { cause, .. }) => current = cause,
                 }
             }
         };
         self.debug_lines.expressions = self
             .expressions
             .iter()
-            .map(|expression| {
-                source_span(expression.origin)
+            .map(|expression| match source_span(expression.origin) {
+                Ok(span) => span
                     .and_then(|span| expression_lines.get(&span).copied())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                Err(()) => FirExpressionDebugLines {
+                    positionless: true,
+                    ..FirExpressionDebugLines::default()
+                },
             })
             .collect();
         self.debug_lines.statements = self
@@ -177,6 +193,8 @@ impl FirBody {
             .iter()
             .map(|statement| {
                 source_span(statement.origin)
+                    .ok()
+                    .flatten()
                     .and_then(|span| statement_lines.get(&span).copied())
                     .unwrap_or_default()
             })

@@ -26,12 +26,15 @@ use crate::types::{
     existing_type_name, ty_mentions_param, type_name, type_name_nested_child, Ty, TypeName,
     Visibility,
 };
-use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
+use scope::ScopeKind;
+use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, NarrowPath, Ns};
 
 mod abstract_obligations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod anonymous_object_capture;
+pub use anonymous_object_capture::{AnonymousObjectCapture, AnonymousObjectCaptureSource};
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
@@ -213,8 +216,15 @@ fn lexical_receiver_declaration(file: &File, reference: &TypeRef) -> (Span, Stri
 }
 
 fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
-    let label = (parameter.name == "_").then(|| lexical_receiver_label(file, &parameter.ty));
-    ContextReceiver::new(ty, parameter.name.clone(), label, parameter.name == "_")
+    let kind = match parameter.context_kind {
+        crate::types::ContextParameterKind::Named => {
+            return ContextReceiver::named(ty, parameter.name.clone())
+        }
+        crate::types::ContextParameterKind::Anonymous => ContextReceiverKind::Anonymous,
+        crate::types::ContextParameterKind::LegacyReceiver => ContextReceiverKind::LegacyReceiver,
+        crate::types::ContextParameterKind::None => unreachable!("a context parameter has a kind"),
+    };
+    ContextReceiver::new(ty, kind, Some(lexical_receiver_label(file, &parameter.ty)))
 }
 
 fn header_type_has_annotation(
@@ -3543,61 +3553,6 @@ impl PropertyReadSelection {
             Self::Extension(access) => access.property.getter.external_property_identity,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnonymousObjectCapture {
-    pub name: String,
-    pub ty: Ty,
-    /// The enclosing mutable local is represented by one shared cell rather than copied by value.
-    /// This is a semantic capture decision; the backend chooses the cell representation.
-    pub shared_cell: bool,
-    /// Physical value captured by the generated class. A delegated property's semantic type remains
-    /// `ty`, while its immutable delegate object is the constructor/field payload.
-    pub storage_ty: Option<Ty>,
-    /// Semantic source of the captured value. Keep this separate from `name`: `this$0` is one JVM
-    /// field spelling, not a reliable front-end discriminator. A backend or future target may choose
-    /// a different physical name while the enclosing-instance meaning remains unchanged.
-    pub source: AnonymousObjectCaptureSource,
-    /// Source-level receiver label required while a retained inline/local classifier body is
-    /// checked in isolation. This is present only for an implicit receiver capture; checked FIR
-    /// consumes the semantic receiver coordinate and does not retain the spelling.
-    pub receiver_label: Option<Box<str>>,
-    /// Number of distinct same-named lexical bindings nearer than the selected source at this
-    /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
-    /// consumes it while the active lexical scopes still exist.
-    pub(crate) lexical_shadow_depth: u32,
-    /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
-    /// establish their own identity when checked; transitive captures preserve the upstream field.
-    pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
-}
-
-impl AnonymousObjectCapture {
-    pub fn stored_ty(&self) -> Ty {
-        self.storage_ty.unwrap_or(self.ty)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnonymousObjectCaptureSource {
-    LexicalValue,
-    /// A field of the construction site's current classifier, selected by the checker. The capture
-    /// constructor reads this exact ordinal; neither FIR construction nor lowering looks the name up.
-    ClassStorage {
-        field: u32,
-    },
-    /// Exact class-receiver rung selected at the construction site.
-    EnclosingInstance {
-        current: bool,
-        depth: u32,
-    },
-    /// A receiver introduced by an enclosing extension/receiver-function/context rung. The
-    /// coordinate is relative to the construction body's checked receiver tower; it is semantic
-    /// identity and must not be reconstructed from the capture field spelling.
-    ImplicitReceiver {
-        current: bool,
-        depth: u32,
-    },
 }
 
 type ModuleSymbolCache = HashMap<
@@ -18986,6 +18941,7 @@ impl<'a> Checker<'a> {
                         source,
                         delegate_storage: local.delegate_storage_ty,
                         receiver_label: None,
+                        receiver: None,
                     });
                 });
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
@@ -19030,6 +18986,12 @@ impl<'a> Checker<'a> {
                                     }
                                 },
                                 delegate_storage: None,
+                                receiver: Some(self.captured_receiver(
+                                    scope,
+                                    identity,
+                                    extension_declaration,
+                                    receiver.class_receiver,
+                                )),
                                 receiver_label: (!receiver.class_receiver)
                                     .then(|| {
                                         extension_declaration
@@ -24830,6 +24792,12 @@ impl<'a> Checker<'a> {
                             storage_ty: None,
                             source,
                             receiver_label: label,
+                            receiver: Some(self.captured_receiver(
+                                scope,
+                                receiver.identity,
+                                receiver.extension_receiver,
+                                receiver.class_receiver,
+                            )),
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         };
@@ -24870,6 +24838,7 @@ impl<'a> Checker<'a> {
                             name: captured,
                             source: AnonymousObjectCaptureSource::LexicalValue,
                             receiver_label: None,
+                            receiver: None,
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         });
@@ -37867,6 +37836,7 @@ struct AnonymousCaptureCandidate {
     source: AnonymousObjectCaptureSource,
     delegate_storage: Option<Ty>,
     receiver_label: Option<Box<str>>,
+    receiver: Option<crate::fir::FirCapturedReceiver>,
 }
 
 #[derive(Clone, Copy)]
@@ -38028,6 +37998,7 @@ fn record_anonymous_construction_captures(
             storage_ty: candidate.delegate_storage,
             source: candidate.source,
             receiver_label: candidate.receiver_label.clone(),
+            receiver: candidate.receiver.clone(),
             lexical_shadow_depth: 0,
             capture_dependency: None,
         })
@@ -41228,7 +41199,12 @@ impl<'a> Checker<'a> {
             .filter(|(_, _, identity, _)| {
                 scope.innermost_class_receiver_identity() != Some(*identity)
             })
-            .map(|(ty, _, _, _)| ty);
+            .map(|(ty, extension, identity, class_receiver)| {
+                (
+                    ty,
+                    self.captured_receiver(scope, identity, extension, class_receiver),
+                )
+            });
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -41477,6 +41453,7 @@ impl<'a> Checker<'a> {
                         depth: 0,
                     },
                     receiver_label: None,
+                    receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                 }),
@@ -41490,7 +41467,7 @@ impl<'a> Checker<'a> {
         // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
         // conservatively is harmless when no member ultimately reads it and prevents a later body
         // callback from attempting source-scope lookup after the enclosing body has been dropped.
-        if let Some(receiver) = implicit_receiver_capture {
+        if let Some((receiver, receiver_name)) = implicit_receiver_capture {
             result.values.push(AnonymousObjectCapture {
                 name: "this$receiver".to_string(),
                 ty: receiver,
@@ -41503,6 +41480,7 @@ impl<'a> Checker<'a> {
                 receiver_label: innermost_label
                     .filter(|(_, _, is_class)| !*is_class)
                     .map(|(label, _, _)| label.clone().into_boxed_str()),
+                receiver: Some(receiver_name),
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -41544,6 +41522,7 @@ impl<'a> Checker<'a> {
                 name,
                 source,
                 receiver_label: None,
+                receiver: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -57293,20 +57272,19 @@ impl<'a> Checker<'a> {
             scope.declare_context_receivers(&class_context_receivers);
             let mut context_names = std::collections::HashSet::new();
             for receiver in &class_context_receivers {
-                if receiver.name == "_" {
+                let Some(name) = receiver.name() else {
                     continue;
-                }
-                if !context_names.insert(receiver.name.as_str()) {
+                };
+                if !context_names.insert(name) {
                     self.diags.error(
                         cl.span,
                         format!(
-                            "conflicting declaration: context parameter '{}' is declared more than once",
-                            receiver.name
+                            "conflicting declaration: context parameter '{name}' is declared more than once",
                         ),
                     );
                     continue;
                 }
-                self.declare_context_parameter(scope, &receiver.name, receiver.ty);
+                self.declare_context_parameter(scope, name, receiver.ty);
             }
             if body_local_class {
                 // A nested typealias declared by a body-local class is itself body-local and is
@@ -58247,8 +58225,8 @@ impl<'a> Checker<'a> {
                                 &context_receivers,
                             );
                         for receiver in &context_receivers {
-                            if receiver.name != "_" {
-                                self.declare(&accessor_scope, &receiver.name, receiver.ty, false);
+                            if let Some(name) = receiver.name() {
+                                self.declare(&accessor_scope, name, receiver.ty, false);
                             }
                         }
                         let field_ty =
@@ -59466,8 +59444,8 @@ impl<'a> Checker<'a> {
                         // property set. `expr_inner_name` compares exact receiver coordinates and
                         // therefore still gives a nearer extension receiver priority.
                         for receiver in &context_receivers {
-                            if receiver.name != "_" {
-                                self.declare(scope, &receiver.name, receiver.ty, false);
+                            if let Some(name) = receiver.name() {
+                                self.declare(scope, name, receiver.ty, false);
                             }
                         }
                         let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
@@ -60016,7 +59994,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let defaults_scope = scope.parameter_child(&context_receivers);
+            let defaults_scope = scope.parameter_child();
             self.check_parameter_defaults(
                 &defaults_scope,
                 f.params
@@ -60024,7 +60002,7 @@ impl<'a> Checker<'a> {
                     .map(|parameter| (parameter.name.as_str(), parameter.default)),
                 &parameter_types,
             );
-            let params_scope = scope.parameter_child(&context_receivers);
+            let params_scope = scope.parameter_child();
             let scope = &params_scope;
             let inherited_equality_bound = (f.name == "equals")
                 .then(|| {
@@ -73255,23 +73233,26 @@ impl<'a> Checker<'a> {
             let bret = {
                 let current_receiver = implicit_types.last().copied();
                 let current_receiver_name = current_receiver.map(|_| "this".to_string());
-                let mut outer_receivers = context_types
-                    .iter()
+                let function_type =
+                    |ty: &Ty| ContextReceiver::new(*ty, ContextReceiverKind::FunctionType, None);
+                let mut outer_receivers = (context_types.iter().zip(&bind_names))
                     .take(named_context_count)
-                    .enumerate()
-                    .map(|(index, ty)| {
-                        ContextReceiver::new(*ty, bind_names[index].clone(), None, false)
-                    })
+                    .map(|(ty, name)| ContextReceiver::named(*ty, name.clone()))
                     .collect::<Vec<_>>();
                 outer_receivers.extend(
                     implicit_types
                         .get(..implicit_types.len().saturating_sub(1))
                         .unwrap_or_default()
                         .iter()
-                        .map(|ty| ContextReceiver::new(*ty, "_", None, true)),
+                        .map(function_type),
                 );
-                let lambda_scope =
-                    scope.function_child(current_receiver, current_receiver_name, &outer_receivers);
+                let current_context = (extension_receiver.is_none()
+                    && !receiver_context_types.is_empty())
+                .then(|| receiver_context_types.to_vec());
+                let lambda_scope = scope
+                    .function_child(current_receiver, current_receiver_name, &outer_receivers)
+                    .with_lambda_label(receiver_label.map(str::to_string))
+                    .with_current_receiver_context(current_context);
                 let scope = &lambda_scope;
                 for receiver in implicit_types.iter().rev() {
                     if let Some(internal) = receiver.obj_internal() {

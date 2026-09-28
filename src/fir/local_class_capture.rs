@@ -3,6 +3,7 @@
 use super::header::{DeclarationId, FirExprId, LocalValueId, OriginId};
 use super::signature::ResolvedTy;
 use super::ClassCaptureIdentity;
+use crate::types::CapturedContextKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirLocalClassCaptureSource {
@@ -71,6 +72,35 @@ impl FirLocalClassCaptureSource {
     }
 }
 
+/// What a captured receiver was in source. A target names the capture's field and constructor
+/// parameter after it; kotlinc's `LocalDeclarationsLowering` names each kind differently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirCapturedReceiver {
+    /// The enclosing class instance.
+    Enclosing,
+    /// The extension receiver of the named callable with this source name.
+    Callable(Box<str>),
+    /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
+    Lambda(Option<Box<str>>),
+    /// A context parameter that is an implicit receiver: its kind, the declared types of its
+    /// rung's context parameters of that kind, in order, and its own position among them.
+    Context {
+        kind: CapturedContextKind,
+        types: Box<[ResolvedTy]>,
+        index: u32,
+    },
+}
+
+impl FirCapturedReceiver {
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        match self {
+            Self::Enclosing | Self::Lambda(None) => 0,
+            Self::Callable(label) | Self::Lambda(Some(label)) => label.len(),
+            Self::Context { types, .. } => types.len() * std::mem::size_of::<ResolvedTy>(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirLocalClassCapture {
     pub origin: OriginId,
@@ -82,4 +112,17 @@ pub struct FirLocalClassCapture {
     /// Common lowering uses this edge instead of joining constructor prefixes by field spelling.
     pub(crate) capture_identity: Option<ClassCaptureIdentity>,
     pub source: FirLocalClassCaptureSource,
+    /// `Some` exactly when the captured value is a receiver.
+    pub receiver: Option<FirCapturedReceiver>,
+}
+
+impl FirLocalClassCapture {
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.name.len()
+            + self.source.storage_payload_bytes()
+            + self
+                .receiver
+                .as_ref()
+                .map_or(0, FirCapturedReceiver::storage_payload_bytes)
+    }
 }
