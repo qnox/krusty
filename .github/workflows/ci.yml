@@ -70,8 +70,10 @@ jobs:
         env:
           # The instrumented e2e run costs ~2x the normal gate under [profile.coverage] (opt 1
           # with branch counters). Keep the local default strict; only this intentionally slower
-          # environment raises it — with enough headroom that a hung binary still fails fast.
-          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 600
+          # environment raises it. A full pass has already reached 600s while still finishing
+          # tests, so the budget is fifteen minutes: a hung binary still fails, a slow runner
+          # does not.
+          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 900
         run: just ci
 
   # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
