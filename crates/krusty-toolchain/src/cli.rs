@@ -1,4 +1,4 @@
-//! Argument parsing for the `krusty-kotlin` executable.
+//! Argument parsing for the `krusty-toolchain` executable.
 //!
 //! Only `build` is implemented. Other toolchain commands fail closed so they are not mistaken for
 //! compiler inputs or silently ignored.
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use krusty_build::kotlin_toolchain::BuildCommand;
 
 pub const ROOT_HELP: &str = "\
-usage: krusty-kotlin <command> [options]
+usage: krusty-toolchain <command> [options]
 
 krusty stand-in for the Kotlin Toolchain CLI (`kotlin build`). The compiler is the separate
 `krusty` executable (`KRUSTY_COMPILER`, the same directory as this program, or `PATH`).
@@ -20,7 +20,7 @@ Gradle and .iml projects are recognized and left to their project-model extensio
 ";
 
 pub const BUILD_HELP: &str = "\
-usage: krusty-kotlin build [options]
+usage: krusty-toolchain build [options]
 
 Compile a Kotlin Toolchain JVM project in the working directory (module.yaml or project.yaml).
 Same options as the toolchain `kotlin build` command. Gradle and .iml projects are recognized
@@ -40,12 +40,12 @@ pub enum Parsed {
     Build(BuildCommand),
 }
 
-/// Where to find the `krusty` compiler for a `krusty-kotlin` invocation.
+/// Where to find the `krusty` compiler for a `krusty-toolchain` invocation.
 #[derive(Clone, Debug)]
 pub struct CompilerSearch {
     /// `KRUSTY_COMPILER`, when the variable is set. An explicit path that is not a file is an error.
     pub override_path: Option<PathBuf>,
-    /// This `krusty-kotlin` executable. A sibling `krusty` is preferred over `PATH`.
+    /// This `krusty-toolchain` executable. A sibling `krusty` is preferred over `PATH`.
     pub executable: PathBuf,
     /// Directories from `PATH`, in order.
     pub path_dirs: Vec<PathBuf>,
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn compiler_search_prefers_an_explicit_path_then_a_sibling_then_path() {
         let root = std::env::temp_dir().join(format!(
-            "krusty-kotlin-compiler-{}-{}",
+            "krusty-toolchain-compiler-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -277,7 +277,7 @@ mod tests {
         std::fs::write(&explicit, b"explicit").expect("explicit");
         std::fs::write(&on_path, b"path").expect("path");
 
-        let executable = bin.join("krusty-kotlin");
+        let executable = bin.join("krusty-toolchain");
         let found = locate_compiler(&CompilerSearch {
             override_path: Some(explicit.clone()),
             executable: executable.clone(),

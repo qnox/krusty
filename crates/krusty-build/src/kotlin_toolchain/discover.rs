@@ -1,6 +1,6 @@
-//! Which project a `krusty-kotlin build` invocation is standing in.
+//! Which project a `krusty-toolchain build` invocation is standing in.
 //!
-//! The Kotlin Toolchain layout (`module.yaml` / `project.yaml`) is the project `krusty-kotlin build`
+//! The Kotlin Toolchain layout (`module.yaml` / `project.yaml`) is the project `krusty-toolchain build`
 //! compiles. A `project.yaml` owns every `module.yaml` beneath it, matching the toolchain rule that
 //! a module file included by a parent project is not its own project. Gradle and a JetBrains `.iml`
 //! model are recognized so they are not read as that layout; compiling them stays with their own
@@ -65,12 +65,12 @@ pub(super) fn extension_message(kind: &ProjectKind) -> Option<String> {
     match kind {
         ProjectKind::Toolchain(_) => None,
         ProjectKind::Gradle(root) => Some(format!(
-            "krusty-kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
              {} is a Gradle project. Gradle remains a project-model extension and is not compiled by this command yet.",
             root.display()
         )),
         ProjectKind::Jps(root) => Some(format!(
-            "krusty-kotlin build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
+            "krusty-toolchain build compiles Kotlin Toolchain projects (module.yaml or project.yaml).\n\
              {} is a JetBrains .iml project. .iml support remains a project-model extension and is not compiled by this command yet.",
             root.display()
         )),

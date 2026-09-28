@@ -515,24 +515,24 @@ build-release TARGET="":
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
         cargo build --release --target {{TARGET}} -p krusty-cli --bin krusty
-        cargo build --release --target {{TARGET}} -p krusty-kotlin --bin krusty-kotlin
+        cargo build --release --target {{TARGET}} -p krusty-toolchain --bin krusty-toolchain
         cargo build --release --target {{TARGET}} -p krusty-lsp
     else
         cargo build --release -p krusty-cli --bin krusty
-        cargo build --release -p krusty-kotlin --bin krusty-kotlin
+        cargo build --release -p krusty-toolchain --bin krusty-toolchain
         cargo build --release -p krusty-lsp
     fi
-    echo "built krusty, krusty-kotlin, and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
+    echo "built krusty, krusty-toolchain, and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 
 # Package one executable into dist/ (.tar.gz on unix, .zip on windows). PRODUCT defaults to the
-# compiler for compatibility; release CI invokes this for `krusty`, `krusty-kotlin`, and `krusty-lsp`.
+# compiler for compatibility; release CI invokes this for `krusty`, `krusty-toolchain`, and `krusty-lsp`.
 package TARGET PRODUCT="krusty":
     #!/usr/bin/env bash
     set -euo pipefail
     ver=$(just version)
     product="{{PRODUCT}}"
     case "$product" in
-        krusty|krusty-kotlin|krusty-lsp) ;;
+        krusty|krusty-toolchain|krusty-lsp) ;;
         *) echo "unknown release product: $product" >&2; exit 2 ;;
     esac
     bindir="target/{{TARGET}}/release"

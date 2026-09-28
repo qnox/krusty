@@ -178,7 +178,7 @@ impl BuildReport {
         self.outcomes.iter().all(|(_, outcome)| outcome.is_ok())
     }
 
-    /// One line per module, in build order — what a `krusty-kotlin build` run prints.
+    /// One line per module, in build order — what a `krusty-toolchain build` run prints.
     pub fn render(&self) -> String {
         let mut out = String::new();
         for (id, outcome) in &self.outcomes {

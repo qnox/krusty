@@ -174,20 +174,20 @@ mod tests {
         let compiler =
             fs::read_to_string("crates/krusty-cli/Cargo.toml").expect("compiler manifest");
         assert!(
-            !compiler.contains("krusty-build") && !compiler.contains("krusty-kotlin"),
+            !compiler.contains("krusty-build") && !compiler.contains("krusty-toolchain"),
             "the compiler executable must not depend on the build layer or the toolchain CLI"
         );
         for path in rust_files_under("crates/krusty-cli/src") {
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
             assert!(
-                !text.contains("krusty_build") && !text.contains("krusty_kotlin"),
+                !text.contains("krusty_build") && !text.contains("krusty_toolchain"),
                 "{} must not reference the build layer",
                 path.display()
             );
         }
         let toolchain =
-            fs::read_to_string("crates/krusty-kotlin/Cargo.toml").expect("toolchain manifest");
+            fs::read_to_string("crates/krusty-toolchain/Cargo.toml").expect("toolchain manifest");
         assert!(
             toolchain.contains("krusty-build"),
             "kotlin build is implemented on the build layer"
@@ -197,8 +197,8 @@ mod tests {
             "the toolchain CLI drives krusty as a subprocess, not through the compiler package"
         );
         assert!(
-            toolchain.contains("name = \"krusty-kotlin\""),
-            "the toolchain executable keeps the krusty- prefix, like krusty-lsp"
+            toolchain.contains("name = \"krusty-toolchain\""),
+            "the toolchain executable is krusty-toolchain, like krusty-lsp"
         );
         assert!(
             !toolchain.contains("name = \"kotlin\""),

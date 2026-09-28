@@ -1,4 +1,4 @@
-//! `krusty-kotlin build` over a real `module.yaml` project: load, compile with the driver, run on the JVM.
+//! `krusty-toolchain build` over a real `module.yaml` project: load, compile with the driver, run on the JVM.
 //!
 //! Skips when the compiler binary, the Kotlin stdlib, or a JDK is absent, same as `hello_world`.
 
