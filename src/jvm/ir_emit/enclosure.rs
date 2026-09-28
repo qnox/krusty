@@ -142,6 +142,16 @@ fn scope_enclosure(
             if static_storage(ir, class) {
                 return Some((class.fq_name(), None));
             }
+            // An enum entry's class initializes its body through its `(String, int, ...)V`
+            // constructor, which it declares with no primary constructor of its own.
+            if let Some(arguments) = &class.enum_entry_of {
+                let parameters: Vec<Ty> = [Ty::String, Ty::Int]
+                    .into_iter()
+                    .chain(jvm_tys(arguments))
+                    .collect();
+                let descriptor = method_descriptor(&parameters, Ty::Unit);
+                return Some((class.fq_name(), Some(("<init>".to_string(), descriptor))));
+            }
             class.has_primary_ctor.then(|| {
                 let descriptor = method_descriptor(&class_ctor_jvm_tys(class), Ty::Unit);
                 (class.fq_name(), Some(("<init>".to_string(), descriptor)))

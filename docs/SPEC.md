@@ -4676,6 +4676,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
   package-private class itself. Test:
   `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
+- **What an enum entry's body declares is enclosed by the entry class's constructor.** An enum
+  entry with a body compiles to its own class, whose `(String, int, ...)V` constructor runs the
+  body's initializers. An object or local class declared in one of them names that constructor in
+  its `EnclosingMethod` (`Level$HIGH.<init>(Ljava/lang/String;I)V`), not the enum's. Test:
+  `tests/enum_entry_body_enclosure_e2e.rs`.
 - **A method's catch types precede its code's constants in the pool.** ASM's `MethodWriter`
   visits a method's try-catch blocks before its instructions, so kotlinc's pool holds every catch
   type a method's exception table names ahead of the constants its code introduces. krusty
