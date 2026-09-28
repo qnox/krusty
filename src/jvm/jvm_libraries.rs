@@ -848,6 +848,7 @@ impl JvmLibraries {
                     infix: meta.is_infix,
                     is_abstract: false,
                     is_final: true,
+                    java_declared: false,
                     return_value_status: None,
                 },
                 annotations: meta.annotations.clone(),
@@ -911,6 +912,7 @@ impl JvmLibraries {
                 infix: builtin.is_infix,
                 is_abstract: false,
                 is_final: true,
+                java_declared: false,
                 return_value_status: None,
             };
             function.annotations = builtin.annotations;
@@ -1081,6 +1083,7 @@ impl JvmLibraries {
                     infix: function.is_infix(),
                     is_abstract: false,
                     is_final: function.is_final(),
+                    java_declared: false,
                     return_value_status: Some(function.return_value_status),
                 },
                 annotations: function.annotations.clone(),
@@ -1847,6 +1850,7 @@ impl JvmLibraries {
                     declaration.map_or_else(|| m.is_final(), |declaration| declaration.is_final()),
                 );
                 member.set_is_interface(ci.is_interface());
+                member.set_java_declared(!has_kotlin_metadata);
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
                         pass_receiver: physical_params.len() == member.params.len() + 1,
@@ -4618,6 +4622,7 @@ impl JvmLibraries {
                         infix: mf.is_infix(),
                         is_abstract: false,
                         is_final: mf.is_final(),
+                        java_declared: false,
                         return_value_status: Some(mf.return_value_status),
                     },
                     annotations: mf.annotations.clone(),
@@ -5216,6 +5221,7 @@ impl JvmLibraries {
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
+                                java_declared: m.java_declared(),
                                 return_value_status: m.return_value_status,
                             },
                             annotations: m.annotations.clone(),

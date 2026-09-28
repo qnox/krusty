@@ -127,6 +127,19 @@ fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<Typ
         || function.kind == FnKind::Extension && interface_owners.contains(&function.callable.owner)
 }
 
+/// Kotlin's JVM delegation filter: an implemented Java method (a JDK default method, including one
+/// admitted onto a mapped builtin such as `MutableMap.compute`) and an implemented builtin member
+/// mapped to a Java default (`@PlatformDependent`, such as `Map.getOrDefault`) keep their inherited
+/// implementation rather than being forwarded to the delegate. Implemented Kotlin interface members
+/// are still forwarded.
+fn is_platform_default(function: &FunctionInfo) -> bool {
+    !function.flags.is_abstract
+        && (function.flags.java_declared
+            || function
+                .annotations
+                .contains(&crate::types::wk::platform_dependent()))
+}
+
 fn effective_function<'a>(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
@@ -754,6 +767,9 @@ fn delegation_members(
                 continue;
             }
             let function = effective_function(source, index, interface, candidates)?;
+            if is_platform_default(function) {
+                continue;
+            }
             let call = function_call(source, index, interface, function);
             let overridden = delegated_function_declaration(index, function)?;
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;

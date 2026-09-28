@@ -422,3 +422,54 @@ fn delegated_generic_property_accessors_match_kotlinc() {
     let expected = std::fs::read(reference.join("Crate.class")).expect("kotlinc emits Crate");
     assert_eq!(accessors(emitted), accessors(&expected));
 }
+
+const PLATFORM_DEFAULT_SRC: &str = "class Table<K, V>(val map: MutableMap<K, V>) : MutableMap<K, V> by map\n\
+class Transform(f: java.util.function.Function<String, String>) : java.util.function.Function<String, String> by f\n\
+interface Named { fun name(): String = \"default\" }\n\
+class Renamed(n: Named) : Named by n\n\
+fun box(): String {\n\
+    val table = Table(java.util.HashMap<String, String>())\n\
+    table.put(\"k\", \"O\")\n\
+    val renamed = Renamed(object : Named { override fun name() = \"K\" })\n\
+    val transform = Transform(java.util.function.Function { it })\n\
+    return table.getOrDefault(\"k\", \"x\") + renamed.name() + transform.apply(\"\")\n\
+}\n";
+
+/// The methods a class declares, as `name descriptor`. A set: member ORDER is a separate parity
+/// concern, and this test is about which forwarders exist.
+fn declared_methods(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .expect("class parses")
+        .methods
+        .iter()
+        .map(|method| format!("{} {}", method.name, method.descriptor))
+        .collect()
+}
+
+/// kotlinc never forwards an implemented Java method (the JDK defaults `Map.compute`,
+/// `Function.andThen`, …) or an implemented builtin mapped to one (`Map.getOrDefault`); forwarding
+/// them duplicated `getOrDefault` and failed class loading. An implemented Kotlin interface member
+/// is still forwarded.
+#[test]
+fn delegation_keeps_platform_default_methods_inherited() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(PLATFORM_DEFAULT_SRC, "DelegPlatformDefaults"),
+        "OK"
+    );
+    let classes = common::expect_classes_with_stdlib(PLATFORM_DEFAULT_SRC, "DelegPlatformDefaults");
+    let reference =
+        common::kotlinc_library(PLATFORM_DEFAULT_SRC).expect("kotlinc compiles the reference");
+    for class in ["Table", "Transform", "Renamed"] {
+        let (_, bytes) = classes
+            .iter()
+            .find(|(name, _)| name == class)
+            .unwrap_or_else(|| panic!("{class} emitted"));
+        let expected = std::fs::read(reference.join(format!("{class}.class")))
+            .unwrap_or_else(|error| panic!("kotlinc emits {class}: {error}"));
+        assert_eq!(
+            declared_methods(bytes),
+            declared_methods(&expected),
+            "{class} declares different methods than kotlinc"
+        );
+    }
+}

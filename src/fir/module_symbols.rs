@@ -684,6 +684,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             infix: header.flags.has(DeclarationFlags::INFIX),
             is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
             is_final: header.flags.has(DeclarationFlags::FINAL),
+            java_declared: false,
             return_value_status: None,
         };
         function.visibility = header.visibility;
@@ -947,6 +948,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
+                java_declared: false,
                 return_value_status: None,
             };
             function.visibility = header.visibility;
@@ -1390,6 +1392,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
+                java_declared: false,
                 return_value_status: None,
             };
             function.visibility = header.visibility;

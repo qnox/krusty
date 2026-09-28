@@ -123,27 +123,31 @@ pub use crate::types::{TypeParameterBounds, TypeParameterView, TypeParameters, T
 /// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
 /// name; mutated through the matching `set_*` methods.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LmFlags(u8);
+pub struct LmFlags(u16);
 
 impl LmFlags {
-    const RET_NULLABLE: u8 = 1 << 0;
-    const IS_INTERFACE: u8 = 1 << 1;
-    const SUSPEND: u8 = 1 << 2;
+    const RET_NULLABLE: u16 = 1 << 0;
+    const IS_INTERFACE: u16 = 1 << 1;
+    const SUSPEND: u16 = 1 << 2;
     /// The member is declared `operator`. Only `@Metadata` records it — the JVM has no such flag — and
     /// only a convention call site (`"x" { … }` for `operator fun String.invoke`) needs it, so it
     /// travels with the member rather than being re-derived from a name.
-    const IS_OPERATOR: u8 = 1 << 3;
+    const IS_OPERATOR: u16 = 1 << 3;
     /// The member is a member EXTENSION (`class DslScope { fun String.f() }`): its declaring class is
     /// the dispatch receiver and its FIRST JVM parameter is the extension receiver. Nothing in the
     /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
     /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
-    const IS_EXTENSION: u8 = 1 << 4;
-    const IS_ABSTRACT: u8 = 1 << 5;
-    const IS_INFIX: u8 = 1 << 6;
-    const IS_FINAL: u8 = 1 << 7;
+    const IS_EXTENSION: u16 = 1 << 4;
+    const IS_ABSTRACT: u16 = 1 << 5;
+    const IS_INFIX: u16 = 1 << 6;
+    const IS_FINAL: u16 = 1 << 7;
+    /// The member is declared by a Java class file (one without Kotlin `@Metadata`), including a JDK
+    /// method admitted onto a mapped Kotlin builtin scope. Kotlin semantics expose this origin: a
+    /// non-abstract Java method is never forwarded by interface delegation.
+    const JAVA_DECLARED: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -152,7 +156,7 @@ impl LmFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -187,6 +191,10 @@ impl LmFlags {
     #[inline]
     pub const fn with_is_infix(self, on: bool) -> Self {
         self.with(Self::IS_INFIX, on)
+    }
+    #[inline]
+    pub const fn with_java_declared(self, on: bool) -> Self {
+        self.with(Self::JAVA_DECLARED, on)
     }
 }
 
@@ -827,6 +835,12 @@ impl LibraryMember {
     }
     pub fn set_is_final(&mut self, on: bool) {
         self.flags = self.flags.with_is_final(on);
+    }
+    pub fn java_declared(&self) -> bool {
+        self.flags.has(LmFlags::JAVA_DECLARED)
+    }
+    pub fn set_java_declared(&mut self, on: bool) {
+        self.flags = self.flags.with_java_declared(on);
     }
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
@@ -2169,6 +2183,7 @@ impl FunctionInfo {
         candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.is_final = member.is_final();
+        candidate.flags.java_declared = member.java_declared();
         candidate.flags.return_value_status = member.return_value_status;
         candidate.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
@@ -2319,6 +2334,8 @@ pub struct FnFlags {
     /// The declaration cannot be overridden. This is source modality, independent of a target's
     /// physical access flags.
     pub is_final: bool,
+    /// Declared by a Java class file rather than by Kotlin. See [`LibraryMember::java_declared`].
+    pub java_declared: bool,
     /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:
     /// its status is derived from its override edges after they are frozen.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,
