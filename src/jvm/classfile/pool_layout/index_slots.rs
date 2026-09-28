@@ -57,18 +57,34 @@ pub(super) struct ClassSlots {
     pub(super) slots: Vec<Slot>,
     /// The positions in `slots` of the fields' slots.
     fields: Range<usize>,
+    /// The position in `slots` where each method's slots start.
+    method_starts: Vec<usize>,
     /// The position in `slots` past the methods' slots.
     methods_end: usize,
 }
 
 impl ClassSlots {
     /// The slots in the order kotlinc's writer visits what holds them: the class header, the
-    /// methods, the fields, then the class attributes.
+    /// methods, the fields, then the class attributes. A method's header and attributes precede
+    /// its code: kotlinc interns them before it visits the body.
     pub(super) fn visit_order(&self) -> impl Iterator<Item = &Slot> {
         let slots = &self.slots;
+        let method_ends = self.method_starts.iter().skip(1).copied();
+        let methods = self
+            .method_starts
+            .iter()
+            .zip(method_ends.chain([self.methods_end]))
+            .flat_map(move |(&start, end)| {
+                let method = &slots[start..end];
+                let is_code = |slot: &&Slot| matches!(slot.holder, Holder::Code(..));
+                method
+                    .iter()
+                    .filter(move |slot| !is_code(slot))
+                    .chain(method.iter().filter(is_code))
+            });
         slots[..self.fields.start]
             .iter()
-            .chain(&slots[self.fields.end..self.methods_end])
+            .chain(methods)
             .chain(&slots[self.fields.clone()])
             .chain(&slots[self.methods_end..])
     }
@@ -103,6 +119,7 @@ struct Reader<'a> {
     entries: Vec<Option<Entry>>,
     slots: Vec<Slot>,
     fields: Range<usize>,
+    method_starts: Vec<usize>,
     methods_end: usize,
 }
 
@@ -113,6 +130,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         entries: Vec::new(),
         slots: Vec::new(),
         fields: 0..0,
+        method_starts: Vec::new(),
         methods_end: 0,
     };
     reader.pool()?;
@@ -126,6 +144,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         pool_end,
         slots: reader.slots,
         fields: reader.fields,
+        method_starts: reader.method_starts,
         methods_end: reader.methods_end,
     })
 }
@@ -246,6 +265,7 @@ impl Reader<'_> {
         }
         self.fields = fields_start..self.slots.len();
         for method in 0..usize::from(self.u2()?) {
+            self.method_starts.push(self.slots.len());
             self.member(Scope::Method(method))?;
         }
         self.methods_end = self.slots.len();
