@@ -5098,8 +5098,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface method abstract and puts the body on the receiver-first `$DefaultImpls` static. kotlinc
   still calls such a member through the interface (`invokeinterface ClosedRange.contains`), so the
   implementing class's forwarder dispatches; only a nonvirtual `super` call or read names the
-  holder static, and it loads the receiver at its own class with no `checkcast`. The provider
-  publishes the holder as the declaration's nonvirtual realization. Tests:
+  holder static, and it loads the receiver at its own class with no `checkcast`. A `super` write
+  names the holder's setter the same way. `super@Outer` from an inner class calls the public
+  holder static directly with the outer receiver, so the outer class gets no accessor. The provider
+  publishes the holder as the declaration's nonvirtual realization; resolution keeps the selected
+  declaration's identity and the JVM super-call realization reads the holder from it. Tests:
   `tests/legacy_interface_calls_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the

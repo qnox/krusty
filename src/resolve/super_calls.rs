@@ -27,6 +27,9 @@ pub struct ResolvedSuperCall {
     /// Stable source declaration selected for this call. Dependency declarations leave this unset;
     /// current-compilation defaults use it to retain their exact checked default-expression owner.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
+    /// Stable dependency declaration selected for this call. Resolution keeps the declaration it
+    /// selected; a target realizes the declaration's physical holder from this identity.
+    pub external: Option<crate::fir::ExternalCallableId>,
     /// Kotlin property declaration selected by property syntax. The callable declaration above is
     /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
     /// to reach the source property rather than its generated getter or setter.
@@ -45,17 +48,11 @@ impl ResolvedSuperCall {
         receiver: ImplicitReceiverSelection,
         dispatch_owner: TypeName,
         interface: bool,
-        mut member: crate::libraries::LibraryMember,
+        member: crate::libraries::LibraryMember,
     ) -> Option<Self> {
-        if let Some(target) = member.nonvirtual_realization.take() {
-            member.owner = Some(target.owner);
-            member.descriptor = target.descriptor;
-            member.realization = crate::libraries::MemberRealization::Direct {
-                pass_receiver: true,
-            };
-        }
         let realization = member.realization;
         let stable_declaration = member.stable_declaration;
+        let external = member.external_identity;
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let suspend = member.suspend();
@@ -91,27 +88,13 @@ impl ResolvedSuperCall {
             interface,
             realization,
             stable_declaration,
+            external,
             property_declaration: None,
             source_member,
             external_property,
             suspend,
         })
     }
-}
-
-/// A selected accessor as a `super` call reaches it: through its provider-published nonvirtual
-/// holder when its body is not on the declaring owner (a legacy interface body), else as declared.
-pub(super) fn nonvirtual_accessor(
-    mut callable: crate::libraries::LibraryCallable,
-) -> crate::libraries::LibraryCallable {
-    if let Some(target) = callable.nonvirtual_realization.take() {
-        callable.owner = target.owner;
-        callable.descriptor = target.descriptor;
-        callable.member_realization = crate::libraries::MemberRealization::Direct {
-            pass_receiver: true,
-        };
-    }
-    callable
 }
 
 impl Checker<'_> {
@@ -298,6 +281,7 @@ impl Checker<'_> {
                     interface,
                     realization,
                     stable_declaration,
+                    external: callable.external_identity,
                     property_declaration,
                     source_member: setter.source_member,
                     external_property: callable.external_property_identity,

@@ -451,7 +451,10 @@ pub(super) fn realize_default_calls(
 /// separate pass because compiler plugins add checked declarations after the streaming frontend
 /// has completed, while the backend must remain the sole owner of descriptors and invocation
 /// opcodes.
-pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
+pub(super) fn realize_super_calls(
+    ir: &mut IrFile,
+    classpath: &crate::jvm::classpath::Classpath,
+) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
         // descriptor is left to choose, and that is a JVM ABI decision derived from the semantic
@@ -470,6 +473,7 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                     realization,
                     descriptor,
                     source,
+                    external,
                     defaults,
                     source_member,
                 },
@@ -477,6 +481,25 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
             args,
         } = ir.exprs[raw].clone()
         {
+            // A dependency declaration whose ordinary descriptor is not a legal nonvirtual entry
+            // (a legacy interface body) names its holder: realize the selected declaration there,
+            // as a receiver-first static. Resolution keeps the declaration it selected.
+            let holder = external
+                .and_then(|target| classpath.external_callable(target))
+                .and_then(|target| target.callable.nonvirtual_realization);
+            // A holder static is public, so `super@Outer` from an inner class calls it directly
+            // with the outer receiver; only a real nonvirtual dispatch needs the outer accessor.
+            let enclosing_dispatch = enclosing_dispatch && holder.is_none();
+            let (owner, descriptor, realization) = match holder {
+                Some(holder) => (
+                    holder.owner,
+                    holder.descriptor,
+                    crate::libraries::MemberRealization::Direct {
+                        pass_receiver: true,
+                    },
+                ),
+                None => (owner, descriptor, realization),
+            };
             if !defaults.is_empty() {
                 return Err(source.map_or(
                     ModuleRealizationTarget::Classifier(owner),
@@ -522,11 +545,9 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                         dispatch_receiver: Some(receiver),
                         args: bridge_arguments,
                     }),
+                    // As for a direct `super` call below, the receiver stays the dispatch receiver,
+                    // so a receiver-first holder static loads it at its own class.
                     crate::libraries::MemberRealization::Direct { pass_receiver } => {
-                        let mut operands = bridge_arguments;
-                        if pass_receiver {
-                            operands.insert(0, receiver);
-                        }
                         ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
                                 owner,
@@ -534,8 +555,8 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                                 descriptor,
                                 inline: crate::libraries::InlineKind::None,
                             },
-                            dispatch_receiver: None,
-                            args: operands,
+                            dispatch_receiver: pass_receiver.then_some(receiver),
+                            args: bridge_arguments,
                         })
                     }
                     crate::libraries::MemberRealization::Intrinsic(_)
@@ -644,7 +665,7 @@ pub(super) fn realize(
     property_realizations: &mut PropertyRealizations,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
-    realize_super_calls(ir)?;
+    realize_super_calls(ir, classpath)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,

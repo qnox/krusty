@@ -318,6 +318,9 @@ pub enum FirCallTarget {
         /// Stable current-module callable selected for the super declaration. This is the exact
         /// owner of retained checked defaults; dependency declarations leave it unset.
         source: Option<CallableId>,
+        /// Stable dependency declaration selected for the super declaration; current-module
+        /// declarations leave it unset.
+        external: Option<super::ExternalCallableId>,
         source_member: Option<crate::libraries::SourceMember>,
         /// The selected declaration is a `suspend` function: the call is a suspension point, and
         /// a target passes it a continuation.

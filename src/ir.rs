@@ -278,6 +278,9 @@ pub enum Callee {
         /// Exact source callable owning checked default expressions, when this super declaration is
         /// part of the current module.
         source: Option<crate::fir::CallableId>,
+        /// Exact dependency declaration selected for this super call. A target resolves its own
+        /// physical realization of that declaration (a legacy interface body's holder) from it.
+        external: Option<crate::fir::ExternalCallableId>,
         /// Final semantic parameter ordinals omitted at the checked call site.
         defaults: Vec<u32>,
         source_member: Option<crate::libraries::SourceMember>,
