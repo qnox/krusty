@@ -265,12 +265,14 @@ fn bridges_to_generated_members_use_their_published_parameter_identities() {
 /// The override renames the parameter; the bridge keeps the overridden declaration's `item`.
 #[test]
 fn a_bridge_names_its_parameters_after_the_overridden_declaration() {
-    let src = "interface Sink<T> {\n\
+    let src = "class Token(val raw: Int)\n\
+               \n\
+               interface Sink<T> {\n\
                \x20   fun accept(item: T): T\n\
                }\n\
                \n\
-               class Renamed : Sink<String> {\n\
-               \x20   override fun accept(text: String): String = text\n\
+               class Renamed : Sink<Token> {\n\
+               \x20   override fun accept(text: Token): Token = text\n\
                }\n";
     common::byte_diff_against_kotlinc("RenamedBridgeParameter", src, "Renamed")
         .expect("reference kotlinc is provisioned")
@@ -281,14 +283,16 @@ fn a_bridge_names_its_parameters_after_the_overridden_declaration() {
 /// class that only inherits it.
 #[test]
 fn an_inherited_bridge_names_its_parameters_after_the_declaring_supertype() {
-    let src = "abstract class Base<T> {\n\
+    let src = "class Token(val raw: Int)\n\
+               \n\
+               abstract class Base<T> {\n\
                \x20   abstract fun take(first: T): T\n\
                }\n\
                \n\
-               abstract class Middle : Base<String>()\n\
+               abstract class Middle : Base<Token>()\n\
                \n\
                class Leaf : Middle() {\n\
-               \x20   override fun take(other: String): String = other\n\
+               \x20   override fun take(other: Token): Token = other\n\
                }\n";
     common::byte_diff_against_kotlinc("InheritedBridgeParameter", src, "Leaf")
         .expect("reference kotlinc is provisioned")
@@ -299,16 +303,17 @@ fn an_inherited_bridge_names_its_parameters_after_the_declaring_supertype() {
 /// the override `outer`.
 #[test]
 fn a_bridge_names_its_context_parameter_after_the_overridden_declaration() {
-    let src = "class Scope(val prefix: String)\n\
+    let src = "class Scope(val marker: Int)\n\
+               class Token(val raw: Int)\n\
                \n\
                interface Renderer<T> {\n\
                \x20   context(scope: Scope)\n\
                \x20   fun render(item: T): T\n\
                }\n\
                \n\
-               class Upper : Renderer<String> {\n\
+               class Upper : Renderer<Token> {\n\
                \x20   context(outer: Scope)\n\
-               \x20   override fun render(text: String): String = outer.prefix + text\n\
+               \x20   override fun render(text: Token): Token { outer.marker; return text }\n\
                }\n";
     assert_code_and_debug_identical("RenamedContextBridgeParameter", src, "Upper");
 }
@@ -320,23 +325,24 @@ fn a_bridge_names_its_context_parameter_after_the_overridden_declaration() {
 fn a_bridge_labels_an_anonymous_context_parameter_after_the_overridden_declaration() {
     const SRC: &str = "@JvmInline value class Id(val raw: Int)\n\
 interface Base<T> {\n\
-    context(_: T) fun label(x: Int): String\n\
+    context(_: T) fun label(x: Int): Int\n\
 }\n\
 class Impl : Base<Id> {\n\
-    context(_: Id) override fun label(x: Int): String = \"OK\"\n\
+    context(_: Id) override fun label(x: Int): Int = x\n\
 }\n";
     common::assert_class_code_matches_kotlinc("ValueClassContextBridge", SRC, "Impl");
 }
 
 /// An anonymous context parameter of a type-parameter type is labelled after the parameter's upper
-/// bound: `$context-Any` unbounded, `$context-CharSequence` under `T : CharSequence`.
+/// bound: `$context-Any` unbounded, `$context-Textual` under `T : Textual`.
 #[test]
 fn an_anonymous_context_parameter_of_a_type_parameter_is_labelled_after_its_bound() {
-    const SRC: &str = "class Holder<T> {\n\
-    context(_: T) fun held(): String = \"held\"\n\
+    const SRC: &str = "interface Textual\n\
+class Holder<T> {\n\
+    context(_: T) fun held(): Int = 1\n\
 }\n\
-context(_: T) fun <T> free(): String = \"free\"\n\
-context(_: T?) fun <T : CharSequence> bounded(): String = \"bounded\"\n";
+context(_: T) fun <T> free(): Int = 2\n\
+context(_: T?) fun <T : Textual> bounded(): Int = 3\n";
     for class in ["Holder", "TypeParameterContextLabelKt"] {
         common::assert_class_code_matches_kotlinc("TypeParameterContextLabel", SRC, class);
     }
