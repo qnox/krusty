@@ -282,7 +282,7 @@ impl Emitter<'_> {
         if internal == "java/lang/Object" {
             ReferenceCoercion::Unchanged
         } else {
-            ReferenceCoercion::Cast(internal)
+            ReferenceCoercion::Cast(internal.to_owned())
         }
     }
 
