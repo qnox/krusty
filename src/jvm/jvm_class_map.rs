@@ -20,8 +20,11 @@ use crate::types::{CollectionKind, MappedCollection, TypeName};
 /// of every primitive owner plus `String` and `Enum`; derive the primitive portion from the shared
 /// Kotlin/JVM mapping instead of maintaining another classifier-name list.
 pub fn intrinsic_companion_to_jvm(internal: &str) -> Option<String> {
-    intrinsic_companion_owner(crate::types::existing_type_name(internal)?)
-        .map(companion_object_internal)
+    intrinsic_companion_jvm_class(crate::types::existing_type_name(internal)?)
+}
+
+pub(super) fn intrinsic_companion_jvm_class(classifier: TypeName) -> Option<String> {
+    intrinsic_companion_owner(classifier).map(companion_object_internal)
 }
 
 /// The owner of an intrinsic companion (`kotlin/Int.Companion` → `kotlin/Int`).
@@ -299,28 +302,32 @@ pub fn is_throwable_internal(internal: &str) -> bool {
 
 use crate::types::Ty;
 
+/// Primitive classifier → boxed internal name. Unsigned types box to their own inline class.
+const PRIM_WRAPPERS: &[(&str, &str)] = &[
+    ("kotlin/Int", "java/lang/Integer"),
+    ("kotlin/Long", "java/lang/Long"),
+    ("kotlin/Short", "java/lang/Short"),
+    ("kotlin/Byte", "java/lang/Byte"),
+    ("kotlin/Double", "java/lang/Double"),
+    ("kotlin/Float", "java/lang/Float"),
+    ("kotlin/Boolean", "java/lang/Boolean"),
+    ("kotlin/Char", "java/lang/Character"),
+    ("kotlin/UByte", "kotlin/UByte"),
+    ("kotlin/UShort", "kotlin/UShort"),
+    ("kotlin/UInt", "kotlin/UInt"),
+    ("kotlin/ULong", "kotlin/ULong"),
+];
+
 /// The JVM wrapper (box) class internal name for a Kotlin primitive's INTERNAL NAME
 /// (`kotlin/Int` → `java/lang/Integer`), or `None` if `internal` is not a Kotlin primitive name.
 /// The single source of truth for the boxed form, shared by the emit-only boxing in
 /// [`to_jvm_internal`], the `Ty`-keyed [`wrapper_internal`], and descriptor callers in the backend
 /// and plugins — so the primitive→wrapper table is listed exactly once.
 pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
-    Some(match internal {
-        "kotlin/Int" => "java/lang/Integer",
-        "kotlin/Long" => "java/lang/Long",
-        "kotlin/Short" => "java/lang/Short",
-        "kotlin/Byte" => "java/lang/Byte",
-        "kotlin/Double" => "java/lang/Double",
-        "kotlin/Float" => "java/lang/Float",
-        "kotlin/Boolean" => "java/lang/Boolean",
-        "kotlin/Char" => "java/lang/Character",
-        // An unsigned type's boxed form is its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
-        "kotlin/UByte" => "kotlin/UByte",
-        "kotlin/UShort" => "kotlin/UShort",
-        "kotlin/UInt" => "kotlin/UInt",
-        "kotlin/ULong" => "kotlin/ULong",
-        _ => return None,
-    })
+    PRIM_WRAPPERS
+        .iter()
+        .find(|(name, _)| *name == internal)
+        .map(|(_, wrapper)| *wrapper)
 }
 
 /// Inverse of [`kotlin_prim_to_wrapper`]: the Kotlin primitive internal name for a JVM box class
@@ -598,6 +605,9 @@ struct BuiltinIds {
     coll_to_kotlin: FxHashMap<TypeName, TypeName>,
     coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
     wrapper_prim: FxHashMap<TypeName, &'static str>,
+    /// Kotlin primitive classifier → its boxed internal name, including unsigned types that box
+    /// to themselves. [`wrapper_internal`] looks the identity up here instead of rendering it.
+    prim_wrapper: FxHashMap<TypeName, &'static str>,
     with_members: FxHashMap<TypeName, TypeName>,
     /// Canonical Kotlin declaration whose `.kotlin_builtins` record describes a JVM-mapped owner.
     /// Read-only collection faces win for erasure groups with mutable siblings, matching the frontend
@@ -680,6 +690,10 @@ fn builtin_ids() -> &'static BuiltinIds {
                 with_members.insert(jvm_id, tn(kotlin));
             }
         }
+        let mut prim_wrapper = FxHashMap::default();
+        for (internal, wrapper) in PRIM_WRAPPERS {
+            prim_wrapper.insert(tn(internal), *wrapper);
+        }
         let mut wrapper_prim = FxHashMap::default();
         for wrapper in [
             "java/lang/Integer",
@@ -706,6 +720,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             coll_to_kotlin,
             coll_to_kotlin_mutable,
             wrapper_prim,
+            prim_wrapper,
             with_members,
             metadata_owner,
             mapped_collection,
@@ -818,6 +833,29 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
         .map_or(internal, |(_, id)| *id)
 }
 
+/// JVM name of a Kotlin mapped builtin (`kotlin/Any` → `java/lang/Object`). The JVM face of the
+/// same group, and a primitive wrapper, are not part of this direction.
+pub(crate) fn kotlin_builtin_jvm_name(internal: TypeName) -> Option<&'static str> {
+    let ids = builtin_ids();
+    if !ids.erasure_group.contains_key(&internal) {
+        return None;
+    }
+    let (jvm, jvm_id) = *ids.jvm_builtin.get(&internal)?;
+    (jvm_id != internal).then_some(jvm)
+}
+
+/// Whether [`to_jvm_internal`] would rewrite this classifier. Classpath loading asks once per
+/// class; erasure-table identity and the function-classifier family answer it without rendering.
+pub(super) fn maps_to_distinct_jvm_internal(internal: TypeName) -> bool {
+    if to_jvm_type_name(internal) != internal {
+        return true;
+    }
+    match super::function_classifiers::classifier(internal) {
+        Some(function) => function.is_reflective() || !function.is_suspend(),
+        None => false,
+    }
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from a classpath signature to
 /// the canonical Kotlin declaration in its erasure group. Read-only collection declarations are the
 /// canonical source identity; mutable siblings remain ordinary Kotlin subtypes.
@@ -837,7 +875,7 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
     // The semantic type is the Kotlin classifier. JVM boxing is chosen here, at the backend
     // boundary, from that classifier identity; core never manufactures a wrapper type.
     if scalar == t || t.is_unsigned() {
-        kotlin_prim_to_wrapper(&internal.render())
+        builtin_ids().prim_wrapper.get(&internal).copied()
     } else {
         None
     }
@@ -848,10 +886,10 @@ mod tests {
     use super::{
         is_kotlin_collection_type_name, is_mapped_collection_face,
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
-        jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
-        platform_flexible_upper_bound, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
-        wrapper_internal, wrapper_to_kotlin_prim_name,
+        jvm_to_kotlin_builtin_metadata_name, kotlin_builtin_jvm_name, kotlin_builtin_to_jvm,
+        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
+        maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_internal,
+        to_jvm_type_name, to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, CollectionKind, MappedCollection, Ty};
 
@@ -907,8 +945,15 @@ mod tests {
             assert_eq!(wrapper_internal(prim), Some(wrapper));
         }
         // Unsigned boxes to its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
+        assert_eq!(kotlin_prim_to_wrapper("kotlin/UByte"), Some("kotlin/UByte"));
+        assert_eq!(
+            kotlin_prim_to_wrapper("kotlin/UShort"),
+            Some("kotlin/UShort")
+        );
         assert_eq!(kotlin_prim_to_wrapper("kotlin/UInt"), Some("kotlin/UInt"));
         assert_eq!(kotlin_prim_to_wrapper("kotlin/ULong"), Some("kotlin/ULong"));
+        assert_eq!(wrapper_internal(Ty::UByte), Some("kotlin/UByte"));
+        assert_eq!(wrapper_internal(Ty::UShort), Some("kotlin/UShort"));
         assert_eq!(wrapper_internal(Ty::UInt), Some("kotlin/UInt"));
         assert_eq!(wrapper_internal(Ty::ULong), Some("kotlin/ULong"));
         // Non-primitives have no wrapper.
@@ -992,6 +1037,47 @@ mod tests {
             assert!(
                 !is_mapped_collection_face(type_name(not_a_face)),
                 "{not_a_face}"
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_jvm_mapping_follows_the_string_erasure() {
+        for name in [
+            "kotlin/Int",
+            "kotlin/UInt",
+            "kotlin/String",
+            "java/lang/String",
+            "kotlin/Any",
+            "java/lang/Object",
+            "java/lang/Void",
+            "kotlin/Nothing",
+            "kotlin/collections/List",
+            "kotlin/collections/MutableList",
+            "java/util/List",
+            "kotlin/collections/Map$Entry",
+            "kotlin/collections/Map.Entry",
+            "kotlin/Function0",
+            "kotlin/Function22",
+            "kotlin/Function23",
+            "kotlin/Function",
+            "kotlin/FunctionX",
+            "kotlin/coroutines/SuspendFunction1",
+            "kotlin/reflect/KFunction1",
+            "kotlin/reflect/KSuspendFunction0",
+            "kotlin/reflect/KFunction",
+            "kotlin/jvm/functions/Function1",
+            "demo/Foo",
+        ] {
+            assert_eq!(
+                maps_to_distinct_jvm_internal(type_name(name)),
+                to_jvm_internal(name) != name,
+                "{name}"
+            );
+            assert_eq!(
+                kotlin_builtin_jvm_name(type_name(name)),
+                kotlin_builtin_to_jvm(name),
+                "{name}"
             );
         }
     }

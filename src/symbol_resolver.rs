@@ -7956,7 +7956,7 @@ mod tests {
 
         fn library_value_form(&self, ty: Ty) -> Ty {
             ty.obj_internal()
-                .and_then(|n| crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&n.render()))
+                .and_then(crate::jvm::jvm_class_map::kotlin_builtin_jvm_name)
                 .map(Ty::obj)
                 .unwrap_or(ty)
         }
