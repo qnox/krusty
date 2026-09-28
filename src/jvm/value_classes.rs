@@ -27,6 +27,7 @@ mod default_constructions;
 mod descriptor_parameters;
 mod equality;
 mod function_references;
+mod hidden_constructors;
 mod inline_body_slots;
 mod interface_entries;
 mod member_names;
@@ -1504,9 +1505,7 @@ pub(crate) fn lower_value_classes(
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
-    // Only a declared Kotlin parameter counts: a lexical capture, an outer instance or a lambda class's
-    // capture is a compiler-added slot kotlinc adds after value classes are lowered, so it is already
-    // the carrier and never hides the constructor.
+    // Which slots count is `hidden_constructors::selecting_slots`.
     let serialization_deserialization_ctors = (0..ir.classes.len())
         .map(|class| {
             ir.generated_secondary_constructor(
@@ -1520,9 +1519,9 @@ pub(crate) fn lower_value_classes(
         if !c.is_value
             && !c.is_object
             && !c.is_interface
-            && c.ctor_args
-                .iter()
-                .any(|a| a.declared_ty.is_some() && is_vc_ty(&a.ty))
+            && hidden_constructors::selecting_slots(c)
+                .zip(&c.ctor_args)
+                .any(|(selects, a)| selects && is_vc_ty(&a.ty))
         {
             // Capture the DECLARED ctor param types before the erase below rewrites them — the
             // class metadata constructor record must name the value classes.
@@ -1721,19 +1720,14 @@ pub(crate) fn lower_value_classes(
     // selected constructor may still be private behind its marker accessor. Its recorded generated
     // declaration identity decides that ABI; no owner-wide parameter scan is involved.
     let mut value_class_parameter_constructions = serialization_constructor_accessor_calls;
-    // Which primary-constructor slots of each class lowered here are declared Kotlin parameters.
-    // A capture or an enclosing instance is a slot kotlinc adds after lowering value classes, so a
-    // value class there never selects the hidden constructor (see `value_param_ctors` above).
-    let declared_primary_slots: HashMap<TypeName, Vec<bool>> = ir
+    let selecting_primary_slots: HashMap<TypeName, Vec<bool>> = ir
         .classes
         .iter()
         .map(|class| {
-            let declared = class
-                .ctor_args
-                .iter()
-                .map(|argument| argument.declared_ty.is_some())
-                .collect();
-            (class.fq_name, declared)
+            (
+                class.fq_name,
+                hidden_constructors::selecting_slots(class).collect(),
+            )
         })
         .collect();
     let primary_constructions: HashSet<ExprId> = ir
@@ -1788,7 +1782,7 @@ pub(crate) fn lower_value_classes(
                 // A value class's own construction is `constructor-impl`, not the hidden-marker ABI
                 // used by an ordinary class whose selected constructor declares a value-class
                 // parameter.
-                let declared = declared_primary_slots.get(internal).filter(|slots| {
+                let declared = selecting_primary_slots.get(internal).filter(|slots| {
                     slots.len() == ps.len() && primary_constructions.contains(&(i as ExprId))
                 });
                 let hides = match declared {
