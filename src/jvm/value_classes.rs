@@ -2168,11 +2168,14 @@ pub(crate) fn lower_value_classes(
                 // class as its BOX. The checked coercion narrows that box to `X?`; feeding the object
                 // through `box-impl(U)` would instead cast it to the carrier wrapper (`Integer` for an
                 // `int` carrier) and either double-box or throw. A declaration-returning value class
-                // has its carrier result stamped separately and does not satisfy this condition.
+                // has its carrier result stamped separately and does not satisfy this condition. A
+                // read of a generic property (`val boxed: T?`) is the same erased slot.
                 && !ir
                     .physical_types
                     .get(arg)
                     .is_some_and(|physical| physical.is_erased_top())
+                && !matches!(&ir.exprs[*arg as usize],
+                    IrExpr::PropertyRead { ty, .. } if ty.non_null().is_ty_param())
                 && !matches!(repr_ctx.repr(*arg), Repr::Boxed(_)) =>
             {
                 let fq_name = type_operand.non_null().obj_internal().unwrap();
@@ -2914,14 +2917,7 @@ pub(crate) fn lower_value_classes(
                     (repr_ctx.repr(*arg), target(type_operand, &under))
                 {
                     if source == target {
-                        ops.push((
-                            *arg,
-                            if type_operand.is_nullable() {
-                                BoxOp::UnboxNull(source)
-                            } else {
-                                BoxOp::Unbox(source)
-                            },
-                        ));
+                        ops.push((*arg, BoxOp::unbox(source, type_operand.is_nullable())));
                         retarget.push((id, erase(&under[&source], &under)));
                         continue;
                     }
@@ -2971,14 +2967,7 @@ pub(crate) fn lower_value_classes(
                         .get(arg)
                         .is_some_and(|physical| physical.is_erased_top())
                     {
-                        ops.push((
-                            *arg,
-                            if type_operand.is_nullable() {
-                                BoxOp::UnboxNull(target)
-                            } else {
-                                BoxOp::Unbox(target)
-                            },
-                        ));
+                        ops.push((*arg, BoxOp::unbox(target, type_operand.is_nullable())));
                         retarget.push((id, erase(&under[&target], &under)));
                         continue;
                     }
@@ -2988,13 +2977,14 @@ pub(crate) fn lower_value_classes(
                 // the BOX object. The target position wants the carrier, so realize the same
                 // cast-plus-`unbox-impl` boundary as the explicitly stamped generic-call case above.
                 // Kotlin has no implicit conversion from an unrelated concrete value to a value
-                // class; consequently a non-null `NotVc` operand under this checked coercion is a
-                // boxed value-class reference, never a raw carrier discovered by guesswork.
+                // class; consequently a `NotVc` operand under this checked coercion is a boxed
+                // value-class reference, never a raw carrier discovered by guesswork. Coerced to `X?`
+                // over a reference carrier, the box may be null and unboxes null-safely.
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
                     if matches!(repr_ctx.repr(*arg), Repr::NotVc)
                         && !repr_ctx.operand_null_only(*arg)
                     {
-                        ops.push((*arg, BoxOp::Unbox(target)));
+                        ops.push((*arg, BoxOp::unbox(target, type_operand.is_nullable())));
                         retarget.push((id, erase(&under[&target], &under)));
                         continue;
                     }
@@ -4080,6 +4070,17 @@ enum BoxOp {
     StringOf(TypeName),
 }
 
+impl BoxOp {
+    /// Unbox a `value_class` box, null-safely where the value may be null.
+    fn unbox(value_class: TypeName, nullable: bool) -> Self {
+        if nullable {
+            Self::UnboxNull(value_class)
+        } else {
+            Self::Unbox(value_class)
+        }
+    }
+}
+
 /// The representation a value-class value currently has.
 #[derive(Clone, Copy)]
 enum Repr {
@@ -4292,14 +4293,7 @@ fn record_value_boundary(
             for tail in tails {
                 if matches!(repr_ctx.repr(tail), Repr::Boxed(tail_class) if tail_class == value_class)
                 {
-                    ops.push((
-                        tail,
-                        if parameter.is_nullable() {
-                            BoxOp::UnboxNull(value_class)
-                        } else {
-                            BoxOp::Unbox(value_class)
-                        },
-                    ));
+                    ops.push((tail, BoxOp::unbox(value_class, parameter.is_nullable())));
                 }
             }
         }
@@ -4312,14 +4306,7 @@ fn record_value_boundary(
                         ..
                     }
                 ) {
-                    ops.push((
-                        value,
-                        if parameter.is_nullable() {
-                            BoxOp::UnboxNull(value_class)
-                        } else {
-                            BoxOp::Unbox(value_class)
-                        },
-                    ));
+                    ops.push((value, BoxOp::unbox(value_class, parameter.is_nullable())));
                 }
             }
         }
@@ -4903,10 +4890,12 @@ impl ReprCtx<'_> {
                 // promises the unboxed carrier after step 5, even when its operand is an erased generic
                 // read such as `List<X>.get`. Treating the pre-rewrite operand as the coercion's result
                 // makes a following sole-property access insert a second `unbox-impl`.
-                if matches!(target(type_operand, under), Target::UnboxedX(target) if target == x) {
-                    false
-                } else {
-                    self.is_boxed_vc(*arg, x)
+                // A surviving coercion to a boxed `X?` is one whose operand already was the box (an
+                // unboxed operand was rewritten to `box-impl`), even an erased generic read.
+                match target(type_operand, under) {
+                    Target::UnboxedX(target) if target == x => false,
+                    Target::Boxed if is_x(type_operand) => true,
+                    _ => self.is_boxed_vc(*arg, x),
                 }
             }
             IrExpr::Block { value: Some(v), .. } => self.is_boxed_vc(*v, x),
