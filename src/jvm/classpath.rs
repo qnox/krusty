@@ -3706,8 +3706,7 @@ impl Classpath {
             return true;
         }
         let tree = self.package_tree();
-        let catalog_hits = tree.jars_for_class(mapped);
-        if !catalog_hits.is_empty() {
+        if tree.first_jar_for_spelling(mapped).is_some() {
             return true;
         }
         if tree.incomplete_entries.is_empty() {
@@ -3748,7 +3747,7 @@ impl Classpath {
             return true;
         }
         let tree = self.package_tree();
-        if !tree.jars_for_class_name(mapped).is_empty() {
+        if tree.first_class_jar(mapped).is_some() {
             return true;
         }
         if tree.incomplete_entries.is_empty() {
@@ -5119,7 +5118,7 @@ impl PackageTree {
         else {
             return false;
         };
-        !self.jars_for_class_id(class).is_empty()
+        self.first_jar_for_id(class).is_some()
     }
 
     /// Whether `package` directly declares a class whose final path segment is `class_segment`.
@@ -5132,7 +5131,7 @@ impl PackageTree {
         let Some(class) = self.names.existing_child_of(parent, class_segment) else {
             return false;
         };
-        !self.jars_for_class_id(class).is_empty()
+        self.first_jar_for_id(class).is_some()
     }
 
     /// Whether `owner` directly declares the nested class `name`. Both probes stay inside the
