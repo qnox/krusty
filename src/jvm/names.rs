@@ -94,30 +94,24 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
 /// physical name of a name interned before it is mapped is remembered per thread.
 pub fn classfile_internal_name(internal: &str) -> String {
     if let Some(identity) = crate::types::existing_type_name(internal) {
-        return classfile_internal_name_of(identity);
+        return classfile_internal_name_of(identity).to_string();
     }
     physical_classfile_name(internal)
 }
 
-/// Physical JVM classfile name of an interned classifier. A repeated lookup returns the remembered
-/// spelling and does not render the classifier again. Callers that already hold a [`TypeName`] use
-/// this instead of rendering the name into [`classfile_internal_name`].
-pub(super) fn classfile_internal_name_of(internal: TypeName) -> String {
+/// Physical JVM classfile name of an interned classifier. The spelling is interned once. A repeated
+/// lookup returns that same text and does not render or allocate. Callers that already hold a
+/// [`TypeName`] use this instead of rendering the name into [`classfile_internal_name`].
+pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
+        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
             std::cell::RefCell::default();
     }
-    if let Some(physical) =
-        INTERNED.with(|known| known.borrow().get(&internal).map(|name| name.to_string()))
-    {
+    if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
         return physical;
     }
-    let physical = physical_classfile_name_of(internal);
-    INTERNED.with(|known| {
-        known
-            .borrow_mut()
-            .insert(internal, physical.as_str().into())
-    });
+    let physical = crate::types::intern(&physical_classfile_name_of(internal));
+    INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
     physical
 }
 
@@ -408,14 +402,14 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
             .boxed_ref()
             .and_then(Ty::obj_internal)
-            .map(crate::jvm::names::classfile_internal_name_of)
+            .map(|name| crate::jvm::names::classfile_internal_name_of(name).to_string())
             .unwrap_or_else(|| instanceof_internal_name(*inner)),
         // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
         // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
         t if t.is_array() => type_descriptor(t),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n),
+        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n).to_string(),
         // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
         Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
@@ -597,16 +591,13 @@ mod tests {
             "kotlin/Int.Companion",
         ] {
             let identity = crate::types::type_name(spelling);
+            let physical = classfile_internal_name_of(identity);
             assert_eq!(
-                classfile_internal_name_of(identity),
-                classfile_internal_name(&identity.render()),
+                physical,
+                classfile_internal_name(&identity.render()).as_str(),
                 "{spelling}"
             );
-            assert_eq!(
-                classfile_internal_name_of(identity),
-                classfile_internal_name_of(identity),
-                "{spelling}"
-            );
+            assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));
         }
     }
 
