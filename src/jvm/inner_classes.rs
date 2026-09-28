@@ -5,6 +5,7 @@
 //! rendered spellings as lookup keys or reparses them to recover semantic owners.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec};
@@ -15,10 +16,12 @@ use crate::types::{type_name, TypeName};
 pub(super) struct InnerClasses {
     specs: Vec<InnerClassSpec>,
     paths: DeclarationPaths,
+    /// The class each class declared in executable code is declared in, by internal name.
+    declaring: Rc<HashMap<String, String>>,
 }
 
 impl InnerClasses {
-    pub(super) fn new(ir: &IrFile) -> Self {
+    pub(super) fn new(ir: &IrFile, facade: &str) -> Self {
         let declared: HashMap<TypeName, &IrClass> = ir
             .classes
             .iter()
@@ -174,9 +177,21 @@ impl InnerClasses {
             .iter()
             .map(|(class, path)| (class.render(), path.clone()))
             .collect::<HashMap<_, _>>();
+        // kotlinc's `ClassCodegen` generates a class declared in executable code from the class
+        // whose code declares it, and lists it there: the class its `EnclosingMethod` names.
+        let declaring = ir
+            .classes
+            .iter()
+            .filter(|class| class.enclosure.is_some())
+            .filter_map(|class| {
+                let (owner, _) = crate::jvm::ir_emit::class_enclosure(ir, class, facade)?;
+                Some((class.fq_name(), owner))
+            })
+            .collect();
         Self {
             specs,
-            paths: std::rc::Rc::new(paths),
+            paths: Rc::new(paths),
+            declaring: Rc::new(declaring),
         }
     }
 
@@ -185,6 +200,7 @@ impl InnerClasses {
             writer.add_inner_class(spec.clone());
         }
         writer.set_declaration_paths(self.paths.clone());
+        writer.set_declaring_classes(self.declaring.clone());
     }
 }
 
@@ -283,7 +299,7 @@ mod tests {
         ir.add_class(companion_class);
         ir.add_class(IrClass::synthetic(nested_with_dollars));
 
-        let prepared = InnerClasses::new(&ir);
+        let prepared = InnerClasses::new(&ir, "sample/FacadeKt");
         assert_eq!(
             prepared.specs,
             vec![
@@ -343,7 +359,7 @@ mod tests {
         ir.add_class(member_class);
 
         assert_eq!(
-            InnerClasses::new(&ir).specs,
+            InnerClasses::new(&ir, "sample/FacadeKt").specs,
             [
                 InnerClassSpec {
                     inner: "sample/Owner$make$Local".to_string(),
@@ -370,6 +386,6 @@ mod tests {
         local.enclosure = Some(IrEnclosure::File);
         ir.add_class(local);
 
-        InnerClasses::new(&ir);
+        InnerClasses::new(&ir, "sample/FacadeKt");
     }
 }

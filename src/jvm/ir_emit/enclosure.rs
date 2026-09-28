@@ -16,7 +16,7 @@ use super::{
 /// facade with no method; a classifier's initializer names its primary `<init>`, or no method when
 /// the classifier's storage is static (an object, or a companion whose fields its outer class
 /// holds, and so its outer class).
-pub(super) fn class_enclosure(
+pub(in crate::jvm) fn class_enclosure(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
     c: &crate::ir::IrClass,
