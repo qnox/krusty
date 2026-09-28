@@ -4699,6 +4699,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body's initializers. An object or local class declared in one of them names that constructor in
   its `EnclosingMethod` (`Level$HIGH.<init>(Ljava/lang/String;I)V`), not the enum's. Test:
   `tests/enum_entry_body_enclosure_e2e.rs`.
+- **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
+  `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
+  static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.
+  So a class using `typeOf` names no `KTypeProjection$Companion` and has no `InnerClasses` row
+  for it. Test: `tests/type_of_e2e.rs::type_of_projections_call_the_static_factories`.
 - **A method's catch types precede its code's constants in the pool.** ASM's `MethodWriter`
   visits a method's try-catch blocks before its instructions, so kotlinc's pool holds every catch
   type a method's exception table names ahead of the constants its code introduces. krusty

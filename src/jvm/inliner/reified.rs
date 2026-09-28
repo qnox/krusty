@@ -286,11 +286,6 @@ fn type_of_nodes(instruction: &TypeOfInsn) -> Vec<Node> {
             name,
             descriptor,
         } => method(0xb8, owner, name, descriptor),
-        TypeOfInsn::InvokeVirtual {
-            owner,
-            name,
-            descriptor,
-        } => method(0xb6, owner, name, descriptor),
         TypeOfInsn::InvokeSpecial {
             owner,
             name,
