@@ -4180,7 +4180,11 @@ struct ReprCtx<'a> {
 }
 
 impl ReprCtx<'_> {
+    /// A value recorded as yielding a value class's carrier is that value class, unboxed.
     fn repr(&self, id: ExprId) -> Repr {
+        if let Some(&value_class) = self.carrier_unboxes.get(&id) {
+            return Repr::Unboxed(value_class);
+        }
         repr(
             self.exprs,
             self.rets,
