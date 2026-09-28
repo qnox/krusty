@@ -49,7 +49,7 @@ pub(super) fn cached_ct_sym_index(path: &Path, release: u8) -> Option<Arc<CtSymI
 /// Build one release's public-class index. Entries are classfiles stored with a `.sig` suffix under
 /// `<release-set>/<module>/<internal>.sig`; the release-set contains every release for which those
 /// exact bytes apply.
-pub(super) fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
+fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
     let release = release_symbol(release)?;
     let file = File::open(path).ok()?;
     let archive = zip::ZipArchive::new(file).ok()?;
@@ -83,4 +83,30 @@ pub(super) fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex>
             .or_insert_with(|| name.to_owned());
     }
     (!index.by_name.is_empty()).then_some(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioned_java8_ct_sym_indexes_public_classes() {
+        let Some(symbols) = crate::toolchain::jdk_symbols() else {
+            return;
+        };
+        if symbols.file_name().is_none_or(|name| name != "ct.sym") {
+            return;
+        }
+        let index = build_ct_sym_index(&symbols, 8).expect("Java 8 ct.sym index");
+        assert!(
+            index.names.get("java/util/ArrayList").is_some(),
+            "Java 8 ct.sym view indexed {} classes but not java.util.ArrayList",
+            index.by_name.len()
+        );
+        assert!(
+            index.by_name.len() > 1000,
+            "Java 8 ct.sym view collapsed to {} classes",
+            index.by_name.len()
+        );
+    }
 }

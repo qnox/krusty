@@ -23,8 +23,6 @@ pub(crate) use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
 
-#[cfg(test)]
-use self::ct_sym_index::build_ct_sym_index;
 use self::ct_sym_index::cached_ct_sym_index;
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
@@ -6375,27 +6373,6 @@ mod fq_tests {
     }
 
     #[test]
-    fn provisioned_java8_ct_sym_indexes_public_classes() {
-        let Some(symbols) = crate::toolchain::jdk_symbols() else {
-            return;
-        };
-        if symbols.file_name().is_none_or(|name| name != "ct.sym") {
-            return;
-        }
-        let index = build_ct_sym_index(&symbols, 8).expect("Java 8 ct.sym index");
-        assert!(
-            index.names.get("java/util/ArrayList").is_some(),
-            "Java 8 ct.sym view indexed {} classes but not java.util.ArrayList",
-            index.by_name.len()
-        );
-        assert!(
-            index.by_name.len() > 1000,
-            "Java 8 ct.sym view collapsed to {} classes",
-            index.by_name.len()
-        );
-    }
-
-    #[test]
     fn ct_sym_classpath_exposes_only_the_selected_release_view() {
         let directory = test_temp_dir("ct-sym-release");
         let symbols = directory.join("ct.sym");
@@ -6416,7 +6393,7 @@ mod fq_tests {
         assert!(!java8.class_exists("future/OnlyNine"));
         assert!(!java8.class_exists("future/OnlyEleven"));
 
-        let java9 = build_ct_sym_index(&symbols, 9).expect("Java 9 symbol view");
+        let java9 = cached_ct_sym_index(&symbols, 9).expect("Java 9 symbol view");
         assert!(java9.names.get("transient/Body").is_some());
         assert!(java9.names.get("future/OnlyNine").is_some());
         assert!(java9.names.get("future/OnlyEleven").is_none());
