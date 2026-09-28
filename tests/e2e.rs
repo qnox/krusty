@@ -1490,6 +1490,8 @@ mod paren_condition_newline_e2e;
 mod parser_errors_coverage_e2e;
 #[path = "path_smartcast_e2e.rs"]
 mod path_smartcast_e2e;
+#[path = "platform_argument_expected_e2e.rs"]
+mod platform_argument_expected_e2e;
 #[path = "platform_call_assertions_e2e.rs"]
 mod platform_call_assertions_e2e;
 #[path = "platform_classifier_identity_e2e.rs"]
