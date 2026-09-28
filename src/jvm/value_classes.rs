@@ -3608,17 +3608,18 @@ pub(crate) fn lower_value_classes(
                 box_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
             }
-            BoxOp::Unbox(x)
+            BoxOp::Unbox(x) | BoxOp::UnboxNull(x)
                 if matches!(
                     ir.value_class_suspend_calls.get(&id).copied(),
                     Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
-                        if carrier.canonical_semantic()
+                        if carrier.non_null().canonical_semantic()
                             == erase(&under[&x], &under).canonical_semantic()
                 ) =>
             {
                 // The erased CPS method descriptor says `Object`, but the continuation carries the
-                // already-unboxed representation recorded for this exact call. A boundary collected
-                // from the pre-CPS descriptor must not insert a value-class `unbox-impl` around it.
+                // already-unboxed representation recorded for this exact call, null or not. A boundary
+                // collected from the pre-CPS descriptor must not insert a value-class `unbox-impl`
+                // around it.
             }
             BoxOp::Unbox(x) => {
                 if matches!(
