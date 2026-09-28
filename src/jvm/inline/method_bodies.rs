@@ -65,6 +65,12 @@ pub trait MethodBodies {
     /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
 
+    /// [`Self::body`] for a classifier that is already interned.
+    /// Identity-aware implementations override this compatibility path to avoid rendering.
+    fn body_name(&self, owner: TypeName, name: &str, descriptor: &str) -> Option<MethodCode> {
+        self.body(&owner.render(), name, descriptor)
+    }
+
     /// The class file of `internal`, for a class an inlined body's objects are copied from.
     fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
         None
@@ -175,5 +181,33 @@ mod tests {
         };
         assert!(probe.owner_is_interface_name(type_name("sample/Interface")));
         assert_eq!(probe.owner.take().as_deref(), Some("sample/Interface"));
+    }
+
+    #[test]
+    fn default_body_probe_preserves_the_string_capability() {
+        struct BodyStringProbe(RefCell<Option<(String, String, String)>>);
+        impl MethodBodies for BodyStringProbe {
+            fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
+                self.0.replace(Some((
+                    owner.to_owned(),
+                    name.to_owned(),
+                    descriptor.to_owned(),
+                )));
+                None
+            }
+        }
+
+        let probe = BodyStringProbe(RefCell::new(None));
+        assert!(probe
+            .body_name(type_name("shared/Pool"), "answer", "()I")
+            .is_none());
+        assert_eq!(
+            probe.0.take(),
+            Some((
+                "shared/Pool".to_owned(),
+                "answer".to_owned(),
+                "()I".to_owned()
+            ))
+        );
     }
 }

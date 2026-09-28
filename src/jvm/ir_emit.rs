@@ -11553,7 +11553,7 @@ impl<'a> Emitter<'a> {
                 args,
             } if inline.can_inline() => {
                 self.bodies
-                    .body(&owner.render(), name, descriptor)
+                    .body_name(*owner, name, descriptor)
                     .is_some_and(|body| !body.handlers.is_empty())
                     || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
                     || args
