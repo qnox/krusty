@@ -9,7 +9,8 @@ use super::{
     box_prim_free, discard, emit_num_conv, emit_return, finish_code, finish_code_sig, ir_ty_to_jvm,
     jvm_declared_ty, jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
     method_descriptor, slot_words, throw_assertion_error, type_descriptor, unbox_prim_from,
-    verif_for_jvm_free, ClassWriter, CodeBuilder, EmitRun, JvmSignatureFormatter, VerifType,
+    verif_for_jvm_free, ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter,
+    VerifType,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -21,10 +22,13 @@ fn finish_bridge(
     code: &mut CodeBuilder,
     locals: u16,
     bridge: &crate::ir::Bridge,
+    packs_arguments: bool,
     signature: Option<&str>,
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
         finish_code_sig::<0x0001>(cw, name, desc, code, locals, signature);
+    } else if packs_arguments {
+        finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     } else if bridge.special {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 }>(cw, name, desc, code, locals);
     } else {
@@ -149,15 +153,9 @@ pub(super) fn emit_bridges(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
-    return_adaptations: &crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
-    run: &EmitRun,
+    env: &EmitEnv<'_>,
 ) {
-    let class = ClassBridges {
-        ir,
-        class: c,
-        return_adaptations,
-        run,
-    };
+    let class = ClassBridges::of(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -172,7 +170,20 @@ struct ClassBridges<'a> {
     ir: &'a IrFile,
     class: &'a crate::ir::IrClass,
     return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     run: &'a EmitRun,
+}
+
+impl<'a> ClassBridges<'a> {
+    fn of(ir: &'a IrFile, class: &'a crate::ir::IrClass, env: &'a EmitEnv<'_>) -> Self {
+        Self {
+            ir,
+            class,
+            return_adaptations: env.bridge_return_adaptations,
+            argument_arrays: env.function_argument_arrays,
+            run: env.run,
+        }
+    }
 }
 
 /// Emit one bridge: see [`emit_bridges`].
@@ -187,8 +198,10 @@ fn emit_bridge(
         ir,
         class: c,
         return_adaptations,
+        argument_arrays,
         run,
     } = *class;
+    let packs_arguments = argument_arrays.packs(c.fq_name_id(), b);
     let return_unboxing = u32::try_from(bridge_index)
         .ok()
         .and_then(|index| return_adaptations.get(c.fq_name_id(), index));
@@ -252,6 +265,9 @@ fn emit_bridge(
         locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
         code.bind(dispatch);
     }
+    if packs_arguments {
+        super::function_reference_invoke::check_argument_count(cw, &mut code, cp.len());
+    }
     if let Some(parameters) = &target_parameters {
         assert!(
             c.is_value,
@@ -275,10 +291,19 @@ fn emit_bridge(
     } else {
         code.aload(0);
     }
+    let erased_arguments = if packs_arguments {
+        vec![Ty::obj("java/lang/Object"); cp.len()]
+    } else {
+        ep.clone()
+    };
     let mut slot = 1u16;
-    for (k, (et, ct)) in ep.iter().zip(&cp).enumerate() {
-        load(*et, slot, &mut code);
-        slot += slot_words(*et);
+    for (k, (et, ct)) in erased_arguments.iter().zip(&cp).enumerate() {
+        if packs_arguments {
+            super::function_reference_invoke::load_erased_function_argument(cw, &mut code, true, k);
+        } else {
+            load(*et, slot, &mut code);
+            slot += slot_words(*et);
+        }
         // A boxed value-class param (a generic supertype method `f(Object,…)` delegating to a mangled
         // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
         // then `unbox-impl` it to the underlying `ct` the target expects.
@@ -350,9 +375,10 @@ fn emit_bridge(
             &mut code,
             1 + pw,
             b,
+            packs_arguments,
             entry.and_then(|header| header.signature.as_deref()),
         );
-        attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
     }
     if b.concrete_ret == Ty::Nothing && !unboxes_result {
@@ -372,9 +398,10 @@ fn emit_bridge(
             &mut code,
             1 + pw,
             b,
+            packs_arguments,
             entry.and_then(|header| header.signature.as_deref()),
         );
-        attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
     }
     if let Some(owner) = &b.box_ret {
@@ -486,9 +513,10 @@ fn emit_bridge(
         &mut code,
         1 + pw,
         b,
+        packs_arguments,
         entry.and_then(|header| header.signature.as_deref()),
     );
-    attach_bridge_debug_tables(ir, c, cw, b, &erased_desc, body_pc);
+    attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
 }
 
 /// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
@@ -507,11 +535,25 @@ fn attach_bridge_debug_tables(
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     bridge: &crate::ir::Bridge,
+    packs_arguments: bool,
     erased_desc: &str,
     body_pc: u16,
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
         attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, body_pc);
+        return;
+    }
+    if packs_arguments {
+        // kotlinc maps no line of the array bridge and names its one parameter `args`.
+        let locals = vec![
+            (String::from("this"), format!("L{};", c.fq_name()), 0u16),
+            (
+                String::from("args"),
+                String::from("[Ljava/lang/Object;"),
+                1u16,
+            ),
+        ];
+        cw.set_method_debug(&bridge.name, erased_desc, None, &locals);
         return;
     }
     if c.decl_line == 0 {
@@ -605,8 +647,7 @@ pub(super) fn emit_value_class_interface_entries(
     cw: &mut ClassWriter,
     member: u32,
     formatter: &JvmSignatureFormatter<'_>,
-    return_adaptations: &crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
-    run: &EmitRun,
+    env: &EmitEnv<'_>,
 ) {
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry
@@ -616,12 +657,7 @@ pub(super) fn emit_value_class_interface_entries(
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         let header = EntryHeader::of(ir, formatter, member, &descriptor);
-        let class = ClassBridges {
-            ir,
-            class: c,
-            return_adaptations,
-            run,
-        };
+        let class = ClassBridges::of(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
     }

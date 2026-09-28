@@ -99,12 +99,12 @@ use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::ProtectedRegion;
-mod collection_markers;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_accessors;
 mod static_fields;
 mod string_members;
+mod supertype_markers;
 mod type_operation_emission;
 mod vararg;
 mod when;
@@ -404,6 +404,8 @@ pub(super) struct EmitEnv<'a> {
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     unit_result_tail_forwards: &'a crate::jvm::suspend::UnitResultTailForwards,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    /// The bridges that take `FunctionN.invoke`'s packed argument array.
+    function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
@@ -3226,7 +3228,7 @@ fn new_classifier_writer(
     } else {
         recorded.and_then(|signature| jvm_class_signature(&formatter, signature))
     };
-    let signature = collection_markers::with_markers(signature, ir, c);
+    let signature = supertype_markers::with_markers(signature, ir, c);
     let internal = c.fq_name();
     // kotlinc (ASM) visits `(name, signature, superName)`, so the signature VALUE interns between
     // the two class names — it must reach the writer's constructor, not only `set_signature`.
@@ -3416,6 +3418,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         emit_time_machines: facts.metadata.emit_time_machines,
         unit_result_tail_forwards: facts.metadata.unit_result_tail_forwards,
         bridge_return_adaptations: facts.metadata.bridge_returns,
+        function_argument_arrays: facts.metadata.function_argument_arrays,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
@@ -4680,8 +4683,7 @@ fn emit_scheduled_member(
             cw,
             fid,
             signature_formatter,
-            env.bridge_return_adaptations,
-            env.run,
+            env,
         );
     } else {
         cw.add_abstract_method_sig(
@@ -4987,7 +4989,7 @@ fn emit_class(
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
     // ahead of the pool seeding below.
-    collection_markers::add_interfaces(&mut cw, ir, c);
+    supertype_markers::add_interfaces(&mut cw, ir, c);
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
@@ -5692,7 +5694,7 @@ fn emit_class(
     // or every inherited call is an `AbstractMethodError`. kotlinc adds them before the bridges, and
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
@@ -6119,7 +6121,7 @@ fn emit_interface_class(
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let mut cw = new_classifier_writer(ir, c, "java/lang/Object", env, opts);
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400); // [PUBLIC |] INTERFACE | ABSTRACT
-    collection_markers::add_interfaces(&mut cw, ir, c);
+    supertype_markers::add_interfaces(&mut cw, ir, c);
     register_sealed_subtypes(
         &mut cw,
         ir,
@@ -6504,7 +6506,7 @@ fn emit_enum_class(
     env.inner_classes.register(&mut cw);
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
-    collection_markers::add_interfaces(&mut cw, ir, c);
+    supertype_markers::add_interfaces(&mut cw, ir, c);
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
@@ -6999,7 +7001,7 @@ fn emit_enum_class(
     // { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`). kotlinc adds both
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -8511,7 +8513,7 @@ fn jvm_class_signature(
         // not written on its own arguments (`interface L<E> : List<E>` implements Java `List<E>`).
         // An explicit source projection remains encoded by `ty_at` itself.
         for sup in &g.supers {
-            s.push_str(&formatter.ty_at(sup, Wildcards::Supertype)?);
+            s.push_str(&formatter.supertype(sup)?);
         }
     }
     Some(s).filter(|signature| signature.contains('<'))
@@ -14683,6 +14685,8 @@ mod invariant_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let function_argument_arrays =
+            crate::jvm::function_argument_arrays::FunctionArgumentArrays::default();
         let unit_result_tail_forwards = crate::jvm::suspend::UnitResultTailForwards::default();
         emit_all_with_checked_classifiers(
             ir,
@@ -14693,6 +14697,7 @@ mod invariant_tests {
                     facade: None,
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
+                    function_argument_arrays: &function_argument_arrays,
                     emit_time_machines,
                     unit_result_tail_forwards: &unit_result_tail_forwards,
                 },
