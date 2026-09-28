@@ -382,6 +382,8 @@ mod cli_dropin_e2e;
 mod closure_in_class_e2e;
 #[path = "codegen_host_e2e.rs"]
 mod codegen_host_e2e;
+#[path = "collection_bridge_barrier_e2e.rs"]
+mod collection_bridge_barrier_e2e;
 #[path = "collection_members_e2e.rs"]
 mod collection_members_e2e;
 #[path = "collection_special_member_stub_e2e.rs"]

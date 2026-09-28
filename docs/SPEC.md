@@ -7440,6 +7440,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the read as the carrier and passed it through `box-impl`, or unboxed it without the null check.
   Tests: `tests/value_class_generic_slot_read_e2e.rs`. Corpus: `inlineClasses/boxNullableValueOf…Generic2`,
   `unboxNullableValueOf…Generic` and `…GWI2`.
+- **A collection bridge checks its argument's type first.** kotlinc's type-safe barrier guards the
+  erased bridge of `contains`, `remove`, `containsKey`, `containsValue`, `get`, `indexOf` and
+  `lastIndexOf` when the override narrows the parameter: a foreign argument answers `false`, `null`
+  or `-1` instead of failing the `checkcast`. Whether a bridge narrows is decided on declared types,
+  before value-class lowering; for a value class the check is `instanceof` its box, which the bridge
+  then unboxes for the mangled override. Tests: `tests/collection_bridge_barrier_e2e.rs`. Corpus:
+  `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic` forms).
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
