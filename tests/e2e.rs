@@ -12,6 +12,8 @@ mod cast_operand_reread_e2e;
 mod common_core;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "common/inner_class_rows.rs"]
+mod inner_class_rows_support;
 #[path = "common/recorded.rs"]
 mod recorded_support;
 
@@ -19,6 +21,7 @@ mod common {
     pub use super::bytecode_comparison_support::*;
     pub use super::common_core::*;
     pub use super::e2e_support::*;
+    pub use super::inner_class_rows_support::assert_same_inner_classes;
     pub use super::recorded_support::{recorded, recorded_line, recorded_named};
 }
 
