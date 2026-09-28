@@ -955,9 +955,25 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     writer: &mut W,
     classpath: Vec<PathBuf>,
 ) -> io::Result<()> {
+    analysis_worker_loop(reader, writer, classpath, false)
+}
+
+fn analysis_worker_loop<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    classpath: Vec<PathBuf>,
+    recycle_compilation_ids: bool,
+) -> io::Result<()> {
     let mut prepared = PreparedClasspath::launch(classpath);
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
+        // The previous request's tables are dropped with its stack. Reusing compilation numbers
+        // makes this request's declaration identities hit strings already interned for those
+        // coordinates instead of leaking a new one per edit. In-process tests leave the counter
+        // monotonic so parallel compilations in one process cannot alias.
+        if recycle_compilation_ids {
+            krusty::begin_compilation_epoch();
+        }
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
         let request = match request {
@@ -1158,7 +1174,7 @@ pub fn run_configured_analysis_worker<R: BufRead, W: Write>(
     let configuration =
         serde_json::from_slice::<OwnedWorkerLaunchConfiguration>(&body).map_err(json_io)?;
     drop(body);
-    run_analysis_worker(reader, writer, configuration.classpath)
+    analysis_worker_loop(reader, writer, configuration.classpath, true)
 }
 
 /// Stub `java_sources` onto `classpath` so Kotlin sources resolve Java declarations that no compiled

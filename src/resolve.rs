@@ -3490,10 +3490,8 @@ impl SymbolTable {
 
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
-        static NEXT_COMPILATION_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
         SymbolTable {
-            compilation_id: NEXT_COMPILATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            compilation_id: crate::compilation_epoch::next_compilation_id(),
             module_symbol_cache: Default::default(),
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
