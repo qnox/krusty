@@ -93,7 +93,13 @@ fn genuine_overload_ambiguity_still_reports() {
                              fun h(a: String?, b: Int?) {}\n\
                              fun useH() { h(null, null) }\n",
     );
-    assert_eq!(diags, vec!["overload resolution ambiguity".to_string()]);
+    assert_eq!(
+        diags,
+        vec!["overload resolution ambiguity between candidates:\n\
+             fun h(a: Int?, b: String?): Unit\n\
+             fun h(a: String?, b: Int?): Unit"
+            .to_string()]
+    );
 }
 
 #[test]

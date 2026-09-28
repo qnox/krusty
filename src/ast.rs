@@ -1829,6 +1829,9 @@ pub struct File {
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.
     pub unit_conversions_on_arbitrary_expressions: bool,
+    /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
+    /// shape is analyzed before the most specific candidate is chosen.
+    pub eager_lambda_analysis: bool,
 }
 
 impl File {

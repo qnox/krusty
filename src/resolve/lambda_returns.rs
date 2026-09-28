@@ -40,6 +40,8 @@ pub(super) struct LambdaReturnScopes {
     /// which is kotlinc's `InlineStatus.returnAllowed`. A return may leave only through lambdas
     /// passed to a plain (neither `crossinline` nor `noinline`) parameter of an inline callee.
     active_inlined: Vec<bool>,
+    /// The lambda whose individual value returns are being collected, with those returns.
+    collected_returns: Option<(ExprId, Vec<Ty>)>,
 }
 
 impl Default for LambdaReturnScopes {
@@ -52,6 +54,7 @@ impl Default for LambdaReturnScopes {
             bare_target: ReturnTarget::Function,
             active_chain: Vec::new(),
             active_inlined: Vec::new(),
+            collected_returns: None,
         }
     }
 }
@@ -186,12 +189,31 @@ impl LambdaReturnScopes {
     pub(super) fn active_chain(&self) -> &[ExprId] {
         &self.active_chain
     }
+
+    /// Start collecting the type of each value `lambda` returns through a labelled `return`,
+    /// individually rather than joined.
+    pub(super) fn collect_returns(&mut self, lambda: ExprId) {
+        self.collected_returns = Some((lambda, Vec::new()));
+    }
+
+    /// The returns collected since [`Self::collect_returns`], ending the collection.
+    pub(super) fn take_collected_returns(&mut self) -> Vec<Ty> {
+        self.collected_returns
+            .take()
+            .map(|(_, returns)| returns)
+            .unwrap_or_default()
+    }
 }
 
 impl Checker<'_> {
     /// Join every value-return exit through the semantic source as it is recorded. Waiting until the
     /// tail is known is too late: two related labelled returns would already have collapsed to `Any`.
     pub(super) fn record_lambda_returned_type(&mut self, lambda: ExprId, returned: Ty) {
+        if let Some((collected, returns)) = &mut self.lambda_returns.collected_returns {
+            if *collected == lambda {
+                returns.push(returned);
+            }
+        }
         let merged = match self.lambda_returns.returned_type(lambda) {
             None => returned,
             Some(_) if returned == Ty::Error => Ty::Error,

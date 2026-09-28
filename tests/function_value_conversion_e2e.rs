@@ -10,55 +10,6 @@ use super::common;
 
 const UNIT_CONVERSIONS: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressions\n";
 
-/// Compile `source` with both compilers and require `class` to be kotlinc's: its header, every
-/// member with its code and debug tables, and its `@Metadata`.
-fn assert_class_matches_kotlinc(
-    stem: &str,
-    source: &str,
-    class: &str,
-) -> common::ReferenceComparison {
-    let comparison = common::compare_with_kotlinc_plugin(
-        stem,
-        source,
-        class,
-        &[common::stdlib_jar()],
-        "17",
-        &common::language_directives::kotlinc_args(source),
-    )
-    .expect("reference kotlinc and javap are provisioned");
-    let header = |bytes: &[u8]| {
-        let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
-        (
-            info.access,
-            info.this_class,
-            info.super_class,
-            info.interfaces(),
-            info.signature.clone(),
-        )
-    };
-    assert_eq!(
-        header(&comparison.krusty_bytes),
-        header(&comparison.reference_bytes),
-        "{class}: kotlinc's class header"
-    );
-    assert_eq!(
-        common::member_table(&comparison.krusty_bytes),
-        common::member_table(&comparison.reference_bytes),
-        "{class}: kotlinc's member table"
-    );
-    assert_eq!(
-        common::member_blocks(&comparison.krusty),
-        common::member_blocks(&comparison.reference),
-        "{class}: kotlinc's members"
-    );
-    assert_eq!(
-        common::raw_kotlin_metadata(&comparison.krusty_bytes),
-        common::raw_kotlin_metadata(&comparison.reference_bytes),
-        "{class}: kotlinc's @Metadata"
-    );
-    comparison
-}
-
 /// Require the carriers of `source` and the method holding their use sites (`use_site`, a javap
 /// header line of `facade`) to be kotlinc's, then run `box()` under both compilers.
 fn assert_conversion_matches_kotlinc(
@@ -69,7 +20,7 @@ fn assert_conversion_matches_kotlinc(
     use_site: &str,
 ) {
     for carrier in carriers {
-        assert_class_matches_kotlinc(stem, source, carrier);
+        common::assert_class_matches_kotlinc(stem, source, carrier);
     }
     let comparison = common::compare_with_kotlinc_plugin(
         stem,

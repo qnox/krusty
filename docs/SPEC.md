@@ -9024,6 +9024,50 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
   `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
 
+- **`+EagerLambdaAnalysis`: a shared lambda argument discriminates overload candidates.** Ported from
+  kotlinc FIR `EagerLambdaResolution` (`runEagerLambdaAnalysisAndFilterOutInapplicableCandidates`,
+  run by `ConeOverloadConflictResolver` after override filtering). kotlinc 2.4.0, 2.4.10 and 2.4.20
+  all accept the flag; a file opts in with `// LANGUAGE: +EagerLambdaAnalysis`
+  (`src/parser/language_policy.rs`). While more than one candidate remains, the first lambda
+  argument that every candidate maps to a parameter of function type (a SAM parameter contributes
+  its function type) is analyzed once, provided every candidate agrees on its parameter count,
+  receiver, context count and input types, and the inputs are fixed; a candidate with a contract
+  stops the analysis. Each candidate is then checked against the lambda's results: every
+  `return@label v` must fit its result type; an empty body or a statement-ending body yields `Unit`,
+  which must fit; a trailing expression fits, except that a `Unit` result accepts any expression and
+  marks the candidate as coercing to `Unit` unless the expression is itself `Unit`. Integer literals
+  adapt to the expected numeric type. When the expected result mentions the candidate's own type
+  parameters, the results, as the lambda's function type, join the call's typed arguments in the
+  shared call-constraint solver (`infer_generic_call_constraints_from_symbols`); a solution that
+  violates a declared bound drops the candidate, and the results must then fit the solved result.
+  So `{ "s" }` keeps `<T : CharSequence> g(b: () -> T)` over `<T : Number> g(b: () -> T)`, `{ null }`
+  keeps a `Number?` bound over a `CharSequence` one, `Inv<T>` and `Inv<out T>` results constrain `T`
+  through their type argument, and a generic candidate dropped this way leaves a coercing
+  `() -> Unit` candidate to win. Candidates whose results do not fit are dropped, and when none
+  fits the first candidate stays, so its own mismatch is reported (`return type mismatch: expected
+  'Int', actual 'Boolean'`). Of the survivors, those that did not coerce to `Unit` are preferred
+  before kotlinc's usual discrimination (most specific, non-generic, non-SAM, non-suspend-converted).
+  The same filter applies to top-level functions, members, extensions and constructors
+  (`src/resolve/eager_lambda_analysis.rs`; the lambda shapes it compares come from
+  `src/resolve/lambda_call_shapes.rs`). A member call's final selection builds its family again, so
+  the members the analysis dropped are remembered by their stable identity (the declaration, the
+  source member, the external callable, or a synthesized operation on its owner), never by their
+  parameter types; when a dropped member has no such identity the analysis leaves the family
+  whole. A suspend lambda without a suspension point compiles to kotlinc's `SuspendLambda` class, as
+  one with suspension points does; inside that class `coroutineContext` reads `this.getContext()`.
+  That class's `@Metadata` keeps the empty payload every suspend lambda class has, where kotlinc
+  records the lambda's function; writing it is separate work, and the tests compare these classes'
+  code only. Known gaps: an anonymous function argument and inputs that kotlinc would semi-fix are
+  not analyzed. Two gaps sit in
+  ordinary generic call checking rather than in the analysis: without the feature krusty still
+  selects between candidates told apart only by the bound a lambda result must meet, where kotlinc
+  reports an overload ambiguity, and when no candidate's bound admits the result krusty reports
+  `none of the following candidates is applicable` where kotlinc reports `cannot infer type for type
+  parameter 'T'` beside the return type mismatch. The corpus case
+  `inference/eagerLambdaAnalysisOnConstructorCall.kt` is `IGNORE_BACKEND: JVM`: kotlinc rejects its
+  two constructors with a platform declaration clash. (`tests/eager_lambda_analysis_e2e.rs`; corpus
+  `inference/eagerLambdaAnalysis{SamAndLambda,SuspendAndNotSuspend,SuspendAndSam}.kt`.)
+
 - **A suspend function VALUE invoked in statement position mid-body gets its own resume state.**
   The machine already threads the continuation and parks/resumes correctly; the leaf/machine
   validation walk (`box_returns`) was just missing traversal arms for `InvokeFunction` and
