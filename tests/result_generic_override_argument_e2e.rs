@@ -55,3 +55,47 @@ fn the_override_does_not_null_check_its_boxed_result() {
 fn a_result_passed_to_a_generic_override_runs() {
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
+
+/// The override shares its name with an overload declared before it. Only the override the bridge
+/// delegates to receives the box; the overload keeps its own `int` parameter.
+const OVERLOADED: &str = "interface Sink<T> {\n\
+    \x20   fun take(x: T): Any?\n\
+    }\n\
+    fun reboxed(r: Result<Any?>): Any? = r\n\
+    class Keep : Sink<Result<Any?>> {\n\
+    \x20   fun take(x: Int): Any? = x\n\
+    \x20   override fun take(x: Result<Any?>): Any? = reboxed(x)\n\
+    }\n\
+    fun pass(): Any? = Keep().take(Result.success(\"OK\"))\n\
+    fun count(): Any? = Keep().take(7)\n\
+    fun box(): String = if (pass() is Result<*> && count() == 7) \"OK\" else \"fail\"\n";
+
+#[test]
+fn only_the_bridged_overload_receives_the_box() {
+    let built = common::compare_with_kotlinc_plugin(
+        "ResultGenericOverrideOverload",
+        OVERLOADED,
+        "Keep",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    for method in [
+        "public final java.lang.Object take(int)",
+        "public java.lang.Object take(java.lang.Object)",
+    ] {
+        let reference = common::method_instructions(&built.reference, method);
+        assert!(!reference.is_empty(), "kotlinc writes {method}");
+        assert_eq!(
+            common::method_instructions(&built.krusty, method),
+            reference,
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn an_overloaded_result_override_runs() {
+    assert_eq!(common::expect_box_run_with_stdlib(OVERLOADED, "Main"), "OK");
+}
