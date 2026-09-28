@@ -481,9 +481,18 @@ class Hidden(private val greeter: Greeter) : Greeter by greeter\n\
 class Narrow(val impl: Impl) : Greeter by impl\n\
 class Mutable(var greeter: Greeter) : Greeter by greeter\n\
 class Other(val kept: Greeter, delegate: Greeter) : Greeter by delegate\n\
+class Second(val first: Greeter, val second: Greeter) : Greeter by second\n\
+fun local(suffix: String): Greeter {\n\
+    class Captured(val first: Greeter, val second: Greeter) : Greeter by second {\n\
+        fun tail() = suffix\n\
+    }\n\
+    val captured = Captured(Impl(\"x\"), Impl(\"\"))\n\
+    return Impl(captured.greet() + captured.tail())\n\
+}\n\
 fun box(): String =\n\
     Shared(Impl(\"O\")).greet() + Hidden(Impl(\"K\")).greet() + Narrow(Impl(\"\")).greet() +\n\
-        Mutable(Impl(\"\")).greet() + Other(Impl(\"x\"), Impl(\"\")).greet()\n";
+        Mutable(Impl(\"\")).greet() + Other(Impl(\"x\"), Impl(\"\")).greet() +\n\
+        Second(Impl(\"x\"), Impl(\"\")).greet() + local(\"\").greet()\n";
 
 /// The fields a class declares, in classfile order, as `access name descriptor`.
 fn declared_fields(bytes: &[u8]) -> Vec<String> {
@@ -506,13 +515,25 @@ fn a_constructor_val_property_delegate_reuses_its_field() {
     let classes = common::expect_classes_with_stdlib(PROPERTY_DELEGATE_SRC, "DelegPropertyField");
     let reference =
         common::kotlinc_library(PROPERTY_DELEGATE_SRC).expect("kotlinc compiles the reference");
-    for class in ["Shared", "Hidden", "Narrow", "Mutable", "Other"] {
+    // The local class is named after its file, which each compiler receives under its own stem.
+    for (class, reference_class) in [
+        ("Shared", "Shared"),
+        ("Hidden", "Hidden"),
+        ("Narrow", "Narrow"),
+        ("Mutable", "Mutable"),
+        ("Other", "Other"),
+        ("Second", "Second"),
+        (
+            "DelegPropertyFieldKt$local$Captured",
+            "LibKt$local$Captured",
+        ),
+    ] {
         let (_, bytes) = classes
             .iter()
             .find(|(name, _)| name == class)
             .unwrap_or_else(|| panic!("{class} emitted"));
-        let expected = std::fs::read(reference.join(format!("{class}.class")))
-            .unwrap_or_else(|error| panic!("kotlinc emits {class}: {error}"));
+        let expected = std::fs::read(reference.join(format!("{reference_class}.class")))
+            .unwrap_or_else(|error| panic!("kotlinc emits {reference_class}: {error}"));
         assert_eq!(
             declared_fields(bytes),
             declared_fields(&expected),

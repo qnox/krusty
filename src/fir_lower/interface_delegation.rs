@@ -14,21 +14,20 @@ use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
 
-/// The physical constructor slot of declared primary-constructor parameter `parameter`, past
-/// whatever compiler prefix (local captures) the constructor carries.
+/// The physical constructor slot of declared primary-constructor parameter `parameter`. The
+/// constructor lowering has laid `ctor_args` out as the compiler prefix (local captures) followed
+/// by the declared value parameters, so the slot is read off that recorded layout rather than
+/// recomputed from the constructor signature, which also counts classifier context parameters.
 fn declared_parameter_index(
-    index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     ir: &IrFile,
     class: crate::ir::ClassId,
     parameter: u32,
 ) -> Result<usize, FirFileLoweringFailure> {
-    let source_parameter_count = primary_constructor_parameter_count(index, declaration)?;
-    let arguments = ir.classes[class as usize].ctor_args.len();
-    arguments
-        .checked_sub(source_parameter_count)
-        .and_then(|prefix| prefix.checked_add(parameter as usize))
-        .filter(|index| *index < arguments)
+    let class_ir = &ir.classes[class as usize];
+    (class_ir.constructor_prefix_count as usize)
+        .checked_add(parameter as usize)
+        .filter(|index| *index < class_ir.ctor_args.len())
         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))
 }
 
@@ -143,7 +142,7 @@ fn materialize_delegation(
     {
         // The property IS the delegate. Its field is the one its constructor parameter backs,
         // which the constructor pass has by now decided.
-        let parameter_index = declared_parameter_index(index, declaration, ir, class, parameter)?;
+        let parameter_index = declared_parameter_index(declaration, ir, class, parameter)?;
         let field = ir.classes[class as usize].ctor_args[parameter_index]
             .field_index
             .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
@@ -163,8 +162,7 @@ fn materialize_delegation(
             // second initializer would be a second write of the same value.
         }
         ResolvedInterfaceDelegateSource::ConstructorParameter(parameter) => {
-            let parameter_index =
-                declared_parameter_index(index, declaration, ir, class, parameter)?;
+            let parameter_index = declared_parameter_index(declaration, ir, class, parameter)?;
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
             prepend_parameter_initializer(ir, class, field, parameter_index)?;
@@ -596,26 +594,6 @@ fn delegated_call(
             })
         })
         .unwrap_or(expression))
-}
-
-fn primary_constructor_parameter_count(
-    index: &ResolvedModuleIndex,
-    classifier: DeclarationId,
-) -> Result<usize, FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
-        if index.declaration_anchor(declaration).is_some_and(|anchor| {
-            anchor.owner == Some(classifier)
-                && anchor.kind == DeclarationKind::Constructor
-                && anchor.sibling == 0
-        }) {
-            return index
-                .signature(declaration)
-                .map(|signature| signature.parameters.len())
-                .ok_or(FirFileLoweringFailure::MissingCallable(declaration));
-        }
-    }
-    Err(FirFileLoweringFailure::MissingClassifier(classifier))
 }
 
 fn prepend_initializer(ir: &mut IrFile, class: crate::ir::ClassId, store: u32) {
