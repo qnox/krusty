@@ -24,11 +24,12 @@ pub(super) fn emit(
     }
 
     // A spread builder normally remains on the operand stack while each element is evaluated.
-    // A frame-recording element cannot inherit that hidden prefix, so evaluate every element on an
-    // empty stack first. Spilling all of them preserves source order and exactly-once evaluation.
+    // An element that cannot carry that prefix (see `spills_operand_prefix`) is evaluated with
+    // every other element on an empty stack first, preserving source order and exactly-once
+    // evaluation.
     let temps = elements
         .iter()
-        .any(|&element| emitter.emits_control_flow(element))
+        .any(|&element| emitter.spills_operand_prefix(element))
         .then(|| emitter.spill_to_temps(elements, code));
     let element_type = array_jvm_element(array_type);
     if element_type.is_jvm_scalar() {
@@ -171,16 +172,13 @@ fn emit_packed_array(
 ) {
     let element_type = array_jvm_element(array_type);
     let reference_array = array_type.is_reference_array();
-    // An element whose own emission records a stack-map frame — a branchy inlined body such as
-    // `takeUnless { … }` — cannot run with `[array, index]` already on the stack: the relocated
-    // frames of a spliced branchy body carry no stack prefix, so the splicer declines and a
-    // required stdlib inline body then bails the whole file. Evaluate such elements into temps
-    // first, on a clean stack, exactly as the constructor and `Ref` holder paths already do for
-    // their own held pairs. Element evaluation stays left-to-right, and a vararg whose elements
-    // are all ordinary keeps its existing emission byte for byte.
+    // An element that cannot carry `[array, index]` on the stack (see `spills_operand_prefix`),
+    // such as a branchy inlined `takeUnless { … }`, is evaluated with every other element into
+    // temps first, on a clean stack. Element evaluation stays left-to-right; an ordinary branchy
+    // element keeps the pair on the stack, as kotlinc does.
     if elements
         .iter()
-        .any(|&element| emitter.emits_control_flow(element))
+        .any(|&element| emitter.spills_operand_prefix(element))
     {
         emit_packed_array_through_temps(emitter, array_type, elements, code);
         return;

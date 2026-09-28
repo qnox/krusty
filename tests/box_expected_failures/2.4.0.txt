@@ -39,8 +39,6 @@ contextParameters/kt51290.kt
 contextParameters/sameExtensionContextAndDispatchReceiver.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
-controlStructures/breakContinueInExpressions/popSizes.kt
-controlStructures/breakContinueInExpressions/tryFinally1.kt
 controlStructures/returnsNothing/propertyGetter.kt
 controlflow/for_loops_array_nested.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
@@ -227,7 +225,6 @@ ranges/contains/inComparableRange.kt
 ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inRangeWithCustomContains.kt
-ranges/kt37370.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt

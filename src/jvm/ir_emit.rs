@@ -7035,9 +7035,9 @@ fn emit_enum_class(
                 e.emit(statement, &mut clinit);
             }
             let args = &entry.args;
-            // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
-            // first, then construct (mirrors the `New` node's spill).
-            let spill = args.iter().any(|&a| e.emits_control_flow(a));
+            // An entry arg that cannot carry the operand stack (`X(try { 1 } finally {})`) runs on a
+            // clean stack: spill all args to temps first, then construct (as the `New` node does).
+            let spill = args.iter().any(|&a| e.spills_operand_prefix(a));
             let temps = if spill {
                 e.spill_to_temps(args, &mut clinit)
             } else {
@@ -10448,11 +10448,11 @@ impl<'a> Emitter<'a> {
             | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
         let takes_receiver = accessor_takes_receiver(&access);
-        // Keep the reference compiler's evaluation layout for a branchy assigned value: spill BOTH
-        // operands in source order (receiver, then value), then reload them. Spilling only the value
-        // would reverse observable side effects. Final-body analysis could verify a live receiver
-        // prefix, but changing this layout would lose bytecode parity.
-        let spilled = if takes_receiver && self.emits_control_flow(value) {
+        // A value that cannot carry the operand stack (a handler, suspension, or loop transfer)
+        // spills BOTH operands in source order (receiver, then value), then reloads them. Spilling
+        // only the value would reverse observable side effects. An ordinary branchy value keeps the
+        // receiver on the stack, as kotlinc does.
+        let spilled = if takes_receiver && self.spills_operand_prefix(value) {
             Some(
                 self.spill_to_temps(
                     &[
@@ -11333,9 +11333,10 @@ impl<'a> Emitter<'a> {
                 let physical_params =
                     parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                if args.iter().any(|&a| self.emits_control_flow(a)) {
-                    // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
-                    // would omit them. Evaluate all args into temps first (clean stack), then build.
+                if args.iter().any(|&a| self.spills_operand_prefix(a)) {
+                    // An argument that enters a handler, suspends, or leaves for a loop target can't
+                    // run with `[new, dup]` on the stack. Evaluate all args into temps first (clean
+                    // stack), then build. An ordinary branch keeps them, as kotlinc does.
                     let temps = self.spill_to_temps(&args, code);
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
@@ -12548,9 +12549,9 @@ impl<'a> Emitter<'a> {
                     let init = self
                         .cw
                         .methodref("java/lang/StringBuilder", "<init>", "()V");
-                    // A branchy part (`"${when{…}}"`) records merge frames that would omit the
-                    // StringBuilder on the stack — spill every part to a temp first, then build.
-                    if parts.iter().any(|&p| self.emits_control_flow(p)) {
+                    // A part that cannot carry the operand stack (`"${try {…} finally {}}"`) is
+                    // spilled with every other part to a temp first, then the builder is built.
+                    if parts.iter().any(|&p| self.spills_operand_prefix(p)) {
                         let temps = self.spill_to_temps(&parts, code);
                         code.new_obj(sb);
                         code.dup();
@@ -13113,9 +13114,9 @@ impl<'a> Emitter<'a> {
                 elem,
                 value,
             } => {
-                // A branchy value (`msg = x ?: "?"`) can't run with the holder on the stack — its
-                // branch frames assume a clean stack. Spill it first (mirrors `RefNew`).
-                if self.emits_control_flow(*value) {
+                // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't
+                // run with the holder on it. Spill it first (as `RefNew` does).
+                if self.spills_operand_prefix(*value) {
                     let temps = self.spill_to_temps(&[*value], code);
                     self.emit_value(*holder, code);
                     for &(slot, t, _) in &temps {
@@ -13370,7 +13371,7 @@ impl<'a> Emitter<'a> {
                     || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
                     || args
                         .iter()
-                        .any(|&argument| self.must_spill_across(argument))
+                        .any(|&argument| self.spills_operand_prefix(argument))
             }
             _ => {
                 let mut spill = false;
@@ -13409,37 +13410,13 @@ impl<'a> Emitter<'a> {
                 dispatch_receiver,
                 args,
             } => {
-                // Preserve the reference compiler's temp layout when a spliced host or lambda branches.
-                // This is no longer a verifier requirement: final-body dataflow can carry a live prefix,
-                // and `must_spill_across` separately identifies handlers/external transfers that cannot.
-                let splice_branches = match callee {
-                    Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        inline,
-                    } if inline.can_inline() => {
-                        args.iter().any(|&a| {
-                            matches!(self.ir.expr(a),
-                                IrExpr::Lambda { inline_body: Some(b), .. } if self.emits_control_flow(*b))
-                        }) || self
-                            .bodies
-                            .body(&owner.render(), name, descriptor)
-                            .and_then(|b| crate::jvm::inline::disassemble(&b.code))
-                            .is_some_and(|ins| {
-                                ins.iter()
-                                    .any(|i| !matches!(i, crate::jvm::inline::Insn::Plain { .. }))
-                            })
-                    }
-                    _ => false,
-                };
                 matches!(
                     callee,
                     Callee::Intrinsic {
                         operation: crate::ir::IrIntrinsic::Assert { .. },
                         ..
                     }
-                ) || splice_branches
+                ) || self.splice_branches(callee, args)
                     || dispatch_receiver.is_some_and(|r| self.emits_control_flow(r))
                     || args.iter().any(|&a| self.emits_control_flow(a))
             }

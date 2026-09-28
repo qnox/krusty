@@ -108,10 +108,11 @@ impl Emitter<'_> {
 
     /// Push a numeric comparison's operands, each constant one already at the compared width.
     ///
-    /// A later operand with control flow is evaluated into temporaries first, as every operand
-    /// sequence is; those temporaries hold the operands exactly as checked IR computes them.
+    /// A later operand that cannot carry the operand stack is evaluated into temporaries first, as
+    /// every operand sequence is; those temporaries hold the operands exactly as checked IR computes
+    /// them.
     pub(super) fn emit_comparison_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        if self.emits_control_flow(rhs) {
+        if self.spills_operand_prefix(rhs) {
             self.emit_operands(&[lhs, rhs], code);
             return;
         }

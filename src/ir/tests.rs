@@ -1,3 +1,4 @@
+use super::test_support::blank_class;
 use super::*;
 
 #[test]
@@ -288,68 +289,6 @@ fn for_each_child_visits_every_direct_operand() {
     let mut bk = Vec::new();
     for_each_child(&f.exprs, blk, &mut |c| bk.push(c));
     assert_eq!(bk, vec![lhs, rhs, bin]);
-}
-
-/// A minimal well-formed `IrClass` for tests that only exercise fields/functions on the file.
-fn blank_class(fq: &str) -> IrClass {
-    IrClass {
-        fq_name: fq.into(),
-        is_source_declared: false,
-        is_anonymous_object: false,
-        enclosure: None,
-        is_inner_class: false,
-        is_local_class: false,
-        is_value: false,
-        is_data: false,
-        decl_line: 0,
-        decl_start_line: 0,
-        decl_end_line: 0,
-        type_param_bounds: Vec::new(),
-        type_params: Vec::new(),
-        captured_type_params: Vec::new(),
-        supertypes: Vec::new(),
-        properties: Vec::new(),
-        fields: Vec::new(),
-        field_annotations: Vec::new(),
-        property_annotations: Vec::new(),
-        ctor_param_count: 0,
-        constructor_prefix_count: 0,
-        ctor_args: Vec::new(),
-        ctor_param_annotations: Vec::new(),
-        init_body: None,
-        pre_super_param_fields: Vec::new(),
-        explicit_param_stores: false,
-        methods: Vec::new(),
-        is_interface: false,
-        is_fun_interface: false,
-        is_annotation: false,
-        annotation_impl_of: None,
-        is_sealed: false,
-        sealed_subclasses: Default::default(),
-        is_abstract: false,
-        is_open: false,
-        superclass: "kotlin/Any".into(),
-        super_arg_prelude: Vec::new(),
-        super_args: Vec::new(),
-        super_ctor_params: Vec::new(),
-        super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
-        is_enum: false,
-        enum_entries: Vec::new(),
-        enum_entry_of: None,
-        prop_ref: None,
-        func_ref: None,
-        bridges: Vec::new(),
-        interfaces: Default::default(),
-        is_object: false,
-        is_companion: false,
-        companion_class: None,
-        published_nested_classifiers: Vec::new(),
-        secondary_ctors: Vec::new(),
-        has_primary_ctor: true,
-        applied_annotations: DeclarationAnnotations::default(),
-        primary_ctor_annotations: DeclarationAnnotations::default(),
-        annotation_retention: None,
-    }
 }
 
 fn add_toplevel_fn(f: &mut IrFile, name: &str, param: Ty) -> u32 {

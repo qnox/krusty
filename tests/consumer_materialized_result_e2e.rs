@@ -55,9 +55,9 @@ fn an_erased_result_is_cast_only_to_its_consumers_type() {
     );
 }
 
-/// A later branchy operand makes krusty spill the operands before it, where kotlinc keeps them on
-/// the stack; that spill shape is a separate difference. The erased result is still spilled as
-/// `Object` and narrowed only for a consumer that needs `String`, so each method's casts match.
+/// A later branchy operand leaves the operands before it on the stack, as kotlinc does. The erased
+/// result stays `Object` there and is narrowed only for a consumer that needs `String`, so each
+/// method's casts match.
 const BRANCHY: &str = "class Box<T>(val v: T) { fun get(): T = v }\n\
     class Pairing(val a: Any?, val b: String)\n\
     var sink: Any? = \"none\"\n\
