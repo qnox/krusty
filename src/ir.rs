@@ -46,6 +46,7 @@ mod inline_copies;
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
+mod module_records;
 mod operators;
 mod overrides;
 mod progression;
@@ -75,8 +76,12 @@ pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use module_records::{
+    IrClassifierKind, IrHeaderAnnotation, IrModuleCallable, IrModuleClassifier,
+    IrModuleMemberAccess, IrModuleSource,
+};
 pub use operators::{IrBinOp, IrTypeOp};
-pub use overrides::{IrFunctionOverride, IrPropertyOverride};
+pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
@@ -221,6 +226,8 @@ pub enum Callee {
         descriptor: String,
         params: Option<(Vec<Ty>, Ty)>,
         interface: bool,
+        /// Exact current-module declaration the checker selected, when the call names one.
+        module_target: Option<crate::fir::CallableId>,
     },
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
     /// Used for `super.method(…)`, which dispatches through the source-level super qualifier directly
@@ -2784,81 +2791,6 @@ pub struct IrPackageProperty {
     pub has_backing_field: bool,
     pub has_declared_getter: bool,
     pub source_order: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IrModuleSource {
-    pub source: crate::fir::SourceFileId,
-    pub package: TypeName,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrModuleCallable {
-    pub source: IrModuleSource,
-    /// Kotlin declaration name used for callable-reference identity. A target-specific annotation
-    /// may change the emitted method name without changing this semantic spelling.
-    pub name: Box<str>,
-    /// Declaring classifier for a member `$default` bridge, and its source-level kind (a target
-    /// decides what the kind means physically). Ordinary member calls are virtual/special calls.
-    pub owner: Option<TypeName>,
-    pub owner_kind: Option<IrClassifierKind>,
-    /// Final Kotlin declaration visibility. A target may need it to realize access from a
-    /// physically separate nested/generated class, but must not recover it from an emitted name or
-    /// owner.
-    pub visibility: crate::types::Visibility,
-    /// Final source declaration flags needed after stable module calls cross into target realization.
-    pub flags: crate::fir::DeclarationFlags,
-    /// Final declaration signature, including context and extension receiver parameters but never
-    /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
-    /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
-    pub parameters: Box<[Ty]>,
-    /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
-    /// and parameter metadata on synthesized adapters instead of inventing positional names.
-    pub parameter_identities: Box<[IrParameterIdentity]>,
-    pub result: Ty,
-    /// Resolved declaration annotations with only the compact constant-string payload needed by
-    /// target realization. No source spelling, expression, or parser coordinate survives here.
-    pub annotations: Box<[IrHeaderAnnotation]>,
-    /// Where the function lives when `owner` is absent.
-    pub placement: IrStaticPlacement,
-}
-
-/// Exact current-module declaration selected for a member operation, plus the selected semantic
-/// parameter shape at that use site. The stable declaration identity remains authoritative for
-/// visibility/ownership; the selected parameters let a backend build a representation adapter for
-/// a generic call without reverse-engineering types from operands.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum IrModuleMemberAccess {
-    Callable {
-        target: crate::fir::CallableId,
-        selected_parameters: Box<[Ty]>,
-    },
-    Property {
-        target: crate::fir::PropertyId,
-        write: bool,
-        selected_parameters: Box<[Ty]>,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrHeaderAnnotation {
-    pub identity: TypeName,
-    pub string_arguments: Box<[Box<str>]>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IrClassifierKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-    Object,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IrModuleClassifier {
-    pub singleton: bool,
-    pub companion_owner: Option<TypeName>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

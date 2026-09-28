@@ -167,7 +167,7 @@ pub(super) fn emit_suspend_lambda_class(
     let mut cw = new_writer_generic(&shape.class, Some(&class_signature), SUSPEND_LAMBDA, opts);
     cw.set_signature(&class_signature);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
-    if let Some((owner, method)) = class_enclosure(ir, c, facade) {
+    if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),

@@ -18,7 +18,8 @@ pub(super) struct Inputs<'a> {
     pub(super) mangle_map: &'a HashMap<(TypeName, String, usize), String>,
     pub(super) suspend_sig: &'a HashSet<(Option<TypeName>, String, usize)>,
     /// Each value-class member rewritten to a static carrier function, by its stable identity:
-    /// the physical name, parameters and result it now has.
+    /// the physical name, parameters and result it now has (the wrapper of a boxed primitive
+    /// override result).
     pub(super) lowered_member_targets: &'a HashMap<u32, (String, Vec<Ty>, Ty)>,
     /// The value-class members an interface entry now stands for.
     pub(super) interface_entries: &'a HashSet<u32>,

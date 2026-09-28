@@ -1203,6 +1203,8 @@ mod missing_return_check_e2e;
 mod mixed_numeric_comparison_e2e;
 #[path = "module_extension_signature_result_e2e.rs"]
 mod module_extension_signature_result_e2e;
+#[path = "module_override_boxed_result_e2e.rs"]
+mod module_override_boxed_result_e2e;
 #[path = "mpp_expect_actual_e2e.rs"]
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
