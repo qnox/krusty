@@ -24,23 +24,23 @@ pub(super) fn requires_function_signature(
         let Some(descriptor) = mapped(ty) else {
             return true;
         };
-        derived.push_str(&descriptor);
+        derived.push_str(descriptor);
     }
     derived.push(')');
     let Some(result) = mapped(ret) else {
         return true;
     };
-    derived.push_str(&result);
+    derived.push_str(result);
     derived != physical
 }
 
 /// `mapTypeDefault`: the descriptor `ClassMapperLite` gives the type's class id, nullability
 /// ignored, or `None` for a type with no class id (a type parameter) or a local one.
-fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<String> {
+fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<&'static str> {
     Some(match ty.non_null() {
         Ty::Obj(classifier, _) if local_classifiers.contains(&classifier) => return None,
         Ty::Obj(classifier, _) => super::jvm_class_map::class_mapper_lite_descriptor(classifier),
-        Ty::Unit => "V".to_owned(),
+        Ty::Unit => "V",
         Ty::Nothing => super::jvm_class_map::class_mapper_lite_nothing_descriptor(),
         // FIR's class id of a function type is its kind and arity, receiver and context included.
         Ty::Fun(signature) => super::jvm_class_map::class_mapper_lite_function_descriptor(
