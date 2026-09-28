@@ -21,6 +21,19 @@ main output as a friend path for Kotlin `internal` visibility.
 The analysis worker currently consumes the union of all module classpaths. A successful model change
 restarts the worker and reanalyzes open documents.
 
+## `krusty build`
+
+`krusty build` compiles Kotlin Toolchain JVM projects. A directory containing `project.yaml`, or a
+single `module.yaml` that no parent `project.yaml` includes, is the project. `jvm/app` and `jvm/lib`
+modules are compiled with krusty. `//` dependencies become module edges; an `exported` dependency is
+visible to dependents, and a `runtime-only` dependency is not on the compile classpath. Maven
+coordinates, version catalogs, `settings`, and non-JVM product types fail the command.
+
+Gradle and `.iml` detection in the language server is unchanged. `krusty build` only recognizes
+those trees so it can refuse them: a Gradle build or an `.idea/modules.xml` model is not compiled,
+and a toolchain file in the same directory wins over a Gradle marker. A nested Gradle directory
+still wins over a parent toolchain project.
+
 ## Detection
 
 Providers are selected in this order:

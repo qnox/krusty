@@ -22,21 +22,18 @@
 //!   not `Send`.
 //! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
 //!   process per module.
-//! * [`gradle`] — runs `./gradlew` with `--include-build tools/krusty-gradle`. That directory is
-//!   the `krusty` Gradle plugin, a drop-in for the Kotlin JVM plugin: the build changes the plugin
-//!   id and version, and the Kotlin DSL stays. The plugin applies the Kotlin JVM plugin, removes
-//!   the Kotlin compile action, and execs the krusty binary. It does not call back into this
-//!   crate, and it does not start kotlinc or the Kotlin compile daemon.
+//! * [`gradle`] — runs a project's Gradle wrapper with the typed `krusty` plugin, either from this
+//!   checkout or from its release Maven repository. Kotlin/JVM continues to own the source model;
+//!   the replacement compilation task execs krusty and does not call back into this crate.
+//! * [`kotlin_toolchain`] — `module.yaml` / `project.yaml` loading for `krusty-toolchain build`. The
+//!   executable lives in `krusty-toolchain`; this crate owns its process-independent project model.
 //!
 //! # What is NOT here
 //!
-//! No Maven, BSP, or JPS providers, and no parallel scheduling. Those providers are ~10,000 lines
-//! living in `crates/krusty-lsp/src/project/` and lifting them is its own change. Parallelism needs
+//! Maven, BSP, and JPS remain language-server project models. The toolchain loader recognizes a
+//! Gradle or `.iml` tree and stops rather than treating it as a toolchain project. Parallelism needs
 //! a process pool with crash isolation and interleaved diagnostics, and the sequential driver is
 //! its oracle: the same graph must produce the same artifacts either way.
-//!
-//! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
-//! standalone.
 //!
 //! # The property this all rests on
 //!
@@ -52,6 +49,7 @@ pub mod digest;
 pub mod driver;
 pub mod gradle;
 pub mod graph;
+pub mod kotlin_toolchain;
 pub mod model;
 pub mod store;
 
