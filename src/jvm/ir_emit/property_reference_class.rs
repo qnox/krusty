@@ -78,13 +78,14 @@ impl PropertyReferenceTarget {
     ) -> Self {
         let semantic_owner = property.owner().expect("property reference owner");
         let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
-        let owner = array_owner.clone().unwrap_or_else(|| {
+        let owner = array_owner.map(str::to_owned).unwrap_or_else(|| {
             crate::jvm::jvm_class_map::to_jvm_internal(&semantic_owner).to_string()
         });
         let semantic_call_owner = property
             .call_owner()
             .expect("property reference call owner");
         let call_owner = crate::jvm::names::array_class_descriptor(&semantic_call_owner)
+            .map(str::to_owned)
             .unwrap_or_else(|| {
                 crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
             });

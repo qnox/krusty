@@ -301,24 +301,29 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 /// the signed primitive it is an inline class over. The hand-written list this replaced was the copy
 /// that made that documentation untrue: it named `UIntArray` and `ULongArray` and not `UByteArray`
 /// or `UShortArray`, so those two descriptored as `Lkotlin/UByteArray;` and would not load at all.
-fn primitive_array_descriptor(internal: impl InternalName) -> Option<String> {
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
     let element = crate::types::prim_array_element(internal)?;
-    Some(format!("[{}", type_descriptor(element)))
+    Some(array_descriptor(type_descriptor(element)))
 }
 
 /// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as
 /// the `CONSTANT_Class` name (`IntArray::class.java` → `[I`); ordinary classifiers use an internal
 /// name instead. `Array` is erased here because a classifier-only owner has no element argument.
-pub fn array_class_descriptor(internal: impl InternalName) -> Option<String> {
+pub fn array_class_descriptor(internal: impl InternalName) -> Option<&'static str> {
     if internal.internal_matches("kotlin/Array") {
-        Some("[Ljava/lang/Object;".to_string())
+        Some(array_descriptor(type_descriptor(Ty::obj(
+            "java/lang/Object",
+        ))))
     } else {
         primitive_array_descriptor(internal)
     }
 }
 
 /// A JVM field/type descriptor from a krusty `Ty`.
-pub fn type_descriptor(ty: Ty) -> String {
+///
+/// Primitive tags are static literals. Object and array spellings are remembered after the first
+/// use, so a repeated descriptor does not format another `String`.
+pub fn type_descriptor(ty: Ty) -> &'static str {
     // `@Metadata` spells a nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`), and
     // the frontend deliberately KEEPS that spelling for the stdlib-mapped nested collections
     // (`Map.Entry`) so their extensions match. A descriptor is the JVM-emission boundary: dots in
@@ -326,9 +331,54 @@ pub fn type_descriptor(ty: Ty) -> String {
     // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
     // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
     // `Ty` that reaches bytecode.
-    let mut descriptor = String::new();
-    push_descriptor_shape(ty, &mut descriptor);
-    descriptor
+    match descriptor_shape(ty) {
+        DescriptorShape::Primitive(tag) => primitive_descriptor(tag),
+        DescriptorShape::Class(internal) => reference_descriptor(internal),
+        DescriptorShape::Array(element) => array_descriptor(type_descriptor(element)),
+    }
+}
+
+fn primitive_descriptor(tag: u8) -> &'static str {
+    match tag {
+        b'I' => "I",
+        b'B' => "B",
+        b'S' => "S",
+        b'J' => "J",
+        b'F' => "F",
+        b'D' => "D",
+        b'Z' => "Z",
+        b'C' => "C",
+        b'V' => "V",
+        _ => unreachable!("invalid JVM primitive descriptor tag: {tag}"),
+    }
+}
+
+/// `Lname;` for an interned classfile internal name. The first use formats it; later uses return
+/// that same spelling.
+fn reference_descriptor(classfile_name: &'static str) -> &'static str {
+    remembered_descriptor::<b'L'>(classfile_name, |name| format!("L{name};"))
+}
+
+/// `[element` for an interned element descriptor, including another array descriptor.
+fn array_descriptor(element: &'static str) -> &'static str {
+    remembered_descriptor::<b'['>(element, |element| format!("[{element}"))
+}
+
+fn remembered_descriptor<const KIND: u8>(
+    key: &'static str,
+    format_spelling: impl FnOnce(&str) -> String,
+) -> &'static str {
+    debug_assert!(KIND == b'L' || KIND == b'[');
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<&'static str, &'static str>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(key).copied()) {
+        return found;
+    }
+    let remembered = Box::leak(format_spelling(key).into_boxed_str());
+    CACHE.with(|cache| cache.borrow_mut().insert(key, remembered));
+    remembered
 }
 
 /// Whether `left` and `right` emit the same JVM descriptor.
@@ -344,21 +394,6 @@ enum DescriptorShape {
     Primitive(u8),
     Class(&'static str),
     Array(Ty),
-}
-
-fn push_descriptor_shape(ty: Ty, descriptor: &mut String) {
-    match descriptor_shape(ty) {
-        DescriptorShape::Primitive(tag) => descriptor.push(char::from(tag)),
-        DescriptorShape::Class(internal) => {
-            descriptor.push('L');
-            descriptor.push_str(internal);
-            descriptor.push(';');
-        }
-        DescriptorShape::Array(element) => {
-            descriptor.push('[');
-            push_descriptor_shape(element, descriptor);
-        }
-    }
 }
 
 fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
@@ -469,7 +504,7 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
             .unwrap_or_else(|| instanceof_internal_name(*inner)),
         // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
         // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
-        t if t.is_array() => type_descriptor(t),
+        t if t.is_array() => type_descriptor(t).to_owned(),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
         Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n).to_string(),
@@ -791,6 +826,32 @@ mod tests {
 
         let p = Ty::obj("demo/Point");
         assert_eq!(type_descriptor(Ty::nullable(p)), type_descriptor(p));
+    }
+
+    #[test]
+    fn repeated_type_descriptors_share_one_spelling() {
+        assert_eq!(type_descriptor(Ty::Int), "I");
+        assert!(std::ptr::eq(
+            type_descriptor(Ty::Int),
+            type_descriptor(Ty::UInt)
+        ));
+        let string = type_descriptor(Ty::String);
+        assert!(std::ptr::eq(string, type_descriptor(Ty::String)));
+        assert!(std::ptr::eq(
+            string,
+            type_descriptor(Ty::obj("java/lang/String"))
+        ));
+        assert_eq!(string, "Ljava/lang/String;");
+        let array = type_descriptor(Ty::obj_args("kotlin/Array", &[Ty::String]));
+        assert!(std::ptr::eq(
+            array,
+            type_descriptor(Ty::obj_args("kotlin/Array", &[Ty::String]))
+        ));
+        assert_eq!(array, "[Ljava/lang/String;");
+        assert!(std::ptr::eq(
+            type_descriptor(Ty::obj("kotlin/IntArray")),
+            type_descriptor(Ty::obj("kotlin/UIntArray"))
+        ));
     }
 
     #[test]

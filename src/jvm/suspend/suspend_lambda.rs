@@ -463,7 +463,7 @@ fn normalized_descriptor(ty: Ty) -> String {
     match crate::jvm::ir_emit::ir_ty_to_jvm(&ty) {
         Ty::Boolean | Ty::Char | Ty::Byte | Ty::Short | Ty::Int => "I".to_string(),
         primitive @ (Ty::Long | Ty::Float | Ty::Double) => {
-            crate::jvm::names::type_descriptor(primitive)
+            crate::jvm::names::type_descriptor(primitive).to_owned()
         }
         _ => "Ljava/lang/Object;".to_string(),
     }

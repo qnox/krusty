@@ -113,6 +113,6 @@ fn arrays_parameter(array: Ty) -> String {
     if array.non_null().is_reference_array() {
         "[Ljava/lang/Object;".to_string()
     } else {
-        crate::jvm::names::type_descriptor(array.non_null())
+        crate::jvm::names::type_descriptor(array.non_null()).to_owned()
     }
 }

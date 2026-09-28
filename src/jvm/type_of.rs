@@ -233,7 +233,7 @@ fn class_instance(ty: Ty) -> Result<TypeOfInsn, TypeOfError> {
             if crate::types::prim_array_element(name).is_some_and(Ty::is_unsigned) {
                 crate::jvm::names::classfile_internal_name_of(name).to_string()
             } else {
-                crate::jvm::names::type_descriptor(inner)
+                crate::jvm::names::type_descriptor(inner).to_owned()
             }
         }
         Ty::Obj(name, _) => crate::jvm::names::classfile_internal_name_of(name).to_string(),
