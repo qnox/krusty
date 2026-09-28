@@ -48,9 +48,6 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         };
         let implementation = *implementations.entry(site.interface).or_insert_with(|| {
             let owner = lexical_owners.get(&site.interface).copied().flatten();
-            let lexical_owner = owner
-                .map(TypeName::render)
-                .unwrap_or_else(|| facade.to_string());
             // kotlinc encloses the implementation in its owner as a whole, with no method.
             let enclosure = owner.map_or(IrEnclosure::File, |owner| {
                 let class = class_order[&owner];
@@ -58,9 +55,9 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
                     u32::try_from(class).expect("too many classes for a class id"),
                 )
             });
-            let interface_fragment = site.interface.render().replace(['/', '$'], "_");
+            let interface_fragment = site.interface.rendered().replace(['/', '$'], "_");
             let segment = format!("annotationImpl${interface_fragment}$0");
-            let implementation = type_name(&format!("{lexical_owner}${segment}"));
+            let implementation = annotation_impl_name(owner, facade, &interface_fragment);
             // kotlinc declares the implementation as a child of its owner, which its
             // `InnerClasses` order reads.
             crate::jvm::local_class_names::record_generated_child_path(
@@ -104,6 +101,19 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
     for class in generated {
         ir.add_class(class);
     }
+}
+
+/// `Owner$annotationImpl$pkg_Name$0`, nested from the owner (or the file facade) without rendering
+/// that owner back into a type name.
+fn annotation_impl_name(
+    owner: Option<TypeName>,
+    facade: &str,
+    interface_fragment: &str,
+) -> TypeName {
+    let mut name = owner.unwrap_or_else(|| type_name(facade));
+    name = name.nested_child("annotationImpl");
+    name = name.nested_child(interface_fragment);
+    name.nested_child("0")
 }
 
 fn annotation_implementation(
@@ -229,12 +239,63 @@ mod tests {
         else {
             panic!("annotation construction remains an allocation")
         };
-        assert!(internal
-            .render()
-            .contains("$annotationImpl$dependency_Marker$0"));
+        assert_eq!(
+            *internal,
+            type_name("sample/MainKt")
+                .nested_child("annotationImpl")
+                .nested_child("dependency_Marker")
+                .nested_child("0")
+        );
+        assert_eq!(
+            internal.render(),
+            "sample/MainKt$annotationImpl$dependency_Marker$0"
+        );
         assert_eq!(*external_target, None);
         assert!(ir.classes.iter().any(|class| {
             class.fq_name_id() == *internal && class.annotation_impl_of == Some(interface)
         }));
+    }
+
+    #[test]
+    fn annotation_implementation_nests_under_its_enclosing_class() {
+        let interface = type_name("sample/Marker");
+        let mut ir = IrFile::default();
+        let host = ir.add_class(crate::ir::test_support::blank_class("sample/Host"));
+        let construction = ir.add_expr(IrExpr::New {
+            internal: interface,
+            args: vec![],
+            ctor_params: Some(vec![]),
+            ctor_desc: None,
+            external_target: Some(ExternalCallableId::from_raw(3)),
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+        ir.annotation_constructions.insert(
+            construction,
+            crate::ir::IrAnnotationConstruction {
+                interface,
+                members: vec![],
+                defaults: vec![],
+                enclosing_class: Some(ir.classes[host as usize].fq_name_id()),
+            },
+        );
+
+        lower_annotation_constructions(&mut ir, "sample/MainKt");
+
+        let IrExpr::New { internal, .. } = ir.expr(construction) else {
+            panic!("annotation construction remains an allocation")
+        };
+        let host_name = ir.classes[host as usize].fq_name_id();
+        assert_eq!(
+            *internal,
+            host_name
+                .nested_child("annotationImpl")
+                .nested_child("sample_Marker")
+                .nested_child("0")
+        );
+        assert_eq!(
+            internal.rendered(),
+            "sample/Host$annotationImpl$sample_Marker$0"
+        );
     }
 }
