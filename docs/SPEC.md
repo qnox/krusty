@@ -4460,6 +4460,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   regenerates those in every overriding class. The custom accessors of an overriding property are
   also emitted without `final`, like the default accessors of a backing-field one. Tests:
   `tests/renamed_builtin_bridge_owner_e2e.rs`.
+- **A bridge erases the overridden declaration's own signature, which the override edge carries.**
+  The supertype side of an erasure bridge is the overridden declaration as declared, before the
+  implementing class's type arguments are applied: `Echo<T>.echo(x: T): T` bridges as
+  `echo(Object)Object` even where the class implements `Echo<String>`. The frontend, which owns
+  declaration lookup, records that shape on each function override edge (`declared_parameters`,
+  `declared_result`): for a dependency declaration its value-class spelling, else its generic
+  signature, else the shape its provider published — the same rule an interface-delegation
+  forwarder's target uses. The JVM bridge pass erases what the edge says and never reopens the
+  dependency provider. Taking the physical descriptor instead would be too early: a semantic
+  value-class parameter (`Continuation.resumeWith(Result<T>)`) is erased by the value-class pass
+  later, and a bridge made from its descriptor would duplicate the method. Tests:
+  `tests/superclass_bridge_e2e.rs`, `tests/suspend_class_implements_interface_e2e.rs`,
+  `src/fir/index_tests.rs::a_dependency_override_edge_carries_the_declarations_own_signature`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type

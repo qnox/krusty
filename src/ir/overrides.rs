@@ -41,6 +41,9 @@ pub struct IrFunctionOverride {
     pub overridden_owner: TypeName,
     pub overridden_is_interface: bool,
     pub name: String,
+    /// The overridden declaration's own parameters and result, before the implementing class's
+    /// type arguments are applied, as the frontend recorded them. A backend erases this shape for
+    /// the supertype side of a bridge; it never reopens the declaration's provider for it.
     pub declared_parameters: Vec<Ty>,
     pub declared_result: Ty,
     pub applied_parameters: Vec<Ty>,

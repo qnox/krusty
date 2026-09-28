@@ -170,8 +170,7 @@ fn run_backend_passes_after_plugins(
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
     // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
-    let boxed_results =
-        crate::jvm::override_results::box_primitive_override_results(ir, classpath)?;
+    let boxed_results = crate::jvm::override_results::box_primitive_override_results(ir);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
