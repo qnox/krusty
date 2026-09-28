@@ -3,11 +3,12 @@
 use super::*;
 
 /// Minimal classifier signature for a mapped builtin whose physical JVM class is absent.
-pub(super) fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
+pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType> {
     // The owner is the receiver's Kotlin identity; the constant-pool boundary supplies its JVM name.
-    let members: &[(&str, &str, Ty)] = match internal {
-        "kotlin/String" => &[("length", "()I", Ty::Int), ("hashCode", "()I", Ty::Int)],
-        _ => return None,
+    let members: &[(&str, &str, Ty)] = if internal.matches("kotlin/String") {
+        &[("length", "()I", Ty::Int), ("hashCode", "()I", Ty::Int)]
+    } else {
+        return None;
     };
     let members = members
         .iter()
