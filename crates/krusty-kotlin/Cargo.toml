@@ -1,0 +1,14 @@
+[package]
+name = "krusty-kotlin"
+version = "0.0.1"
+edition = "2021"
+description = "Kotlin Toolchain command line. kotlin build compiles JVM projects with the krusty compiler."
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+krusty-build = { path = "../krusty-build" }
+
+[[bin]]
+name = "kotlin"
+path = "src/main.rs"

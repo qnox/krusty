@@ -626,10 +626,16 @@ name = "krusty-cli"
 version = "0.0.1"
 dependencies = [
  "krusty",
- "krusty-build",
  "serde",
  "serde_json",
  "zip",
+]
+
+[[package]]
+name = "krusty-kotlin"
+version = "0.0.1"
+dependencies = [
+ "krusty-build",
 ]
 
 [[package]]

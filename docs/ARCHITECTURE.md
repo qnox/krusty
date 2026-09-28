@@ -42,10 +42,12 @@ boundary.
   ships in a klib beside `kotlin-stdlib.jar`, which is a use of a klib and not a second reader.
 - **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
   library and exposes frontend and backend contracts. `crates/krusty-cli` owns kotlinc-compatible
-  batch argument parsing, filesystem output, and process exit behavior, while `crates/krusty-lsp`
-  owns its in-memory source-set analysis, JSON-RPC, document lifecycle, and compact editor query
-  snapshots. These packages depend toward the compiler library; the compiler never depends on any
-  process adapter. LSP compiler analysis is an internal module—not a single-consumer workspace
+  batch argument parsing, filesystem output, and process exit behavior. `crates/krusty-kotlin` owns
+  the Kotlin Toolchain command line (`kotlin build`) and depends on `krusty-build`, not on the
+  compiler executable. `crates/krusty-lsp` owns its in-memory source-set analysis, JSON-RPC,
+  document lifecycle, and compact editor query snapshots. These packages depend toward the compiler
+  library or the build layer; the compiler never depends on any process adapter or on the build
+  layer. LSP compiler analysis is an internal module—not a single-consumer workspace
   package—and architecture guards keep it isolated from the long-lived protocol/session modules.
 - **Shared process-independent policy** stays in the compiler library when it is genuinely a compiler
   concern. For example, JVM classpath code resolves a JDK home to `lib/modules`; each executable
@@ -59,11 +61,13 @@ their dependency DAG, constructs content-addressed cache keys, stores complete a
 drives a compiler through an explicit environment boundary. The crate is a consumer of the compiler
 library; neither the compiler nor a target backend may depend on it.
 
-`krusty` stays a drop-in for `kotlinc`. `krusty build` is the drop-in for the Kotlin Toolchain
-command `kotlin build` on JVM modules: it reads `module.yaml` and `project.yaml` and compiles those
-units with the driver above. It does not extend the toolchain's plugin API, and it does not shell
-out to the `kotlin` CLI. Gradle and JetBrains `.iml` projects remain language-server project models.
-`krusty build` recognizes them and stops, so a Gradle tree is not parsed as a toolchain project.
+`krusty` (the `krusty-cli` executable) stays a drop-in for `kotlinc` and does not link this crate.
+The `kotlin` executable (`crates/krusty-kotlin`) is the drop-in for the Kotlin Toolchain CLI.
+`kotlin build` reads `module.yaml` and `project.yaml` and compiles JVM modules with the driver
+above, spawning `krusty` (`KRUSTY_COMPILER`, a sibling of the `kotlin` executable, or `PATH`). It
+does not extend the toolchain's plugin API, and it does not shell out to an upstream toolchain
+distribution. Gradle and JetBrains `.iml` projects remain language-server project models.
+`kotlin build` recognizes them and stops, so a Gradle tree is not parsed as a toolchain project.
 
 The build model is wider than an analysis-only project model. A build unit records resources, Java
 sources, module name, processor inputs, per-module JDK selection, friend paths, and output shape

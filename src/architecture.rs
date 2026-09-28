@@ -170,6 +170,39 @@ mod tests {
     }
 
     #[test]
+    fn compiler_executable_does_not_link_the_build_layer() {
+        let compiler =
+            fs::read_to_string("crates/krusty-cli/Cargo.toml").expect("compiler manifest");
+        assert!(
+            !compiler.contains("krusty-build") && !compiler.contains("krusty-kotlin"),
+            "the compiler executable must not depend on the build layer or the toolchain CLI"
+        );
+        for path in rust_files_under("crates/krusty-cli/src") {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            assert!(
+                !text.contains("krusty_build") && !text.contains("krusty_kotlin"),
+                "{} must not reference the build layer",
+                path.display()
+            );
+        }
+        let toolchain =
+            fs::read_to_string("crates/krusty-kotlin/Cargo.toml").expect("toolchain manifest");
+        assert!(
+            toolchain.contains("krusty-build"),
+            "kotlin build is implemented on the build layer"
+        );
+        assert!(
+            !toolchain.contains("krusty-cli"),
+            "the toolchain CLI drives krusty as a subprocess, not through the compiler package"
+        );
+        assert!(
+            toolchain.contains("name = \"kotlin\""),
+            "the toolchain executable is the kotlin command"
+        );
+    }
+
+    #[test]
     fn compiler_cli_uses_only_public_compiler_layers() {
         // `plugins` is the compiler-plugin surface, in budget as `features` is: the CLI reads
         // kotlinc's `-Xplugin`/`-P` switches and resolves them against the extension registry.

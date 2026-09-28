@@ -11,7 +11,6 @@ repository = "https://github.com/qnox/krusty"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 krusty = { path = "../.." }
-krusty-build = { path = "../krusty-build" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [[bin]]

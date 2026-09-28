@@ -561,9 +561,6 @@ usage: krusty [options] <sources>
 krusty is a memory-lean Kotlin\u{2192}JVM compiler PoC that aims to be a drop-in for kotlinc on the
 supported language subset (kotlinc-equivalent ABI, verified by a differential harness).
 
-`krusty build` compiles a Kotlin Toolchain JVM project (module.yaml / project.yaml). Gradle and
-.iml projects stay project-model extensions and are not compiled by that command.
-
 Common options (kotlinc-compatible):
   -d <dir|jar>          destination for generated .class files (a directory or a .jar)
   -classpath / -cp <p>  classpath entries (dirs and .jars), ':'-separated
