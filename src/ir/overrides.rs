@@ -50,6 +50,8 @@ pub struct IrFunctionOverride {
     pub applied_result: Ty,
     pub implementation_parameters: Vec<Ty>,
     pub implementation_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
+    /// The overridden declaration's parameter identities, aligned with `declared_parameters`.
+    pub overridden_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub implementation_result: Ty,
     pub suspend: bool,
     pub has_kotlin_superclass_override: bool,

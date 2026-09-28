@@ -24,7 +24,8 @@ pub struct Bridge {
     /// Exact same-module function this bridge delegates to. Backend realization uses this stable
     /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
     pub target_function: Option<u32>,
-    /// Exact source identities of the parameters visible on this bridge. These are frozen before a
+    /// Exact source identities of the parameters visible on this bridge: the overridden
+    /// declaration's, whose signature the bridge realizes. These are frozen before a
     /// representation pass can prepend carrier/receiver parameters to the delegated target.
     pub parameter_identities: Vec<ResolvedParameterIdentity>,
     pub name: String,
