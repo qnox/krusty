@@ -67,6 +67,8 @@ pub(crate) struct StringTable {
     strings: Vec<String>,
     records: Vec<Pb>,
     dedup: HashMap<(String, Vec<u8>), u32>,
+    /// Classifiers already interned with `DESC_TO_CLASS_ID`. A repeat does not render `Lname;`.
+    descriptor_ids: HashMap<TypeName, u32>,
     /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
     /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
     local_names: Vec<u32>,
@@ -122,13 +124,17 @@ impl StringTable {
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
-        let encoded = class_id_of(classifier);
-        if encoded.descriptor_shortcut {
+        if allows_descriptor_shortcut(classifier) {
+            if let Some(&index) = self.descriptor_ids.get(&classifier) {
+                return index;
+            }
             let mut record = Pb::new();
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
-            return self.intern(format!("L{};", classifier.render()), record);
+            let index = self.intern(format!("L{};", classifier.render()), record);
+            self.descriptor_ids.insert(classifier, index);
+            return index;
         }
-        self.class_literal(encoded.literal, false)
+        self.class_literal(class_id_of(classifier).literal, false)
     }
 
     /// A local classifier's id: the raw internal name of the classifier declared in executable
@@ -948,6 +954,24 @@ mod tests {
     }
 
     #[test]
+    fn repeated_descriptor_class_id_keeps_one_table_entry() {
+        let mut strings = StringTable::default();
+        let classifier = crate::types::type_name("sample/Box");
+        let first = strings.class_id(classifier);
+        let len = strings.strings.len();
+        assert_eq!(strings.class_id(classifier), first);
+        assert_eq!(strings.strings.len(), len);
+        assert_eq!(strings.strings[first as usize], "Lsample/Box;");
+
+        let nested = crate::types::type_name("pkg/Outer").nested_child("Inner");
+        let nested_id = strings.class_id(nested);
+        assert_eq!(strings.strings[nested_id as usize], "Lpkg/Outer$Inner;");
+        let len = strings.strings.len();
+        assert_eq!(strings.class_id(nested), nested_id);
+        assert_eq!(strings.strings.len(), len);
+    }
+
+    #[test]
     fn platform_type_encodes_a_nullable_flexible_upper_bound() {
         let mut strings = StringTable::default();
         let encoded = encode_type(
@@ -973,7 +997,29 @@ struct EncodedClassId {
 /// `Owner$$serializer` cannot say whether the second `$` is another boundary or part of the nested
 /// simple name. A descriptor shortcut is safe exactly when none of the actual path segments contains
 /// a literal `$`; the metadata reader is then free to replace every JVM nesting separator with `.`.
+fn allows_descriptor_shortcut(classifier: TypeName) -> bool {
+    let mut outer = classifier;
+    while let Some(owner) = outer.nested_owner() {
+        let segment = outer
+            .nested_segment_within(owner)
+            .expect("a recorded nested owner must own the classifier segment");
+        if segment.contains('$') {
+            return false;
+        }
+        outer = owner;
+    }
+    let mut path = Some(outer);
+    while let Some(segment) = path {
+        if segment.segment_ref().contains('$') {
+            return false;
+        }
+        path = segment.parent();
+    }
+    true
+}
+
 fn class_id_of(classifier: TypeName) -> EncodedClassId {
+    let descriptor_shortcut = allows_descriptor_shortcut(classifier);
     let mut nested = Vec::new();
     let mut outer = classifier;
     while let Some(owner) = outer.nested_owner() {
@@ -984,17 +1030,8 @@ fn class_id_of(classifier: TypeName) -> EncodedClassId {
         );
         outer = owner;
     }
-
-    let mut descriptor_shortcut = true;
-    let mut path = Some(outer);
-    while let Some(segment) = path {
-        descriptor_shortcut &= !segment.segment_ref().contains('$');
-        path = segment.parent();
-    }
-
     let mut literal = outer.render();
     for segment in nested.into_iter().rev() {
-        descriptor_shortcut &= !segment.contains('$');
         literal.push('.');
         literal.push_str(segment);
     }
