@@ -7,7 +7,7 @@
 
 use super::classpath::ExternalCallableKind;
 use crate::fir::ExternalCallableId;
-use crate::ir::{FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
+use crate::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
 use crate::types::{type_name, Ty};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -358,12 +358,15 @@ fn realize_adapter_reference(
     }
     let mut constructor_arguments = reference.captures;
     constructor_arguments.extend(reference.bound_receiver);
+    // The constructor's declared parameters say that a value-class receiver is bound as its box.
+    let mut declared_parameters = None;
     let carrier = match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
                 constructor_parameters.push(Ty::obj("kotlin/Any"));
             }
+            declared_parameters = Some(constructor_parameters.clone().into_boxed_slice());
             IrExpr::New {
                 internal,
                 args: arguments.to_vec(),
@@ -381,20 +384,30 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    install_carrier(ir, expression, carrier, reference.function_type);
+    let carrier = install_carrier(ir, expression, carrier, reference.function_type);
+    if let Some(parameters) = declared_parameters {
+        ir.construction_declared_params.insert(carrier, parameters);
+    }
     Ok(())
 }
 
 /// Replace the reference expression with its carrier, cast to the reference's function type.
 /// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
 /// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
-fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function_type: Ty) {
+/// Replace `expression` with `carrier` cast to its function type; the carrier's new id.
+fn install_carrier(
+    ir: &mut IrFile,
+    expression: usize,
+    carrier: IrExpr,
+    function_type: Ty,
+) -> ExprId {
     let carrier = ir.add_expr(carrier);
     ir.exprs[expression] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg: carrier,
         type_operand: function_type.non_null(),
     };
+    carrier
 }
 
 /// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.
