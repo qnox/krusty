@@ -136,7 +136,7 @@ fn generated_property_hash_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty)
     let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
         "java/lang/Object".to_owned()
     } else {
-        crate::jvm::names::instanceof_internal_name(ty.non_null())
+        crate::jvm::names::instanceof_internal_name(ty.non_null()).to_owned()
     };
     if ty
         .non_null()
