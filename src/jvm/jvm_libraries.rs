@@ -5580,7 +5580,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 object_supertype_rank(&self.cp, recv, want).or_else(|| {
                     // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every
                     // receiver at the lowest precedence when the MRO does not list the implicit root.
-                    want.matches("java/lang/Object").then_some(u32::MAX - 1)
+                    (want == crate::types::wk::java_object()).then_some(u32::MAX - 1)
                 })
             }
             _ => {

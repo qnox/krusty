@@ -1757,9 +1757,8 @@ impl IrClass {
     }
 
     pub fn has_non_top_superclass(&self) -> bool {
-        !self.superclass.matches("")
-            && !self.superclass.matches("java/lang/Object")
-            && !self.superclass.matches("kotlin/Any")
+        self.superclass != crate::types::TypeName::ROOT
+            && !crate::types::wk::is_any_or_object(self.superclass)
     }
 
     pub fn annotation_impl_of(&self) -> Option<String> {

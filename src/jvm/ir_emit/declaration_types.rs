@@ -78,7 +78,7 @@ pub(in crate::jvm) fn function_descriptor(
 
 pub(super) fn jvm_is_erased_top(ty: Ty) -> bool {
     match ty.obj_internal() {
-        Some(name) if name.matches("java/lang/Object") || name.matches("kotlin/Any") => true,
+        Some(name) if crate::types::wk::is_any_or_object(name) => true,
         _ => ty.array_elem().is_some_and(jvm_is_erased_top),
     }
 }
