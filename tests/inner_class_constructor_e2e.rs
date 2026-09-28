@@ -56,11 +56,14 @@ fn a_capturing_local_constructor_lists_no_outer_instance() {
 /// when the declared parameters need generic information, never for the prefix alone.
 #[test]
 fn an_inner_secondary_constructor_signs_only_its_declared_parameters() {
-    let source = "class Envelope<T>\n\
+    let source = "open class Root\n\
+                  class Token : Root()\n\
+                  class Size : Root()\n\
+                  class Envelope<T> : Root()\n\
                   class Owner {\n\
-                  \x20   inner class Part(val value: Any) {\n\
-                  \x20       constructor(size: Int, label: String) : this(label)\n\
-                  \x20       constructor(letter: Envelope<String>, size: Int) : this(letter)\n\
+                  \x20   inner class Part(val value: Root) {\n\
+                  \x20       constructor(size: Size, label: Token) : this(label)\n\
+                  \x20       constructor(letter: Envelope<Token>, size: Size) : this(letter)\n\
                   \x20   }\n\
                   }\n";
     let compared = common::compile_with_kotlinc("Owner", source, &[], &["Owner$Part"]);
@@ -71,12 +74,15 @@ fn an_inner_secondary_constructor_signs_only_its_declared_parameters() {
 /// A local class's captured values are a prefix the same way.
 #[test]
 fn a_capturing_local_secondary_constructor_has_no_signature_of_its_prefix() {
-    let source = "fun make(offset: Int): Any {\n\
-                  \x20   class Piece(val size: Int) {\n\
-                  \x20       constructor(label: CharSequence) : this(offset)\n\
-                  \x20       fun total() = size + offset\n\
+    let source = "interface Outcome\n\
+                  class Label\n\
+                  class Offset\n\
+                  fun make(offset: Offset): Outcome {\n\
+                  \x20   class Piece(val size: Offset) : Outcome {\n\
+                  \x20       constructor(label: Label) : this(offset)\n\
+                  \x20       fun captured() = size\n\
                   \x20   }\n\
-                  \x20   return Piece(\"label\")\n\
+                  \x20   return Piece(Label())\n\
                   }\n";
     let compared = common::compile_with_kotlinc("Make", source, &[], &["MakeKt$make$Piece"]);
     let (expected, actual) = &compared[0];
