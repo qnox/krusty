@@ -106,6 +106,37 @@ __attribute__((weak)) void kt_raise_uninitialized_property(KRef name) {
     kt_throw(kt_throwable_new(&kt_type_illegal_state_exception, message));
 }
 
+/* The bits `equals` and `hashCode` read from a floating-point value, every NaN collapsed to the
+   canonical one, as Java's `doubleToLongBits`/`floatToIntBits` answer. The runtime declares these
+   `static` and defines them in a later tier. */
+__attribute__((weak)) uint64_t kt_double_bits(kt_double value) {
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return value != value ? 0x7ff8000000000000ull : bits;
+}
+
+__attribute__((weak)) uint32_t kt_float_bits(kt_float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return value != value ? 0x7fc00000u : bits;
+}
+
+__attribute__((weak)) const KType kt_type_arithmetic_exception = {
+    .name = "kotlin.ArithmeticException",
+    .name_length = sizeof("kotlin.ArithmeticException") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
+};
+
+/* `throw ArithmeticException("Index overflow has happened.")`, Kotlin's `throwIndexOverflow`. */
+__attribute__((weak)) void kt_throw_index_overflow(void) {
+    static const char message[] = "Index overflow has happened.";
+    kt_throw(kt_throwable_new(&kt_type_arithmetic_exception,
+                              kt_string_utf8(message, sizeof(message) - 1)));
+}
+
 /* Whether `text` -- a string or a builder -- holds exactly these BYTES. Read through the text
    accessor of `standins.h`, which mirrors both layouts, rather than through a runtime comparison:
    `compareTo` and `startsWith` decode to UTF-16 units, which would call two different encodings of

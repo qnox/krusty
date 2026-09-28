@@ -409,6 +409,100 @@ fn a_builder_appends_copies_and_sets_its_length() {
     run_driver("builder_operations");
 }
 
+#[test]
+fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
+    run_driver("range_contains_unsigned");
+}
+
+#[test]
+fn a_progression_renders_compares_and_hashes_with_its_step() {
+    run_driver("range_progression_members");
+}
+
+#[test]
+fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
+    run_driver("comparable_range_program_type");
+}
+
+#[test]
+fn an_empty_unsigned_until_is_the_declared_empty_range() {
+    run_driver("range_unsigned_until_empty");
+}
+
+#[test]
+fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
+    run_driver("range_iterator_ulong_crosses_sign");
+}
+
+#[test]
+fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
+    run_driver("array_copy_into_bounds");
+}
+
+#[test]
+fn a_range_a_progression_and_their_iterators_are_kotlins_classes() {
+    run_driver("range_class_identity");
+}
+
+#[test]
+fn a_comparable_ranges_members_call_the_program_in_kotlins_order_and_stop_at_a_throw() {
+    run_driver("comparable_range_members");
+}
+
+#[test]
+fn a_floating_point_range_compares_by_ieee_and_answers_its_members_as_kotlin_does() {
+    run_driver("floating_range");
+}
+
+#[test]
+fn a_spread_of_something_other_than_the_varargs_array_kind_fails() {
+    run_driver_expecting_failure(
+        "array_copy_into_not_an_array",
+        "krusty: a spread of a value that is not an array of the vararg's kind\n",
+    );
+}
+
+#[test]
+fn a_step_of_something_other_than_a_range_fails() {
+    run_driver_expecting_failure(
+        "range_step_not_a_range",
+        "krusty: a step or reversal of a value that is not a range\n",
+    );
+}
+
+#[test]
+fn a_reversal_of_something_other_than_a_range_fails() {
+    run_driver_expecting_failure(
+        "range_reversed_not_a_range",
+        "krusty: a step or reversal of a value that is not a range\n",
+    );
+}
+
+#[test]
+fn range_behavior_matches_an_executable_kotlinc_oracle() {
+    const KOTLIN_ORACLE: &str = "fun bit(value: Boolean) = if (value) \"1\" else \"0\"\n\
+fun box(): String {\n\
+    val stepped = 1..10 step 2\n\
+    val reversed = (1..9 step 3).reversed()\n\
+    val progression = 1..3 step 1\n\
+    val range = 1..3\n\
+    val unsigned = Long.MAX_VALUE.toULong() - 1uL..Long.MAX_VALUE.toULong() + 5uL step 3\n\
+    return bit(stepped.first == 1) + bit(stepped.last == 9) +\n\
+        bit(reversed.first == 7) + bit(reversed.last == 1) +\n\
+        bit(progression == range) + bit(range != progression) +\n\
+        bit(Long.MAX_VALUE.toULong() + 2uL in unsigned)\n\
+}\n";
+    let Some(native) = run_payload_driver("range_kotlinc_oracle") else {
+        return;
+    };
+    let native = String::from_utf8(native).expect("the native range transcript is ASCII");
+    assert_eq!(
+        native,
+        common::kotlinc_box_result(KOTLIN_ORACLE),
+        "the native range transcript differs from the same program run by kotlinc"
+    );
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT

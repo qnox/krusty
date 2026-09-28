@@ -7726,7 +7726,63 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     half, as the JVM does — growth past the capacity, identity equality and self-append.
   Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
   `builder_operations`, with `class_names` and `result_operations` above).
-
+- **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
+  runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
+  flag for which it is, because the two classes differ observably and the step cannot tell them
+  apart (`1..3 step 1` is a progression). A range (`..`, `until`) renders `"$first..$last"`, hashes
+  `31 * first + last`, and equals only a range of the same element type; a progression (`step`,
+  `downTo`, `reversed()`) renders `"$first..$last step $step"` or `"$first downTo $last step
+  ${-step}"`, hashes `31 * (31 * first + last) + step`, and equals a range or a progression with
+  the same first, last and step — the asymmetry of `IntRange` subclassing `IntProgression`, so
+  `(1..3 step 1) == (1..3)` but not the reverse. Two empty ones are equal and hash to `-1`.
+  `last` is the last element reached. `UIntRange`/`ULongRange` read their bounds unsigned in
+  every comparison, membership residue and walk step, so a `ULong` walk across 2^63 neither
+  misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
+  (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
+  Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **A native range, a progression and their iterators are Kotlin's classes.** `..` and `until`
+  answer `kotlin.ranges.IntRange` (and `LongRange`, `CharRange`, `UIntRange`, `ULongRange`), whose
+  superclass is the element's progression; `step`, `downTo` and `reversed()` answer
+  `kotlin.ranges.IntProgression` (and kin) itself, even for a step of one; and `iterator()` answers
+  `kotlin.ranges.IntProgressionIterator` (and kin), a subclass of the abstract
+  `kotlin.collections.IntIterator`/`LongIterator`/`CharIterator`, while the unsigned iterators
+  subclass only `Any` — as kotlinc 2.4.10 reports on the JVM for the program recorded in the driver.
+  The two share one struct and vtable; the descriptor alone says which class an object is.
+  Tests: `tests/native_runtime_e2e.rs` (`range_class_identity`, `range_progression_members`).
+- **`value in progression` is Kotlin's `Iterable.contains`, index overflow included.** A range
+  (`IntRange` and kin) answers `in` with its own constant-time `contains`. A progression has no
+  `contains`, so Kotlin's `in` walks it with an `Int` index and throws
+  `ArithmeticException("Index overflow has happened.")` on reaching index 2^31 (checked with kotlinc
+  2.4.10: `0L in (Long.MIN_VALUE..Long.MAX_VALUE step 3)` throws, `(Long.MIN_VALUE + 3) in` it is
+  `true`, `-5L in (0L..2147483648L step 1)` throws, `-1L in (0L..2147483647L step 1)` is `false`).
+  The native runtime answers the same in constant time: a member at walk index below 2^31 is found,
+  a walk of at most 2^31 elements ends without one, and any other question throws. Membership in a
+  `ULong` walk is reduced on the unsigned ring, so a short walk across 2^63 finds its members.
+  Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`).
+- **A native `Double`/`Float` range compares by IEEE and answers its members as Kotlin's.**
+  `contains(v)` is `v >= start && v <= end` and `isEmpty()` is `!(start <= end)`, so a NaN bound
+  makes the range empty and a NaN value is in no range. Two empty ranges are equal whatever their
+  bounds (`NaN..NaN` equals itself), and bounds compare by `==`, so `0.0..1.0 == -0.0..1.0` though
+  their hashes differ (`1072693248`, `-1074790400`); a `Float` range never equals a `Double` one.
+  `hashCode` is `31 * start.hashCode() + end.hashCode()` at the bound's own width, `-1` when empty,
+  and `toString` renders each bound as its type does (`1.0E-5..1.0E10`, `-Infinity..Infinity`). All
+  as kotlinc 2.4.10 answers on the JVM for the program recorded in the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`floating_range`).
+- **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
+  range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
+  the range: the builtin one for strings and boxed primitives, and the class's `compareTo` for a
+  program's own `Comparable`. The runtime never rediscovers the order from the bounds' descriptors,
+  which know only the builtin types. `isEmpty` is `start > end`; `contains(v)` asks `v` against
+  `start` and then `end`, as Kotlin's class does. A `compareTo` that raises ends the member there:
+  `contains` makes no second comparison, and neither member answers `true` for a comparison that
+  raised. `equals`, `hashCode` and `toString` stop likewise at the first bound member that raises.
+  `equals` is `isEmpty() && other.isEmpty() || start == other.start && endInclusive ==
+  other.endInclusive` evaluated in Kotlin's order: `other.isEmpty()`, a call into `other`'s
+  `compareTo`, happens only when this range is empty. The exact calls each member makes into the
+  program, and where it stops when one throws, are those kotlinc 2.4.10 makes on the JVM for the
+  program recorded in `comparable_range_members`.
+  Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
   `@IntrinsicConstEvaluation` builtin (`Int.plus`, `toByte()`, `compareTo`, `String.length`, ...) or
