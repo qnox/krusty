@@ -124,3 +124,44 @@ fn constant_fused_guards_preserve_reachability() {
         "constant guards must retain both unconditional and fall-through control flow"
     );
 }
+
+/// A `break` in a loop condition targets the enclosing loop. A `while` condition is outside that
+/// loop, so `while (break)` leaves the outer loop before the body. A `do`/`while` condition is
+/// inside that loop, so the body runs once and the outer loop continues. Official box
+/// `controlStructures/breakContinueInExpressions/breakInLoopConditions.kt`.
+#[test]
+fn break_in_a_loop_condition_targets_the_enclosing_loop() {
+    let src = "fun breakInDoWhileCondition(): String {\n\
+var i = 0\n\
+while (true) {\n\
+++i\n\
+var j = 0\n\
+do {\n\
+++j\n\
+} while (break)\n\
+if (j != 1) return \"FAIL1\"\n\
+if (i == 3) break\n\
+}\n\
+if (i != 3) return \"FAIL2\"\n\
+return \"OK\"\n\
+}\n\
+fun breakInWhileCondition(): String {\n\
+var i = 0\n\
+while (true) {\n\
+++i\n\
+var j = 0\n\
+while (break) {\n\
+j++\n\
+}\n\
+return \"FAIL3\"\n\
+}\n\
+if (i != 1) return \"FAIL4\"\n\
+return \"OK\"\n\
+}\n\
+fun box(): String {\n\
+val breakInDoWhileResult = breakInDoWhileCondition()\n\
+if (breakInDoWhileResult != \"OK\") return breakInDoWhileResult\n\
+return breakInWhileCondition()\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "breakInLoopConditions");
+}

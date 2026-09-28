@@ -1917,6 +1917,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a `break@l`/`continue@l` targets the nearest enclosing loop carrying `l` (an unlabeled `break`/`continue`
   still targets the innermost). Works across all loop forms — counted `for`, collection `for-each`,
   `while`, `do…while` (`LabeledLoops` in `tests/feature_box_e2e.rs`).
+- **A `break` or `continue` in a loop condition targets the enclosing loop.** A `while` condition is
+  outside that loop, so `while (break)` leaves the outer loop and the body does not run. A
+  `do`/`while` condition is inside that loop, so the body runs and `while (break)` leaves the
+  `do`/`while`. The condition emits the transfer and no Boolean test.
+  `break_in_a_loop_condition_targets_the_enclosing_loop` in `tests/loop_jump_shape_e2e.rs`; box
+  corpus `controlStructures/breakContinueInExpressions/breakInLoopConditions.kt`.
 - Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
@@ -4992,12 +4998,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
   `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
   `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
-  to the same `IrExpr::Break`/`Continue` loop jump as the statement form. They are supported only in a TAIL
-  position (an elvis RHS, an `if`/`when`-branch value, a block's trailing value), where the operand stack
-  is empty at the jump; a `break`/`continue` used mid-expression (`x + break`, `inc() downTo continue`,
-  `while (break)`) would jump with operand-stack values krusty's emitter doesn't clear, so
-  `break_continue_tail_only` (a `lower_body` pre-scan) declines that body (skip, never miscompile). Test:
-  `tests/break_continue_expr_e2e.rs`.
+  to the same `IrExpr::Break`/`Continue` loop jump as the statement form. They are supported where the
+  transfer has an empty operand stack: a tail position (an elvis RHS, an `if`/`when`-branch value, a
+  block's trailing value) or an entire loop condition. A `break`/`continue` used after another operand
+  has already been pushed (`x + break`, `inc() downTo continue`) must still be rejected before emission;
+  otherwise the jump would carry a stack value to a target that expects none. Tests:
+  `tests/break_continue_expr_e2e.rs`, `tests/loop_jump_shape_e2e.rs`.
 - **A default PARAMETER whose default VALUE is an object construction (`fun list(f: F = F(), n: Int = 2)`),
   called omitting that argument.** The `foo$default` synthetic stub re-emits an omitted parameter's default
   expression, so `toplevel_default_stub_safe` now ACCEPTS a plain `new`/object construction default (it was

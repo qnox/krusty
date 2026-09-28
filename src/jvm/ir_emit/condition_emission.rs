@@ -207,6 +207,12 @@ impl Emitter<'_> {
             }
             return false;
         }
+        // A condition that always transfers (`while (break)`, `do { … } while (break)`) emits
+        // the jump and no Boolean. Testing a missing 0/1 afterwards is an empty-stack `ifeq`.
+        if self.diverges(cond) {
+            self.emit_value(cond, code);
+            return true;
+        }
         self.emit_value(cond, code);
         if jump_when_true {
             code.ifne(target);
