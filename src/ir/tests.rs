@@ -2,6 +2,17 @@ use super::test_support::blank_class;
 use super::*;
 
 #[test]
+fn a_superclass_reuses_its_rendered_spelling() {
+    let mut class = blank_class("sample/super6044/Host");
+    class.superclass = crate::types::type_name("sample/super6044/Outer$Base");
+    let first = class.superclass();
+    let second = class.superclass();
+    assert!(std::ptr::eq(first, second));
+    assert!(std::ptr::eq(first, class.superclass.rendered()));
+    assert_eq!(first, "sample/super6044/Outer$Base");
+}
+
+#[test]
 fn external_callable_reference_target_keeps_only_provider_identity() {
     let declaration = crate::fir::ExternalCallableId::from_raw(37);
     let target = IrCallableReferenceTarget::External {
