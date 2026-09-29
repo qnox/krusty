@@ -165,3 +165,39 @@ return breakInWhileCondition()\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "breakInLoopConditions");
 }
+
+/// The pre-test loop is not in scope while its own condition is evaluated, so an unlabeled
+/// `continue` there resumes the enclosing loop rather than targeting the loop being entered.
+#[test]
+fn continue_in_a_while_condition_targets_the_enclosing_loop() {
+    let src = "fun box(): String {\n\
+var iterations = 0\n\
+while (++iterations < 3) {\n\
+while (continue) {\n\
+return \"FAIL-inner\"\n\
+}\n\
+return \"FAIL-outer\"\n\
+}\n\
+return if (iterations == 3) \"OK\" else \"FAIL-count: $iterations\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(src, "ContinueInWhileCondition");
+}
+
+/// A `do`/`while` condition remains inside that loop. Its unlabeled `continue` therefore targets
+/// the condition itself; compare bytes without executing the intentional infinite loop.
+#[test]
+fn continue_in_a_do_while_condition_targets_that_loop() {
+    let src = "fun spin() {\n\
+do {\n\
+} while (continue)\n\
+}\n";
+    let Some(result) = common::byte_diff_against_kotlinc(
+        "ContinueInDoWhileCondition",
+        src,
+        "ContinueInDoWhileConditionKt",
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("a do-while condition continue is byte-identical to kotlinc");
+}

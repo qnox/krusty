@@ -1921,8 +1921,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   outside that loop, so `while (break)` leaves the outer loop and the body does not run. A
   `do`/`while` condition is inside that loop, so the body runs and `while (break)` leaves the
   `do`/`while`. The condition emits the transfer and no Boolean test.
-  `break_in_a_loop_condition_targets_the_enclosing_loop` in `tests/loop_jump_shape_e2e.rs`; box
-  corpus `controlStructures/breakContinueInExpressions/breakInLoopConditions.kt`.
+  `break_in_a_loop_condition_targets_the_enclosing_loop` and
+  `continue_in_a_while_condition_targets_the_enclosing_loop` plus the byte-level
+  `continue_in_a_do_while_condition_targets_that_loop` in
+  `tests/loop_jump_shape_e2e.rs`; box corpus
+  `controlStructures/breakContinueInExpressions/breakInLoopConditions.kt`.
 - Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
