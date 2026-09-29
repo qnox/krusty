@@ -75,7 +75,6 @@ dataClasses/components/kt49812.kt
 defaultArguments/convention/incWithDefaultInGetter.kt
 defaultArguments/function/kt36188.kt
 defaultArguments/function/kt36188_2.kt
-defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/getDelegateWithoutReflection.kt
@@ -135,11 +134,8 @@ inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/hiddenConstructor/innerClassConstructor.kt
 inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
-inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
-inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClassGeneric.kt
-inlineClasses/inlineClassCollection/inlineMapOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/jvmInline.kt
 inlineClasses/kt25771.kt
