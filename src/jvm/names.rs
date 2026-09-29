@@ -501,13 +501,13 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
 /// arm therefore erases silently, which is how `Unit` came to answer `true` for every non-null
 /// value, so a Kotlin type with a runtime class of its own is named explicitly.
 ///
-/// `kotlin.Nothing` is deliberately absent: it has no runtime class at all (there is no
-/// `kotlin/Nothing.class` in kotlin-stdlib), so no name here could be right. Common lowering
-/// settles `is Nothing` before a backend sees it.
+/// `kotlin.Nothing` has no Kotlin runtime class. The JVM represents its impossible value slot as
+/// boxed `void`, so representation-only casts and checks name `java/lang/Void`; `instanceof Void`
+/// remains false for every realizable Kotlin value and for `null`.
 pub(crate) fn instanceof_internal_name(t: Ty) -> &'static str {
     match t {
         Ty::Pending => unreachable!("a not-determined type reached a JVM instanceof name"),
-        Ty::Nothing => unreachable!("Nothing reached a JVM instanceof name"),
+        Ty::Nothing => classfile_internal_name_of(crate::types::wk::java_void()),
         Ty::String => "java/lang/String",
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
             Ty::UByte => "kotlin/UByte",
@@ -877,9 +877,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Nothing reached a JVM instanceof name")]
-    fn instanceof_name_rejects_nothing() {
-        instanceof_internal_name(Ty::Nothing);
+    fn nothing_uses_the_jvm_void_carrier() {
+        assert_eq!(instanceof_internal_name(Ty::Nothing), "java/lang/Void");
     }
 
     #[test]
