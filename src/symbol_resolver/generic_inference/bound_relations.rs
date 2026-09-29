@@ -217,6 +217,21 @@ fn complete_explicit_hole_bound_bindings(
     }
 }
 
+/// A caller-owned type parameter is a denotable solution (`R = T` for
+/// `C : MutableCollection<in R>` and `C = MutableCollection<T>`). A formal of this
+/// signature that is still open is not: binding it would record the variable as its
+/// own answer.
+fn solution_mentions_open_formal(
+    generic_sig: &GenericSig,
+    bindings: &GSigBinds,
+    solution: Ty,
+) -> bool {
+    generic_sig.formals.iter().any(|formal| {
+        !bindings.contains_key(formal)
+            && crate::types::ty_mentions_param(solution, std::slice::from_ref(formal))
+    })
+}
+
 /// Solve a formal from the declaration's own bound relation: one that no argument reached, and one
 /// whose argument-derived binding its OWN bound forbids.
 ///
@@ -276,7 +291,8 @@ pub(crate) fn resolve_bound_violating_bindings(
                         || explicit.fixes(index)
                         || bindings.contains_key(&candidate)
                         || solution == Ty::Error
-                        || solution.mentions_ty_param()
+                        || solution.mentions_pending()
+                        || solution_mentions_open_formal(generic_sig, bindings, solution)
                     {
                         continue;
                     }
@@ -349,7 +365,10 @@ pub(crate) fn resolve_bound_violating_bindings(
                 let Some(&solution) = applied.type_args().get(position) else {
                     continue;
                 };
-                if solution != Ty::Error && !solution.mentions_ty_param() {
+                if solution != Ty::Error
+                    && !solution.mentions_pending()
+                    && !solution_mentions_open_formal(generic_sig, bindings, solution)
+                {
                     bindings.insert(open.to_string(), solution);
                     break;
                 }
@@ -396,7 +415,11 @@ pub(crate) fn resolve_bound_violating_bindings(
             let Some(&solution) = applied.type_args().get(position) else {
                 continue;
             };
-            if solution != Ty::Error && !solution.mentions_ty_param() && solution != actual {
+            if solution != Ty::Error
+                && !solution.mentions_pending()
+                && !solution_mentions_open_formal(generic_sig, bindings, solution)
+                && solution != actual
+            {
                 bindings.insert(formal.clone(), solution);
                 break;
             }

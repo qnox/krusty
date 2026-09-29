@@ -406,7 +406,17 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         // shape participates in inference. In particular, `MutableCollection<in T>` must carry
         // the receiver's element type into overload selection; dropping it lets a later collection
         // argument rebind the element overload's `T` to `List<Int>`.
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => unify_ty_impl(
+        // An `in` position reads a star or an `out` projection as the bottom type. The
+        // readable upper bound of `*` is not evidence for a contravariant variable:
+        // `MutableCollection<*>` satisfies `MutableCollection<in R>` only for `R = Nothing`.
+        Ty::InProjection(inner) => {
+            let contributed = match actual {
+                Ty::OutProjection(_) | Ty::StarProjection(_) => Ty::Nothing,
+                _ => actual.projection_inner().unwrap_or(actual),
+            };
+            unify_ty_impl(source, *inner, contributed, binds);
+        }
+        Ty::OutProjection(inner) => unify_ty_impl(
             source,
             *inner,
             actual.projection_inner().unwrap_or(actual),
@@ -929,6 +939,7 @@ pub(crate) fn merge_call_argument_bindings(
     // entails `X = UInt`; leaving X open until applied-supertype solving instead binds it to
     // `Comparable<UInt>`, which satisfies only one side of the intersection and rejects the call.
     complete_dependent_bound_bindings(signature, bindings, explicit_type_arguments);
+    resolve_bound_violating_bindings(Some(source), signature, bindings, explicit_type_arguments);
 }
 
 pub(crate) fn formal_variance_in_type(
@@ -1019,7 +1030,14 @@ pub(super) fn unify_inferred_ty_impl(
         return;
     }
     match sig {
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => unify_inferred_ty_impl(
+        Ty::InProjection(inner) => {
+            let contributed = match actual {
+                Ty::OutProjection(_) | Ty::StarProjection(_) => Ty::Nothing,
+                _ => actual.projection_inner().unwrap_or(actual),
+            };
+            unify_inferred_ty_impl(source, *inner, contributed, binds);
+        }
+        Ty::OutProjection(inner) => unify_inferred_ty_impl(
             source,
             *inner,
             actual.projection_inner().unwrap_or(actual),
