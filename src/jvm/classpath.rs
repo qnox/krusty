@@ -3676,7 +3676,7 @@ impl Classpath {
             }
             return self.find_name(crate::types::type_name_nested_child(owner, nested));
         }
-        let spelling = format!("{}${}", owner.render(), nested);
+        let spelling = owner.jvm_nested_binary_name(nested);
         self.find(&spelling)
     }
 
@@ -5088,22 +5088,6 @@ impl PackageTree {
         self.incomplete_entries.is_empty()
     }
 
-    /// Whether `owner`'s JVM nested class (`Owner$Companion`, `Outer$Inner$Companion`) is declared.
-    /// The owner class file itself need not be present. A miss does not intern the nested name.
-    pub(crate) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
-        let Some(package) = crate::types::existing_type_name_in(&self.names, owner.namespace())
-        else {
-            return false;
-        };
-        let Some(class) = self
-            .names
-            .existing_nested_under(package, owner.segment_ref(), nested)
-        else {
-            return false;
-        };
-        !self.jars_for_class_id(class).is_empty()
-    }
-
     /// Whether `package` directly declares a class whose final path segment is `class_segment`.
     /// The segment is the class file's last component (`CollectionsKt`, `Map$Entry`), not a source
     /// nested name, and a miss does not intern it into the global type-name tree.
@@ -5117,9 +5101,9 @@ impl PackageTree {
         !self.jars_for_class_id(class).is_empty()
     }
 
-    /// Whether `owner`'s flattened JVM nested class is declared. The owner class file itself need
-    /// not be present. Both probes stay inside the catalog's name tree, so a failed symbol lookup
-    /// neither formats nor interns a candidate.
+    /// Whether `owner`'s flattened JVM nested class (`Owner$Companion`,
+    /// `Outer$Inner$Companion`) is declared. The owner class file itself need not be present. Both
+    /// probes stay inside the catalog's name tree, so a miss neither formats nor interns a candidate.
     pub(super) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
         let Some(package) = crate::types::existing_type_name_in(&self.names, owner.namespace())
         else {
@@ -6583,7 +6567,7 @@ mod fq_tests {
             .expect("companion class is in the catalog");
         assert_eq!(found.this_class, type_name(only));
 
-        let inner_owner = type_name("probe/comphit6044/Outer$Inner");
+        let inner_owner = type_name("probe/comphit6044/Outer.Inner");
         let found_inner = classpath
             .find_nested_class(inner_owner, "Companion")
             .expect("nested companion class is in the catalog");

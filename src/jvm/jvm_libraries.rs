@@ -1317,7 +1317,9 @@ impl JvmLibraries {
         {
             return Some(ty);
         }
-        let companion = self.cp.find_nested_class(internal, "Companion")?;
+        let companion = self
+            .cp
+            .find_nested_class(internal, crate::names::COMPANION_OBJECT_NAME)?;
         declared(&companion)
     }
 
@@ -1325,7 +1327,10 @@ impl JvmLibraries {
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        let Some(companion) = self.cp.find_nested_class(ci.this_class, "Companion") else {
+        let Some(companion) = self
+            .cp
+            .find_nested_class(ci.this_class, crate::names::COMPANION_OBJECT_NAME)
+        else {
             return std::collections::HashMap::new();
         };
         let prop_rets: std::collections::HashMap<_, _> =
@@ -3401,22 +3406,16 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     ))
 }
 
-/// Recover the pre-`value class` metadata encoding used by Kotlin's original `inline class`
-/// frontend. Those class protos omit fields 17-19, but the JVM ABI is unambiguous and the ordinary
-/// underlying property remains in metadata. This stays at the JVM provider boundary: consumers see
-/// the same semantic classifier shape regardless of which metadata generation encoded it.
-/// `type_descriptor` of this classifier is `L` plus its rendered internal name. Numbered and
-/// reflective function classifiers, intrinsic companions, and a dotted class tail spell a
-/// different class file, so a descriptor comparison still has to build that spelling.
-fn descriptor_spells_rendered_name(name: TypeName) -> bool {
+/// Whether this already-normalized object classifier has the same identity in the classfile
+/// hierarchy. Function classifiers and intrinsic companions have a distinct JVM realization and
+/// retain the descriptor path below; ordinary and mapped object classifiers compare by identity.
+fn object_rank_uses_identity(name: TypeName) -> bool {
     !super::jvm_class_map::maps_to_distinct_jvm_internal(name)
         && super::jvm_class_map::intrinsic_companion_jvm_class(name).is_none()
-        && !name.segment_ref().contains('.')
 }
 
 /// Rung of `want` in `receiver`'s superclass-then-interface closure. The walk matches
-/// [`supertype_descriptors`] for a classifier whose descriptor is its rendered name, without
-/// building those strings.
+/// [`supertype_descriptors`] for an object classifier without building descriptor strings.
 fn object_supertype_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option<u32> {
     let Ty::Obj(start, _) = receiver else {
         return None;
@@ -3446,7 +3445,9 @@ fn object_supertype_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option
 }
 
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
-/// breadth-first so a more specific receiver is tried before a more general one.
+/// breadth-first so a more specific receiver is tried before a more general one. This is retained
+/// for arrays, scalars, and function/intrinsic classifiers whose JVM representation is not their
+/// semantic object identity.
 fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     // Every type is a subtype of `Any`, so a generic extension declared on `T` (erased to `Object`)
     // applies to any receiver — always try `java/lang/Object` last (after the specific supertypes).
@@ -5592,13 +5593,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             Ty::Obj(want, _)
                 if !recv.is_array()
                     && matches!(recv, Ty::Obj(_, _))
-                    && descriptor_spells_rendered_name(want) =>
+                    && object_rank_uses_identity(want) =>
             {
-                object_supertype_rank(&self.cp, recv, want).or_else(|| {
-                    // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every
-                    // receiver at the lowest precedence when the MRO does not list the implicit root.
-                    want.matches("java/lang/Object").then_some(u32::MAX - 1)
-                })
+                object_supertype_rank(&self.cp, recv, want)
             }
             _ => {
                 let want = type_descriptor(form);
@@ -6065,6 +6062,14 @@ mod tests {
             crate::jvm::classfile::ClassWriter::new("probe/rank6044/Leaf", "probe/rank6044/Mid")
                 .finish(),
         );
+        write(
+            "probe/rank6044/Outer$Nested",
+            crate::jvm::classfile::ClassWriter::new(
+                "probe/rank6044/Outer$Nested",
+                "probe/rank6044/Base",
+            )
+            .finish(),
+        );
         let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![directory.clone()]),
         ));
@@ -6074,6 +6079,7 @@ mod tests {
         let face = Ty::obj("probe/rank6044/Face");
         let any = Ty::obj("kotlin/Any");
         let other = Ty::obj("probe/rank6044/Other");
+        let nested = Ty::obj("probe/rank6044/Outer.Nested");
         let array = Ty::obj_args("kotlin/Array", &[leaf]);
         let function = Ty::obj("kotlin/Function1");
         for (recv, decl) in [
@@ -6083,6 +6089,8 @@ mod tests {
             (leaf, face),
             (leaf, any),
             (leaf, other),
+            (nested, nested),
+            (nested, base),
             (array, any),
             (array, leaf),
             (Ty::Int, any),

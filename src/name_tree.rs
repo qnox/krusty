@@ -578,6 +578,15 @@ impl NameTree {
         out
     }
 
+    /// JVM classfile spelling of a nested classifier below `owner`, without interning the child.
+    pub(crate) fn jvm_nested_binary_name(&self, owner: NameId, nested: &str) -> String {
+        let mut out = self.jvm_binary_name(owner);
+        out.reserve(nested.len() + 1);
+        out.push('$');
+        out.push_str(nested);
+        out
+    }
+
     pub fn starts_with(&self, id: NameId, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
@@ -1055,6 +1064,10 @@ mod tests {
             "metadata/Outer$Middle$Inner$Generated"
         );
         assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
+        assert_eq!(
+            names.jvm_nested_binary_name(metadata_nested, "Companion"),
+            "metadata/Outer$Middle$Inner$Companion"
+        );
 
         let late_nested = names.insert("late/Outer$Inner");
         assert_eq!(names.nested_owner(late_nested), None);
