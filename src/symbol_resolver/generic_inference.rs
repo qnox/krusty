@@ -406,12 +406,14 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         // shape participates in inference. In particular, `MutableCollection<in T>` must carry
         // the receiver's element type into overload selection; dropping it lets a later collection
         // argument rebind the element overload's `T` to `List<Int>`.
-        // An `in` position reads a star or an `out` projection as the bottom type. The
-        // readable upper bound of `*` is not evidence for a contravariant variable:
-        // `MutableCollection<*>` satisfies `MutableCollection<in R>` only for `R = Nothing`.
+        // A star in an `in` position is the bottom type. The readable upper bound of
+        // `*` is not evidence for a contravariant variable: `MutableCollection<*>`
+        // satisfies `MutableCollection<in R>` only for `R = Nothing`. An `out`
+        // projection still contributes its type argument, so `Context<out T>` passed
+        // where `Context<in R>` is expected binds `R` to `T`.
         Ty::InProjection(inner) => {
             let contributed = match actual {
-                Ty::OutProjection(_) | Ty::StarProjection(_) => Ty::Nothing,
+                Ty::StarProjection(_) => Ty::Nothing,
                 _ => actual.projection_inner().unwrap_or(actual),
             };
             unify_ty_impl(source, *inner, contributed, binds);
@@ -1032,7 +1034,7 @@ pub(super) fn unify_inferred_ty_impl(
     match sig {
         Ty::InProjection(inner) => {
             let contributed = match actual {
-                Ty::OutProjection(_) | Ty::StarProjection(_) => Ty::Nothing,
+                Ty::StarProjection(_) => Ty::Nothing,
                 _ => actual.projection_inner().unwrap_or(actual),
             };
             unify_inferred_ty_impl(source, *inner, contributed, binds);

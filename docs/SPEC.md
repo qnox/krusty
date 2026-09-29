@@ -2546,9 +2546,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument.** `<R, C : MutableCollection<in R>> id(c: C)` applied to `MutableCollection<T>` or
   `ArrayList<T>` binds `R` to `T`, including when `T` belongs to the caller. A star argument
   binds the contravariant variable to `Nothing` (`MutableCollection<*>` satisfies
-  `MutableCollection<in Nothing>`). An argument outside that bound, such as `Int`, is rejected.
+  `MutableCollection<in Nothing>`). An `out` projection contributes its type argument
+  instead: `Context<out T>` passed where `Context<in R>` is expected binds `R` to `T`.
+  An argument outside that bound, such as `Int`, is rejected.
   The same rule instantiates the reified element of `filterIsInstanceTo` from the
-  destination collection. Test: `tests/generic_bound_projection_e2e.rs`.
+  destination collection. Tests: `tests/generic_bound_projection_e2e.rs` and
+  `tests/backend_rejection_coverage_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
