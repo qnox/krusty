@@ -95,19 +95,19 @@ fn class_mapper_lite_descriptor_spelling(classifier: TypeName) -> &'static str {
     if let Some(owner) =
         intrinsic_companion_owner(classifier).filter(|owner| Ty::obj_name(*owner) != Ty::Boolean)
     {
-        return interned_reference_descriptor(&companion_object_internal(owner));
+        return retained_reference_descriptor(&companion_object_internal(owner));
     }
-    interned_reference_descriptor(&super::names::binary_class_name(classifier))
+    retained_reference_descriptor(&super::names::binary_class_name(classifier))
 }
 
-/// `Lname;` remembered by its text. `name` is not already a static classfile spelling, so this
-/// does not key [`super::names::reference_descriptor`]; the result still shares that interner.
-fn interned_reference_descriptor(name: &str) -> &'static str {
+/// Retain `Lname;` for the surrounding JVM cache. These generated physical spellings must not use
+/// the core type-parameter-name interner.
+fn retained_reference_descriptor(name: &str) -> &'static str {
     let mut descriptor = String::with_capacity(name.len() + 2);
     descriptor.push('L');
     descriptor.push_str(name);
     descriptor.push(';');
-    crate::types::intern(&descriptor)
+    Box::leak(descriptor.into_boxed_str())
 }
 
 /// [`class_mapper_lite_descriptor`] of `kotlin.Nothing`, which is a type rather than a classifier.
@@ -131,9 +131,9 @@ pub(super) fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool)
         return found;
     }
     let spelled = if suspend {
-        interned_reference_descriptor(&format!("kotlin/coroutines/SuspendFunction{arity}"))
+        retained_reference_descriptor(&format!("kotlin/coroutines/SuspendFunction{arity}"))
     } else {
-        interned_reference_descriptor(&format!("kotlin/Function{arity}"))
+        retained_reference_descriptor(&format!("kotlin/Function{arity}"))
     };
     CACHE.with(|cache| cache.borrow_mut().insert((suspend, arity), spelled));
     spelled
