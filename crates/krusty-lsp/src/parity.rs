@@ -507,7 +507,7 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
         &resolve,
     ) {
         Some(stubs) => {
-            classpath.set_stub_overlay(stubs);
+            classpath.set_stub_overlay(&stubs);
             true
         }
         None => false,

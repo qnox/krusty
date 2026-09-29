@@ -223,16 +223,18 @@ fn classpath_paths_are_cacheable(paths: &[PathBuf]) -> bool {
     paths.iter().all(|path| path.is_file())
 }
 
-fn harness_classpath(paths: Vec<PathBuf>) -> std::rc::Rc<Classpath> {
-    if !classpath_paths_are_cacheable(&paths) {
-        return std::rc::Rc::new(Classpath::new(paths));
+fn harness_classpath(paths: &[PathBuf]) -> std::rc::Rc<Classpath> {
+    if !classpath_paths_are_cacheable(paths) {
+        return std::rc::Rc::new(Classpath::new(paths.to_vec()));
     }
     CP_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(paths)))
-            .clone()
+        if let Some(hit) = cache.borrow().get(paths) {
+            return std::rc::Rc::clone(hit);
+        }
+        let owned = paths.to_vec();
+        let cp = std::rc::Rc::new(Classpath::new(owned.clone()));
+        cache.borrow_mut().insert(owned, std::rc::Rc::clone(&cp));
+        cp
     })
 }
 
@@ -241,7 +243,7 @@ fn harness_classpath_with_friends(
     friend_paths: Vec<PathBuf>,
 ) -> std::rc::Rc<Classpath> {
     if friend_paths.is_empty() {
-        harness_classpath(paths)
+        harness_classpath(&paths)
     } else {
         std::rc::Rc::new(Classpath::new_with_friend_paths(paths, friend_paths))
     }
@@ -260,7 +262,7 @@ impl OverlayGuard {
         if classes.is_empty() {
             return None;
         }
-        cp.set_stub_overlay(classes.to_vec());
+        cp.set_stub_overlay(classes);
         Some(OverlayGuard(cp.clone()))
     }
 }
@@ -290,7 +292,7 @@ fn compile_source(
         cp_paths.push(p.to_path_buf());
     }
     // Reuse stable jar/jimage classpaths; scratch directory classpaths die with their compile.
-    let cp = harness_classpath(cp_paths);
+    let cp = harness_classpath(&cp_paths);
     progress("two-pass FIR");
     let started = std::time::Instant::now();
     let platform = Box::new(
@@ -1127,6 +1129,29 @@ fn scratch_directory_classpaths_are_not_retained() {
     assert!(classpath_paths_are_cacheable(
         &[manifest.join("Cargo.toml")]
     ));
+    let first = harness_classpath(std::slice::from_ref(&manifest));
+    let second = harness_classpath(std::slice::from_ref(&manifest));
+    assert!(
+        !std::rc::Rc::ptr_eq(&first, &second),
+        "a directory classpath is rebuilt; retaining it would pin a deleted scratch dir"
+    );
+}
+
+#[test]
+fn stable_file_classpaths_reuse_one_instance() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let empty_a = harness_classpath(&[]);
+    let empty_b = harness_classpath(&[]);
+    assert!(std::rc::Rc::ptr_eq(&empty_a, &empty_b));
+
+    let jar = manifest.join("Cargo.toml");
+    let first = harness_classpath(std::slice::from_ref(&jar));
+    let second = harness_classpath(std::slice::from_ref(&jar));
+    assert!(
+        std::rc::Rc::ptr_eq(&first, &second),
+        "a repeated jar classpath must hit without building another Classpath"
+    );
+    assert!(!std::rc::Rc::ptr_eq(&empty_a, &first));
 }
 
 #[test]

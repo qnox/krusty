@@ -3902,11 +3902,11 @@ impl Classpath {
         declares(owner, field).then(|| (owner, field.to_string()))
     }
 
-    /// Replace the in-memory class overlay and invalidate dependent lookups.
-    pub fn set_stub_overlay(&self, classes: Vec<(String, Vec<u8>)>) {
+    /// Replace the in-memory class overlay from borrowed class bytes and invalidate dependent lookups.
+    pub fn set_stub_overlay(&self, classes: &[(String, Vec<u8>)]) {
         let mut map = HashMap::new();
         for (_, bytes) in classes {
-            if let Ok(ci) = parse_class(&bytes) {
+            if let Ok(ci) = parse_class(bytes) {
                 map.entry(ci.this_class)
                     .or_insert_with(|| std::sync::Arc::new(ci));
             }
@@ -8162,7 +8162,7 @@ mod fq_tests {
             &|candidate| candidate == "java/lang/Object",
         )
         .expect("stub");
-        cp.set_stub_overlay(stubs);
+        cp.set_stub_overlay(&stubs);
 
         assert!(std::rc::Rc::ptr_eq(
             &warm_symbols,
@@ -8198,7 +8198,7 @@ mod fq_tests {
             !cp.has_package(TypeName::ROOT, "p"),
             "package absent before overlay"
         );
-        cp.set_stub_overlay(stubs);
+        cp.set_stub_overlay(&stubs);
         assert!(
             cp.has_package(TypeName::ROOT, "p"),
             "overlay contributes its package"
