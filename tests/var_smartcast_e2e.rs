@@ -515,10 +515,7 @@ fn cast_to_nothing_in_try_still_returns_from_the_catch() {
     }\n\
     return \"Fail\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("catch returns after null as Nothing"),
-        "OK"
-    );
+    assert_eq!(run(SRC).expect("catch returns after null as Nothing"), "OK");
 }
 
 #[test]
