@@ -19,6 +19,7 @@ cd "$(dirname "$0")"
 # Shared with instrumented coverage, which executes the already-built test binaries directly.
 source "$(dirname "$0")/scripts/test-deadline.sh"
 source "$(dirname "$0")/scripts/libtest-shards.sh"
+source "$(dirname "$0")/scripts/e2e-parallel.sh"
 source "$(dirname "$0")/scripts/target-hygiene.sh"
 
 # `gate` is a Cargo profile, not a target dir; and cargo never prunes `target/` itself. Refuse the
@@ -255,6 +256,22 @@ run_label() {
 }
 export -f run_label
 
+# TIMINGS and FAILED are appended by every concurrent run (the small-binary pool and the e2e shard
+# pool). A short O_APPEND write is not atomic on every host the gate runs on, so take a mkdir lock.
+# The critical section is one line; a leftover lock dies with the temporary log directory.
+append_exclusive() {
+  local file="$1" line="$2" lockdir="${1}.lock"
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    sleep 0.01
+  done
+  if ! printf '%s\n' "$line" >>"$file"; then
+    rmdir "$lockdir"
+    return 1
+  fi
+  rmdir "$lockdir"
+}
+export -f append_exclusive
+
 run_one() {
   local b="${2%%::*}" extra="" name slug status=0
   local explicit_label="${3:-}" expected_tests="${4:-}" description
@@ -268,9 +285,9 @@ run_one() {
   if [ -n "$slug" ]; then name="$name@$slug"; fi
   # The slug is lossy (`--test-threads=N` stripped, punctuation folded), so a future split whose
   # passes differ only along a dropped axis would collide and silently resurrect the overwrite bug
-  # this naming exists to prevent. Disambiguate instead. Only same-binary splits can collide, and
-  # those are scheduled sequentially from the main shell, so no locking is needed: every run in the
-  # concurrent xargs pool has a distinct binary basename and an empty slug.
+  # this naming exists to prevent. Disambiguate instead. Concurrent callers must not share a slug:
+  # the existence check below is not safe across processes. The xargs pool only runs distinct
+  # binaries (empty slug); e2e shards pass a distinct explicit label.
   local uniq="$name" n=1
   while [ -e "$1/$uniq.log" ]; do
     n=$((n + 1))
@@ -302,14 +319,14 @@ run_one() {
     elif [ -n "$extra" ]; then
       description="$description [$extra]"
     fi
-    printf '%s\t%s\n' "$name" "$description" >>"$1/FAILED"
+    append_exclusive "$1/FAILED" "$(printf '%s\t%s' "$name" "$description")"
     if [ "$status" -eq 124 ]; then
-      printf '%s\t%s\n' "$name" "$description" >>"$1/TIMED_OUT"
+      append_exclusive "$1/TIMED_OUT" "$(printf '%s\t%s' "$name" "$description")"
     fi
   fi
   end="$(epoch_ms)"
   ms=$((end - start))
-  printf '%08d %s\n' "$ms" "$name" >>"$1/TIMINGS"
+  append_exclusive "$1/TIMINGS" "$(printf '%08d %s' "$ms" "$name")"
 }
 export -f run_one
 
@@ -354,47 +371,105 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary joins ~4,000 formerly-separate e2e tests, many of which drive the real kotlinc plus
-# a persistent JVM box runner. Run it DEDICATED and SEQUENTIALLY — after conformance, before the
-# small-binary pool — with `--test-threads=$ncpu` so its tests parallelize INTERNALLY across all cores,
-# and size the per-process box-runner pool to match so `ncpu` in-flight `box()` calls don't queue on too
-# few runners. The whole binary can exceed the five-minute per-process ceiling on smaller hosts, so
-# greedily balance whole top-level test modules into bounded shards. Each shard skips the other modules
-# and must report exactly its planned test count; a lossy libtest skip filter therefore fails visibly
-# instead of silently reducing coverage. Running the shards alone (outside the `-P jobs` fan-out) keeps
-# them from over-subscribing while they own the cores.
+# The e2e binary joins the product tests that drive kotlinc plus a persistent JVM box runner. Run it
+# after conformance and before the small-binary pool. Each shard uses `--test-threads=$ncpu` and a
+# matching box-runner pool so its own `box()` calls do not queue on too few JVMs. Those threads wait
+# on the JVMs, so one shard leaves cores idle. A bounded pool (default three shards when the host has
+# at least three CPUs; `KRUSTY_E2E_PARALLEL` overrides) runs outside the `-P jobs` fan-out. Wider than
+# that, a 4-core host stops gaining throughput and a shard drifts toward its deadline. The whole
+# binary can exceed the per-process ceiling, so greedily balance whole top-level test modules into
+# shards. Each shard skips the other modules and must report exactly its planned test count; a lossy
+# libtest skip filter therefore fails visibly instead of silently reducing coverage.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
   e2e_shards="$KRUSTY_E2E_SHARDS"
   libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
+  if ! e2e_parallel="$(e2e_parallel_width "$ncpu" "$e2e_shards" "${KRUSTY_E2E_PARALLEL:-}")"; then
+    echo "run-tests.sh: KRUSTY_E2E_PARALLEL must be a canonical positive integer" >&2
+    exit 1
+  fi
   e2e_listing="$logdir/e2e-tests.list"
   e2e_plan="$logdir/e2e-shards.plan"
   e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
   libtest_write_shard_plan \
     "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
+  echo "run-tests.sh: e2e shards=$e2e_shards parallel=$e2e_parallel" >&2
+  # bash 3.2 has no `wait -n`. A fifo of N tokens is the slot pool: fd 3 stays open for the children.
+  e2e_slot_dir="$(mktemp -d)"
+  mkfifo "$e2e_slot_dir/slots"
+  exec 3<>"$e2e_slot_dir/slots"
+  rm -rf "$e2e_slot_dir"
+  for ((slot = 0; slot < e2e_parallel; slot++)); do
+    printf 'x\n' >&3
+  done
+  e2e_pids=()
+  # A bad plan can be discovered after earlier shards have already started. Stop that process tree
+  # (the worker, the deadline supervisor, and the JVMs it forked) before the log directory disappears.
+  kill_descendants() {
+    local pid="$1" child
+    local children=()
+    while read -r child; do
+      [ -n "$child" ] && children+=("$child")
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+    if [ "${#children[@]}" -gt 0 ]; then
+      for child in "${children[@]}"; do
+        kill_descendants "$child"
+      done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  }
+  stop_e2e_pool() {
+    local pid
+    if [ "${#e2e_pids[@]}" -gt 0 ]; then
+      for pid in "${e2e_pids[@]}"; do
+        kill_descendants "$pid"
+      done
+      for pid in "${e2e_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+      done
+    fi
+    exec 3>&- || true
+  }
   for ((shard = 0; shard < e2e_shards; shard++)); do
     skip_args=()
     skip_file="$logdir/e2e-shard-$shard.skips"
     expected_tests="$(libtest_shard_expected_tests "$e2e_plan" "$shard")"
     if [ "$expected_tests" -eq 0 ]; then
       echo "run-tests.sh: e2e shard $((shard + 1))/$e2e_shards was assigned no tests" >&2
+      stop_e2e_pool
       exit 1
     fi
     if ! libtest_shard_skip_patterns \
       "$e2e_plan" "$e2e_listing" "$shard" >"$skip_file"; then
       echo "run-tests.sh: could not build safe filters for e2e shard $((shard + 1))/$e2e_shards" >&2
+      stop_e2e_pool
       exit 1
     fi
     while IFS= read -r pattern; do
       skip_args+=(--skip "$pattern")
     done <"$skip_file"
     label="shard-$((shard + 1))-of-$e2e_shards"
-    echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
-    KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
-      KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-        "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
+    read -r -u 3 _
+    (
+      trap 'printf "x\n" >&3' EXIT
+      echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
+      KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
+        KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
+          "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
+    ) &
+    e2e_pids+=("$!")
   done
+  e2e_pool_status=0
+  for pid in "${e2e_pids[@]}"; do
+    wait "$pid" || e2e_pool_status=$?
+  done
+  exec 3>&-
+  if [ "$e2e_pool_status" -ne 0 ]; then
+    echo "run-tests.sh: an e2e shard worker exited $e2e_pool_status" >&2
+    exit "$e2e_pool_status"
+  fi
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.

@@ -140,6 +140,67 @@ fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
     }
 }
 
+fn e2e_parallel_width(
+    ncpu: u32,
+    shards: u32,
+    override_width: Option<&str>,
+) -> std::process::Output {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("e2e-parallel.sh");
+    let override_width = override_width.unwrap_or("");
+    Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; e2e_parallel_width \"$2\" \"$3\" \"$4\"",
+            "e2e-parallel-width",
+        ])
+        .arg(script)
+        .arg(ncpu.to_string())
+        .arg(shards.to_string())
+        .arg(override_width)
+        .output()
+        .expect("run e2e parallel width")
+}
+
+#[test]
+fn e2e_parallel_width_caps_the_shard_pool() {
+    let three = e2e_parallel_width(4, 22, None);
+    assert!(
+        three.status.success(),
+        "{}",
+        String::from_utf8_lossy(&three.stderr)
+    );
+    assert_eq!(String::from_utf8(three.stdout).expect("utf-8"), "3\n");
+
+    let two_cores = e2e_parallel_width(2, 22, None);
+    assert!(two_cores.status.success());
+    assert_eq!(String::from_utf8(two_cores.stdout).expect("utf-8"), "1\n");
+
+    let capped = e2e_parallel_width(4, 2, None);
+    assert!(capped.status.success());
+    assert_eq!(String::from_utf8(capped.stdout).expect("utf-8"), "2\n");
+
+    let overridden = e2e_parallel_width(4, 22, Some("4"));
+    assert!(overridden.status.success());
+    assert_eq!(String::from_utf8(overridden.stdout).expect("utf-8"), "4\n");
+
+    let override_capped = e2e_parallel_width(4, 22, Some("100"));
+    assert!(override_capped.status.success());
+    assert_eq!(
+        String::from_utf8(override_capped.stdout).expect("utf-8"),
+        "22\n"
+    );
+
+    for invalid in ["0", "00", "01", "-1", "two"] {
+        let output = e2e_parallel_width(4, 22, Some(invalid));
+        assert!(
+            !output.status.success(),
+            "e2e parallel width accepted {invalid:?}"
+        );
+    }
+}
+
 #[test]
 fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
