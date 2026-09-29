@@ -1748,8 +1748,8 @@ impl IrClass {
         self.fq_name.matches(internal)
     }
 
-    pub fn superclass(&self) -> String {
-        self.superclass.render()
+    pub fn superclass(&self) -> &'static str {
+        self.superclass.rendered()
     }
 
     pub fn superclass_matches(&self, internal: &str) -> bool {
