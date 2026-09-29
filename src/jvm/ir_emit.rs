@@ -15,8 +15,9 @@ use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    boxed_descriptor, companion_field_descriptor, mapped_builtin_virtual_name_of, method_descriptor,
-    property_getter_name, property_setter_name, reference_array_element, type_descriptor,
+    boxed_descriptor, companion_field_descriptor, mapped_builtin_virtual_name_of,
+    method_descriptor, property_getter_name, property_setter_name, reference_array_element,
+    type_descriptor,
 };
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
