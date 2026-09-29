@@ -2068,20 +2068,7 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     companion.push(member);
                 } else {
-                    let source_name =
-                        super::names::mapped_builtin_virtual_source_name(ci.this_class, &m.name);
-                    if source_name != m.name {
-                        let mut alias = member.clone();
-                        alias.name = source_name.to_string();
-                        alias.physical_name = Some(m.name.clone());
-                        // `java.lang.Number.doubleValue()` and friends are Kotlin's `Number.toDouble`
-                        // declarations, but remain VIRTUAL calls: a bounded `T : Number` can hold any
-                        // numeric wrapper. Only declarations owned by a concrete Kotlin scalar are
-                        // numeric-conversion intrinsics (normalized by the builtin provider path).
-                        members.push(alias);
-                    } else {
-                        members.push(member);
-                    }
+                    members.push(member);
                 }
             }
             // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) or `kotlin/String` takes
