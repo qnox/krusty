@@ -22,6 +22,8 @@ fun <A: Double?, B: Any> eq_doubleN_any(a: A, b: B) = a == b
 
 fun <A: Double?, B: Any?> eq_doubleN_anyN(a: A, b: B) = a == b
 
+fun <A: Float, B: Float?> eq_float_floatN(a: A, b: B) = a == b
+
 fun box(): String {
     if (!eq_double_doubleN(0.0, -0.0)) throw AssertionError("!eq_double_doubleN(0.0, -0.0)")
     if (eq_double_doubleN(0.0, null)) throw AssertionError("eq_double_doubleN(0.0, null)")
@@ -39,6 +41,8 @@ fun box(): String {
     if (!eq_doubleN_anyN(0.0, 0.0)) throw AssertionError("!eq_doubleN_anyN(0.0, 0.0)")
     if (eq_doubleN_anyN(0.0, -0.0)) throw AssertionError("eq_doubleN_anyN(0.0, -0.0)")
     if (eq_doubleN_anyN(0.0, null)) throw AssertionError("eq_doubleN_anyN(0.0, null)")
+    if (!eq_float_floatN(0.0F, -0.0F)) throw AssertionError("!eq_float_floatN(0.0F, -0.0F)")
+    if (eq_float_floatN(0.0F, null)) throw AssertionError("eq_float_floatN(0.0F, null)")
 
     return "OK"
 }

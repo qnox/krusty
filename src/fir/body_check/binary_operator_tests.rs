@@ -168,7 +168,13 @@ fn double_type_parameter_against_any_stays_structural_equality() {
         .expect("checked equality")
         .kind;
     assert!(
-        matches!(kind, FirExprKind::Binary { .. } | FirExprKind::Call(_)),
-        "Any must not select IEEE equality, found {kind:?}"
+        matches!(
+            kind,
+            FirExprKind::Binary {
+                operation: FirBinaryOperation::Equal,
+                ..
+            }
+        ),
+        "Any must select structural equality, found {kind:?}"
     );
 }
