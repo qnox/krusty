@@ -188,8 +188,17 @@ jobs:
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
+  # Each target keeps the build for the newest master commit. A later push cancels the queued and
+  # in-progress build of that target. The group is per target, and it is on this job rather than
+  # the workflow, so the cancellation does not take the ci run with it. One group for every target
+  # would also cancel the six builds of the same commit.
   build-release:
     if: github.ref == 'refs/heads/master'
+    concurrency:
+      # Pull requests skip this job. Give them a group of their own so a skipped matrix leg cannot
+      # join the master group and cancel the tip build.
+      group: ${{ github.ref == 'refs/heads/master' && format('build-release-{0}', matrix.target.triple) || format('build-release-pr-{0}', github.run_id) }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
