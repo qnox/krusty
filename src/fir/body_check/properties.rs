@@ -280,7 +280,7 @@ impl BodyFirChecker<'_> {
         let ty = ResolvedTy::new(Ty::obj_name(classifier.classifier))
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
 
-        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span)?
+        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span, true)?
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
             .map(Some)
     }
@@ -295,6 +295,7 @@ impl BodyFirChecker<'_> {
         ty: ResolvedTy,
         origin: OriginId,
         span: Option<Span>,
+        inherited_dispatch_is_current: bool,
     ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
         let classifier = self
             .index
@@ -302,12 +303,13 @@ impl BodyFirChecker<'_> {
             .or_else(|| self.index.enclosing_classifier(owner))
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let current_storage_owner = self.current_storage_owner();
-        // An inherited member is read through the current instance, which a superclass
-        // constructor's arguments cannot use: there a supertype names an enclosing instance
-        // (`object : A(b)` inside `A`, an inner class's outer `A` whose inner chain extends `A`).
+        // An inherited member is read through the current instance. That does not apply to a
+        // different receiver that only names a supertype: a superclass constructor's arguments
+        // (`object : A(b)` inside `A`) and `this@Outer` when `inner class Inner : Outer`.
         let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
             current == owner
-                || !self.constructor_prefix_capture_access
+                || (inherited_dispatch_is_current
+                    && !self.constructor_prefix_capture_access
                     && self
                         .index
                         .classifier_hierarchy(current)
@@ -315,7 +317,7 @@ impl BodyFirChecker<'_> {
                             hierarchy
                                 .iter()
                                 .any(|entry| entry.classifier == classifier.classifier)
-                        })
+                        }))
         });
         if current_storage_is_owner && self.body.local_callable().is_none() {
             let depth = self
@@ -566,9 +568,13 @@ impl BodyFirChecker<'_> {
             }
         }
         if let Some(owner) = selected.classifier {
-            if let Some(receiver) =
-                self.materialize_classifier_dispatch_receiver(owner, selected_ty, origin, span)?
-            {
+            if let Some(receiver) = self.materialize_classifier_dispatch_receiver(
+                owner,
+                selected_ty,
+                origin,
+                span,
+                selected.current,
+            )? {
                 return Ok(Some(receiver));
             }
         }
