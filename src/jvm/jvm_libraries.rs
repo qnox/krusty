@@ -5977,10 +5977,10 @@ fn classpath_annotation_targets(
 #[cfg(test)]
 mod tests {
     use super::{
-        collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
-        java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
-        parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig,
+        collection_barrier_role, desc_to_ty, incomplete_classifier_spelling,
+        java_method_has_operator_convention, java_type_nullability,
+        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
@@ -6142,6 +6142,19 @@ mod tests {
 
         drop(libraries);
         std::fs::remove_dir_all(directory).expect("remove nested probe directory");
+    }
+
+    #[test]
+    fn incomplete_probe_does_not_apply_classifier_erasure_to_a_package() {
+        let kotlin_string = type_name("kotlin/String");
+        assert_eq!(
+            incomplete_classifier_spelling(SymbolNamespace::Package(kotlin_string), "Nested"),
+            "kotlin/String/Nested"
+        );
+        assert_eq!(
+            incomplete_classifier_spelling(SymbolNamespace::Classifier(kotlin_string), "Nested"),
+            "java/lang/String$Nested"
+        );
     }
 
     #[test]
