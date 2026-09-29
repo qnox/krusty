@@ -479,23 +479,114 @@ pub fn trace_cache_stats() {
     }
 }
 
-/// One jimage resource: `(file offset, ON-DISK byte size, zlib-compressed?)`. The size is the stored
-/// (compressed) length when the resource uses the "zip" decompressor, else the raw class length; the
-/// flag is set ONLY for the "zip" decompressor (authoritatively, from the strings table) so the reader
-/// never inflates a resource compressed by some other scheme.
-type JimageEntry = (u64, usize, bool);
+/// High bit of a location's packed size. On-disk class sizes fit in the low 31 bits.
+const JIMAGE_COMPRESSED: u32 = 1 << 31;
+
+/// One class resource in the jimage, indexed by [`NameId`].
+///
+/// A hash map of ~30k classes keeps a power-of-two slot table (64k entries, key plus a fat
+/// `(offset, size, flag)` value). Name ids are arena-sequential, and a real content offset is never
+/// zero — jimage content begins after the header and tables — so an absent name is `offset == 0`.
+/// Offset and on-disk size each fit in 32 bits for a JDK `lib/modules` (well under 4 GiB; class
+/// resources are far under 2 GiB), which packs a slot into 8 bytes.
+#[derive(Debug, Default)]
+struct JimageLocations {
+    slots: Vec<JimageSlot>,
+    classes: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct JimageSlot {
+    offset: u32,
+    packed: u32,
+}
+
+impl JimageLocations {
+    fn reserve_classes(&mut self, table_length: usize) {
+        // Package nodes take extra ids, so the vector still grows past the class count. Reserving
+        // the redirect table length skips the first several doublings.
+        self.slots.reserve(table_length);
+    }
+
+    /// First location wins, matching `HashMap::entry().or_insert`.
+    fn insert(&mut self, id: NameId, offset: u64, size: usize, compressed: bool) {
+        // A JDK `lib/modules` content offset is a few hundred megabytes. Above 4 GiB the slot
+        // cannot represent it, so the class stays absent rather than truncating onto another offset.
+        let Ok(offset) = u32::try_from(offset) else {
+            return;
+        };
+        if offset == 0 {
+            return;
+        }
+        let index = id.0 as usize;
+        if index >= self.slots.len() {
+            self.slots.resize(
+                index + 1,
+                JimageSlot {
+                    offset: 0,
+                    packed: 0,
+                },
+            );
+        }
+        if self.slots[index].offset != 0 {
+            return;
+        }
+        // The top bit stores the compression flag. An unrepresentable resource is not a valid
+        // packed location; keeping it absent avoids seek-reading a truncated byte range.
+        let Ok(size) = u32::try_from(size) else {
+            return;
+        };
+        if size & JIMAGE_COMPRESSED != 0 {
+            return;
+        }
+        self.slots[index] = JimageSlot {
+            offset,
+            packed: if compressed {
+                size | JIMAGE_COMPRESSED
+            } else {
+                size
+            },
+        };
+        self.classes += 1;
+    }
+
+    fn get(&self, id: NameId) -> Option<(u64, usize, bool)> {
+        let slot = self.slots.get(id.0 as usize)?;
+        if slot.offset == 0 {
+            return None;
+        }
+        let compressed = slot.packed & JIMAGE_COMPRESSED != 0;
+        let size = (slot.packed & !JIMAGE_COMPRESSED) as usize;
+        Some((u64::from(slot.offset), size, compressed))
+    }
+
+    fn class_ids(&self) -> impl Iterator<Item = NameId> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| (slot.offset != 0).then_some(NameId(index as u32)))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.classes == 0
+    }
+
+    fn class_count(&self) -> usize {
+        self.classes as usize
+    }
+}
 
 #[derive(Debug)]
 struct JimageIndex {
     names: std::sync::Arc<NameTree>,
-    by_name: HashMap<NameId, JimageEntry>,
+    locations: JimageLocations,
 }
 
 impl Default for JimageIndex {
     fn default() -> Self {
         Self {
             names: std::sync::Arc::new(NameTree::default()),
-            by_name: HashMap::new(),
+            locations: JimageLocations::default(),
         }
     }
 }
@@ -1781,7 +1872,7 @@ pub struct Classpath {
     /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
     /// cache keyed by the entry set, so a cp that adds one library reuses every other jar's catalog.
     pkg_tree: RefCell<Option<std::sync::Arc<PackageTree>>>,
-    /// Lazily-built index of the JDK jimage: internal class-name id → [`JimageEntry`], so JDK class bytes
+    /// Lazily-built index of the JDK jimage: internal class-name id → file offset, so JDK class bytes
     /// can be seek-read (and inflated, for a compressed image) on demand. Shared via `Arc` from a
     /// process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
@@ -2226,7 +2317,7 @@ impl Classpath {
             .jimage
             .borrow()
             .as_ref()
-            .map_or(0, |(_, i)| i.by_name.len());
+            .map_or(0, |(_, i)| i.locations.class_count());
         let types = self
             .types
             .borrow()
@@ -3582,7 +3673,7 @@ impl Classpath {
         let guard = self.jimage.borrow();
         let (path, index) = guard.as_ref()?;
         let id = index.names.get(internal)?;
-        let &(offset, size, compressed) = index.by_name.get(&id)?;
+        let (offset, size, compressed) = index.locations.get(id)?;
         use std::io::{Read, Seek, SeekFrom};
         let mut f = File::open(path).ok()?;
         f.seek(SeekFrom::Start(offset)).ok()?;
@@ -5226,7 +5317,7 @@ fn jimage_class_id(names: &NameTree, parent: &str, base: &str) -> NameId {
 fn catalog_jimage_packages(idx: &JimageIndex) -> JarPackages {
     let mut packages = JarPackages::default();
     packages.names = std::sync::Arc::clone(&idx.names);
-    for &internal in idx.by_name.keys() {
+    for internal in idx.locations.class_ids() {
         let Some(pkg) = idx.names.parent(internal) else {
             continue;
         };
@@ -5236,7 +5327,7 @@ fn catalog_jimage_packages(idx: &JimageIndex) -> JarPackages {
         }
         packages.packages.entry(pkg).or_default().has_classes = true;
     }
-    packages.complete = !idx.by_name.is_empty();
+    packages.complete = !idx.locations.is_empty();
     packages
 }
 
@@ -5771,8 +5862,8 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
     }
 }
 
-/// Build the jimage class index: internal name id → [`JimageEntry`] (content offset + on-disk size +
-/// compressed flag) for each `.class` resource, read from the jimage location table directly — the
+/// Build the jimage class index: internal name id → content offset, on-disk size, and compressed
+/// flag for each `.class` resource, read from the jimage location table directly — the
 /// bootclasspath equivalent of a jar's central directory — so JDK class bytes can be seek-read on demand.
 /// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
 /// ImageLocation.
@@ -5840,6 +5931,7 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         a
     };
     let mut idx = JimageIndex::default();
+    idx.locations.reserve_classes(table_length);
     for i in 0..table_length {
         let lo = u32le(offsets + i * 4) as usize;
         if lo == 0 {
@@ -5863,9 +5955,8 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         // needs only the tables, not the content.
         let stored = if comp != 0 { comp } else { unc };
         let internal = jimage_class_id(&idx.names, parent, base);
-        idx.by_name
-            .entry(internal)
-            .or_insert((abs as u64, stored, comp != 0));
+        idx.locations
+            .insert(internal, abs as u64, stored, comp != 0);
     }
     Some(idx)
 }
@@ -6038,10 +6129,14 @@ mod fq_tests {
     fn jimage_index_uses_name_ids_for_class_lookup_and_package_parent() {
         let mut idx = JimageIndex::default();
         let string = idx.names.insert("java/lang/String");
-        idx.by_name.insert(string, (1, 2, false));
+        idx.locations.insert(string, 1, 2, false);
+        idx.locations.insert(string, 9, 8, true);
 
         let lookup = idx.names.get("java/lang/String").expect("indexed class");
-        assert_eq!(idx.by_name.get(&lookup), Some(&(1, 2, false)));
+        assert_eq!(idx.locations.get(lookup), Some((1, 2, false)));
+        assert_eq!(idx.locations.class_count(), 1);
+        let package_only = idx.names.parent(string).expect("package node");
+        assert_eq!(idx.locations.get(package_only), None);
 
         let package = idx.names.parent(string).expect("class has package parent");
         let packages = catalog_jimage_packages(&idx);
@@ -6060,6 +6155,33 @@ mod fq_tests {
         let via_segments = jimage_class_id(&joined, "java/lang", "String");
         assert_eq!(joined.get("java/lang/String"), Some(via_segments));
         assert_eq!(joined.render(via_segments), "java/lang/String");
+    }
+
+    #[test]
+    fn jimage_location_slots_pack_size_and_compressed_flag() {
+        let mut locations = JimageLocations::default();
+        let string = NameId(3);
+        let object = NameId(8);
+        locations.insert(string, 1, 2, false);
+        locations.insert(string, 99, 7, true);
+        locations.insert(object, 40, 50, true);
+
+        assert_eq!(locations.get(string), Some((1, 2, false)));
+        assert_eq!(locations.get(object), Some((40, 50, true)));
+        assert_eq!(locations.get(NameId(1)), None);
+        assert_eq!(locations.class_count(), 2);
+        assert_eq!(
+            locations.class_ids().collect::<Vec<_>>(),
+            vec![string, object]
+        );
+
+        locations.insert(NameId(4), 0, 1, false);
+        assert_eq!(locations.class_count(), 2);
+        assert_eq!(locations.get(NameId(4)), None);
+
+        locations.insert(NameId(5), 50, JIMAGE_COMPRESSED as usize, false);
+        assert_eq!(locations.class_count(), 2);
+        assert_eq!(locations.get(NameId(5)), None);
     }
 
     #[test]
