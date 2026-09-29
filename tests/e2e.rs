@@ -681,6 +681,8 @@ mod enum_secondary_constructor_e2e;
 mod enum_value_of_intrinsic_e2e;
 #[path = "enum_vararg_e2e.rs"]
 mod enum_vararg_e2e;
+#[path = "error_branch_join_e2e.rs"]
+mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
 mod error_receiver_cascade_e2e;
 #[path = "expected_return_invariant_binding_e2e.rs"]
