@@ -31,12 +31,13 @@ impl BodyLowering<'_> {
             .ty
             .get();
 
-        // Captures retain source evaluation order: `receiver` is evaluated before the parenthesized
-        // callable expression. The wrapper's first two value slots mirror that order.
-        let receiver = self.expression_with_conversion(receiver.value, receiver.conversion)?;
-        let callable = self.expression(fir_callable)?;
-        let function_value = self.ir.add_expr(IrExpr::GetValue(1));
-        let bound_receiver = self.ir.add_expr(IrExpr::GetValue(0));
+        // The parenthesized callee runs before the receiver: `getReceiver().(getFun())` logs
+        // `getFun` then `getReceiver`. The wrapper's first two value slots follow that order.
+        let callable_value = self.expression(fir_callable)?;
+        let receiver_value =
+            self.expression_with_conversion(receiver.value, receiver.conversion)?;
+        let function_value = self.ir.add_expr(IrExpr::GetValue(0));
+        let bound_receiver = self.ir.add_expr(IrExpr::GetValue(1));
         let mut next_parameter = 2u32;
         let arguments = target_parameters
             .iter()
@@ -73,8 +74,8 @@ impl BodyLowering<'_> {
             .filter_map(|(parameter, ty)| (parameter != receiver_parameter).then_some(ty.get()))
             .collect::<Vec<_>>();
         let mut parameters = Vec::with_capacity(bound_parameters.len() + 2);
-        parameters.push(receiver_type.get());
         parameters.push(callable_type);
+        parameters.push(receiver_type.get());
         parameters.extend(bound_parameters.iter().copied());
         let wrapper = self.ir.add_fun(IrFunction {
             name: format!(
@@ -104,7 +105,7 @@ impl BodyLowering<'_> {
         Ok(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: wrapper,
             arity,
-            captures: vec![receiver, callable],
+            captures: vec![callable_value, receiver_value],
             sam: None,
             inline_body: None,
         }))
