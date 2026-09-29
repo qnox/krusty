@@ -167,11 +167,16 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
 }
 
 fn physical_classfile_name_of(internal: TypeName) -> &'static str {
+    if let Some(function) = super::function_classifiers::classifier(internal) {
+        if function.identity() == internal && (function.is_reflective() || !function.is_suspend()) {
+            return crate::jvm::jvm_class_map::jvm_internal_name(internal);
+        }
+    }
     let mapped = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(internal);
     // The classfile mapping already chose the physical classifier. Reuse its rendered spelling
     // when that spelling is the binary name; a dotted tail still becomes `$`.
     if mapped.segment_ref().contains('.') {
-        return crate::types::intern(&mapped.jvm_binary_name());
+        return Box::leak(mapped.jvm_binary_name().into_boxed_str());
     }
     mapped.rendered()
 }
