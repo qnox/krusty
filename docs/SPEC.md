@@ -3498,6 +3498,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_nested_object_reads_the_enclosing_top_level_backing_field`,
   `a_nested_object_reads_the_enclosing_instance_backing_field`,
   `a_local_class_in_a_setter_writes_the_backing_field`,
+  `a_local_class_compound_update_uses_the_backing_field_bridge`,
   `nested_field_bridges_do_not_replace_property_reference_bridges`) and
   `a_private_property_keeps_its_source_written_setter` in `tests/companion_e2e.rs`.
 

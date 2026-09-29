@@ -735,7 +735,7 @@ struct Accessor<'a> {
 /// accessor is `access$getX` / `access$setX` and carries that accessor's JVM type; a plain field
 /// is `access$getX$p` / `access$setX$p`. A named object's plain backing field is static, so its
 /// bridge takes no instance. A declared accessor, and every instance field, still receives the owner.
-pub(super) fn member_property_field_bridge(
+pub(super) fn member_property_access_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     owner: &str,
@@ -872,9 +872,8 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, false, cw) {
             return;
         }
-        let Some(access) = field_accessor_shape(self.ir, class, property, false) else {
-            return;
-        };
+        let access = field_accessor_shape(self.ir, class, property, false)
+            .expect("a planned field getter must retain its backing field");
         let mut code = CodeBuilder::new(1);
         code.mark_line(self.declaration_line);
         code.aload(0);
@@ -902,9 +901,8 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, true, cw) {
             return;
         }
-        let Some(access) = field_accessor_shape(self.ir, class, property, true) else {
-            return;
-        };
+        let access = field_accessor_shape(self.ir, class, property, true)
+            .expect("a planned field setter must retain its backing field");
         let mut code = CodeBuilder::new(1 + access.words);
         code.mark_line(self.declaration_line);
         code.aload(0);
