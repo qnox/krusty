@@ -8804,6 +8804,10 @@ impl<'a> Emitter<'a> {
                             .sum()
                     })
                     .unwrap_or_else(|| slot_words(target) as i32);
+                // A property assignment is `Unit`. A Java bean setter may return the receiver or
+                // any other value; that result is discarded, the same way a statement-position
+                // call drops its value. Kotlin setters are `void`, so they leave nothing to pop.
+                let ret_words = descriptor_ret_words(&descriptor);
                 let m = if is_interface {
                     self.cw.interface_methodref(&owner, &name, &descriptor)
                 } else {
@@ -8814,11 +8818,16 @@ impl<'a> Emitter<'a> {
                 // not one and marks nothing.
                 self.mark_dispatch_line(operation.expression, code);
                 if is_static {
-                    code.invokestatic(m, words, 0);
+                    code.invokestatic(m, words, ret_words);
                 } else if is_interface {
-                    code.invokeinterface(m, words, 0);
+                    code.invokeinterface(m, words, ret_words);
                 } else {
-                    code.invokevirtual(m, words, 0);
+                    code.invokevirtual(m, words, ret_words);
+                }
+                if ret_words == 2 {
+                    code.pop2();
+                } else if ret_words == 1 {
+                    code.pop();
                 }
             }
             PropertyAccess::AccessBridge {
