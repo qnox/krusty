@@ -9349,42 +9349,6 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
-    /// Select the property-read realization available from declarations emitted by this compilation.
-    /// `None` deliberately means the external bytecode-provider path must decide.
-    fn selected_local_property_read_access(
-        &self,
-        owner: &str,
-        name: &str,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        self.declared_property_read_access(owner, name, None, false)
-    }
-
-    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
-    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
-    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
-    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
-        self.ir
-            .classes
-            .iter()
-            .find(|c| c.fq_name_matches(owner))
-            .and_then(|c| c.fields.iter().find(|f| f.name == name))
-            .is_some_and(|f| f.is_lateinit())
-    }
-
-    /// Does this property read realize as a DIRECT FIELD load of a `lateinit` backing field — the one
-    /// read shape that emits the guard INLINE rather than hiding it inside a getter body? Mirrors the
-    /// realization [`Self::emit_property_read`] picks through
-    /// [`Self::selected_local_property_read_access`]. Everything past that helper is an external-provider
-    /// property, whose owner is not a class being emitted here.
-    fn lateinit_direct_field_read(&self, owner: &str, name: &str) -> bool {
-        use crate::jvm::inline::PropertyAccess;
-        let Some(access) = self.selected_local_property_read_access(owner, name) else {
-            return false;
-        };
-        matches!(&access, PropertyAccess::Field { owner, name, .. }
-            if self.is_lateinit_field(owner, name))
-    }
-
     fn emit_physical_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
             IrExpr::BottomValue { producer, .. } => {
@@ -11821,7 +11785,7 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
-                    || self.lateinit_direct_field_read(&owner.render(), name)
+                    || self.lateinit_read_guards_inline(&owner.render(), name)
             }
             IrExpr::SetField {
                 receiver, value, ..

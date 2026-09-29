@@ -41,6 +41,9 @@ pub enum PropertyAccess {
         name: String,
         descriptor: String,
         takes_receiver: bool,
+        /// Source property named in the inline `lateinit` guard when this bridge performs a raw
+        /// backing-field read. A bridge that dispatches to a getter leaves the guard in that body.
+        inline_uninitialized_guard: Option<String>,
     },
 }
 

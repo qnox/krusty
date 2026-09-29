@@ -2684,14 +2684,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   across one — `emit_operands`, `New`, `SetField`, `StringConcat`, and the `emit_value_over` fill/subscript
   positions above — must spill or retain the held entries. `emits_control_flow` answers this for `GetField` by
   the field's `lateinit` flag, and for `PropertyRead` by first resolving which realization the read takes:
-  only a DIRECT FIELD load carries the guard inline, since a read through the accessor hides it inside the
-  getter body (which is why a cross-class or inherited read, always an accessor read, was never affected).
+  a DIRECT FIELD load carries the guard inline, and so does a synthetic `access$get<X>$p` bridge, because
+  that bridge is a raw field load (a private `lateinit` property has no getter to hide the guard in). A
+  read through a real getter still leaves the guard inside the getter body. An outer class reading its
+  companion's private `lateinit` property is the bridge case: without the guard the read yields null.
   Recursing into the receiver alone answered `false`, so `class C { lateinit var s: String; fun f() =
   listOf(s, s) }` emitted successfully and failed at link time with `VerifyError: Inconsistent stackmap
   frames at branch target N`. This is emitter-only: the guard shape, and the fact that a `lateinit` read
   still throws while the field is null, are unchanged — spilling only moves *when* the earlier operands
   are evaluated relative to it. `lateinit` on a top-level/`object` property is a separate, still-declined
-  shape (the IR backend skips the file). `tests/lateinit_operand_stack_e2e.rs`.
+  shape (the IR backend skips the file). `tests/lateinit_operand_stack_e2e.rs`,
+  `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
