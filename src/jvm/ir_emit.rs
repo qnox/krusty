@@ -66,6 +66,8 @@ mod implicit_reference_coercion;
 mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
+mod instance_field_names;
+use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
 mod lambda_class_names;
 mod local_updates;
@@ -932,51 +934,6 @@ fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, Stri
             .and_then(|p| p.setter_jvm_name.clone())
             .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
     )
-}
-
-/// Physical JVM name of an instance backing field. Kotlin permits an instance property and a
-/// companion property with the same source name, but the JVM field signature does not include the
-/// STATIC flag. kotlinc therefore keeps the companion static's source name and suffixes the instance
-/// backing field (`result` -> `result$1`). This is solely a JVM realization decision: IR properties,
-/// metadata, accessors, and resolver identities retain the source name.
-fn instance_field_jvm_name(
-    ir: &IrFile,
-    class: &crate::ir::IrClass,
-    field: &crate::ir::IrField,
-) -> String {
-    let field_index = class
-        .fields
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, field))
-        .expect("an instance field name must belong to its class");
-    if let Some(capture) = super::capture_names::field_capture(class, field_index) {
-        return super::capture_names::capture_name(capture);
-    }
-    let owner = class.fq_name();
-    let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
-    let conflicts_with_static = ir.statics.iter().any(|static_field| {
-        static_field.owner_matches(&owner)
-            && static_field.name == field.name
-            && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
-    });
-    if !conflicts_with_static {
-        return field.name.clone();
-    }
-    for suffix in 1usize.. {
-        let candidate = format!("{}${suffix}", field.name);
-        let occupied_by_instance = class.fields.iter().any(|other| {
-            other.name == candidate && type_descriptor(jvm_declared_ty(&other.ty)) == descriptor
-        });
-        let occupied_by_static = ir.statics.iter().any(|static_field| {
-            static_field.owner_matches(&owner)
-                && static_field.name == candidate
-                && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
-        });
-        if !occupied_by_instance && !occupied_by_static {
-            return candidate;
-        }
-    }
-    unreachable!("an unused JVM backing-field suffix always exists")
 }
 
 /// The primary constructor's declared annotations in class-file order — RUNTIME-visible first, then

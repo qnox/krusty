@@ -8152,6 +8152,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not default (`<set-?>` for the setter's value) and names its `x$delegate` field explicitly. A
   delegated getter states its operator call at the property's line, which an inlined operator's
   lines map against. (`tests/delegated_properties_array_e2e.rs`.)
+  Delegated properties that share a name on one owner — extension properties for different
+  receivers — cannot share that field. The first keeps `name$delegate` and each later one takes
+  the next suffix, `name$delegate$1`, `name$delegate$2`, in declaration order, including when the
+  delegate types differ. (`tests/extension_delegate_fields_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
