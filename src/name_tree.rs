@@ -973,6 +973,29 @@ impl NameTree {
         self.arena.len()
     }
 
+    /// Slots across every child table still retained, including ones superseded by a growth.
+    #[cfg(test)]
+    fn retained_table_slots(&self) -> usize {
+        let writer = self.writer.lock().unwrap();
+        writer.tables.iter().map(|table| table.mask + 1).sum()
+    }
+
+    /// Free child tables that growth has replaced. The live table stays.
+    ///
+    /// Requiring exclusive access prevents a probe from holding a previous table pointer while
+    /// this drops it. The jimage index calls this at the end of its single-threaded build, before
+    /// the tree is published.
+    pub(crate) fn reclaim_retired_tables(&mut self) {
+        let writer = self.writer.get_mut().unwrap();
+        if writer.tables.len() <= 1 {
+            return;
+        }
+        let live = writer.tables.pop().unwrap();
+        debug_assert!(std::ptr::eq(&*live, self.current.load(Ordering::Acquire)));
+        writer.tables.clear();
+        writer.tables.push(live);
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.arena.len() as usize
@@ -1097,6 +1120,31 @@ mod tests {
         let cloned = first.clone();
         assert!(std::ptr::eq(first.segment(left), cloned.segment(left)));
         assert_eq!(cloned.render(left), "kotlin/collections/List");
+    }
+
+    #[test]
+    fn reclaim_drops_superseded_child_tables() {
+        let mut names = NameTree::default();
+        for index in 0..200 {
+            names.insert(&format!("pkg/Class{index}"));
+        }
+        let grown = names.retained_table_slots();
+        let class0 = names.get("pkg/Class0").expect("inserted class");
+        names.reclaim_retired_tables();
+        let live = names.retained_table_slots();
+        assert!(grown > live, "superseded tables stay until reclaim");
+        assert_eq!(live.count_ones(), 1, "one live power-of-two table");
+        assert_eq!(names.get("pkg/Class0"), Some(class0));
+        assert_eq!(
+            names
+                .get("pkg/Class199")
+                .map(|id| names.render(id))
+                .as_deref(),
+            Some("pkg/Class199")
+        );
+        let extra = names.insert("pkg/Extra");
+        assert_eq!(names.render(extra), "pkg/Extra");
+        assert_eq!(names.retained_table_slots(), live);
     }
 
     #[test]

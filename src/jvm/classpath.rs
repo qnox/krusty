@@ -5958,6 +5958,11 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         idx.locations
             .insert(internal, abs as u64, stored, comp != 0);
     }
+    // Growth kept every superseded child table so a probe still inside the old one stays valid.
+    // This build is the only user of the tree, so those tables are just retained capacity.
+    std::sync::Arc::get_mut(&mut idx.names)
+        .expect("jimage name tree is private until publication")
+        .reclaim_retired_tables();
     Some(idx)
 }
 
