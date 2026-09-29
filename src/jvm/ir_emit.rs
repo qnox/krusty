@@ -8890,7 +8890,7 @@ impl<'a> Emitter<'a> {
                 descriptor,
                 is_static,
             } => {
-                let owner = owner.render();
+                let owner = property_access::property_realization_owner(owner);
                 let jt = ty_from_field_descriptor(&descriptor);
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
@@ -8906,7 +8906,7 @@ impl<'a> Emitter<'a> {
                 is_static,
                 is_interface,
             } => {
-                let owner = owner.render();
+                let owner = property_access::property_realization_owner(owner);
                 let words = crate::jvm::names::parse_method_descriptor(&descriptor)
                     .map(|(params, _)| {
                         params
@@ -8945,7 +8945,7 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
                     .sum();
-                let owner = owner.render();
+                let owner = property_access::property_realization_owner(owner);
                 let m = self.cw.methodref(&owner, &name, &descriptor);
                 self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
