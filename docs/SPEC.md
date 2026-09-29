@@ -11265,7 +11265,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, and
   `::a_prefix_increment_of_a_qualified_or_indexed_access_rereads`, all run under the provisioned
   reference compiler as well. Corpus: `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`,
-  `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`.
+  `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`,
+  `defaultArguments/convention/incWithDefaultInGetter.kt` (the second `get` applies its default).
 - **A shared-cell capture stays one cell however many callables it crosses, and is forwarded BY the
   cell.** `var ok = "fail"; fun mk(): C = object : C { override fun i() = ok }` — the anonymous
   object must see the write `ok = "OK"` that happens after `mk()` returns, so it has to hold the
