@@ -727,6 +727,44 @@ impl NameTree {
         expected.next().is_none()
     }
 
+    /// Whether `path` is the JVM classfile spelling of `owner`'s direct nested classifier. The
+    /// comparison walks the stored namespace and final segment without rendering or interning the
+    /// candidate; source/metadata dots in the class tail compare as JVM `$` separators.
+    pub(crate) fn nested_child_matches_path(
+        &self,
+        owner: NameId,
+        nested: &str,
+        path: &str,
+    ) -> bool {
+        let (namespace, candidate) = path.rsplit_once('/').unwrap_or(("", path));
+        let owner = self.node(owner);
+        let Some(parent) = owner.parent else {
+            return false;
+        };
+        if !self.matches_path(parent, namespace) {
+            return false;
+        }
+        let expected_len = owner.segment.len() + 1 + nested.len();
+        if candidate.len() != expected_len {
+            return false;
+        }
+        candidate
+            .bytes()
+            .zip(
+                owner
+                    .segment
+                    .bytes()
+                    .map(|byte| if byte == b'.' { b'$' } else { byte })
+                    .chain(std::iter::once(b'$'))
+                    .chain(
+                        nested
+                            .bytes()
+                            .map(|byte| if byte == b'.' { b'$' } else { byte }),
+                    ),
+            )
+            .all(|(actual, expected)| actual == expected)
+    }
+
     /// Whether `candidate` is `owner` itself or a classifier nested directly or transitively in
     /// `owner`. Nested classifier segments are flattened (`Outer$Inner$Deep`) in the final path
     /// component, so this compares interned package and segment nodes without rendering either id.
@@ -1068,6 +1106,16 @@ mod tests {
             names.jvm_nested_binary_name(metadata_nested, "Companion"),
             "metadata/Outer$Middle$Inner$Companion"
         );
+        assert!(names.nested_child_matches_path(
+            metadata_nested,
+            "Companion",
+            "metadata/Outer$Middle$Inner$Companion"
+        ));
+        assert!(!names.nested_child_matches_path(
+            metadata_nested,
+            "Other",
+            "metadata/Outer$Middle$Inner$Companion"
+        ));
 
         let late_nested = names.insert("late/Outer$Inner");
         assert_eq!(names.nested_owner(late_nested), None);
