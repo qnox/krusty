@@ -30,6 +30,103 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
         .collect()
 }
 
+/// Instantiate a nested result-only call from the concrete parts of an enclosing parameter.
+///
+/// The parameter may still contain the outer call's inference variables. Those variables are not
+/// evidence: completing the nested call to its declared upper bound and feeding that placeholder
+/// back would fix the outer variables to the bound. A type that does not mention the outer
+/// variables (including a use-site projection of one, such as `in String`) solves the nested
+/// variables that occur there. The instantiated return is contributed only when every nested
+/// variable that occurs in it was solved that way, so a still-open outer variable such as the `T`
+/// in `fun <T> take(x: List<T>)` contributes nothing and the enclosing expectation can still
+/// supply it.
+pub(crate) fn nested_result_from_concrete_parameter(
+    nested: &GenericSig,
+    parameter: Ty,
+    outer_formals: &[String],
+) -> Option<Ty> {
+    let mut binds = GSigBinds::new();
+    if !bind_concrete_parameter(nested, nested.ret, parameter, outer_formals, &mut binds) {
+        return None;
+    }
+    let mut solved_a_result_variable = false;
+    for formal in &nested.formals {
+        if !crate::types::ty_mentions_param(nested.ret, std::slice::from_ref(formal)) {
+            continue;
+        }
+        solved_a_result_variable = true;
+        if !binds.contains_key(formal) {
+            return None;
+        }
+    }
+    if !solved_a_result_variable {
+        return None;
+    }
+    let instantiated = super::ty_subst_keep_unbound(nested.ret, &binds);
+    (!nested
+        .formals
+        .iter()
+        .any(|formal| crate::types::ty_mentions_param(instantiated, std::slice::from_ref(formal))))
+    .then_some(instantiated)
+}
+
+fn bind_concrete_parameter(
+    nested: &GenericSig,
+    shape: Ty,
+    actual: Ty,
+    outer_formals: &[String],
+    binds: &mut GSigBinds,
+) -> bool {
+    let shape = shape.non_null();
+    let actual = actual.non_null();
+    match shape {
+        Ty::StarProjection(_) => true,
+        Ty::InProjection(inner) | Ty::OutProjection(inner) => bind_concrete_parameter(
+            nested,
+            *inner,
+            actual.projection_inner().unwrap_or(actual),
+            outer_formals,
+            binds,
+        ),
+        Ty::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
+            let constraint = actual.projection_inner().unwrap_or(actual).non_null();
+            if !is_concrete_constraint(constraint, &nested.formals, outer_formals) {
+                return true;
+            }
+            match binds.get(name) {
+                Some(existing) if *existing != constraint => false,
+                Some(_) => true,
+                None => {
+                    binds.insert(name.to_string(), constraint);
+                    true
+                }
+            }
+        }
+        Ty::Obj(owner, arguments) => {
+            let actual = actual.projection_inner().unwrap_or(actual).non_null();
+            let Ty::Obj(actual_owner, actual_arguments) = actual else {
+                return true;
+            };
+            if owner != actual_owner || arguments.len() != actual_arguments.len() {
+                return true;
+            }
+            arguments
+                .iter()
+                .zip(actual_arguments)
+                .all(|(&shape, &actual)| {
+                    bind_concrete_parameter(nested, shape, actual, outer_formals, binds)
+                })
+        }
+        _ => true,
+    }
+}
+
+fn is_concrete_constraint(ty: Ty, nested_formals: &[String], outer_formals: &[String]) -> bool {
+    !matches!(ty, Ty::StarProjection(_) | Ty::Error)
+        && !crate::types::ty_mentions_param(ty, nested_formals)
+        && !crate::types::ty_mentions_param(ty, outer_formals)
+}
+
 /// Publish the proper result type of an unconstrained postponed producer without erasing symbolic
 /// types owned by an enclosing declaration.
 pub(crate) fn instantiate_unconstrained_result(signature: &GenericSig, actual: Ty) -> Ty {
@@ -124,6 +221,64 @@ mod tests {
         assert_eq!(
             instantiate_unconstrained_result(&generic, actual),
             Ty::obj_args("sample/Pair", &[Ty::String, Ty::Nothing])
+        );
+    }
+
+    fn box_of(arguments: &[Ty]) -> Ty {
+        Ty::obj_args("sample/Box", arguments)
+    }
+
+    #[test]
+    fn a_concrete_projection_solves_the_nested_variable_and_open_variables_do_not() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let nested = Ty::ty_param("producer:T", any);
+        let generic = signature(
+            &["producer:T"],
+            vec![vec![any]],
+            box_of(&[
+                nested,
+                Ty::star_projection(any),
+                Ty::obj_args("kotlin/collections/List", &[nested]),
+            ]),
+        );
+        let parameter = box_of(&[
+            Ty::in_projection(Ty::String),
+            Ty::ty_param("gather:A", any),
+            Ty::ty_param("gather:R", any),
+        ]);
+
+        assert_eq!(
+            nested_result_from_concrete_parameter(
+                &generic,
+                parameter,
+                &[
+                    "gather:T".to_string(),
+                    "gather:A".to_string(),
+                    "gather:R".to_string()
+                ],
+            ),
+            Some(box_of(&[
+                Ty::String,
+                Ty::star_projection(any),
+                Ty::obj_args("kotlin/collections/List", &[Ty::String]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn an_open_outer_variable_does_not_solve_a_result_only_producer() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let nested = Ty::ty_param("producer:T", any);
+        let generic = signature(
+            &["producer:T"],
+            vec![Vec::new()],
+            Ty::obj_args("kotlin/collections/List", &[nested]),
+        );
+        let parameter = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("take:T", any)]);
+
+        assert_eq!(
+            nested_result_from_concrete_parameter(&generic, parameter, &["take:T".to_string()]),
+            None
         );
     }
 }

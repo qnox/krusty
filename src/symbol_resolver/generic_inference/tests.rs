@@ -516,6 +516,44 @@ fn captured_self_bound_keeps_denotable_caller_type_parameters() {
 }
 
 #[test]
+fn projected_expected_argument_solves_the_return_variable() {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let formal = Ty::ty_param("T", any);
+    let star = Ty::star_projection(any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![Vec::new()],
+        receiver: None,
+        params: vec![],
+        ret: Ty::obj_args(
+            "fixtures/Box",
+            &[
+                formal,
+                star,
+                Ty::obj_args("kotlin/collections/List", &[formal]),
+            ],
+        ),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected = Ty::obj_args(
+        "fixtures/Box",
+        &[
+            Ty::in_projection(Ty::String),
+            star,
+            Ty::obj_args("kotlin/collections/List", &[Ty::String]),
+        ],
+    );
+
+    assert_eq!(
+        infer_generic_return_bindings(&signature, expected, |actual, bound| actual == bound)
+            .as_ref()
+            .and_then(|bindings| bindings.get("T"))
+            .copied(),
+        Some(Ty::String)
+    );
+}
+
+#[test]
 fn expected_result_cannot_replace_a_recursive_declared_bound() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let bound_formal = Ty::ty_param("T", any);

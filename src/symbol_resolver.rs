@@ -7133,6 +7133,36 @@ mod tests {
     }
 
     #[test]
+    fn use_site_projection_agrees_with_its_inner_type() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("T", any);
+        let star = Ty::star_projection(any);
+        let declared = Ty::obj_args(
+            "fixtures/Box",
+            &[
+                formal,
+                star,
+                Ty::obj_args("kotlin/collections/List", &[formal]),
+            ],
+        );
+        let expected = Ty::obj_args(
+            "fixtures/Box",
+            &[
+                Ty::in_projection(Ty::String),
+                star,
+                Ty::obj_args("kotlin/collections/List", &[Ty::String]),
+            ],
+        );
+
+        let constraints =
+            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+
+        assert!(constraints.conflicting_formals.is_empty());
+        assert!(constraints.bindings.is_empty());
+        assert!(!constraints.constrained_formals.contains("T"));
+    }
+
+    #[test]
     fn symbolic_and_concrete_return_constraints_conflict() {
         let callee = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let caller = Ty::ty_param("U", Ty::obj("kotlin/Any"));
