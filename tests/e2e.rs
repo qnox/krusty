@@ -865,8 +865,6 @@ mod hides_members_overload_e2e;
 mod iconsapi_byte_residue_e2e;
 #[path = "ieee754_equality_e2e.rs"]
 mod ieee754_equality_e2e;
-#[path = "nullable_double_type_param_equality_e2e.rs"]
-mod nullable_double_type_param_equality_e2e;
 #[path = "implicit_any_super_method_e2e.rs"]
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]
@@ -1237,6 +1235,8 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
+#[path = "nullable_double_type_param_equality_e2e.rs"]
+mod nullable_double_type_param_equality_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
