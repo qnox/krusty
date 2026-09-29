@@ -2684,7 +2684,7 @@ impl Classpath {
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
-    pub fn lambda_return_overloads(
+    pub(super) fn lambda_return_overloads(
         &self,
         internal_id: TypeName,
     ) -> std::rc::Rc<LambdaReturnOverloads> {
@@ -3198,7 +3198,7 @@ impl Classpath {
     /// The alias identity `package.name` after that package's alias table has been loaded. A miss
     /// does not intern `name`. Loading the table interns the aliases the package actually declares,
     /// which is what makes a later identity lookup succeed.
-    pub fn package_alias_identity(&self, package: TypeName, name: &str) -> Option<TypeName> {
+    pub(super) fn package_alias_identity(&self, package: TypeName, name: &str) -> Option<TypeName> {
         if let Some(identity) = crate::types::existing_type_name_child(package, name) {
             return self.type_alias_target_name(identity).map(|_| identity);
         }
@@ -3435,7 +3435,7 @@ impl Classpath {
 
     /// Read this package's `.kotlin_builtins` fragment. Parsing interns the fragment's classifier
     /// identities, so a later child lookup can see them without rendering the probed spelling.
-    pub fn load_package_builtins(&self, package: TypeName) {
+    pub(super) fn load_package_builtins(&self, package: TypeName) {
         let _ = self.builtins_file_for_package(package);
     }
 
@@ -4179,7 +4179,7 @@ impl Classpath {
     /// When `recv_desc` is `Some`, the method whose FIRST parameter (the extension receiver) matches it is
     /// chosen — a name like `maxOrNull` has many receiver-typed overloads (`[I`, `[D`, `Iterable`), so name
     /// alone would pick the wrong one; `None` takes the first method of that name.
-    pub fn facade_method(
+    pub(super) fn facade_method(
         &self,
         root: TypeName,
         jvm_name: &str,
@@ -5019,18 +5019,30 @@ impl PackageTree {
         self.jars_for_class_id(class)
     }
 
-    pub(crate) fn catalog_complete(&self) -> bool {
+    pub(super) fn catalog_complete(&self) -> bool {
         self.incomplete_entries.is_empty()
     }
 
     /// Whether `package` directly declares a class whose final path segment is `class_segment`.
     /// The segment is the class file's last component (`CollectionsKt`, `Map$Entry`), not a source
     /// nested name, and a miss does not intern it into the global type-name tree.
-    pub(crate) fn contains_exact_class(&self, package: TypeName, class_segment: &str) -> bool {
+    pub(super) fn contains_exact_class(&self, package: TypeName, class_segment: &str) -> bool {
         let Some(parent) = crate::types::existing_type_name_in(&self.names, package) else {
             return false;
         };
         let Some(class) = self.names.existing_child_of(parent, class_segment) else {
+            return false;
+        };
+        !self.jars_for_class_id(class).is_empty()
+    }
+
+    /// Whether `owner` directly declares the nested class `name`. Both probes stay inside the
+    /// catalog's name tree, so a failed symbol lookup neither formats nor interns a candidate.
+    pub(super) fn contains_nested_class(&self, owner: TypeName, name: &str) -> bool {
+        let Some(owner) = crate::types::existing_type_name_in(&self.names, owner) else {
+            return false;
+        };
+        let Some(class) = self.names.existing_nested_child_of(owner, name) else {
             return false;
         };
         !self.jars_for_class_id(class).is_empty()
@@ -7379,6 +7391,7 @@ mod fq_tests {
         let mut first = JarPackages::default();
         record_pkg_entry_name("shared/One.class", &mut first);
         record_pkg_entry_name("shared/Duplicate.class", &mut first);
+        record_pkg_entry_name("shared/Outer$Nested.class", &mut first);
         let mut second = JarPackages::default();
         record_pkg_entry_name("shared/Two.class", &mut second);
         record_pkg_entry_name("shared/Duplicate.class", &mut second);
@@ -7396,6 +7409,16 @@ mod fq_tests {
         assert!(tree
             .jars_for_class_name(type_name("shared/Missing"))
             .is_empty());
+        assert!(tree.contains_exact_class(type_name("shared"), "Outer$Nested"));
+        let outer = type_name("shared/Outer");
+        assert!(tree.contains_nested_class(outer, "Nested"));
+        assert!(
+            crate::types::existing_type_name_nested_child(outer, "CatalogProbeMissing").is_none()
+        );
+        assert!(!tree.contains_nested_class(outer, "CatalogProbeMissing"));
+        assert!(
+            crate::types::existing_type_name_nested_child(outer, "CatalogProbeMissing").is_none()
+        );
     }
 
     #[test]
