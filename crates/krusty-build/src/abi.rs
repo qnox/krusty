@@ -169,8 +169,8 @@ impl AbiClass {
         for field in &info.fields {
             members.push(AbiMember {
                 kind: MemberKind::Field,
-                name: field.name.clone(),
-                descriptor: field.descriptor.clone(),
+                name: field.name.to_owned(),
+                descriptor: field.descriptor.to_owned(),
                 access: field.access,
                 signature: field.signature.clone(),
                 constant: field.const_value.as_ref().map(abi_constant),
@@ -179,8 +179,8 @@ impl AbiClass {
         for method in &info.methods {
             members.push(AbiMember {
                 kind: MemberKind::Method,
-                name: method.name.clone(),
-                descriptor: method.descriptor.clone(),
+                name: method.name.to_owned(),
+                descriptor: method.descriptor.to_owned(),
                 access: method.access,
                 signature: method.signature.clone(),
                 constant: None,
