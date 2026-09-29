@@ -98,14 +98,10 @@ impl ProductionSignatureSemantics<'_> {
         }
         let own_package = self
             .headers
-            .scopes
-            .path(file.package)
-            .iter()
-            .map(|segment| self.headers.lookup_names.get(*segment))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(Self::failure)?
-            .into_iter()
-            .fold(crate::types::TypeName::ROOT, crate::types::type_name_child);
+            .sources
+            .get(source_id)
+            .map(|source| source.package)
+            .ok_or_else(Self::failure)?;
         let kotlin_defaults = super::super::source_package::kotlin_default_packages().to_vec();
         let platform_defaults = self
             .table
