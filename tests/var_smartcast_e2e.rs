@@ -311,6 +311,149 @@ fn same_rung_null_write_reports_nothing_nullable_receiver_for_calls() {
 }
 
 #[test]
+fn null_branch_assignment_is_non_null_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(x: Box?): Int {\n\
+    var b = x\n\
+    if (b == null) {\n\
+        b = Box(1)\n\
+    }\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(null) == 1 && f(Box(4)) == 4) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("null-branch assignment smart-casts after if"),
+        "OK"
+    );
+}
+
+#[test]
+fn both_branch_assignments_are_non_null_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean): Int {\n\
+    var b: Box? = null\n\
+    if (c) b = Box(1) else b = Box(2)\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(true) == 1 && f(false) == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("both-branch assignment smart-casts after if"),
+        "OK"
+    );
+}
+
+#[test]
+fn one_sided_assignment_stays_nullable_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean, x: Box?): Int {\n\
+    var b = x\n\
+    if (c) b = Box(1)\n\
+    return b.n\n\
+}\n";
+    assert_diagnostics(
+        diags(SRC),
+        &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
+    );
+}
+
+#[test]
+fn null_write_on_one_edge_drops_the_flow_type() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean): Int {\n\
+    var b: Box? = Box(1)\n\
+    if (c) b = null\n\
+    return b.n\n\
+}\n";
+    assert_diagnostics(
+        diags(SRC),
+        &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
+    );
+}
+
+#[test]
+fn when_edges_that_agree_are_non_null_after() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(x: Box?): Int {\n\
+    var b = x\n\
+    when {\n\
+        b == null -> b = Box(2)\n\
+        else -> {}\n\
+    }\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(null) == 2 && f(Box(5)) == 5) \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("when edges agree after the when"), "OK");
+}
+
+#[test]
+fn else_edge_keeps_an_earlier_assignment() {
+    const SRC: &str = "fun f(c: Boolean, x: String?): Int {\n\
+    var t = x\n\
+    t = \"hello\"\n\
+    if (c) {\n\
+        t = null\n\
+    } else {\n\
+        return t.length\n\
+    }\n\
+    return -1\n\
+}\n\
+fun box(): String = if (f(false, null) == 5 && f(true, null) == -1) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("else edge keeps the assignment the then edge skipped"),
+        "OK"
+    );
+}
+
+#[test]
+fn null_branch_assignment_unboxes_a_nullable_primitive() {
+    const SRC: &str = "fun f(x: Int?): Int {\n\
+    var n = x\n\
+    if (n == null) n = 7\n\
+    return n + 1\n\
+}\n\
+fun box(): String = if (f(null) == 8 && f(2) == 3) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("nullable primitive assignment smart-casts after if"),
+        "OK"
+    );
+}
+
+#[test]
+fn operator_after_null_branch_assignment() {
+    const SRC: &str = "fun box(): String {\n\
+    val result = mutableMapOf<String, MutableList<Int>>()\n\
+    val key = \"k\"\n\
+    var list = result[key]\n\
+    if (list == null) {\n\
+        list = mutableListOf()\n\
+        result[key] = list\n\
+    }\n\
+    list += 1\n\
+    return if (result[key]?.single() == 1) \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("operator applies to the joined non-null type"),
+        "OK"
+    );
+}
+
+#[test]
+fn nothing_branch_leaves_the_other_edge() {
+    const SRC: &str = "fun f(x: String?): Int {\n\
+    var t = x\n\
+    if (t == null) {\n\
+        throw IllegalStateException()\n\
+    }\n\
+    return t.length\n\
+}\n\
+fun box(): String = if (f(\"ab\") == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("Nothing branch is not part of the join"),
+        "OK"
+    );
+}
+
+#[test]
 fn nullable_receiver_extension_call_reports_unsafe_call() {
     const SRC: &str = "fun f(s: String?): Int {\n\
     return s.trim().length\n\
