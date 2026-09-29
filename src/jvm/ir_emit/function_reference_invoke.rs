@@ -96,7 +96,7 @@ pub(super) fn emit_reference_invoke_bridge(
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         code.getstatic(unit, 1);
     } else if let Some(value_class) = fr.box_ret {
-        let value_class = value_class.render();
+        let value_class = super::value_class_adapters::value_class_spelling(value_class);
         let box_impl = cw.methodref(
             &value_class,
             "box-impl",
