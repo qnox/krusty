@@ -15,8 +15,9 @@
 //!
 //! `KRUSTY_RECORD=1` ignores a stored dump, recompiles, and rewrites the archive. A release or RC
 //! with no matching dump fails the test instead of compiling: the archive has to be updated and
-//! committed. A snapshot, dev, or beta build still compiles, because that version is not an
-//! immutable artifact and never reads or writes the archive. CI does not write dumps.
+//! committed. A rejected kotlinc run is recorded too, exit code and stderr included, and a later
+//! run replays that rejection. A snapshot, dev, or beta build still compiles, because that version
+//! is not an immutable artifact and never reads or writes the archive. CI does not write dumps.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
@@ -1023,6 +1024,14 @@ fn live_kotlinc() -> bool {
 
 const INVOCATION_MODULE: &str = "_invocations";
 const JAR_ENTRY: &str = "__jar__";
+const EXIT_ENTRY: &str = "__exit__";
+const STDERR_ENTRY: &str = "__stderr__";
+
+pub(crate) struct ReplayedClasses {
+    pub(crate) code: i32,
+    pub(crate) stderr: String,
+    pub(crate) files: BTreeMap<String, Vec<u8>>,
+}
 
 struct Invocation {
     out: PathBuf,
@@ -1030,12 +1039,13 @@ struct Invocation {
     label: String,
 }
 
-/// Class files recorded for this `kotlinc` invocation.
+/// Class files, exit code, and stderr recorded for this `kotlinc` invocation.
 ///
-/// `Some` replays those files into the invocation's `-d` output and must not compile. `None`
-/// means the caller compiles: `KRUSTY_RECORD=1`, a live diagnostic comparison, or a compiler
-/// that does not use the archive. A release or RC with no matching dump panics.
-pub fn replay_class_dump(args: &[String]) -> Option<BTreeMap<String, Vec<u8>>> {
+/// `Some` must not compile. `None` means the caller compiles: `KRUSTY_RECORD=1`, a live
+/// diagnostic comparison, or a compiler that does not use the archive. A release or RC with no
+/// matching dump panics. A dump written before exit codes were stored replays as a successful
+/// compile with empty stderr.
+pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
     if live_kotlinc() {
         return None;
     }
@@ -1058,7 +1068,7 @@ pub fn replay_class_dump(args: &[String]) -> Option<BTreeMap<String, Vec<u8>>> {
         compiler,
         invocation.fingerprint,
     ) {
-        return Some(files);
+        return Some(split_replay(files));
     }
     refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
 }
@@ -1069,9 +1079,10 @@ pub fn write_replayed_classes(args: &[String], files: &BTreeMap<String, Vec<u8>>
     write_output(&invocation.out, files);
 }
 
-/// Store class files produced while `KRUSTY_RECORD=1`. A live diagnostic comparison and a
+/// Store the class files, exit code, and stderr produced while `KRUSTY_RECORD=1`. A rejected
+/// compile is stored too, so the next run can replay it. A live diagnostic comparison and a
 /// non-release compiler do not write the archive.
-pub fn remember_class_dump(args: &[String]) {
+pub fn remember_class_dump(args: &[String], code: i32, stderr: &str) {
     if live_kotlinc() || !record_forced() || !ci_allows_write() {
         return;
     }
@@ -1081,9 +1092,8 @@ pub fn remember_class_dump(args: &[String]) {
     let Some(invocation) = parse_invocation(args) else {
         return;
     };
-    let Some(files) = read_output_tree(&invocation.out) else {
-        return;
-    };
+    let mut files = read_output_tree(&invocation.out).unwrap_or_default();
+    attach_status(&mut files, code, stderr);
     store_files(
         &dumps_root(),
         INVOCATION_MODULE,
@@ -1092,6 +1102,34 @@ pub fn remember_class_dump(args: &[String]) {
         invocation.fingerprint,
         &files,
     );
+}
+
+fn attach_status(files: &mut BTreeMap<String, Vec<u8>>, code: i32, stderr: &str) {
+    files.insert(EXIT_ENTRY.to_string(), code.to_le_bytes().to_vec());
+    files.insert(STDERR_ENTRY.to_string(), stderr.as_bytes().to_vec());
+}
+
+fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
+    let code = match files.remove(EXIT_ENTRY) {
+        Some(bytes) => exit_code(&bytes),
+        None => 0,
+    };
+    let stderr = files
+        .remove(STDERR_ENTRY)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    ReplayedClasses {
+        code,
+        stderr,
+        files,
+    }
+}
+
+fn exit_code(bytes: &[u8]) -> i32 {
+    let Ok(bytes) = <[u8; 4]>::try_from(bytes) else {
+        refuse_missing_dump("a kotlinc exit code that is not four bytes");
+    };
+    i32::from_le_bytes(bytes)
 }
 
 fn parse_invocation(args: &[String]) -> Option<Invocation> {
@@ -1222,6 +1260,9 @@ fn write_output(out: &Path, files: &BTreeMap<String, Vec<u8>>) {
     }
     std::fs::create_dir_all(out).expect("create kotlinc output directory");
     for (relative, bytes) in files {
+        if relative == EXIT_ENTRY || relative == STDERR_ENTRY {
+            continue;
+        }
         let path = out.join(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create replayed class directory");
@@ -1570,6 +1611,37 @@ mod tests {
         let right = parse_invocation(&args("out-b")).expect("right invocation");
         assert_eq!(left.fingerprint, right.fingerprint);
         assert_ne!(left.out, right.out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_rejected_invocation_replays_its_stderr_and_a_plain_dump_is_success() {
+        let mut rejected = BTreeMap::new();
+        rejected.insert("pkg/A.class".to_string(), b"class".to_vec());
+        attach_status(&mut rejected, 1, "only named arguments");
+        let replayed = split_replay(rejected);
+        assert_eq!(replayed.code, 1);
+        assert_eq!(replayed.stderr, "only named arguments");
+        assert_eq!(replayed.files.get("pkg/A.class").unwrap(), b"class");
+        assert!(!replayed.files.contains_key(EXIT_ENTRY));
+        assert!(!replayed.files.contains_key(STDERR_ENTRY));
+
+        let mut plain = BTreeMap::new();
+        plain.insert("pkg/A.class".to_string(), b"class".to_vec());
+        let replayed = split_replay(plain);
+        assert_eq!(replayed.code, 0);
+        assert_eq!(replayed.stderr, "");
+        assert_eq!(replayed.files.get("pkg/A.class").unwrap(), b"class");
+
+        let root = temp_root("status");
+        let out = root.join("out");
+        let mut stored = BTreeMap::new();
+        stored.insert("pkg/A.class".to_string(), b"class".to_vec());
+        attach_status(&mut stored, 0, "");
+        write_output(&out, &stored);
+        assert_eq!(std::fs::read(out.join("pkg/A.class")).unwrap(), b"class");
+        assert!(!out.join(EXIT_ENTRY).exists());
+        assert!(!out.join(STDERR_ENTRY).exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

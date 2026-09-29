@@ -2613,14 +2613,14 @@ impl KotlincServer {
 /// that dump is missing: the test fails and tells you to update the archive with `KRUSTY_RECORD=1`.
 /// [`byte_dump::with_live_kotlinc`] opts out for a comparison that needs kotlinc's stderr.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    if let Some(files) = byte_dump::replay_class_dump(args) {
-        byte_dump::write_replayed_classes(args, &files);
-        return Some((0, String::new()));
+    if let Some(replayed) = byte_dump::replay_class_dump(args) {
+        if replayed.code == 0 {
+            byte_dump::write_replayed_classes(args, &replayed.files);
+        }
+        return Some((replayed.code, replayed.stderr));
     }
     let result = kotlinc_compile_live(args)?;
-    if result.0 == 0 {
-        byte_dump::remember_class_dump(args);
-    }
+    byte_dump::remember_class_dump(args, result.0, &result.1);
     Some(result)
 }
 

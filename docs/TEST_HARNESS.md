@@ -170,8 +170,10 @@ matching dump fails the test and does not run kotlinc. The failure names `tests/
 and `KRUSTY_RECORD=1`: that flag recompiles, rewrites the ranges the run reaches, and the archive
 update is committed. A snapshot, dev, or beta build never reads or writes dumps — that version
 string is not a stable artifact, so it still compiles. Class-file kotlinc calls go through the same
-archive. A comparison that needs kotlinc's own stderr still compiles, because the archive stores
-class files and not diagnostic text. The archive is read at runtime and is not compiled into the
+archive, and so does a kotlinc rejection: the archive keeps the exit code and stderr with the class
+files, and a later run replays them. The diagnostic recorder still compiles, because it compares
+kotlinc's own text in `tests/recorded/` and does not read this archive. The archive is read at
+runtime and is not compiled into the
 test binary. The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler.
 
