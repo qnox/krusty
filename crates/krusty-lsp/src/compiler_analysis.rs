@@ -1049,7 +1049,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         let source = "package a\n\
                       @p.Tag(1)\n\
@@ -1103,7 +1103,7 @@ mod tests {
                 .any(|(name, _)| name == "fixtures/Parent$DialogStyle"),
             "nested enum stub"
         );
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         let source = "package consumer\n\
                       import fixtures.Parent\n\
@@ -1153,7 +1153,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         let source = "package a\nfun use(x: p.Item): String = x.name";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
@@ -1195,7 +1195,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // `u?.javaPsi ?: return` proves the safe-call ROOT `u` non-null: the plain
         // `u.size` afterwards must not report a nullable-receiver error.
@@ -1307,7 +1307,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // The Kotlin override refines the Java synthetic property: `x.entries` must read as
         // `Array<RefinedEntry>` (the override's return), not the Java base's `BaseEntry[]`.
@@ -1380,7 +1380,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         let source = "package a\n\
                       import p.Event\n\
@@ -1436,7 +1436,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         let source = "package a\n\
                       fun use(c: p.Ctx): Int {\n\
@@ -1486,7 +1486,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // An anonymous object extending a DECLARATION-ONLY Kotlin class whose own base is the
         // Java parameter type reaches `accept(Visitor)` only through the module-side supertype
@@ -1555,7 +1555,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // The constructor twin of the member-argument case: the argument's path to the Java
         // parameter type runs through a MODULE-declared subclass, so `Holder(V())` resolves only
@@ -1609,7 +1609,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // The registerUProblem shape: a Kotlin vararg forwarded with a spread into a Java
         // vararg member, plus an element-style call — both need the stub's ACC_VARARGS.
@@ -1684,7 +1684,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // Three production-style SAM-conversion shapes: a zero-parameter lambda on an IMPLICIT
         // receiver (inside .apply {}), an explicit call, and a static member whose SAM is a
@@ -1744,7 +1744,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // Explicit call type arguments must bind K/V so both the lambda parameter and returned
         // Map specialize; without them `s` erases to Any and `m["x"]` to Any. The assertion is
@@ -1796,7 +1796,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // Kotlin's decapitalize-smart getter mapping: `getID()` reads as `id` and
         // `getURLPath()` as `urlPath`, regardless of the declaring API.
@@ -1846,7 +1846,7 @@ mod tests {
             },
         )
         .expect("Java stubs");
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
 
         // `isX`/`setX` and `getX`/`setX` pairs are writable synthetic properties; a getter-only
         // `rank` stays read-only ('val' cannot be reassigned).
