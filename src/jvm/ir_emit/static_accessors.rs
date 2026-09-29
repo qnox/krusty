@@ -561,7 +561,7 @@ pub(super) fn emit(
             }
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
-                let owner = bridge.owner.render();
+                let owner = super::static_fields::static_owner_spelling(bridge.owner);
                 super::access_bridges::emit_protected_member_access_bridge(
                     bridge,
                     &owner,
@@ -641,7 +641,7 @@ impl Accessor<'_> {
             .backing_field
             .expect("a bridged member property has a backing field")
             as usize];
-        let internal = owner.fq_name.render();
+        let internal = owner.fq_name();
         let field_ty = jvm_declared_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
@@ -698,7 +698,7 @@ impl Accessor<'_> {
             .backing_field
             .expect("a bridged member property has a backing field")
             as usize];
-        let internal = owner.fq_name.render();
+        let internal = owner.fq_name();
         let field_ty = jvm_declared_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
