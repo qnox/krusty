@@ -17,8 +17,12 @@ class D(val value: String) {\n\
     operator fun getValue(thisRef: C, property: Any): String = value\n\
 }\n\
 \n\
+class E(val value: String) {\n\
+    operator fun getValue(thisRef: C, property: Any): String = value\n\
+}\n\
+\n\
 val O.prop by D(\"O\")\n\
-val K.prop by D(\"K\")\n\
+val K.prop by E(\"K\")\n\
 \n\
 fun box() = O.prop + K.prop\n";
 

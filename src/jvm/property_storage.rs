@@ -47,13 +47,27 @@ pub fn realize_top_level_jvm_fields(ir: &mut IrFile) {
 /// for the first declaration and numbers the rest `prop$delegate$1`, `prop$delegate$2`, … even
 /// when the descriptors differ. A non-delegate static that already occupies the spelling counts.
 pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
+    let delegates = ir
+        .local_property_layouts
+        .values()
+        .filter_map(|layout| match layout {
+            IrLocalPropertyLayout::TopLevelAccessor {
+                delegate: Some(storage),
+                ..
+            } => Some(*storage),
+            IrLocalPropertyLayout::TopLevelAccessor { delegate: None, .. }
+            | IrLocalPropertyLayout::TopLevelStorage { .. }
+            | IrLocalPropertyLayout::Member { .. }
+            | IrLocalPropertyLayout::MemberExtension { .. } => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
     let mut used: std::collections::HashMap<Option<crate::types::TypeName>, Vec<String>> =
         std::collections::HashMap::new();
     for index in 0..ir.statics.len() {
         let owner = ir.statics[index].owner;
         let current = ir.static_field_jvm_name(index as u32).to_string();
         let bucket = used.entry(owner).or_default();
-        let delegate = ir.statics[index].name.ends_with("$delegate");
+        let delegate = delegates.contains(&(index as u32));
         if !delegate || !bucket.iter().any(|name| name == &current) {
             bucket.push(current);
             continue;
