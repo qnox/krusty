@@ -2074,6 +2074,8 @@ mod unsigned_literal_width_e2e;
 mod unsigned_loop_lines_e2e;
 #[path = "unsigned_narrow_carrier_e2e.rs"]
 mod unsigned_narrow_carrier_e2e;
+#[path = "unsigned_property_getter_e2e.rs"]
+mod unsigned_property_getter_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_inline_finally_e2e.rs"]

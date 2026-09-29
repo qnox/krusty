@@ -3916,7 +3916,10 @@ pub(crate) fn lower_value_classes(
 
     // A property whose declared type is a VALUE CLASS has a `@JvmName`-mangled accessor. The backend
     // synthesizes the accessors for a plain property and cannot know the value classes, so stamp the
-    // mangled spelling onto the declaration here, where the map exists.
+    // mangled spelling onto the declaration here, where the map exists. Native unsigned classes stay
+    // out of `under` (an expression keeps the primitive carrier) and live only in `callable_under`,
+    // which is the map a property reference already mangles against. A member `val uInt: UInt` is
+    // therefore `getUInt-pVg5ArA()I`, the method that reference calls.
     for ci in 0..ir.classes.len() {
         let props: Vec<(usize, String, Ty)> = ir.classes[ci]
             .properties
@@ -3931,7 +3934,7 @@ pub(crate) fn lower_value_classes(
             let is_vc_ty = |t: &Ty| {
                 t.non_null()
                     .obj_internal()
-                    .is_some_and(|fq_name| under.contains_key(&fq_name))
+                    .is_some_and(|fq_name| callable_under.contains_key(&fq_name))
             };
             // The property's own accessor is mangled only when its own type is a value class. When it
             // merely overrides a value-class property (`override val p: Nothing?`), the own accessor
@@ -3940,12 +3943,12 @@ pub(crate) fn lower_value_classes(
                 continue;
             }
             let plain = property_getter_name(&name);
-            let getter = vc_mangle(&plain, &[], &ty, &under, false, false);
+            let getter = vc_mangle(&plain, &[], &ty, &callable_under, false, false);
             let setter = vc_mangle(
                 &crate::names::property_setter_name(&name),
                 std::slice::from_ref(&ty),
                 &Ty::Unit,
-                &under,
+                &callable_under,
                 false,
                 false,
             );
