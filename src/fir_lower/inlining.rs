@@ -208,11 +208,17 @@ impl BodyLowering<'_> {
                 FirTypeParameterRef::External { .. } => None,
             })
             .collect::<HashMap<_, _>>();
-        let operand_types = function_shape
+        // The declared parameter type, before this call's substitutions. A type parameter
+        // specialized to a function type is still not an inline lambda parameter.
+        let declared_operand_types = function_shape
             .dispatch_receiver
             .map(Ty::obj_name)
             .into_iter()
             .chain(function_shape.params.iter().copied())
+            .collect::<Vec<_>>();
+        let operand_types = declared_operand_types
+            .iter()
+            .copied()
             .map(|ty| ty_subst_keep_unbound(ty, &bindings))
             .collect::<Vec<_>>();
         let operands = operands
@@ -314,7 +320,9 @@ impl BodyLowering<'_> {
         // The function TYPE alone does not say which is which. A `noinline` parameter is
         // function-typed exactly like the spliced one beside it and is a real closure with its own
         // local, name and lifetime, so the callee's declared role decides and the type only rules
-        // out the parameters that cannot splice at all.
+        // out the parameters that cannot splice at all. The declared type is what rules them out:
+        // a lambda passed to `Any`, to a type parameter, or to an extension receiver is a value,
+        // evaluated once, even though the argument is a lambda literal.
         //
         // A parameter with no name or no published role to align against is a broken contract
         // between this expansion and the callable's published header, not a shape to fall back on:
@@ -335,28 +343,35 @@ impl BodyLowering<'_> {
                             ..
                         }
                     )
-                }) && parameter_names
+                }) && declared_operand_types
                     .get(index)
-                    .is_some_and(InlineOperand::is_spliced)
+                    .is_some_and(|ty| matches!(ty, Ty::Fun(_)))
+                    && parameter_names
+                        .get(index)
+                        .is_some_and(InlineOperand::is_spliced)
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let mut plans = Vec::with_capacity(operands.len());
-        for (index, ((operand, lambda), ty)) in operands
+        let mut splice_lambda = vec![false; operands.len()];
+        for (index, (((operand, lambda), ty), declared)) in operands
             .iter()
             .zip(inline_lambdas)
             .zip(&operand_types)
+            .zip(&declared_operand_types)
             .enumerate()
         {
             let Some(operand) = operand else {
-                plans.push(if default_lambdas.contains(&index) {
+                let splice = default_lambdas.contains(&index);
+                splice_lambda[index] = splice;
+                plans.push(if splice {
                     InlineOperandPlan::Splice
                 } else {
                     InlineOperandPlan::Default
                 });
                 continue;
             };
-            plans.push(match (self.ir.expr(*operand), lambda) {
+            let plan = match (self.ir.expr(*operand), lambda) {
                 (IrExpr::GetValue(_), None)
                     if matches!(ty.non_null(), crate::types::Ty::Fun(_))
                         && parameter_names
@@ -375,8 +390,18 @@ impl BodyLowering<'_> {
                     InlineOperandPlan::Reuse(*slot)
                 }
                 (_, None) => InlineOperandPlan::Copy,
-                (_, Some(_)) => InlineOperandPlan::Splice,
-            });
+                (_, Some(_))
+                    if matches!(declared, Ty::Fun(_))
+                        && parameter_names
+                            .get(index)
+                            .is_some_and(InlineOperand::is_spliced) =>
+                {
+                    InlineOperandPlan::Splice
+                }
+                (_, Some(_)) => InlineOperandPlan::Copy,
+            };
+            splice_lambda[index] = matches!(plan, InlineOperandPlan::Splice);
+            plans.push(plan);
         }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
@@ -418,6 +443,13 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         let mut inline_lambdas = inline_lambdas.to_vec();
+        // A copied lambda is a value. Leaving it in this table would replace every read with a
+        // fresh copy of the literal, so `x === x` would compare two objects.
+        for (lambda, splice) in inline_lambdas.iter_mut().zip(&splice_lambda) {
+            if !splice {
+                *lambda = None;
+            }
+        }
         let mut default_lambda_implementations = Vec::new();
         for &index in &default_lambdas {
             let lambda = self.inline_default_lambda(
