@@ -6985,7 +6985,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - Common lowering prepends the matching prefix reads to `super_args`. Each transitive capture
     retains the superclass field's stable semantic coordinate, so matching never depends on a
     synthetic field spelling. Only a call short by exactly the parent's prefix is filled; any other
-    shape is left to the arity check downstream.
+    shape is left to the arity check downstream. The same shortfall is measured against the
+    constructor the subclass actually calls. A secondary constructor's JVM `<init>` still leads
+    with the captures, while the checker records only the parameters written in source, so
+    `class B : A()` — `A` capturing, with `constructor() : this("O")` — was calling `A.<init>()`,
+    which does not exist (`NoSuchMethodError`). The prefix is prepended to that secondary call
+    the same way it is prepended to a primary `super(…)`.
 
   The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
   and is then found to need `x` for a declaration it reaches carries one field, not two — the second
@@ -6995,8 +7000,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
   they also carry a superclass capture that their own body never mentions.
-  Tests: `tests/local_superclass_capture_e2e.rs`, seven shapes, each cross-checked against the
-  reference compiler. Corpus: `codegen/box/localClass/localHierarchy.kt`,
+  Tests: `tests/local_superclass_capture_e2e.rs`, each cross-checked against the
+  reference compiler, including
+  `a_subclass_passes_a_capture_to_a_secondary_constructor` and
+  `a_subclass_uses_the_selected_secondary_constructor_capture_prefix`. Corpus:
+  `codegen/box/localClass/localHierarchy.kt`,
   `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
   `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
