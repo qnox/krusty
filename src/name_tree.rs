@@ -931,6 +931,12 @@ impl NameTree {
         self.node(id).segment
     }
 
+    /// Nodes currently stored, including the root. Used to adopt a larger catalog tree instead of
+    /// copying it.
+    pub(crate) fn node_count(&self) -> u32 {
+        self.arena.len()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.arena.len() as usize
