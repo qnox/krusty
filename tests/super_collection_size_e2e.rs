@@ -18,8 +18,8 @@ fun box(): String {\n\
 fn getter_instructions(root: &std::path::Path, class_bytes: &[u8]) -> Vec<String> {
     let class_file = root.join("A.class");
     fs::write(&class_file, class_bytes).expect("write A.class");
-    let disassembly =
-        common::javap(&["-c", "-p", &class_file.to_string_lossy()]).expect("javap unavailable");
+    let disassembly = common::javap(&["-c", "-p", "-v", &class_file.to_string_lossy()])
+        .expect("javap unavailable");
     let instructions = common::method_instructions(&disassembly, "int getSize();");
     assert!(!instructions.is_empty(), "missing getSize:\n{disassembly}");
     instructions
