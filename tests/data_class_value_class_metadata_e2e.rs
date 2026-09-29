@@ -71,7 +71,7 @@ fn repository_emission_binds_each_data_member_to_one_exact_jvm_realization() {
     assert_eq!(
         functions
             .iter()
-            .map(|function| function.kotlin_name.as_str())
+            .map(|function| function.kotlin_name)
             .collect::<Vec<_>>(),
         [
             "component1",
