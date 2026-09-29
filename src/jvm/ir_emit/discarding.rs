@@ -73,17 +73,24 @@ impl Emitter<'_> {
                 }
                 // A generic call's erased result is discarded as it is. Reading it as the
                 // substituted type (a `checkcast`, an unboxing) exists only for a consumer, and
-                // kotlinc pops the erased value.
+                // kotlinc pops the erased value. A property assignment is a statement of type
+                // `Unit` even when the Java setter returns the receiver or another value; that
+                // result is popped, not cast to `kotlin.Unit`.
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
-                    ..
-                } if self.ir.declaration_result_coercions.contains(&expression) => {
-                    if let Some(&erased) = self.ir.physical_types.get(arg) {
-                        self.emit_value(*arg, code);
-                        discard(super::ir_ty_to_jvm(&erased), code);
-                        return;
-                    }
+                    type_operand,
+                } if *type_operand == crate::types::Ty::Unit
+                    || (self.ir.declaration_result_coercions.contains(&expression)
+                        && self.ir.physical_types.contains_key(arg)) =>
+                {
+                    let produced = self.ir.physical_types.get(arg).copied().map_or_else(
+                        || self.value_ty(*arg),
+                        |erased| super::ir_ty_to_jvm(&erased),
+                    );
+                    self.emit_value(*arg, code);
+                    discard(produced, code);
+                    return;
                 }
                 _ => {}
             }
