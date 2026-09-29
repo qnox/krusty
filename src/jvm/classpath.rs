@@ -5036,13 +5036,18 @@ impl PackageTree {
         !self.jars_for_class_id(class).is_empty()
     }
 
-    /// Whether `owner` directly declares the nested class `name`. Both probes stay inside the
-    /// catalog's name tree, so a failed symbol lookup neither formats nor interns a candidate.
-    pub(super) fn contains_nested_class(&self, owner: TypeName, name: &str) -> bool {
-        let Some(owner) = crate::types::existing_type_name_in(&self.names, owner) else {
+    /// Whether `owner`'s flattened JVM nested class is declared. The owner class file itself need
+    /// not be present. Both probes stay inside the catalog's name tree, so a failed symbol lookup
+    /// neither formats nor interns a candidate.
+    pub(super) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
+        let Some(package) = crate::types::existing_type_name_in(&self.names, owner.namespace())
+        else {
             return false;
         };
-        let Some(class) = self.names.existing_nested_child_of(owner, name) else {
+        let Some(class) = self
+            .names
+            .existing_nested_under(package, owner.segment_ref(), nested)
+        else {
             return false;
         };
         !self.jars_for_class_id(class).is_empty()
