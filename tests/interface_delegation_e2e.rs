@@ -243,7 +243,7 @@ fun box(): String = DelegatedImpl(Impl()).first + DelegatedImpl(Impl()).middle()
         .methods
         .iter()
         .filter(|method| matches!(method.name, "getFirst" | "middle" | "getLast"))
-        .map(|method| method.name.clone())
+        .map(|method| method.name)
         .collect::<Vec<_>>();
     assert_eq!(order, ["getFirst", "middle", "getLast"]);
     if let Some(reference) = common::kotlinc_library(SRC) {
@@ -255,7 +255,7 @@ fun box(): String = DelegatedImpl(Impl()).first + DelegatedImpl(Impl()).middle()
             .methods
             .iter()
             .filter(|method| matches!(method.name, "getFirst" | "middle" | "getLast"))
-            .map(|method| method.name.clone())
+            .map(|method| method.name)
             .collect::<Vec<_>>();
         assert_eq!(
             order, reference_order,

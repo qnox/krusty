@@ -284,7 +284,7 @@ fn the_implementation_emits_members_in_kotlincs_order() {
     let names = impl_class
         .methods
         .iter()
-        .map(|m| m.name.clone())
+        .map(|m| m.name)
         .collect::<Vec<_>>();
     assert_eq!(
         names,
@@ -628,13 +628,13 @@ fn the_implementation_flags_and_locals_match_kotlinc() {
         let mut methods = class
             .methods
             .iter()
-            .map(|m| (m.name.clone(), m.descriptor.clone(), m.access))
+            .map(|m| (m.name, m.descriptor, m.access))
             .collect::<Vec<_>>();
         methods.sort();
         let mut fields = class
             .fields
             .iter()
-            .map(|f| (f.name.clone(), f.access))
+            .map(|f| (f.name, f.access))
             .collect::<Vec<_>>();
         fields.sort();
         (fields, methods)
@@ -700,8 +700,8 @@ fn the_implementation_nullability_matches_kotlinc() {
             .iter()
             .map(|m| {
                 (
-                    m.name.clone(),
-                    m.descriptor.clone(),
+                    m.name,
+                    m.descriptor,
                     format!("{:?}", m.return_nullability),
                     format!("{:?}", m.parameter_nullability),
                 )
