@@ -867,8 +867,10 @@ impl BodyFirChecker<'_> {
                 declaration = owner;
             }
         };
-        let enclosing_property = class_context
-            .enclosing_property
+        // An accessor body owns `field`, even when it is nested inside another accessor. A
+        // property initializer nested there does not: its `field` is the enclosing accessor's.
+        let enclosing_property = properties::accessor_property(index, declaration)
+            .or(class_context.enclosing_property)
             .or(indexed_enclosing_property);
         let mut enclosing = enclosing_classifier
             .and_then(|classifier| index.declaration_anchor(classifier.declaration))
