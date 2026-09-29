@@ -740,14 +740,34 @@ impl ProductionSignatureSemantics<'_> {
                 continue;
             };
             let mut resolved = true;
-            for segment in &segments[length..] {
-                match <Self as crate::fir::SignatureSemantics>::select_member(
-                    self, scope, segment, origin, receiver, None, demand,
-                ) {
-                    Ok(next) => receiver = next,
-                    Err(_) => {
-                        resolved = false;
-                        break;
+            let mut pending = segments[length..].iter();
+            if let Some(segment) = pending.next() {
+                if let Some(entries) =
+                    self.prioritized_enum_entries_on_qualifier(scope, &prefix, segment)
+                {
+                    match crate::fir::ResolvedTy::new(entries) {
+                        Ok(next) => receiver = next,
+                        Err(_) => resolved = false,
+                    }
+                } else {
+                    match <Self as crate::fir::SignatureSemantics>::select_member(
+                        self, scope, segment, origin, receiver, None, demand,
+                    ) {
+                        Ok(next) => receiver = next,
+                        Err(_) => resolved = false,
+                    }
+                }
+            }
+            if resolved {
+                for segment in pending {
+                    match <Self as crate::fir::SignatureSemantics>::select_member(
+                        self, scope, segment, origin, receiver, None, demand,
+                    ) {
+                        Ok(next) => receiver = next,
+                        Err(_) => {
+                            resolved = false;
+                            break;
+                        }
                     }
                 }
             }

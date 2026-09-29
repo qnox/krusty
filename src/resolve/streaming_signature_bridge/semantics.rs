@@ -206,6 +206,16 @@ impl ProductionSignatureSemantics<'_> {
         let mut receiver = <Self as crate::fir::SignatureSemantics>::select_value(
             self, scope, root, origin, None, demand,
         )?;
+        if let Some(segment) = segments.next() {
+            if let Some(entries) = self.prioritized_enum_entries_on_qualifier(scope, root, segment)
+            {
+                receiver = crate::fir::ResolvedTy::new(entries).map_err(|_| Self::failure())?;
+            } else {
+                receiver = <Self as crate::fir::SignatureSemantics>::select_member(
+                    self, scope, segment, origin, receiver, None, demand,
+                )?;
+            }
+        }
         for segment in segments {
             receiver = <Self as crate::fir::SignatureSemantics>::select_member(
                 self, scope, segment, origin, receiver, None, demand,
@@ -1482,6 +1492,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(classifier) =
                     self.qualified_classifier_or_source_alias(scope, qualifier)
                 {
+                    // The enum qualifier's value is its companion, but `Enum.entries` is still the
+                    // classifier property. `Enum.Companion.entries` names the companion member.
+                    if let Some(result) =
+                        self.prioritized_enum_entries_on_qualifier(scope, qualifier, name)
+                    {
+                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+                    }
                     if let Some(result) =
                         self.select_qualified_associated_property(scope, classifier, name, demand)?
                     {
@@ -4598,6 +4615,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
             }
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+        }
+        if spelling == "entries" {
+            if let Some(result) = self.enum_entries_on_companion_receiver(scope, receiver.get()) {
+                return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+            }
         }
         Err(self.record_missing_member(scope, origin, receiver.get(), spelling))
     }

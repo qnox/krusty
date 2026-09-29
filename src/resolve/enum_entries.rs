@@ -15,6 +15,22 @@ impl Checker<'_> {
         self.classifier_enum_entry_ordinal(owner, name).is_some()
     }
 
+    /// The enum named by a simple qualifier whose value facet is that enum's companion.
+    /// `Enum.entries` is a classifier property of the enum, not a member of the companion value.
+    pub(super) fn enum_entries_value_classifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+    ) -> Option<TypeName> {
+        let crate::ast::Expr::Name(name) = self.file.expr(receiver) else {
+            return None;
+        };
+        let owner = self.select_classifier(scope, name).found()?;
+        self.resolved_type_name(owner)
+            .is_some_and(|classifier| classifier.is_enum())
+            .then_some(owner)
+    }
+
     pub(super) fn record_enum_entry(&mut self, expression: ExprId, owner: TypeName, name: &str) {
         let ordinal = self.classifier_enum_entry_ordinal(owner, name);
         if let Some(ordinal) = ordinal.and_then(|ordinal| u32::try_from(ordinal).ok()) {

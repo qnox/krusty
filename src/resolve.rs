@@ -67000,11 +67000,17 @@ impl<'a> Checker<'a> {
             // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on every enum classifier.
             // Recognize the classifier receiver directly, even when its provider has no direct accessor;
             // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
+            // An enum that declares a companion is also a value (that companion). `Enum.entries` is
+            // still the classifier property: the companion value does not replace the enum facet.
+            let entries_owner = (name == "entries" && self.file.prioritized_enum_entries)
+                .then(|| self.enum_entries_value_classifier(scope, receiver))
+                .flatten();
             if let Some(owner) = receiver_qualifier
                 .as_ref()
                 .ok()
                 .copied()
                 .and_then(ResolvedQualifier::classifier)
+                .or(entries_owner)
             {
                 let legacy_enum_entries = name == "entries"
                     && !self.file.prioritized_enum_entries

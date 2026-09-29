@@ -3630,6 +3630,8 @@ impl HeaderInventoryBuilder {
         }
         let file = file?;
         self.sources.set_package(source_id, file.package.as_deref());
+        self.sources
+            .set_prioritized_enum_entries(source_id, file.prioritized_enum_entries);
         self.inventoried[raw] = true;
         let (stubs, stable_by_transient) = self.add_file(source_id, file, source.is_common);
         Some((source_id, stubs, stable_by_transient))

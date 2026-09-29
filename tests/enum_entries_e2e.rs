@@ -116,3 +116,59 @@ fn enum_with_ctor_and_method_still_emits_entries() {
         );
     }
 }
+
+#[test]
+fn enum_entries_stays_visible_through_a_companion_value() {
+    const SRC: &str = "\
+enum class Mode(val state: String) {\n\
+    A(\"a\"), B(\"b\");\n\
+    companion object {\n\
+        fun fromName(name: String): Mode? = Mode.entries.find { it.state == name }\n\
+        fun text() = Mode.entries.joinToString { it.state }\n\
+    }\n\
+}\n\
+fun listed() = Mode.entries.joinToString { it.state }\n\
+fun box(): String {\n\
+    if (listed() != \"a, b\") return \"listed\"\n\
+    if (Mode.text() != \"a, b\") return \"text\"\n\
+    if (Mode.fromName(\"b\") != Mode.B) return \"find\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_companion_entries");
+}
+
+#[test]
+fn a_companion_member_named_entries_stays_on_the_companion() {
+    const SRC: &str = "\
+enum class Shadow {\n\
+    A;\n\
+    companion object {\n\
+        val entries = 1\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    if (Shadow.entries.size != 1) return \"size\"\n\
+    if (Shadow.Companion.entries != 1) return \"companion\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_companion_entries_member");
+}
+
+#[test]
+fn inferred_enum_entries_outranks_a_companion_member() {
+    const SRC: &str = "\
+enum class Shadow {\n\
+    A;\n\
+    companion object {\n\
+        val entries = 7\n\
+    }\n\
+}\n\
+fun count() = Shadow.entries.size\n\
+fun companionValue() = Shadow.Companion.entries\n\
+fun box(): String {\n\
+    if (count() != 1) return \"count\"\n\
+    if (companionValue() != 7) return \"companion\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_companion_entries_inferred");
+}
