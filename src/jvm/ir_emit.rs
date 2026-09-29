@@ -12600,8 +12600,9 @@ fn identity_compares_refs(lt: Ty, rt: Ty) -> bool {
 }
 
 /// The int-vs-wide category of a numeric comparison's operands: `true` for the int-category primitives
-/// that fuse to `if_icmp*`/compare-to-zero, `false` for `Long`/`Double`/`Float`, which compare 3-way
-/// through `lcmp`/`dcmp*`/`fcmp*` first.
+/// that fuse to `if_icmp*`/compare-to-zero, `false` for `Long`/`ULong`/`Double`/`Float`, which compare
+/// 3-way through `lcmp`/`dcmp*`/`fcmp*` first. `ULong` occupies a `long` slot; treating it as an int
+/// emits `if_icmp*` against two longs.
 ///
 /// Deriving this as a bare "not `Long`/`Double`/`Float`" swept every REFERENCE type into the int
 /// category, so a mixed reference/primitive `===` that slipped past the identity path emitted an int
@@ -12616,7 +12617,7 @@ fn numeric_cmp_int_category(lt: Ty, rt: Ty) -> bool {
         "numeric comparison reached with a non-scalar operand ({lt:?} vs {rt:?}) — \
          reference shapes belong on the identity/null/areEqual paths"
     );
-    !matches!(lt, Ty::Long | Ty::Double | Ty::Float)
+    !matches!(lt, Ty::Long | Ty::ULong | Ty::Double | Ty::Float)
 }
 
 /// Normalize a call's return JVM-type: a Kotlin `Nothing` is carried as an object whose JVM mapping is

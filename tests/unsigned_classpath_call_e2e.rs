@@ -498,6 +498,29 @@ fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
     );
 }
 
+/// `0UL == n!!` keeps the literal typed `ULong`. That comparison is still two longs: `lcmp`, not
+/// `if_icmpne`.
+#[test]
+fn ulong_literal_on_the_left_compares_its_carrier() {
+    common::expect_box_ok_with_stdlib(
+        "fun isZeroULong(n: ULong?) = n!! == 0UL\n\
+         fun isZeroULong2(n: ULong?) = 0UL == n!!\n\
+         fun isNullULong(n: ULong?) = n == null\n\
+         fun isNullULong2(n: ULong?) = null == n\n\
+         fun box(): String {\n\
+             if (isZeroULong(1UL)) return \"right nonzero\"\n\
+             if (isZeroULong2(1UL)) return \"left nonzero\"\n\
+             if (!isZeroULong(0UL)) return \"right zero\"\n\
+             if (!isZeroULong2(0UL)) return \"left zero\"\n\
+             if (1UL != 1UL) return \"left one\"\n\
+             if (isNullULong(1UL) || isNullULong2(1UL)) return \"null value\"\n\
+             if (!isNullULong(null) || !isNullULong2(null)) return \"null\"\n\
+             return \"OK\"\n\
+         }\n",
+        "ULongLeftZero",
+    );
+}
+
 /// An unsigned RECEIVER of an inline scope function is the function's first argument, even though
 /// source syntax puts it before the dot. That argument crosses an erased reference boundary and must
 /// therefore carry the semantic value-class box (`kotlin/UInt`, etc.), not the box of its primitive

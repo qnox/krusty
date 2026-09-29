@@ -80,7 +80,7 @@ impl Emitter<'_> {
             // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.
             let nan_l = matches!(op, Gt | Ge);
             match lt {
-                Ty::Long => code.lcmp(),
+                Ty::Long | Ty::ULong => code.lcmp(),
                 Ty::Double => {
                     if nan_l {
                         code.dcmpl()
@@ -95,7 +95,7 @@ impl Emitter<'_> {
                         code.fcmpg()
                     }
                 }
-                _ => unreachable!("int_cat is false only for Long/Double/Float"),
+                _ => unreachable!("int_cat is false only for Long/ULong/Double/Float"),
             }
         }
         self.mark_comparison_decision(&[lhs, rhs], code);
