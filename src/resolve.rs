@@ -34678,10 +34678,7 @@ fun use() {
         let errors = check_with_detected_features(&format!(
             "// LANGUAGE: -AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
         ));
-        assert!(
-            errors.iter().any(|error| error.contains("unresolved reference 'secret'")),
-            "disabling the property-access rule should hide the superclass companion declaration: {errors:?}"
-        );
+        assert_eq!(errors, ["unresolved reference 'secret'."]);
     }
 
     #[test]

@@ -264,11 +264,7 @@ fn when_guard_requires_its_language_feature() {
         "// LANGUAGE: -WhenGuards\n\
          sealed interface V\nclass A(val ok: Boolean) : V\nfun f(v: V) = when (v) { is A if v.ok -> 1; else -> 0 }",
     );
-    assert!(
-        d.iter()
-            .any(|message| message.contains("when guards are disabled")),
-        "{d:?}"
-    );
+    assert_eq!(d, ["when guards are disabled by the language feature set"]);
 }
 
 #[test]
