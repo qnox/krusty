@@ -852,6 +852,25 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
         .map_or(internal, |(_, id)| *id)
 }
 
+/// Physical classifier identity written to a JVM classfile for a semantic classifier. Unlike
+/// [`to_jvm_type_name`], this also covers function-classifier families and intrinsic companions,
+/// whose physical names are computed from semantic facts rather than the fixed erasure table.
+pub(super) fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
+    if let Some(intrinsic) = intrinsic_companion_jvm_class(internal) {
+        return crate::types::type_name(&intrinsic);
+    }
+    if let Some(function) = super::function_classifiers::classifier(internal) {
+        if function.is_reflective() {
+            return crate::types::type_name(crate::types::KFUNCTION_INTERNAL);
+        }
+        if !function.is_suspend() {
+            let runtime = super::names::function_interface_internal_name(function.arity());
+            return crate::types::type_name(&runtime);
+        }
+    }
+    to_jvm_type_name(internal)
+}
+
 /// Whether [`to_jvm_internal`] would rewrite this classifier. Classpath loading asks once per
 /// class; erasure-table identity and the function-classifier family answer it without rendering.
 pub(super) fn maps_to_distinct_jvm_internal(internal: TypeName) -> bool {
@@ -926,9 +945,9 @@ mod tests {
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
         mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
-        maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_internal,
-        to_jvm_type_name, to_kotlin_internal, to_kotlin_type_name, wrapper_internal,
-        wrapper_to_kotlin_prim_name, wrapper_type_name,
+        maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_classfile_type_name,
+        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, to_kotlin_type_name,
+        wrapper_internal, wrapper_to_kotlin_prim_name, wrapper_type_name,
     };
     use crate::types::{type_name, CollectionKind, MappedCollection, Ty};
 
@@ -1005,6 +1024,29 @@ mod tests {
         assert_eq!(kotlin_prim_to_wrapper("kotlin/String"), None);
         assert_eq!(kotlin_prim_to_wrapper("demo/Foo"), None);
         assert_eq!(wrapper_internal(Ty::String), None);
+    }
+
+    #[test]
+    fn classfile_classifier_identity_includes_computed_jvm_realizations() {
+        let cases = [
+            ("kotlin/Int", "java/lang/Integer"),
+            ("kotlin/collections/MutableList", "java/util/List"),
+            ("kotlin/Function1", "kotlin/jvm/functions/Function1"),
+            ("kotlin/Function23", "kotlin/jvm/functions/FunctionN"),
+            ("kotlin/reflect/KFunction2", "kotlin/reflect/KFunction"),
+            (
+                "kotlin/Int.Companion",
+                "kotlin/jvm/internal/IntCompanionObject",
+            ),
+            ("sample/Outer.Inner", "sample/Outer.Inner"),
+        ];
+        for (semantic, physical) in cases {
+            assert_eq!(
+                to_jvm_classfile_type_name(type_name(semantic)),
+                type_name(physical),
+                "{semantic}"
+            );
+        }
     }
 
     #[test]
