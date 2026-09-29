@@ -105,8 +105,22 @@ impl StringTable {
         if let Some(index) = self.latest_match(hash, string, record.as_bytes()) {
             return index;
         }
+        self.push_entry(string.to_owned(), record, hash)
+    }
+
+    /// Intern text that the serializer has already materialized, retaining that allocation when
+    /// the pair is new. A duplicate is still compared by complete text and record bytes.
+    fn intern_owned(&mut self, string: String, record: Pb) -> u32 {
+        let hash = string_record_hash(&string, record.as_bytes());
+        if let Some(index) = self.latest_match(hash, &string, record.as_bytes()) {
+            return index;
+        }
+        self.push_entry(string, record, hash)
+    }
+
+    fn push_entry(&mut self, string: String, record: Pb, hash: u64) -> u32 {
         let index = self.strings.len() as u32;
-        self.strings.push(string.to_owned());
+        self.strings.push(string);
         self.records.push(record);
         self.dedup.entry(hash).or_default().push(index);
         index
@@ -147,10 +161,7 @@ impl StringTable {
             }
             let mut record = Pb::new();
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
-            let index = self.intern(
-                crate::jvm::names::reference_descriptor(classifier.rendered()),
-                record,
-            );
+            let index = self.intern_owned(format!("L{};", classifier.rendered()), record);
             self.descriptor_ids.insert(classifier, index);
             return index;
         }
@@ -1009,18 +1020,10 @@ mod tests {
         assert_eq!(strings.class_id(classifier), first);
         assert_eq!(strings.strings.len(), len);
         assert_eq!(strings.strings[first as usize], "Lsample/Box;");
-        assert_eq!(
-            strings.strings[first as usize].as_str(),
-            crate::jvm::names::reference_descriptor(classifier.rendered())
-        );
 
         let nested = crate::types::type_name("pkg/Outer").nested_child("Inner");
         let nested_id = strings.class_id(nested);
         assert_eq!(strings.strings[nested_id as usize], "Lpkg/Outer$Inner;");
-        assert_eq!(
-            strings.strings[nested_id as usize].as_str(),
-            crate::jvm::names::reference_descriptor(nested.rendered())
-        );
         let len = strings.strings.len();
         assert_eq!(strings.class_id(nested), nested_id);
         assert_eq!(strings.strings.len(), len);
