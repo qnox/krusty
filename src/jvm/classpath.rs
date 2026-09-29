@@ -5037,9 +5037,9 @@ pub struct PackageNode {
     builtins_jars: Vec<JarId>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PackageTree {
-    names: NameTree,
+    names: std::sync::Arc<NameTree>,
     packages: HashMap<NameId, PackageNode>,
     /// Every package path that EXISTS as a qualifier, including the intermediate ones no jar declares
     /// directly. A catalog records only the packages that own class files, so `java/util` is a node
@@ -5050,6 +5050,18 @@ pub struct PackageTree {
     /// Exact class owners, sorted by name and classpath order.
     classes: Vec<(NameId, JarId)>,
     incomplete_entries: Vec<JarId>,
+}
+
+impl Default for PackageTree {
+    fn default() -> Self {
+        Self {
+            names: std::sync::Arc::new(NameTree::default()),
+            packages: HashMap::new(),
+            package_prefixes: HashSet::new(),
+            classes: Vec::new(),
+            incomplete_entries: Vec::new(),
+        }
+    }
 }
 
 impl PackageTree {
@@ -5405,12 +5417,43 @@ fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
 /// package node's `jars` order IS the shadowing order lookups walk. When a part is merged out of
 /// position order (the base+delta path below), the touched vectors are re-sorted so the result is
 /// indistinguishable from a single in-order compose.
+/// Point the composed tree at `names` when that tree already holds more nodes. Existing ids are
+/// copied across; the larger tree's own ids stay valid, so a JDK catalog is not duplicated.
+fn adopt_larger_name_tree(tree: &mut PackageTree, names: &std::sync::Arc<NameTree>) {
+    let old = std::sync::Arc::clone(&tree.names);
+    tree.names = std::sync::Arc::clone(names);
+    if old.node_count() <= 1 {
+        return;
+    }
+    let remap = |id: NameId| names.insert_from(&old, id);
+    let packages = std::mem::take(&mut tree.packages);
+    tree.packages = packages
+        .into_iter()
+        .map(|(id, node)| (remap(id), node))
+        .collect();
+    let prefixes = std::mem::take(&mut tree.package_prefixes);
+    tree.package_prefixes = prefixes.into_iter().map(remap).collect();
+    for (id, _) in &mut tree.classes {
+        *id = remap(*id);
+    }
+}
+
 fn merge_package_tree_part(tree: &mut PackageTree, jar_id: JarId, jp: &JarPackages) {
     if !jp.complete {
         tree.incomplete_entries.push(jar_id);
     }
+    if !std::sync::Arc::ptr_eq(&tree.names, &jp.names)
+        && jp.names.node_count() > tree.names.node_count()
+    {
+        adopt_larger_name_tree(tree, &jp.names);
+    }
+    let shared = std::sync::Arc::ptr_eq(&tree.names, &jp.names);
     for (&pkg_id, entry) in &jp.packages {
-        let pkg = tree.names.insert_from(&jp.names, pkg_id);
+        let pkg = if shared {
+            pkg_id
+        } else {
+            tree.names.insert_from(&jp.names, pkg_id)
+        };
         let node = tree.packages.entry(pkg).or_default();
         if !node.jars.contains(&jar_id) {
             node.jars.push(jar_id);
@@ -5445,7 +5488,11 @@ fn merge_package_tree_part(tree: &mut PackageTree, jar_id: JarId, jp: &JarPackag
         }
     }
     for &class_id in &jp.classes {
-        let class = tree.names.insert_from(&jp.names, class_id);
+        let class = if shared {
+            class_id
+        } else {
+            tree.names.insert_from(&jp.names, class_id)
+        };
         tree.classes.push((class, jar_id));
     }
 }
@@ -6025,6 +6072,11 @@ mod fq_tests {
         assert_eq!(packages.classes, vec![string]);
         assert_eq!(packages.names.render(package), "java/lang");
         assert!(packages.packages[&package].has_classes);
+
+        let composed = compose_package_tree(&[std::sync::Arc::new(packages)]);
+        assert!(std::sync::Arc::ptr_eq(&composed.names, &idx.names));
+        assert_eq!(composed.names.get("java/lang/String"), Some(string));
+        assert_eq!(composed.first_jar_for_id(string), Some(0));
 
         let joined = NameTree::default();
         let via_segments = jimage_class_id(&joined, "java/lang", "String");
