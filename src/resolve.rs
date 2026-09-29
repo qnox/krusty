@@ -67002,7 +67002,12 @@ impl<'a> Checker<'a> {
             // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
             // An enum that declares a companion is also a value (that companion). `Enum.entries` is
             // still the classifier property: the companion value does not replace the enum facet.
-            let entries_owner = (name == "entries" && self.file.prioritized_enum_entries)
+            // A classifier qualifier already names the enum. Re-checking it as a value reports
+            // an unresolved reference for an enum that has no companion instance. Only a receiver
+            // that resolved as a value can be that companion, or a local that shadows the enum.
+            let entries_owner = (name == "entries"
+                && self.file.prioritized_enum_entries
+                && matches!(receiver_qualifier, Ok(ResolvedQualifier::Value)))
                 .then(|| self.enum_entries_value_classifier(scope, receiver))
                 .flatten();
             if let Some(owner) = receiver_qualifier
