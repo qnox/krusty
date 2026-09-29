@@ -5181,6 +5181,8 @@ impl JvmLibraries {
                             None
                         };
                         let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
+                        let collection_barrier =
+                            collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),
                             inline: m.inline,
@@ -5188,6 +5190,7 @@ impl JvmLibraries {
                             context_count: m.context_count,
                             member_realization: m.realization,
                             semantic_role,
+                            collection_barrier,
                             signature: m.signature.clone(),
                             // Preserve the declaration-level return recovered when the class member
                             // was aligned with metadata. This overload view is the common input to
@@ -5262,6 +5265,65 @@ impl JvmLibraries {
             }
         }
         FunctionSet { overloads }
+    }
+}
+
+/// JVM collection ABI role of one exact decoded Kotlin builtin declaration. This normalization is
+/// deliberately at the provider boundary: consumers carry the typed role attached to the selected
+/// declaration and never compare a call, override, bridge, or emitted method spelling.
+fn collection_barrier_role(
+    owner: TypeName,
+    source_name: &str,
+    parameters: &[Ty],
+    result: Ty,
+) -> Option<crate::libraries::CollectionBarrierOutcome> {
+    use crate::libraries::CollectionBarrierOutcome::{False, NotFound, Null};
+
+    if parameters.len() != 1 {
+        return None;
+    }
+    let collection = type_name("kotlin/collections/Collection");
+    let mutable_collection = type_name("kotlin/collections/MutableCollection");
+    let list = type_name("kotlin/collections/List");
+    let mutable_list = type_name("kotlin/collections/MutableList");
+    let set = type_name("kotlin/collections/Set");
+    let mutable_set = type_name("kotlin/collections/MutableSet");
+    let map = type_name("kotlin/collections/Map");
+    let mutable_map = type_name("kotlin/collections/MutableMap");
+    match (owner, source_name, result) {
+        (owner, "contains", Ty::Boolean)
+            if [
+                collection,
+                mutable_collection,
+                list,
+                mutable_list,
+                set,
+                mutable_set,
+            ]
+            .contains(&owner) =>
+        {
+            Some(False)
+        }
+        (owner, "remove", Ty::Boolean)
+            if [mutable_collection, mutable_list, mutable_set].contains(&owner) =>
+        {
+            Some(False)
+        }
+        (owner, "indexOf" | "lastIndexOf", Ty::Int) if owner == list || owner == mutable_list => {
+            Some(NotFound)
+        }
+        (owner, "containsKey" | "containsValue", Ty::Boolean)
+            if owner == map || owner == mutable_map =>
+        {
+            Some(False)
+        }
+        (owner, "get", result)
+            if (owner == map || owner == mutable_map) && result.is_reference() =>
+        {
+            Some(Null)
+        }
+        (owner, "remove", result) if owner == mutable_map && result.is_reference() => Some(Null),
+        _ => None,
     }
 }
 
@@ -5831,10 +5893,12 @@ fn classpath_annotation_targets(
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, java_method_has_operator_convention, java_type_nullability,
-        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
-        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
+        collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
+        java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
+        parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
+        parse_method_gsig,
     };
+    use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
@@ -5852,6 +5916,38 @@ mod tests {
         assert!(java_method_has_operator_convention("set", 4));
         assert!(!java_method_has_operator_convention("get", 0));
         assert!(!java_method_has_operator_convention("set", 1));
+    }
+
+    #[test]
+    fn decoded_collection_barrier_role_is_declaration_exact() {
+        assert_eq!(
+            collection_barrier_role(
+                type_name("kotlin/collections/MutableCollection"),
+                "remove",
+                &[Ty::String],
+                Ty::Boolean,
+            ),
+            Some(CollectionBarrierOutcome::False)
+        );
+        assert_eq!(
+            collection_barrier_role(
+                type_name("kotlin/collections/MutableCollection"),
+                "add",
+                &[Ty::String],
+                Ty::Boolean,
+            ),
+            None,
+            "a same-signature ordinary collection member must keep its parameter assertion"
+        );
+        assert_eq!(
+            collection_barrier_role(
+                type_name("example/MutableCollection"),
+                "remove",
+                &[Ty::String],
+                Ty::Boolean,
+            ),
+            None
+        );
     }
 
     #[test]

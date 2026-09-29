@@ -84,7 +84,7 @@ pub(crate) struct BackendPassFacts {
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 7. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 7. `collection_barriers::select` — attach provider-normalized JVM collection bridge semantics.
 ///
 /// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
@@ -179,7 +179,7 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.function_argument_arrays,
     )?;
-    apply_collection_bridge_barriers(ir);
+    crate::jvm::collection_barriers::select(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
@@ -234,171 +234,6 @@ fn run_backend_passes_after_plugins(
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BridgeBarrierOutcome {
-    False,
-    NotFound,
-    Null,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BridgeBarrier {
-    pub parameter: usize,
-    pub outcome: BridgeBarrierOutcome,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CollectionOwner {
-    Collection,
-    MutableCollection,
-    List,
-    Map,
-}
-
-impl CollectionOwner {
-    fn matches(self, owner: crate::types::TypeName) -> bool {
-        let names: &[&str] = match self {
-            CollectionOwner::Collection => &[
-                "java/util/Collection",
-                "java/util/List",
-                "java/util/Set",
-                "kotlin/collections/Collection",
-                "kotlin/collections/MutableCollection",
-                "kotlin/collections/List",
-                "kotlin/collections/MutableList",
-                "kotlin/collections/Set",
-                "kotlin/collections/MutableSet",
-            ],
-            CollectionOwner::MutableCollection => &[
-                "java/util/Collection",
-                "java/util/List",
-                "java/util/Set",
-                "kotlin/collections/MutableCollection",
-                "kotlin/collections/MutableList",
-                "kotlin/collections/MutableSet",
-            ],
-            CollectionOwner::List => &[
-                "java/util/List",
-                "kotlin/collections/List",
-                "kotlin/collections/MutableList",
-            ],
-            CollectionOwner::Map => &[
-                "java/util/Map",
-                "kotlin/collections/Map",
-                "kotlin/collections/MutableMap",
-            ],
-        };
-        names.iter().any(|name| owner.matches(name))
-    }
-}
-
-fn collection_bridge_semantics(
-    bridge: &crate::ir::Bridge,
-) -> Option<(CollectionOwner, BridgeBarrier)> {
-    let (owner, outcome) = match bridge.name.as_str() {
-        "contains"
-            if bridge.erased_ret == crate::types::Ty::Boolean
-                && bridge.concrete_ret == crate::types::Ty::Boolean =>
-        {
-            (CollectionOwner::Collection, BridgeBarrierOutcome::False)
-        }
-        "remove"
-            if bridge.erased_ret == crate::types::Ty::Boolean
-                && bridge.concrete_ret == crate::types::Ty::Boolean =>
-        {
-            (
-                CollectionOwner::MutableCollection,
-                BridgeBarrierOutcome::False,
-            )
-        }
-        "indexOf" | "lastIndexOf"
-            if bridge.erased_ret == crate::types::Ty::Int
-                && bridge.concrete_ret == crate::types::Ty::Int =>
-        {
-            (CollectionOwner::List, BridgeBarrierOutcome::NotFound)
-        }
-        "containsKey" | "containsValue"
-            if bridge.erased_ret == crate::types::Ty::Boolean
-                && bridge.concrete_ret == crate::types::Ty::Boolean =>
-        {
-            (CollectionOwner::Map, BridgeBarrierOutcome::False)
-        }
-        "get" if bridge.erased_ret.is_reference() && bridge.concrete_ret.is_reference() => {
-            (CollectionOwner::Map, BridgeBarrierOutcome::Null)
-        }
-        _ => return None,
-    };
-    let parameter = 0;
-    (bridge.erased_params.len() == 1
-        && bridge.concrete_params.len() == 1
-        && bridge.erased_params[parameter].is_erased_top()
-        && narrow_collection_parameter(bridge.concrete_params[parameter]))
-    .then_some((parameter, outcome))
-    .map(|(parameter, outcome)| (owner, BridgeBarrier { parameter, outcome }))
-}
-
-/// A collection parameter that is narrower than the erased `Object` slot.
-///
-/// A signed primitive (`containsValue(value: Int)`) is that parameter too: its JVM method takes
-/// the primitive, so the erased bridge must test the boxed wrapper before unboxing. Unsigned
-/// values are inline classes and are not this case. `Nothing` is not a reference and not a
-/// primitive; it stays out of this predicate.
-fn narrow_collection_parameter(ty: crate::types::Ty) -> bool {
-    signed_jvm_primitive(ty) || (ty.is_reference() && !ty.is_erased_top())
-}
-
-fn signed_jvm_primitive(ty: crate::types::Ty) -> bool {
-    matches!(
-        ty,
-        crate::types::Ty::Boolean
-            | crate::types::Ty::Byte
-            | crate::types::Ty::Short
-            | crate::types::Ty::Int
-            | crate::types::Ty::Long
-            | crate::types::Ty::Char
-            | crate::types::Ty::Float
-            | crate::types::Ty::Double
-    )
-}
-
-pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier> {
-    bridge
-        .type_safe_barrier
-        .then(|| collection_bridge_semantics(bridge))
-        .flatten()
-        .map(|(_, barrier)| barrier)
-}
-
-fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile) {
-    for class in &mut ir.classes {
-        let owners = ir
-            .classifier_hierarchies
-            .get(&class.fq_name)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for bridge in &mut class.bridges {
-            let semantics = collection_bridge_semantics(bridge);
-            bridge.type_safe_barrier = semantics.is_some_and(|(required, _)| {
-                owners
-                    .iter()
-                    .any(|entry| required.matches(entry.classifier))
-            });
-            crate::trace_compiler!(
-                "lower",
-                "collection bridge class={} name={} hierarchy={:?} semantics={:?} barrier={}",
-                class.fq_name,
-                bridge.name,
-                owners
-                    .iter()
-                    .map(|entry| entry.classifier)
-                    .collect::<Vec<_>>(),
-                semantics,
-                bridge.type_safe_barrier,
-            );
-        }
-    }
 }
 
 fn jvm_plugin_type_descriptor(ty: Ty) -> Option<String> {
@@ -1669,7 +1504,7 @@ mod tests {
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
             ),
-            ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
+            ("collection_barriers::select(", &["src/jvm/backend.rs"]),
             (
                 "check_before_result_coercion(",
                 &["src/jvm/result_null_checks.rs", "src/jvm/backend.rs"],
@@ -1719,77 +1554,6 @@ mod tests {
             offenders.is_empty(),
             "common lowering must leave JVM storage choices to the backend:\n{}",
             offenders.join("\n")
-        );
-    }
-
-    #[test]
-    fn primitive_collection_parameters_take_the_type_safe_barrier() {
-        fn bridge(
-            name: &str,
-            param: crate::types::Ty,
-            erased_ret: crate::types::Ty,
-            concrete_ret: crate::types::Ty,
-        ) -> crate::ir::Bridge {
-            crate::ir::Bridge {
-                kind: crate::ir::BridgeKind::Function,
-                target_function: None,
-                parameters: Vec::new(),
-                name: name.to_string(),
-                erased_params: vec![crate::types::Ty::obj("kotlin/Any")],
-                erased_ret,
-                concrete_params: vec![param],
-                concrete_ret,
-                target_ret: None,
-                type_safe_barrier: false,
-                special: false,
-                target_name: None,
-            }
-        }
-        let boolean = crate::types::Ty::Boolean;
-        let any = crate::types::Ty::obj("kotlin/Any");
-        let string = crate::types::Ty::obj("kotlin/String");
-        assert_eq!(
-            collection_bridge_semantics(&bridge(
-                "containsValue",
-                crate::types::Ty::Int,
-                boolean,
-                boolean
-            ))
-            .map(|(_, barrier)| barrier.outcome),
-            Some(BridgeBarrierOutcome::False)
-        );
-        assert_eq!(
-            collection_bridge_semantics(&bridge("containsValue", string, boolean, boolean))
-                .map(|(_, barrier)| barrier.outcome),
-            Some(BridgeBarrierOutcome::False)
-        );
-        assert!(
-            collection_bridge_semantics(&bridge("containsValue", any, boolean, boolean)).is_none()
-        );
-        assert_eq!(
-            collection_bridge_semantics(&bridge(
-                "contains",
-                crate::types::Ty::Int,
-                boolean,
-                boolean
-            ))
-            .map(|(_, barrier)| barrier.outcome),
-            Some(BridgeBarrierOutcome::False)
-        );
-        assert_eq!(
-            collection_bridge_semantics(&bridge(
-                "indexOf",
-                crate::types::Ty::Int,
-                crate::types::Ty::Int,
-                crate::types::Ty::Int,
-            ))
-            .map(|(_, barrier)| barrier.outcome),
-            Some(BridgeBarrierOutcome::NotFound)
-        );
-        assert_eq!(
-            collection_bridge_semantics(&bridge("get", crate::types::Ty::Int, any, string,))
-                .map(|(_, barrier)| barrier.outcome),
-            Some(BridgeBarrierOutcome::Null)
         );
     }
 

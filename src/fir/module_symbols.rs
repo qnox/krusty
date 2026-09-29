@@ -529,6 +529,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             reflection_name: Some(name.to_owned()),
             compiler_intrinsic: None,
             semantic_role: None,
+            collection_barrier: None,
             inline_body_plan: None,
             plugin_expression: None,
             descriptor: String::new(),

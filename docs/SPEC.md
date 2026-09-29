@@ -8845,7 +8845,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   neutral result (`false`, `-1`, or `null`) when the test fails, including for `null`. A value
   that passes is unboxed through `Number` (`Boolean` and `Char` through their own wrappers) and
   delegated to the primitive method. A nullable primitive (`Int?`) stays on the reference barrier,
-  which admits `null`. Test: `tests/collection_special_member_stub_e2e.rs`
+  which admits `null`. The JVM declaration provider attaches this ABI role to the exact decoded
+  Kotlin collection declaration; resolution carries that typed fact through the selected override
+  edge and bridge. An ordinary same-signature member such as `MutableCollection.add` therefore
+  keeps its cast/unbox failure instead of receiving a neutral-result guard. Neither bridge lowering
+  nor emission interprets a method spelling or reconstructs a class hierarchy.
+  Test: `tests/collection_special_member_stub_e2e.rs`
   (`primitive_collection_bridges_reject_null_and_foreign_wrappers`).
 
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**

@@ -262,6 +262,20 @@ private object Ints : List<Int> {
     override fun subList(fromIndex: Int, toIndex: Int): List<Int> = emptyList()
 }
 
+private object IntBag : MutableCollection<Int> {
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = true
+    override fun iterator(): MutableIterator<Int> = throw UnsupportedOperationException()
+    override fun contains(element: Int): Boolean = false
+    override fun containsAll(elements: Collection<Int>): Boolean = false
+    override fun add(element: Int): Boolean = element == 3
+    override fun addAll(elements: Collection<Int>): Boolean = false
+    override fun clear() {}
+    override fun remove(element: Int): Boolean = false
+    override fun removeAll(elements: Collection<Int>): Boolean = false
+    override fun retainAll(elements: Collection<Int>): Boolean = false
+}
+
 fun box(): String {
     val values = IntValues as Map<Any?, Any?>
     if (values.containsValue(null)) return "value null"
@@ -279,6 +293,17 @@ fun box(): String {
     if (ints.indexOf(3) != 0) return "index int"
     if (ints.lastIndexOf(null) != -1) return "last null"
     if (ints.lastIndexOf(3) != 0) return "last int"
+
+    val bag = IntBag as MutableCollection<Any?>
+    try {
+        bag.add(null)
+        return "add null did not fail"
+    } catch (_: NullPointerException) {}
+    try {
+        bag.add("x")
+        return "add foreign wrapper did not fail"
+    } catch (_: ClassCastException) {}
+    if (!bag.add(3)) return "add int"
     return "OK"
 }
 "#;

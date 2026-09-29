@@ -44,21 +44,21 @@ fn barrier_instanceof_name(semantic: Ty, jvm: Ty) -> String {
     )
 }
 
-fn emit_bridge_barrier_outcome(
-    outcome: crate::jvm::backend::BridgeBarrierOutcome,
+pub(super) fn emit_barrier_outcome(
+    outcome: crate::jvm::collection_barriers::BarrierOutcome,
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
 ) {
     match outcome {
-        crate::jvm::backend::BridgeBarrierOutcome::False => {
+        crate::jvm::collection_barriers::BarrierOutcome::False => {
             code.push_int(0, cw);
             code.ireturn();
         }
-        crate::jvm::backend::BridgeBarrierOutcome::NotFound => {
+        crate::jvm::collection_barriers::BarrierOutcome::NotFound => {
             code.push_int(-1, cw);
             code.ireturn();
         }
-        crate::jvm::backend::BridgeBarrierOutcome::Null => {
+        crate::jvm::collection_barriers::BarrierOutcome::Null => {
             code.aconst_null();
             code.areturn();
         }
@@ -265,7 +265,7 @@ fn emit_bridge(
         emit_interface_entry_checks(ir, b, &ep, cw, &mut code);
     }
     let body_pc = u16::try_from(code.bytes.len()).expect("parameter checks fit a method");
-    if let Some(barrier) = crate::jvm::backend::bridge_barrier(b) {
+    if let Some(barrier) = crate::jvm::collection_barriers::bridge_barrier(b) {
         let dispatch = code.new_label();
         let parameter_slot = 1 + ep[..barrier.parameter]
             .iter()
@@ -283,7 +283,7 @@ fn emit_bridge(
         let concrete_class = cw.class_ref(&concrete);
         code.instance_of(concrete_class);
         code.ifne(dispatch);
-        emit_bridge_barrier_outcome(barrier.outcome, cw, &mut code);
+        emit_barrier_outcome(barrier.outcome, cw, &mut code);
         let mut locals = vec![VerifType::ObjectName(c.fq_name())];
         locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
         code.bind(dispatch);

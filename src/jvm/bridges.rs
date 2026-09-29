@@ -344,6 +344,8 @@ fn superclass_method_bridges(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
+            overridden_owner: Some(edge.overridden_owner),
+            collection_barrier: edge.collection_barrier,
             parameters,
             name: bridge_name,
             erased_params: base_params,
@@ -487,6 +489,8 @@ fn push_member_extension_accessor_bridges(
     let accessor = |name, target_function, erased_ret, concrete_ret| Bridge {
         kind: BridgeKind::Function,
         target_function,
+        overridden_owner: None,
+        collection_barrier: None,
         parameters: vec![receiver.clone()],
         name,
         erased_params: vec![bridge_erasure(declared_receiver)],
@@ -550,6 +554,8 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: getter,
+            overridden_owner: None,
+            collection_barrier: None,
             parameters: Vec::new(),
             name: getter_name,
             erased_params: vec![],
@@ -574,6 +580,8 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
             target_function: setter,
+            overridden_owner: None,
+            collection_barrier: None,
             parameters: vec![BridgeParameter {
                 identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
                 semantic: edge.declared_type,

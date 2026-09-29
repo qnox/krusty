@@ -85,6 +85,8 @@ pub(super) fn materialize(
             bridges.push(crate::ir::Bridge {
                 kind: crate::ir::BridgeKind::ValueClassInterfaceEntry,
                 target_function: Some(implementation),
+                overridden_owner: None,
+                collection_barrier: None,
                 parameters: bridge_parameters,
                 name,
                 erased_params: parameters.clone(),
