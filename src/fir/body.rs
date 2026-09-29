@@ -13,7 +13,7 @@ pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod branches;
-pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition};
+pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality};
 mod ranges;
 pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,

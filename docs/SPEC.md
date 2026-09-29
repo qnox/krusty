@@ -6211,11 +6211,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bailing in LOWERING (the comparability rule above is unconditional, matching kotlinc): an unsigned
   one boxes to its own inline class rather than a plain wrapper, and a FLOAT/DOUBLE one compares by
   IEEE `==` whenever the subject is a primitive, which `Double.equals` is not (`-0.0 != 0.0`,
-  `NaN == NaN`) — which of the two applies turns on whether an earlier `is` arm smart-casts the
-  SUBJECT to the primitive, per-arm narrowing the lowering does not model (corpus case
-  `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`). Tests:
+  `NaN == NaN`). An earlier `is`/`!is` arm smart-casts the subject for later equality conditions:
+  `when (y: Any) { !is Double -> …; 0.0 -> … }` unboxes `y` as a `Double` and compares with `dcmpg`,
+  so `-0.0 == 0.0`. A smart cast to `Float` against a `Double` literal widens the unboxed float
+  (`floatValue; f2d`) and still uses IEEE equality. Tests:
   `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
-  `::when_widened_subject_boxes_every_primitive_comparand`.
+  `::when_widened_subject_boxes_every_primitive_comparand`,
+  `tests/when_subject_ieee754_e2e.rs`.
 - **`x in a..b` over a WIDENED value.** `when (x: Any) { in 4..10 -> … }` compiles: kotlinc lowers it
   to `CollectionsKt.contains(4..10, x)`, and an `IntRange` is not a `Collection`, so that walks the
   range comparing with `equals` — true exactly when `x` is a BOXED element of the range. krusty keeps
