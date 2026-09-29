@@ -507,6 +507,12 @@ fn retarget_surviving_field_indices(ir: &mut IrFile, remaps: &HashMap<ClassId, V
             property.backing_field = retarget_field_index(remap, property.backing_field);
             property.delegate_field = retarget_field_index(remap, property.delegate_field);
         }
+        let owner = ir.classes[class as usize].fq_name;
+        if let Some(properties) = ir.member_ext_props.get_mut(&owner) {
+            for property in properties {
+                property.delegate_field = retarget_field_index(remap, property.delegate_field);
+            }
+        }
     }
     for layout in ir.local_property_layouts.values_mut() {
         if let crate::ir::IrLocalPropertyLayout::Member {
