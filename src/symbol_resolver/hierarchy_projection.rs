@@ -60,18 +60,11 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     // A function type is the function classifier of its arity and kind: `() -> R` is
     // `kotlin.Function0<R>`, `(P) -> R` is `Function1<P, R>`, and `suspend () -> R` is
     // `kotlin.coroutines.SuspendFunction0<R>`. Every `FunctionN` / `SuspendFunctionN` extends the
-    // arity-independent `kotlin.Function<R>`, which stays a direct supertype so a function value
-    // remains assignable to `Function<R>` even when that classifier record is absent. Member lookup
-    // does not consult this list: `members_in_hierarchy` still reads `invoke` from `Function<R>`.
-    if let Ty::Fun(signature) = ty.non_null() {
-        let classifier =
-            crate::libraries::function_classifiers::supertype_classifier(ty.non_null());
-        let function = Ty::obj_args("kotlin/Function", &[signature.ret]);
-        return if classifier == function {
-            vec![function]
-        } else {
-            vec![classifier, function]
-        };
+    // arity-independent `kotlin.Function<R>`. The normalized `FunctionN` declaration records that
+    // second edge; keeping it there makes a missing classifier record a frontend error instead of
+    // silently bypassing the provider with a parallel hierarchy path.
+    if matches!(ty.non_null(), Ty::Fun(_)) {
+        return vec![crate::libraries::function_classifiers::supertype_classifier(ty.non_null())];
     }
     let Some(internal) = ty.kotlin_class_internal() else {
         return Vec::new();
@@ -426,10 +419,7 @@ mod tests {
         let supertypes = direct_supertypes(&FunctionClassifiers, value);
         assert_eq!(
             supertypes,
-            vec![
-                Ty::obj_args("kotlin/Function0", &[Ty::String]),
-                Ty::obj_args("kotlin/Function", &[Ty::String]),
-            ]
+            vec![Ty::obj_args("kotlin/Function0", &[Ty::String])]
         );
         let extension = Ty::fun_with_shape(vec![Ty::String, Ty::Int], Ty::Boolean, 0, true, false);
         assert_eq!(
