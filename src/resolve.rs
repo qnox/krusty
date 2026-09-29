@@ -67005,11 +67005,14 @@ impl<'a> Checker<'a> {
             // A classifier qualifier already names the enum. Re-checking it as a value reports
             // an unresolved reference for an enum that has no companion instance. Only a receiver
             // that resolved as a value can be that companion, or a local that shadows the enum.
-            let entries_owner = (name == "entries"
+            let entries_owner = if name == "entries"
                 && self.file.prioritized_enum_entries
-                && matches!(receiver_qualifier, Ok(ResolvedQualifier::Value)))
-                .then(|| self.enum_entries_value_classifier(scope, receiver))
-                .flatten();
+                && matches!(receiver_qualifier, Ok(ResolvedQualifier::Value))
+            {
+                self.enum_entries_value_classifier(scope, receiver)
+            } else {
+                None
+            };
             if let Some(owner) = receiver_qualifier
                 .as_ref()
                 .ok()
