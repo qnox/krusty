@@ -615,11 +615,18 @@ pub(super) fn member_property_field_bridge(
     } else {
         property_setter_name(&property.name)
     };
+    let inline_uninitialized_guard = (read && !declared_accessor)
+        .then(|| property.backing_field)
+        .flatten()
+        .and_then(|field| class.fields.get(field as usize))
+        .filter(|field| field.is_lateinit())
+        .map(|_| property.name.clone());
     crate::jvm::inline::PropertyAccess::AccessBridge {
         owner: owner.to_string(),
         name: format!("access${accessor}$p"),
         descriptor,
         takes_receiver: !static_field,
+        inline_uninitialized_guard,
     }
 }
 

@@ -9,6 +9,46 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Select the property-read realization available from declarations emitted by this compilation.
+    /// `None` deliberately means the external bytecode-provider path must decide.
+    fn selected_local_property_read_access(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        self.declared_property_read_access(owner, name, None, false)
+    }
+
+    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
+    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+        self.ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name_matches(owner))
+            .and_then(|class| class.fields.iter().find(|field| field.name == name))
+            .is_some_and(|field| field.is_lateinit())
+    }
+
+    /// Whether this property read emits the uninitialized guard inline. A direct field load does.
+    /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
+    /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
+    pub(super) fn lateinit_read_guards_inline(&self, owner: &str, name: &str) -> bool {
+        use crate::jvm::inline::PropertyAccess;
+        let Some(access) = self.selected_local_property_read_access(owner, name) else {
+            return false;
+        };
+        match access {
+            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(&owner, &name),
+            PropertyAccess::AccessBridge {
+                inline_uninitialized_guard,
+                ..
+            } => inline_uninitialized_guard.is_some(),
+            PropertyAccess::Accessor { .. } => false,
+        }
+    }
+
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
     /// realization takes none), perform the field load or accessor call, and bridge the physical result to
     /// the property read's Kotlin type.
@@ -122,6 +162,7 @@ impl Emitter<'_> {
                 owner,
                 name,
                 descriptor,
+                inline_uninitialized_guard,
                 ..
             } => {
                 // The bridge's arguments are already on the stack: the receiver when it takes one,
@@ -138,6 +179,22 @@ impl Emitter<'_> {
                 code.invokestatic(m, arguments, words);
                 if words == 0 {
                     return;
+                }
+                // `access$get<X>$p` is a raw field load. A `lateinit` getter is not synthesized for
+                // a private property, so the uninitialized guard has to sit at this read, the same
+                // place a direct field load puts it.
+                if let Some(property) = inline_uninitialized_guard {
+                    code.dup();
+                    let initialized = code.new_label();
+                    code.ifnonnull(initialized);
+                    code.push_string(&property, self.cw);
+                    let throw_uninitialized = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "throwUninitializedPropertyAccessException",
+                        "(Ljava/lang/String;)V",
+                    );
+                    code.invokestatic(throw_uninitialized, 1, 0);
+                    self.bind(initialized, code);
                 }
                 ty_from_descriptor_ret(&descriptor)
             }

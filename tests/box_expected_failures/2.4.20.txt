@@ -223,7 +223,6 @@ properties/classObjectProperties.kt
 properties/complexPropertyInitializer.kt
 properties/fieldInsideField.kt
 properties/fieldInsideNested.kt
-properties/lateinit/accessorException.kt
 properties/lateinit/topLevel/accessorException.kt
 properties/lateinit/topLevel/uninitializedMemberAccess.kt
 properties/lateinit/topLevel/uninitializedRead.kt
