@@ -150,8 +150,9 @@ pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
 use capture_storage::{
-    anonymous_body_bound_value_names, anonymous_body_expressions, anonymous_descendant_writes_name,
-    anonymous_descendants, local_class_capture_expressions,
+    anonymous_body_bound_value_names, anonymous_body_expressions, anonymous_descendant_uses_name,
+    anonymous_descendant_writes_name, anonymous_descendants, enclosing_value_visible_beside_member,
+    local_class_capture_expressions,
 };
 use collection_literals::{default_factory, standard_factory};
 use constant_evaluation::{
@@ -18625,32 +18626,38 @@ impl<'a> Checker<'a> {
                             AnonymousObjectCaptureSource::LexicalValue
                         }
                     };
+                    let function_local = matches!(local.origin, ReceiverFnValueOrigin::Local);
+                    let written_here = self.fn_reassigned.contains(name)
+                        || anonymous_descendant_writes_name(
+                            self.file,
+                            declaration,
+                            &self.anonymous_lexical_scope,
+                            name,
+                            function_local,
+                        );
+                    let shared_cell = capture_storage::CapturedBinding {
+                        delegated: local.delegate_storage_ty.is_some(),
+                        mutable: local.is_var,
+                        already_shared: local.shared_storage_cell,
+                        written_here,
+                    }
+                    .is_shared_cell();
+                    // A shared cell keeps the declared type so a later write of `null` into
+                    // `var x: Any?` still type-checks. A copied value takes the type proven at
+                    // this construction, including a smart cast of that local.
+                    let ty = if local.is_var && (shared_cell || local.delegate_storage_ty.is_some())
+                    {
+                        local.ty
+                    } else {
+                        narrows.get(name).copied().unwrap_or(local.ty)
+                    };
                     candidates.push(AnonymousCaptureCandidate {
                         name: name.to_string(),
-                        // A mutable capture denotes its declared storage cell, not the value's
-                        // current flow type. `var x: Any? = Any()` may be narrowed to `Any` at this
-                        // construction point, but a nested classifier must still be able to write
-                        // `null` through the shared cell.
-                        ty: if local.is_var {
-                            local.ty
-                        } else {
-                            narrows.get(name).copied().unwrap_or(local.ty)
-                        },
-                        shared_cell: capture_storage::CapturedBinding {
-                            delegated: local.delegate_storage_ty.is_some(),
-                            mutable: local.is_var,
-                            already_shared: local.shared_storage_cell,
-                            written_here: self.fn_reassigned.contains(name)
-                                || anonymous_descendant_writes_name(
-                                    self.file,
-                                    declaration,
-                                    &self.anonymous_lexical_scope,
-                                    name,
-                                ),
-                        }
-                        .is_shared_cell(),
+                        ty,
+                        shared_cell,
                         source,
                         delegate_storage: local.delegate_storage_ty,
+                        function_local,
                         receiver_label: None,
                         receiver: None,
                     });
@@ -18685,6 +18692,7 @@ impl<'a> Checker<'a> {
                                 },
                                 ty: receiver.ty,
                                 shared_cell: false,
+                                function_local: false,
                                 source: if receiver.class_receiver {
                                     AnonymousObjectCaptureSource::EnclosingInstance {
                                         current: receiver.current,
@@ -37522,79 +37530,6 @@ fn enclosing_receiver_labels(
         .collect()
 }
 
-fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
-    // A nested lambda is another runtime closure, but a value from outside the anonymous class
-    // still has to cross the class boundary before that closure can capture it. Descend through the
-    // lambda here so `object { fun f() { sink.action() } }`, including when that call sits inside a
-    // callback passed by `f`, records `action` on the anonymous class itself.
-    let matches = match file.expr(expression) {
-        Expr::SafeCall { name: member, .. } => member == name,
-        Expr::Call { callee, .. } => {
-            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
-        }
-        _ => false,
-    };
-    if matches {
-        return true;
-    }
-    let mut expressions = Vec::new();
-    let mut statements = Vec::new();
-    file.any_child_expr(
-        expression,
-        &mut |child| {
-            expressions.push(child);
-            false
-        },
-        &mut |statement| {
-            statements.push(statement);
-            false
-        },
-    );
-    expressions
-        .into_iter()
-        .any(|child| expression_has_member_call_named(file, child, name))
-        || statements.into_iter().any(|statement| {
-            let mut children = Vec::new();
-            file.any_child_stmt(statement, &mut |child| {
-                children.push(child);
-                false
-            });
-            children
-                .into_iter()
-                .any(|child| expression_has_member_call_named(file, child, name))
-        })
-}
-
-fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
-    let expressions = anonymous_body_expressions(file, declaration);
-    expressions
-        .iter()
-        .any(|expression| file.expr_uses_name_deep(*expression, name))
-        || matches!(ty, Ty::Fun(signature) if signature.has_receiver)
-            && expressions
-                .into_iter()
-                .any(|expression| expression_has_member_call_named(file, expression, name))
-}
-
-fn anonymous_descendant_uses_name(
-    file: &File,
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-    name: &str,
-    ty: Ty,
-) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        (!anonymous_body_bound_value_names(file, candidate).contains(name)
-            || capture_analysis::own_property_initializer_uses_outer_name(file, candidate, name))
-            && (anonymous_body_uses_name(file, candidate, name, ty)
-                || candidate != declaration
-                    && matches!(file.decl(candidate), Decl::Class(class) if class
-                        .interface_delegations
-                        .iter()
-                        .any(|delegation| file.expr_uses_name_deep(delegation.value, name))))
-    })
-}
-
 #[derive(Clone)]
 struct AnonymousCaptureCandidate {
     name: String,
@@ -37602,6 +37537,9 @@ struct AnonymousCaptureCandidate {
     shared_cell: bool,
     source: AnonymousObjectCaptureSource,
     delegate_storage: Option<Ty>,
+    /// The candidate is a function parameter or local, not a top-level or class property.
+    /// That local keeps its unqualified name inside a nested classifier that redeclares it.
+    function_local: bool,
     receiver_label: Option<Box<str>>,
     receiver: Option<crate::fir::FirCapturedReceiver>,
 }
@@ -37695,7 +37633,6 @@ fn record_anonymous_construction_captures(
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
         return Vec::new();
     };
-    let bound = anonymous_body_bound_value_names(file, declaration);
     crate::trace_compiler!(
         "resolve",
         "anonymous capture candidates declaration={declaration:?} construction={construction:?} candidates={:?}",
@@ -37728,33 +37665,34 @@ fn record_anonymous_construction_captures(
                 | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
                 | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
                 AnonymousObjectCaptureSource::LexicalValue => {
-                    (!bound.contains(&candidate.name)
-                        || capture_analysis::own_property_initializer_uses_outer_name(
+                    enclosing_value_visible_beside_member(
+                        file,
+                        declaration,
+                        &candidate.name,
+                        candidate.function_local,
+                    ) && (candidate.delegate_storage.is_some()
+                        || anonymous_descendant_uses_name(
                             file,
                             declaration,
+                            lexical_scope,
                             &candidate.name,
+                            candidate.ty,
+                            candidate.function_local,
+                        )
+                        || anonymous_descendant_uses_selected_local_callable_capture(
+                            file,
+                            declaration,
+                            lexical_scope,
+                            &candidate.name,
+                            selected_local_callables,
+                        )
+                        || anonymous_descendant_writes_name(
+                            file,
+                            declaration,
+                            lexical_scope,
+                            &candidate.name,
+                            candidate.function_local,
                         ))
-                        && (candidate.delegate_storage.is_some()
-                            || anonymous_descendant_uses_name(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                                candidate.ty,
-                            )
-                            || anonymous_descendant_uses_selected_local_callable_capture(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                                selected_local_callables,
-                            )
-                            || anonymous_descendant_writes_name(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                            ))
                 }
             }
         })
@@ -40892,10 +40830,12 @@ impl<'a> Checker<'a> {
 
     /// What a statement-position local class reads from its enclosing scope.
     ///
-    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
-    /// a name that merely *looks* like one is treated as such. Over-reporting costs an unused
-    /// constructor parameter (or a skipped file, when the name is one of the unmodelled kinds);
-    /// under-reporting emits a class without the constructor parameter its capture needs.
+    /// Deliberately syntactic and conservative: a name the class also declares is not a capture,
+    /// unless an enclosing function local already owns that spelling — the local wins inside the
+    /// class, so the class must capture it (`objects/flist.kt`). A name that merely *looks* like a
+    /// capture is treated as such. Over-reporting costs an unused constructor parameter (or a
+    /// skipped file, when the name is one of the unmodelled kinds); under-reporting emits a class
+    /// without the constructor parameter its capture needs.
     fn local_class_captures(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> LocalClassCaptures {
         let mut result = LocalClassCaptures::default();
         let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -40958,13 +40898,22 @@ impl<'a> Checker<'a> {
                 through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
             }
         }
-        // A property occupies the value namespace and shadows every outer source of that name.
+        // A property shadows an enclosing class member of the same spelling, not an enclosing
+        // function local. `fun f(head: T) { object { val head get() = head } }` captures `head`.
         for name in cl
             .props
             .iter()
             .map(|p| &p.name)
             .chain(cl.body_props.iter().map(|p| &p.name))
         {
+            if self
+                .lookup(scope, name)
+                .is_some_and(|binding| matches!(binding.origin, ReceiverFnValueOrigin::Local))
+            {
+                unsupported.remove(name);
+                through_outer.remove(name);
+                continue;
+            }
             outer.remove(name);
             unsupported.remove(name);
             through_outer.remove(name);
@@ -49354,21 +49303,10 @@ impl<'a> Checker<'a> {
         labels
     }
 
-    /// Shadow synthetic immutable capture properties with their semantic source bindings. A shared
-    /// cell remains writable inside methods and accessors even though the field holding the cell is
-    /// itself final.
-    fn body_class_declares_property_named(&self, declaration: DeclId, name: &str) -> bool {
-        matches!(self.file.decl(declaration), Decl::Class(class) if class
-            .props
-            .iter()
-            .map(|property| property.name.as_str())
-            .chain(class.body_props.iter().map(|property| property.name.as_str()))
-            .any(|property| property == name))
-    }
-
-    /// Bind the lexical capture selected for one property's own initializer. That initializer is
-    /// the sole class-body region where an enclosing value with the same spelling outranks the
-    /// property being initialized; accessors and sibling member bodies retain the property rung.
+    /// Bind the lexical capture selected for one property's own initializer, so `val x = x`
+    /// reads the enclosing value's storage. A function local already owns that unqualified name
+    /// in every nested body (`declare_dispatch_property_with_provenance`); this binding is the
+    /// reified field the initializer reads.
     fn declare_property_initializer_class_storage_capture(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -49416,7 +49354,6 @@ impl<'a> Checker<'a> {
                 AnonymousObjectCaptureSource::LexicalValue
                     | AnonymousObjectCaptureSource::ClassStorage { .. }
             ) && capture.storage_ty.is_none()
-                && !self.body_class_declares_property_named(declaration, &capture.name)
             {
                 self.declare_class_storage(
                     scope,
@@ -56640,9 +56577,8 @@ impl<'a> Checker<'a> {
                 for (parameter, ty) in cl.props.iter().zip(primary_parameter_types) {
                     self.declare(property_scope, &parameter.name, ty, parameter.is_var);
                 }
-                // Reapply non-colliding semantic capture bindings after provider-visible synthetic
-                // storage and constructor parameters enter this child rung. A same-named source
-                // property gets its capture only in the initializer-specific scope below.
+                // Reapply capture bindings after constructor parameters. An enclosing function local
+                // is one of those captures and stays ahead of a same-named constructor `val`.
                 self.declare_body_class_storage_captures(property_scope, d);
                 for (property_index, property) in cl.body_props.iter().enumerate() {
                     let source_member = crate::libraries::SourceMember::ClassProperty {
@@ -58108,6 +58044,11 @@ impl<'a> Checker<'a> {
                 let scope = &body_scope;
                 for (p, &parameter_ty) in cl.props.iter().zip(&source_primary_params) {
                     self.declare(scope, &p.name, parameter_ty, p.is_var);
+                }
+                if body_local_class {
+                    // Constructor parameters are locals on this rung. Rebinding captures after them
+                    // keeps an enclosing function local in front of a same-named constructor `val`.
+                    self.declare_body_class_storage_captures(scope, d);
                 }
                 // Base class constructor args are evaluated before the body and may reference ctor params.
                 // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver

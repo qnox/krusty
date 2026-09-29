@@ -9137,11 +9137,7 @@ impl<'a> Emitter<'a> {
                 is_interface: is_jvm_interface(class),
             });
         }
-        let field = class
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .filter(|_| declared.is_none_or(|p| p.backing_field.is_some()));
+        let field = property_access::declared_property_field(class, declared, name);
         let setter_name = declared
             .and_then(|p| p.setter_jvm_name.clone())
             .unwrap_or_else(|| crate::names::property_setter_name(name));
@@ -9224,11 +9220,7 @@ impl<'a> Emitter<'a> {
                 is_interface: interface,
             });
         }
-        let field = class
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .filter(|_| declared.is_none_or(|p| p.backing_field.is_some()));
+        let field = property_access::declared_property_field(class, declared, name);
         // A declaration-specified JVM name wins; otherwise the checker's selected accessor identity
         // refines the naming convention. Backend value-class mangling lives in a different table and
         // therefore cannot overwrite an inherited generic declaration here.
