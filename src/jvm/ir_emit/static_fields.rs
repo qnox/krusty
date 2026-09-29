@@ -590,8 +590,11 @@ impl Emitter<'_> {
         let name = s.name.clone();
         let is_const = s.is_const;
         let facade = self.facade.clone();
-        // A PRIVATE property's field, read from another class, goes through its owner's accessor.
+        // A PRIVATE property's field, or the backing field of a source-declared getter, read from
+        // another class, goes through its owner's accessor. Calling the declared getter would
+        // re-enter it: the read is inside that getter.
         if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
+            .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
             .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(
@@ -673,9 +676,10 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
-        // A PRIVATE property's field, written from another class, goes through its owner's
-        // accessor.
+        // A PRIVATE property's field, or the backing field of a source-declared setter, written
+        // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
+            .or_else(|| crate::jvm::private_static_access::declared_backing_setter(self.ir, index))
             .filter(|storage| self.static_owner != Some(storage.owner))
         {
             let m = static_accessors::static_methodref(

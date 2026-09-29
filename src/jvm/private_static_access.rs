@@ -55,6 +55,18 @@ pub(crate) struct BridgedStorage {
     pub(crate) owner: StaticOwner,
 }
 
+/// The synthetic method that exposes a private member property to another JVM class. A bridge
+/// that calls a source-declared accessor is `access$getX` / `access$setX`; one that touches the
+/// backing field is `access$getX$p` / `access$setX$p`. Keeping the distinction here prevents a
+/// property-reference bridge from colliding with a nested `field` use of the same property.
+pub(crate) fn member_property_accessor_name(
+    declared_accessor_name: &str,
+    calls_declared_accessor: bool,
+) -> String {
+    let field_suffix = if calls_declared_accessor { "" } else { "$p" };
+    format!("access${declared_accessor_name}{field_suffix}")
+}
+
 /// The selection, made here for every consumer: another class reads static storage `index`
 /// through `access$get<X>$p` when it is a PRIVATE bridgeable field whose getter the compiler
 /// supplies, so no `getX` method exists to call.
@@ -76,6 +88,25 @@ pub(crate) fn bridged_setter(ir: &IrFile, index: u32) -> Option<BridgedStorage> 
             IrStaticAccessor::Declared => false,
         };
     bridged.then(|| bridgeable(ir, index)).flatten()
+}
+
+/// Another class reads static storage `index` through `access$get<X>$p` when the getter is one
+/// the source declared. That read is the backing field inside the getter, so calling `getX` would
+/// re-enter it. A compiler-supplied getter stays on [`bridged_getter`].
+pub(crate) fn declared_backing_getter(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
+    let property = &ir.statics[index as usize];
+    (property.accessors.getter == IrStaticAccessor::Declared)
+        .then(|| bridgeable(ir, index))
+        .flatten()
+}
+
+/// Another class writes static storage `index` through `access$set<X>$p` when the setter is one
+/// the source declared. The write is the backing field inside that setter.
+pub(crate) fn declared_backing_setter(ir: &IrFile, index: u32) -> Option<BridgedStorage> {
+    let property = &ir.statics[index as usize];
+    (property.is_var && property.accessors.setter == IrStaticAccessor::Declared)
+        .then(|| bridgeable(ir, index))
+        .flatten()
 }
 
 /// Storage whose accessors may be bridged: a plain field (no constant value, no `@JvmField`) of a
