@@ -108,6 +108,19 @@ fn extension_delegates_of_one_name_use_distinct_fields() {
 }
 
 #[test]
+fn a_class_with_many_properties_names_every_backing_field() {
+    let mut src = String::from("class Wide {\n");
+    for index in 0..40 {
+        src.push_str(&format!("    val p{index}: Int = {index}\n"));
+    }
+    src.push_str("}\nfun box(): String = if (Wide().p0 + Wide().p39 == 39) \"OK\" else \"fail\"\n");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&src, "WideInstanceFields"),
+        "OK"
+    );
+}
+
+#[test]
 fn a_member_and_its_extension_delegates_use_distinct_fields() {
     assert_eq!(
         common::expect_box_run_with_stdlib(MEMBER, "MemberDelegateFields"),
