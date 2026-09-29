@@ -172,3 +172,15 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "enum_companion_entries_inferred");
 }
+
+#[test]
+fn a_local_root_named_like_the_enum_is_not_reinterpreted() {
+    const SRC: &str = "\
+enum class Mode { A; companion object }\n\
+class Holder(val entries: String)\n\
+fun box(): String {\n\
+    val Mode = Holder(\"OK\")\n\
+    return Mode.entries\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_entries_shadowed_root");
+}

@@ -15,20 +15,22 @@ impl Checker<'_> {
         self.classifier_enum_entry_ordinal(owner, name).is_some()
     }
 
-    /// The enum named by a simple qualifier whose value facet is that enum's companion.
-    /// `Enum.entries` is a classifier property of the enum, not a member of the companion value.
+    /// The enum whose companion is the already-bound receiver value. `Enum.entries` is a
+    /// classifier property of the enum, not a member of the companion value. Inspecting the
+    /// resolved receiver type preserves a local/property root that shadows the enum spelling.
     pub(super) fn enum_entries_value_classifier(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         receiver: ExprId,
     ) -> Option<TypeName> {
-        let crate::ast::Expr::Name(name) = self.file.expr(receiver) else {
+        let companion = self.expr(scope, receiver).non_null().obj_internal()?;
+        let owner = companion.nested_owner()?;
+        let declaration = self.resolver().classifier(owner)?;
+        if !declaration.is_enum() {
             return None;
-        };
-        let owner = self.select_classifier(scope, name).found()?;
-        self.resolved_type_name(owner)
-            .is_some_and(|classifier| classifier.is_enum())
-            .then_some(owner)
+        }
+        let declared_companion = declaration.companion_object.as_ref()?.1;
+        (declared_companion == companion).then_some(owner)
     }
 
     pub(super) fn record_enum_entry(&mut self, expression: ExprId, owner: TypeName, name: &str) {
