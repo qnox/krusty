@@ -57,3 +57,33 @@ pub fn compile_in_process_files_target(
         .collect::<Vec<_>>();
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_classpaths_are_reused_and_directories_are_not() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let empty_a = super::super::cached_classpath(&[], None);
+        let empty_b = super::super::cached_classpath(&[], None);
+        assert!(std::rc::Rc::ptr_eq(&empty_a, &empty_b));
+
+        let file = root.join("Cargo.toml");
+        let first = super::super::cached_classpath(std::slice::from_ref(&file), None);
+        let second = super::super::cached_classpath(std::slice::from_ref(&file), None);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "a repeated jar classpath must hit without building another Classpath"
+        );
+        assert!(!std::rc::Rc::ptr_eq(&empty_a, &first));
+
+        let dir = super::super::scratch_dir().expect("scratch directory");
+        let dir_a = super::super::cached_classpath(std::slice::from_ref(&dir), None);
+        let dir_b = super::super::cached_classpath(std::slice::from_ref(&dir), None);
+        assert!(
+            !std::rc::Rc::ptr_eq(&dir_a, &dir_b),
+            "a directory classpath is rebuilt; retaining it would pin a deleted scratch dir"
+        );
+    }
+}
