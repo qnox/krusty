@@ -19,6 +19,8 @@ mod method_bodies;
 mod method_body_cache;
 mod package_facades;
 mod property_identity;
+#[cfg(test)]
+mod test_support;
 mod value_class_erasure;
 
 pub(crate) use crate::libraries::{
@@ -5751,6 +5753,7 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 
 #[cfg(test)]
 mod fq_tests {
+    use super::test_support::{test_temp_dir, write_test_jar_with_entry};
     use super::*;
 
     #[test]
@@ -6365,17 +6368,6 @@ mod fq_tests {
 
         drop(java8);
         std::fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    fn test_temp_dir(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("krusty-{tag}-{}-{unique}", std::process::id()));
-        std::fs::create_dir(&directory).expect("create test directory");
-        directory
     }
 
     fn write_invalid_package_facade(directory: &Path, internal: &str) {
@@ -7372,70 +7364,6 @@ mod fq_tests {
         std::fs::remove_dir_all(directory).expect("remove temp dir");
     }
 
-    // A metadata classifier can keep a dot in its final segment (`Outer.Inner`). The class file is
-    // stored under `$`. The body read must use that physical spelling.
-    #[test]
-    fn method_body_of_a_dotted_classifier_reads_the_dollar_class_file() {
-        let directory = test_temp_dir("dotted-body-class");
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        let mut cw = crate::jvm::classfile::ClassWriter::new(
-            "probe/body6044/Outer$Inner",
-            "java/lang/Object",
-        );
-        let mut code = crate::jvm::classfile::CodeBuilder::new(0);
-        code.push_int(7, &mut cw);
-        code.ireturn();
-        cw.add_method(
-            crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
-            "answer",
-            "()I",
-            &code,
-        );
-        let jar = directory.join("nested.jar");
-        write_test_jar_with_entry(&jar, "probe/body6044/Outer$Inner.class", &cw.finish());
-
-        let dotted = crate::types::type_name_child(type_name("probe/body6044"), "Outer.Inner");
-        let classpath = Classpath::new(vec![jar]);
-        let code = classpath
-            .method_code_name(dotted, "answer", "()I")
-            .expect("dotted classifier reads Outer$Inner.class");
-        assert_eq!(code.code.last().copied(), Some(0xac)); // ireturn
-
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove temp dir");
-    }
-
-    // `kotlin/Function1` is a metadata name. Its bytecode lives in `kotlin/jvm/functions/Function1`.
-    #[test]
-    fn method_body_of_a_function_classifier_reads_the_jvm_function_class() {
-        let directory = test_temp_dir("function-body-class");
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        let mut cw = crate::jvm::classfile::ClassWriter::new(
-            "kotlin/jvm/functions/Function1",
-            "java/lang/Object",
-        );
-        let mut code = crate::jvm::classfile::CodeBuilder::new(0);
-        code.push_int(3, &mut cw);
-        code.ireturn();
-        cw.add_method(
-            crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
-            "answer",
-            "()I",
-            &code,
-        );
-        let jar = directory.join("function.jar");
-        write_test_jar_with_entry(&jar, "kotlin/jvm/functions/Function1.class", &cw.finish());
-
-        let classpath = Classpath::new(vec![jar]);
-        let code = classpath
-            .method_code_name(type_name("kotlin/Function1"), "answer", "()I")
-            .expect("Function1 reads kotlin/jvm/functions/Function1.class");
-        assert_eq!(code.code.last().copied(), Some(0xac));
-
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove temp dir");
-    }
-
     fn body_class_bytes() -> Vec<u8> {
         let mut cw = crate::jvm::classfile::ClassWriter::new("transient/Body", "java/lang/Object");
         let mut code = crate::jvm::classfile::CodeBuilder::new(0);
@@ -7448,16 +7376,6 @@ mod fq_tests {
             &code,
         );
         cw.finish()
-    }
-
-    fn write_test_jar_with_entry(path: &Path, entry_name: &str, bytes: &[u8]) {
-        let file = File::create(path).expect("create jar");
-        let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        writer.start_file(entry_name, options).expect("start entry");
-        std::io::Write::write_all(&mut writer, bytes).expect("write entry");
-        writer.finish().expect("finish jar");
     }
 
     fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {

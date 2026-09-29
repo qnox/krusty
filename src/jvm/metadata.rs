@@ -2473,13 +2473,13 @@ fn decode_functions(
                             })
                             .collect()
                     };
-                    // The predicate renders every parameter type. It exists only to decide whether
-                    // this trace fires, so it must not run when tracing is compiled out.
+                    // Trace selection follows the resolved function-classifier family. Rendering
+                    // remains confined to the trace payload below.
                     #[cfg(feature = "trace")]
                     if value_params.iter().any(|parameter| {
                         parameter
                             .ty
-                            .is_some_and(|ty| ty.render().contains("Function"))
+                            .is_some_and(|ty| super::function_classifiers::classifier(ty).is_some())
                     }) {
                         crate::trace_compiler!(
                             "metadata_functions",
