@@ -11,6 +11,16 @@ use super::common::expect_box_same_as_kotlinc;
 fn companion_var_with_only_a_custom_setter_keeps_its_getter() {
     expect_box_same_as_kotlinc(
         r#"
+import kotlin.reflect.KProperty
+
+class Delegate {
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): String = "delegated"
+}
+
+class ExtensionDelegate {
+    operator fun getValue(receiver: Int, property: KProperty<*>): String = "extension"
+}
+
 class Test {
     companion object {
         public val prop1: Int = 10
@@ -25,6 +35,9 @@ class Test {
             prop4++
         }
         public var prop5: Int = 14
+        val delegated: String by Delegate()
+        val Int.extension: String by ExtensionDelegate()
+        fun readExtension(): String = 1.extension
         public var prop7: Int = 20
             set(i: Int) {
                 field++
@@ -43,6 +56,8 @@ fun box(): String {
     if (t.prop5 != 14) return "fail5"
     t.prop5 = 1414
     if (t.prop5 != 1414) return "fail6"
+    if (t.delegated != "delegated") return "fail.delegated"
+    if (t.readExtension() != "extension") return "fail.extension"
     if (t.prop7 != 20) return "fail7"
     t.prop7 = 1000000
     if (t.prop7 != 21) return "fail8"
