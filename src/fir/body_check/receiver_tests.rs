@@ -124,6 +124,47 @@ fn nested_inner_member_extension_publishes_exact_enclosing_receiver_paths() {
     );
 }
 
+/// `inner class Inner : Outer` is a subtype of its enclosing class, and the two `Outer` instances
+/// are different values. `this.s` is Inner's own property; `this@Outer.s` walks `this$0`.
+#[test]
+fn inner_class_extending_its_enclosing_class_keeps_labeled_outer_distinct() {
+    let (body, index) = checked_function_body(
+        "open class Outer private constructor(val s: String) {\n\
+             inner class Inner : Outer(\"O\") {\n\
+                 fun foo(): String = this.s + this@Outer.s\n\
+             }\n\
+         }\n",
+        "foo",
+    );
+    let enclosing = (0..body.expression_count())
+        .filter_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::EnclosingReceiver { path } = &expression.kind else {
+                return None;
+            };
+            Some((expression.ty.get(), path.to_vec()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(enclosing.len(), 1, "{enclosing:?}");
+    assert_eq!(enclosing[0].0, Ty::obj("Outer"));
+    assert_eq!(enclosing[0].1.len(), 1);
+    let edge = index
+        .classifier_header(enclosing[0].1[0])
+        .expect("enclosing path starts at the inner class")
+        .classifier;
+    assert_eq!(edge, crate::types::type_name("Outer$Inner"));
+    let implicit = (0..body.expression_count())
+        .filter_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::ImplicitReceiver { current, depth } = &expression.kind else {
+                return None;
+            };
+            Some((expression.ty.get(), *current, *depth))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(implicit, [(Ty::obj("Outer$Inner"), true, 0)]);
+}
+
 #[test]
 fn classifier_star_import_publishes_a_stable_enum_entry_value() {
     let (body, _) = checked_function_body(
