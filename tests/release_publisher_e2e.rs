@@ -301,6 +301,23 @@ fn master_runs_have_their_own_group_and_the_release_job_publishes_under_the_lock
         !job.contains("concurrency:"),
         "a concurrency group on the release job cancels a queued release and its run"
     );
+    let build_release = {
+        let start = workflow
+            .find("\n  build-release:\n")
+            .expect("ci.yml has a build-release job");
+        let end = workflow
+            .find("\n  release:\n")
+            .expect("ci.yml has a release job");
+        &workflow[start..end]
+    };
+    assert!(
+        !build_release.contains("concurrency:"),
+        "a concurrency group on the release build cancels the whole run"
+    );
+    assert!(
+        build_release.contains("scripts/release-publisher.sh check"),
+        "an older master commit skips the release build"
+    );
 
     let steps = steps(job);
     let position = |needle: &str| {
