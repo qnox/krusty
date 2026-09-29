@@ -20,6 +20,19 @@ type SelectedPropertyRead = (
     Box<[FirTypeSubstitution]>,
 );
 
+/// Property whose own accessor body `declaration` checks. A nested initializer is not an accessor
+/// and therefore keeps the enclosing accessor property supplied by the body-check session.
+pub(super) fn accessor_property(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+) -> Option<PropertyId> {
+    index
+        .declaration_anchor(declaration)
+        .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::Accessor)
+        .and_then(|anchor| anchor.owner)
+        .and_then(|property| index.property_for_declaration(property))
+}
+
 impl BodyFirChecker<'_> {
     /// Preserve an already-selected dependency property reached through `super` as a PROPERTY
     /// operation. The provider identity remains opaque; only the non-virtual dispatch fact crosses

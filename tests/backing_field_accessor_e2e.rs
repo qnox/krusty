@@ -127,3 +127,20 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_against("DefaultOtherAccessor", LIB, MAIN);
 }
+
+/// `properties/fieldInsideField.kt`: a nested accessor's `field` is that accessor's property, not
+/// the accessor this object was created inside.
+#[test]
+fn an_inner_accessor_reads_its_own_backing_field() {
+    const SRC: &str = "abstract class Your {\n\
+    abstract val your: String\n\
+    fun foo() = your\n\
+}\n\
+val my: String = \"O\"\n\
+    get() = field + object: Your() {\n\
+        override val your = \"K\"\n\
+            get() = field\n\
+    }.foo()\n\
+fun box() = my\n";
+    common::expect_box_ok_with_stdlib(SRC, "FieldInsideField");
+}

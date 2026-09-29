@@ -3482,7 +3482,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `GetField`, write → `SetField`). Crucially, EVERY access to the property — even in-class, including
   `x`, `x = …`, `x += …`, `x++` — routes through `getX`/`setX`, never the raw field (`resolve_field`
   and the direct unqualified read/write/incdec sites all decline a custom-accessor property); only the
-  `field` keyword inside the accessor reaches the field. Tests: `tests/backing_field_accessor_e2e.rs`.
+  `field` keyword inside the accessor reaches the field. An accessor nested inside another
+  accessor binds `field` to its own property (`override val your = "K" get() = field` reads `your`,
+  not the outer property the object was created in). A `field` use that is not itself in an
+  accessor still means the enclosing accessor's property. Tests:
+  `tests/backing_field_accessor_e2e.rs`
+  (`an_inner_accessor_reads_its_own_backing_field`).
 
 - **Top-level property with a backing field + custom accessor.** `val x = "OK" get() = field`,
   `var v = 0 set(value) { field = value }` at file scope. The backing field is a facade STATIC
