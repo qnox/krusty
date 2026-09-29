@@ -99,9 +99,10 @@ pub fn classfile_internal_name(internal: &str) -> String {
     physical_classfile_name(internal)
 }
 
-/// Physical JVM classfile name of an interned classifier. The spelling is interned once. A repeated
-/// lookup returns that same text and does not render or allocate. Callers that already hold a
-/// [`TypeName`] use this instead of rendering the name into [`classfile_internal_name`].
+/// Physical JVM classfile name of an interned classifier. The spelling is retained once per
+/// emitting thread. A repeated lookup returns that same text and does not render or allocate.
+/// Callers that already hold a [`TypeName`] use this instead of rendering the name into
+/// [`classfile_internal_name`].
 pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     thread_local! {
         static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
@@ -110,7 +111,7 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
         return physical;
     }
-    let physical = crate::types::intern(&physical_classfile_name_of(internal));
+    let physical = Box::leak(physical_classfile_name_of(internal).into_boxed_str());
     INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
     physical
 }
