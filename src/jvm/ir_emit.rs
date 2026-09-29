@@ -9349,45 +9349,6 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
-    /// Select the property-read realization available from declarations emitted by this compilation.
-    /// `None` deliberately means the external bytecode-provider path must decide.
-    fn selected_local_property_read_access(
-        &self,
-        owner: &str,
-        name: &str,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        self.declared_property_read_access(owner, name, None, false)
-    }
-
-    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
-    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
-    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
-    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
-        self.ir
-            .classes
-            .iter()
-            .find(|c| c.fq_name_matches(owner))
-            .and_then(|c| c.fields.iter().find(|f| f.name == name))
-            .is_some_and(|f| f.is_lateinit())
-    }
-
-    /// Whether this property read emits the uninitialized guard inline. A direct field load does.
-    /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
-    /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
-    fn lateinit_read_guards_inline(&self, owner: &str, name: &str) -> bool {
-        use crate::jvm::inline::PropertyAccess;
-        let Some(access) = self.selected_local_property_read_access(owner, name) else {
-            return false;
-        };
-        match access {
-            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(&owner, &name),
-            PropertyAccess::AccessBridge { owner, name, .. } => {
-                self.access_bridge_lateinit_name(&owner, &name).is_some()
-            }
-            PropertyAccess::Accessor { .. } => false,
-        }
-    }
-
     fn emit_physical_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
             IrExpr::BottomValue { producer, .. } => {

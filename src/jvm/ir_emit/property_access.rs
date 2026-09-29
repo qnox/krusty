@@ -9,6 +9,46 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Select the property-read realization available from declarations emitted by this compilation.
+    /// `None` deliberately means the external bytecode-provider path must decide.
+    fn selected_local_property_read_access(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        self.declared_property_read_access(owner, name, None, false)
+    }
+
+    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
+    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+        self.ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name_matches(owner))
+            .and_then(|class| class.fields.iter().find(|field| field.name == name))
+            .is_some_and(|field| field.is_lateinit())
+    }
+
+    /// Whether this property read emits the uninitialized guard inline. A direct field load does.
+    /// So does a synthetic `access$get<X>$p` bridge: that bridge is a raw field load, not a getter
+    /// body, so the guard is not hiding inside an accessor. A real getter still owns its own guard.
+    pub(super) fn lateinit_read_guards_inline(&self, owner: &str, name: &str) -> bool {
+        use crate::jvm::inline::PropertyAccess;
+        let Some(access) = self.selected_local_property_read_access(owner, name) else {
+            return false;
+        };
+        match access {
+            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(&owner, &name),
+            PropertyAccess::AccessBridge {
+                inline_uninitialized_guard,
+                ..
+            } => inline_uninitialized_guard.is_some(),
+            PropertyAccess::Accessor { .. } => false,
+        }
+    }
+
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
     /// realization takes none), perform the field load or accessor call, and bridge the physical result to
     /// the property read's Kotlin type.
@@ -122,6 +162,7 @@ impl Emitter<'_> {
                 owner,
                 name,
                 descriptor,
+                inline_uninitialized_guard,
                 ..
             } => {
                 // The bridge's arguments are already on the stack: the receiver when it takes one,
@@ -142,7 +183,7 @@ impl Emitter<'_> {
                 // `access$get<X>$p` is a raw field load. A `lateinit` getter is not synthesized for
                 // a private property, so the uninitialized guard has to sit at this read, the same
                 // place a direct field load puts it.
-                if let Some(property) = self.access_bridge_lateinit_name(&owner, &name) {
+                if let Some(property) = inline_uninitialized_guard {
                     code.dup();
                     let initialized = code.new_label();
                     code.ifnonnull(initialized);
@@ -199,28 +240,5 @@ impl Emitter<'_> {
             // narrowing to one would `checkcast` to a class the value is not an instance of.
             self.narrow_on_stack(physical, *ty, code);
         }
-    }
-
-    /// Source name of the `lateinit` property `bridge` (`access$get<X>$p`) reads, when that bridge
-    /// is a raw backing-field load rather than a getter.
-    pub(super) fn access_bridge_lateinit_name(&self, owner: &str, bridge: &str) -> Option<String> {
-        let class = self
-            .ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name_matches(owner))?;
-        class.properties.iter().find_map(|property| {
-            let expected = format!(
-                "access${}$p",
-                crate::names::property_getter_name(&property.name)
-            );
-            if expected != bridge {
-                return None;
-            }
-            let field = property
-                .backing_field
-                .and_then(|index| class.fields.get(index as usize))?;
-            field.is_lateinit().then(|| property.name.clone())
-        })
     }
 }

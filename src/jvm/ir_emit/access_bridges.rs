@@ -657,6 +657,7 @@ pub(super) fn protected_property_access(
         name: format!("access${}", bridge.name),
         descriptor: method_descriptor(&parameters, bridge.result),
         takes_receiver: true,
+        inline_uninitialized_guard: None,
     }
 }
 
@@ -688,6 +689,7 @@ pub(super) fn private_member_read_access(
         name,
         descriptor: method_descriptor(&bridge_parameters, result),
         takes_receiver: true,
+        inline_uninitialized_guard: None,
     }
 }
 
