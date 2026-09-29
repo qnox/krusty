@@ -434,6 +434,68 @@ pub(crate) fn normalize_inherited_member_functions(
     retain_covariant_inherited_overrides(source, functions);
 }
 
+/// Left-to-right depth-first visit order of `root` and its supertypes. The first visit wins in a
+/// diamond, matching the order an inherited default expression is chosen.
+pub(crate) fn supertype_preorder(
+    source: &dyn SymbolSource,
+    root: TypeName,
+) -> std::collections::HashMap<TypeName, u32> {
+    let mut order = std::collections::HashMap::new();
+    let mut next = 0u32;
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        order.insert(current, next);
+        next = next.saturating_add(1);
+        for supertype in super::direct_supertypes(source, Ty::obj_name(current))
+            .into_iter()
+            .rev()
+        {
+            if let Some(name) = supertype.kotlin_class_internal() {
+                pending.push(name);
+            }
+        }
+    }
+    order
+}
+
+/// The inherited declaration whose default expressions a fake override uses.
+///
+/// Several overridden functions may each declare defaults for the same parameter. That conflict is
+/// rejected when the functions are both reached directly, and kept as a compatibility warning when
+/// one is reached through an intermediate classifier (`KT-36188`). The expressions that survive are
+/// the ones on the leftmost supertype in a depth-first walk, not the nearest declaration: `A2 : A`
+/// listed before `B` still uses `A`'s default even though `B` is a shallower rung.
+fn leftmost_default_supplier<'a>(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+    inherited: &[&'a FunctionInfo],
+) -> Option<&'a FunctionInfo> {
+    let order = supertype_preorder(source, owner);
+    inherited
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            candidate
+                .call_sig
+                .param_defaults
+                .iter()
+                .any(|default| *default)
+        })
+        .min_by_key(|candidate| {
+            (
+                order
+                    .get(&candidate.callable.owner)
+                    .copied()
+                    .unwrap_or(u32::MAX),
+                candidate.receiver_rank,
+            )
+        })
+}
+
 /// Publish inherited default-argument availability on the overriding declaration that remains the
 /// semantic call target. Kotlin forbids repeating defaults on an override: a call through the
 /// derived receiver selects the override's covariant result and parameter contract, while omitted
@@ -484,6 +546,7 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
         if implementation.call_sig.param_defaults.is_empty() {
             implementation.call_sig.param_defaults = vec![false; parameter_count];
         }
+        let supplier = leftmost_default_supplier(source, implementation.callable.owner, &inherited);
         let mut inherited_any_default = false;
         for parameter in 0..parameter_count {
             if implementation.call_sig.param_defaults[parameter] {
@@ -504,12 +567,15 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
                     .get(parameter)
                     .is_some_and(Option::is_none)
                 {
-                    if let Some(value) = inherited
-                        .iter()
-                        .find_map(|candidate| candidate.default_values.get(parameter))
-                        .cloned()
-                        .flatten()
-                    {
+                    let value = match supplier {
+                        Some(supplier) => supplier.default_values.get(parameter).cloned().flatten(),
+                        None => inherited
+                            .iter()
+                            .find_map(|candidate| candidate.default_values.get(parameter))
+                            .cloned()
+                            .flatten(),
+                    };
+                    if let Some(value) = value {
                         implementation.default_values[parameter] = Some(value);
                     }
                 }
@@ -519,25 +585,20 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
             parameter_count,
             &implementation.call_sig.param_defaults,
         );
-        if inherited_any_default && implementation.callable.external_default_provider.is_none() {
-            implementation.callable.external_default_provider = inherited
-                .iter()
-                .filter(|candidate| {
-                    candidate
-                        .call_sig
-                        .param_defaults
-                        .iter()
-                        .any(|default| *default)
-                })
-                .min_by_key(|candidate| candidate.receiver_rank)
-                .and_then(|candidate| {
-                    candidate
+        if inherited_any_default {
+            if let Some(supplier) = supplier {
+                if implementation.callable.external_default_provider.is_none() {
+                    implementation.callable.external_default_provider = supplier
                         .callable
                         .external_default_provider
-                        .or(candidate.callable.external_identity)
-                });
-        }
-        if implementation.callable.default_realization.is_none() {
+                        .or(supplier.callable.external_identity);
+                }
+                if implementation.callable.default_realization.is_none() {
+                    implementation.callable.default_realization =
+                        supplier.callable.default_realization.clone();
+                }
+            }
+        } else if implementation.callable.default_realization.is_none() {
             implementation.callable.default_realization = inherited
                 .iter()
                 .filter(|candidate| candidate.callable.default_realization.is_some())

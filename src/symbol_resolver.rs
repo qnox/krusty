@@ -52,6 +52,7 @@ pub(crate) use member_hierarchy::{
     declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
     lexical_enclosing_classifier_names, member_is_inheritable, members_in_hierarchy,
     normalize_inherited_member_functions, override_input_shapes_match, specialize_member_function,
+    supertype_preorder,
     InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
