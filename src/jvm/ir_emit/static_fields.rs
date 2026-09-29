@@ -617,7 +617,7 @@ impl Emitter<'_> {
         // bridge, kotlinc's hoisted-companion-property access shape. A `@JvmField` static
         // is a PUBLIC field with no bridges: every reader goes `getstatic` directly.
         if let Some(owner) = self.ir.statics[i as usize].owner {
-            let owner_name = owner.render();
+            let owner_name = static_owner_spelling(owner);
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
@@ -708,7 +708,7 @@ impl Emitter<'_> {
         // A `@JvmField` static is a PUBLIC field with no bridges: every writer goes
         // `putstatic` directly.
         if let Some(owner) = self.ir.statics[index as usize].owner {
-            let owner_name = owner.render();
+            let owner_name = static_owner_spelling(owner);
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
                 let setter = self.ir.statics[index as usize]
@@ -778,5 +778,25 @@ impl Emitter<'_> {
             &type_descriptor(physical),
         );
         code.putstatic(reference, slot_words(physical) as i32);
+    }
+}
+
+pub(super) fn static_owner_spelling(owner: crate::types::TypeName) -> &'static str {
+    owner.rendered()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_static_owner_reuses_its_rendered_spelling() {
+        let owner = crate::types::type_name("sample/static6044/Outer$Host");
+        assert!(std::ptr::eq(
+            super::static_owner_spelling(owner),
+            owner.rendered()
+        ));
+        assert_eq!(
+            super::static_owner_spelling(owner),
+            "sample/static6044/Outer$Host"
+        );
     }
 }
