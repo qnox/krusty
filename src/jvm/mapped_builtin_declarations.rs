@@ -235,7 +235,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(special_realizations().len(), 8);
+        assert_eq!(special_realizations().len(), 14);
         assert_eq!(rows.len(), special_realizations().len());
 
         assert_eq!(
