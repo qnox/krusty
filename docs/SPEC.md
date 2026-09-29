@@ -2518,8 +2518,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The body runs before the condition. A `finally` that `return`s or `throw`s covers a `break` or
   `continue` in its `try`, so that transfer does not reach the code after the loop. A transfer that
   reaches the loop's exit keeps the loop from counting as a function exit. A `while` condition
-  belongs to the enclosing loop; a `do`/`while` condition belongs to that loop.
-  `finally_return_overrides_break_in_catch` in `tests/finally_e2e.rs`; box corpus `try/finally12.kt`.
+  belongs to the enclosing loop; a `do`/`while` condition belongs to that loop. A pre-test
+  `while (false)` never runs its body, so a `return` there does not complete the function, and a
+  `do` body that returns only on a path that can be skipped still needs a return after the loop.
+  `finally_return_overrides_break_in_catch` in `tests/finally_e2e.rs`;
+  `while_false_body_return_does_not_count` and `do_while_conditional_return_can_still_fall_through`
+  in `tests/missing_return_check_e2e.rs`; box corpus `try/finally12.kt`.
 - **`when (subject)` with `in`/`!in` range branches** (`when (x) { in 4..6 -> … }`): the parser builds
   the structural `Is`/`InRange` node for an `is`/`in`-range condition (same as the infix `is`/`in`
   operator); the checker and lowering treat that node as a complete boolean test of the subject, not a
