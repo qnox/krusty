@@ -32,6 +32,7 @@ impl BodyLowering<'_> {
                 ty,
                 mutable: _,
                 lateinit,
+                deferred,
                 initializer,
                 conversion,
             } => {
@@ -56,6 +57,9 @@ impl BodyLowering<'_> {
                 });
                 if let Some(name) = self.body.debug_value_name(*target) {
                     self.ir.value_names.insert(variable, name.to_owned());
+                }
+                if *deferred {
+                    self.ir.deferred_local_types.insert(variable, ty.get());
                 }
                 variable
             }

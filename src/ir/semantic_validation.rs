@@ -617,6 +617,10 @@ impl IrFile {
             )?;
         }
         reject_all("logical expression", self.logical_types.values().copied())?;
+        reject_all(
+            "deferred local declaration",
+            self.deferred_local_types.values().copied(),
+        )?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
         reject_all("physical expression", self.physical_types.values().copied())?;
         for properties in self.member_ext_props.values() {

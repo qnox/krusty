@@ -2088,6 +2088,11 @@ pub struct IrFile {
     /// `String` types only, where logical = physical representation — by the suspend pass's operand
     /// snapshot typing (`hoisted_value_ty`) for external callees.
     pub logical_types: std::collections::HashMap<u32, Ty>,
+    /// Deferred source-local declaration → its declared semantic type before an inline expansion
+    /// specializes type parameters. The parser supplies a target-neutral zero expression because
+    /// the source omitted an initializer; a backend uses this provenance to choose that target's
+    /// storage representation and physical zero without changing the specialized semantic type.
+    pub deferred_local_types: std::collections::HashMap<ExprId, Ty>,
     /// What common lowering decided about each `when` (and `if`) a backend emits.
     pub(crate) whens: when_facts::IrWhenFacts,
     /// Source binding reads and the checked binding's reassignment contract. The expression key is

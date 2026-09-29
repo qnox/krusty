@@ -33,7 +33,20 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         self.emit_value(expression, code);
-        self.coerce_reference_on_stack(self.value_ty(expression), expected, code);
+        let source = self.value_ty(expression);
+        let target = ir_ty_to_jvm(&expected);
+        // A type-parameter local kept in its erased reference slot is read here as the
+        // primitive the caller returns. The store boxed into that slot; this is the unbox.
+        if source.is_reference() && target.is_jvm_scalar() {
+            unbox_prim_from(
+                self.cw,
+                code,
+                source,
+                semantic_scalar_adapter(expected, target),
+            );
+            return;
+        }
+        self.coerce_reference_on_stack(source, expected, code);
     }
 
     /// Emit an operand whose consumer materializes it at its own slot type, answering the stack type

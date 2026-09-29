@@ -510,20 +510,10 @@ impl BodyLowering<'_> {
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
             self.ir.mark_inline_copy(copy);
-            let generated_zero = match self.ir.expr(source) {
-                IrExpr::Variable {
-                    ty,
-                    init: Some(initial),
-                    named: false,
-                    ..
-                } => match self.ir.expr(*initial) {
-                    IrExpr::Const(value) if *value == IrConst::zero_for_value_type(*ty) => {
-                        Some(value.clone())
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
+            // A compiler temporary's synthetic zero is refreshed after its type specializes.
+            // A deferred source local carries explicit declaration provenance instead: its
+            // semantic type specializes normally, and each backend selects its physical zero.
+            let generated_zero = synthetic_temporary_default(self.ir, source);
             // Reified/type-parameter substitutions are lexical: they apply inside nested lambda
             // templates even though those templates own an independent value-numbering domain.
             // Value rebasing and return rewriting remain protected below, but the checked type
@@ -960,6 +950,30 @@ fn rebase_values(
         _ => {}
     }
     Some(())
+}
+
+/// The synthetic zero of a compiler temporary. Deferred source locals carry an explicit
+/// declaration fact in common IR instead of being recognized from their constant's shape.
+fn synthetic_temporary_default(ir: &crate::ir::IrFile, source: ExprId) -> Option<IrConst> {
+    let IrExpr::Variable {
+        ty,
+        init: Some(initial),
+        named,
+        ..
+    } = ir.expr(source)
+    else {
+        return None;
+    };
+    if *named {
+        return None;
+    }
+    let IrExpr::Const(value) = ir.expr(*initial) else {
+        return None;
+    };
+    if *value != IrConst::zero_for_value_type(*ty) {
+        return None;
+    }
+    Some(value.clone())
 }
 
 fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
