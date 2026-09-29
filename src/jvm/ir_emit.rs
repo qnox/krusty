@@ -2766,7 +2766,7 @@ fn emit_backing_field_write_adaptation(
             .and_then(|ty| ty.non_null().obj_internal())
         {
             if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
-                let class = cw.class_ref(&storage.render());
+                let class = cw.class_ref(storage.rendered());
                 code.checkcast(class);
                 emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);
                 return;
@@ -5934,7 +5934,7 @@ fn emit_default_impls_forwarders(
                 } => {
                     let Some(owner) = member.owner else { continue };
                     (
-                        owner.render(),
+                        owner.rendered(),
                         name.clone(),
                         member.descriptor.to_string(),
                         ForwarderDispatch::HolderStatic,
@@ -5946,7 +5946,7 @@ fn emit_default_impls_forwarders(
                     let mut with_receiver = vec![Ty::obj_name(interface)];
                     with_receiver.extend_from_slice(&param_tys);
                     (
-                        crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
+                        crate::types::type_name_nested_child(interface, "DefaultImpls").rendered(),
                         name.clone(),
                         method_descriptor(&with_receiver, ret),
                         ForwarderDispatch::HolderStatic,
@@ -5963,7 +5963,7 @@ fn emit_default_impls_forwarders(
                         continue;
                     };
                     (
-                        named.render(),
+                        named.rendered(),
                         name.clone(),
                         method_descriptor(&param_tys, ret),
                         ForwarderDispatch::InterfaceSpecial,
@@ -6059,7 +6059,7 @@ fn emit_jd_access_bridge(
         param_tys.len(),
         "an access bridge needs every declaration parameter identity"
     );
-    let fq = interface.render();
+    let fq = interface.rendered();
     let member_desc = method_descriptor(param_tys, ret);
     let mut with_receiver = vec![Ty::obj_name(interface)];
     with_receiver.extend_from_slice(param_tys);
@@ -7197,8 +7197,8 @@ fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
 fn emit_box_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
     let fq = vc
         .obj_internal()
-        .map(|n| n.render())
-        .unwrap_or_else(|| "java/lang/Object".to_string());
+        .map(|n| n.rendered())
+        .unwrap_or("java/lang/Object");
     let u = vc_underlying_jvm(ir, vc);
     let m = cw.methodref(&fq, "box-impl", &format!("({})L{fq};", type_descriptor(u)));
     code.invokestatic(m, slot_words(u) as i32, 1);
@@ -7208,8 +7208,8 @@ fn emit_box_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuil
 fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
     let fq = vc
         .obj_internal()
-        .map(|n| n.render())
-        .unwrap_or_else(|| "java/lang/Object".to_string());
+        .map(|n| n.rendered())
+        .unwrap_or("java/lang/Object");
     let u = vc_underlying_jvm(ir, vc);
     let m = cw.methodref(&fq, "unbox-impl", &format!("(){}", type_descriptor(u)));
     code.invokevirtual(m, 0, slot_words(u) as i32);
@@ -8714,7 +8714,7 @@ impl<'a> Emitter<'a> {
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
-                access_owner.render()
+                access_owner.rendered()
             ));
             return;
         }
@@ -9786,7 +9786,7 @@ impl<'a> Emitter<'a> {
                     let bridge_name = format!("access${name}");
                     let method =
                         self.cw
-                            .methodref(&bridge.owner.render(), &bridge_name, &bridge_desc);
+                            .methodref(&bridge.owner.rendered(), &bridge_name, &bridge_desc);
                     self.mark_call_start(e, code);
                     code.invokestatic(method, aw + 1, physical_call_result_words(ret));
                 } else if self.ir.method_visibility(fid).is_private() {
@@ -9900,7 +9900,7 @@ impl<'a> Emitter<'a> {
                     let owner_name = *owner;
                     let static_owner = StaticOwner::Class(owner_name);
                     let source_owner_is_interface = static_owner.is_interface(self.ir);
-                    let owner = owner_name.render();
+                    let owner = owner_name.rendered();
                     // The classpath answers whether a library owner is an interface; a static
                     // declared on an interface being compiled right now is not there. An
                     // `invokestatic` naming an interface must use an InterfaceMethodref, so the
@@ -9938,7 +9938,7 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
-                    let owner = owner.render();
+                    let owner = owner.rendered();
                     let method =
                         self.cw
                             .methodref(&owner, &format!("{}$default", f.name), &descriptor);
@@ -10039,7 +10039,7 @@ impl<'a> Emitter<'a> {
                             }
                             Ty::Obj(classifier, _) => {
                                 self.emit_value(args[0], code);
-                                let owner = classifier.render();
+                                let owner = classifier.rendered();
                                 let descriptor = format!("(Ljava/lang/String;)L{owner};");
                                 let method = self.cw.methodref(&owner, "valueOf", &descriptor);
                                 code.invokestatic(method, 1, 1);
@@ -10090,7 +10090,7 @@ impl<'a> Emitter<'a> {
                         let descriptor = method_descriptor(&[carrier], Ty::String);
                         let method =
                             self.cw
-                                .methodref(&owner.render(), "toString-impl", &descriptor);
+                                .methodref(&owner.rendered(), "toString-impl", &descriptor);
                         code.invokestatic(method, slot_words(carrier) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::PrimitiveArrayNew { element } => {
@@ -10193,7 +10193,7 @@ impl<'a> Emitter<'a> {
                 } => {
                     let owner_identity = *owner;
                     let (owner, name, descriptor, inline) = (
-                        owner.render(),
+                        owner.rendered(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                         *inline,
@@ -10423,7 +10423,7 @@ impl<'a> Emitter<'a> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
-                        let owner = owner.render();
+                        let owner = owner.rendered();
                         let name = name.clone();
                         let ptys = jvm_tys(param_tys);
                         let ret = self.physical_call_result(e, jvm_declared_ty(ret_ty));
@@ -10464,7 +10464,7 @@ impl<'a> Emitter<'a> {
                             let bridge_descriptor = method_descriptor(&bridge_params, ret);
                             let bridge_name = format!("access${name}");
                             let method = self.cw.methodref(
-                                &bridge.owner.render(),
+                                &bridge.owner.rendered(),
                                 &bridge_name,
                                 &bridge_descriptor,
                             );
@@ -10483,7 +10483,7 @@ impl<'a> Emitter<'a> {
                     }
                     let owner_identity = *owner;
                     let (owner, name, descriptor) = (
-                        owner_identity.render(),
+                        owner_identity.rendered(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                     );
@@ -10616,7 +10616,7 @@ impl<'a> Emitter<'a> {
                         let bridge_descriptor = method_descriptor(&bridge_params, ret);
                         let bridge_name = format!("access${jvm_name}");
                         let method = self.cw.methodref(
-                            &bridge.owner.render(),
+                            &bridge.owner.rendered(),
                             &bridge_name,
                             &bridge_descriptor,
                         );
@@ -10641,7 +10641,7 @@ impl<'a> Emitter<'a> {
                     source,
                 } => {
                     let (owner, name, descriptor, interface) = (
-                        owner.render(),
+                        owner.rendered(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                         *interface,
@@ -10761,7 +10761,7 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::EnumEntry { classifier, name } => {
-                let fq_name = classifier.render();
+                let fq_name = classifier.rendered();
                 let desc = format!("L{fq_name};");
                 let f = self.cw.fieldref(&fq_name, name, &desc);
                 code.getstatic(f, 1);
@@ -10776,12 +10776,12 @@ impl<'a> Emitter<'a> {
                 let Some((owner, field)) = self.singleton_storage(*classifier) else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
-                        classifier.render()
+                        classifier.rendered()
                     ));
                     return;
                 };
-                let owner = owner.render();
-                let ty = classifier.render();
+                let owner = owner.rendered();
+                let ty = classifier.rendered();
                 let f = self.cw.fieldref(&owner, &field, &format!("L{ty};"));
                 code.getstatic(f, 1);
             }
@@ -10796,7 +10796,7 @@ impl<'a> Emitter<'a> {
                 name,
                 descriptor,
             } => {
-                let owner = owner.render();
+                let owner = owner.rendered();
                 let f = self.cw.fieldref(&owner, name, descriptor);
                 let words = if descriptor == "J" || descriptor == "D" {
                     2
@@ -10806,12 +10806,12 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, words);
             }
             IrExpr::EnumValues { classifier } => {
-                let fq = classifier.render();
+                let fq = classifier.rendered();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
                 code.invokestatic(m, 0, 1);
             }
             IrExpr::EnumEntries { classifier } => {
-                let fq = classifier.render();
+                let fq = classifier.rendered();
                 let m = self
                     .cw
                     .methodref(&fq, "getEntries", "()Lkotlin/enums/EnumEntries;");
@@ -10832,7 +10832,7 @@ impl<'a> Emitter<'a> {
                     "(ILjava/lang/String;)V",
                 );
                 code.invokestatic(m, 2, 0);
-                code.ldc_class(&erased.render(), self.cw);
+                code.ldc_class(&erased.rendered(), self.cw);
                 if *kclass {
                     let reflection = self.cw.methodref(
                         "kotlin/jvm/internal/Reflection",
@@ -10859,7 +10859,7 @@ impl<'a> Emitter<'a> {
                     "(ILjava/lang/String;)V",
                 );
                 code.invokestatic(m, 2, 0);
-                let ci = self.cw.class_ref(&erased.render());
+                let ci = self.cw.class_ref(&erased.rendered());
                 if *cast {
                     code.checkcast(ci);
                 } else {
@@ -10874,7 +10874,7 @@ impl<'a> Emitter<'a> {
                 arg,
                 declaration,
             } => {
-                let fq = classifier.render();
+                let fq = classifier.rendered();
                 if *declaration == crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel {
                     self.mark_inline_call_site_line(e, code);
                 }
@@ -11396,7 +11396,7 @@ impl<'a> Emitter<'a> {
                 let descriptor = method_descriptor(&[carrier], Ty::String);
                 let method = self
                     .cw
-                    .methodref(&owner.render(), "toString-impl", &descriptor);
+                    .methodref(&owner.rendered(), "toString-impl", &descriptor);
                 code.invokestatic(method, slot_words(carrier) as i32, 1);
                 self.append_top(Ty::String, code);
                 return;

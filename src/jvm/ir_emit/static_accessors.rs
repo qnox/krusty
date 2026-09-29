@@ -743,7 +743,7 @@ pub(super) fn member_property_access_bridge(
     value: &str,
     read: bool,
 ) -> crate::jvm::inline::PropertyAccess {
-    let owner_spelling = owner.render();
+    let owner_spelling = owner.rendered();
     let declared_accessor = if read {
         property.getter.is_some()
     } else {
