@@ -485,10 +485,19 @@ pub fn trace_cache_stats() {
 /// never inflates a resource compressed by some other scheme.
 type JimageEntry = (u64, usize, bool);
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct JimageIndex {
-    names: NameTree,
+    names: std::sync::Arc<NameTree>,
     by_name: HashMap<NameId, JimageEntry>,
+}
+
+impl Default for JimageIndex {
+    fn default() -> Self {
+        Self {
+            names: std::sync::Arc::new(NameTree::default()),
+            by_name: HashMap::new(),
+        }
+    }
 }
 
 /// Process-global jimage index (name id → file offset/size), keyed by the jimage path. The jimage is
@@ -4952,9 +4961,8 @@ struct PkgEntry {
 /// One classpath entry's package catalog: which packages it declares, and per-package facts. Built once
 /// per jar/dir (cached via [`EntryCache`]) from ONE shallow `kotlin_module` parse plus a
 /// central-directory package-name pass (entry names only — no decompression, no class parse).
-#[derive(Default)]
 struct JarPackages {
-    names: NameTree,
+    names: std::sync::Arc<NameTree>,
     /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
     packages: HashMap<NameId, PkgEntry>,
     /// Exact internal class names declared by this entry.
@@ -4964,6 +4972,18 @@ struct JarPackages {
     facades: HashSet<NameId>,
     /// Whether the entire entry was catalogued successfully.
     complete: bool,
+}
+
+impl Default for JarPackages {
+    fn default() -> Self {
+        Self {
+            names: std::sync::Arc::new(NameTree::default()),
+            packages: HashMap::new(),
+            classes: Vec::new(),
+            facades: HashSet::new(),
+            complete: false,
+        }
+    }
 }
 
 impl JarPackages {
@@ -5179,6 +5199,35 @@ fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
     }
 }
 
+/// Class identity `parent/base` without allocating the joined spelling. `parent` is the jimage
+/// location's package (`java/lang`) and `base` is the class file's simple name.
+fn jimage_class_id(names: &NameTree, parent: &str, base: &str) -> NameId {
+    let mut id = NameTree::ROOT;
+    for segment in parent.split('/').filter(|segment| !segment.is_empty()) {
+        id = names.child_of(id, segment);
+    }
+    names.child_of(id, base)
+}
+
+/// Package catalog whose name ids are the jimage index's ids. The catalog and the index share one
+/// name tree.
+fn catalog_jimage_packages(idx: &JimageIndex) -> JarPackages {
+    let mut packages = JarPackages::default();
+    packages.names = std::sync::Arc::clone(&idx.names);
+    for &internal in idx.by_name.keys() {
+        let Some(pkg) = idx.names.parent(internal) else {
+            continue;
+        };
+        packages.classes.push(internal);
+        if pkg == NameTree::ROOT {
+            continue;
+        }
+        packages.packages.entry(pkg).or_default().has_classes = true;
+    }
+    packages.complete = !idx.by_name.is_empty();
+    packages
+}
+
 /// Build one entry's [`JarPackages`] — the only eager per-jar work: a central-directory name pass plus
 /// the shallow `kotlin_module` read(s). The JDK jimage contributes its package membership from the
 /// location table (names only — no class parse), so `find` can scope a JDK type to the jimage instead
@@ -5192,19 +5241,9 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
             let Some(idx) = cached_jimage_index(p) else {
                 return jp;
             };
-            for &internal in idx.by_name.keys() {
-                let Some(pkg) = idx.names.parent(internal) else {
-                    continue;
-                };
-                let class = jp.names.insert_from(&idx.names, internal);
-                jp.classes.push(class);
-                if pkg == NameTree::ROOT {
-                    continue;
-                }
-                let pkg = jp.names.insert_from(&idx.names, pkg);
-                jp.packages.entry(pkg).or_default().has_classes = true;
-            }
-            jp.complete = !idx.by_name.is_empty();
+            // The index already owns the class-name tree. Copying it into the catalog retained a
+            // second ~30k-node tree for the process lifetime of the entry cache.
+            jp = catalog_jimage_packages(&idx);
         }
         Entry::CtSym { path, release } => {
             let Some(index) = cached_ct_sym_index(path, *release) else {
@@ -5764,10 +5803,10 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
             continue;
         }
         let parent = read_str(a[2]);
-        if parent.is_empty() {
+        let base = read_str(a[3]);
+        if parent.is_empty() || base.is_empty() {
             continue;
         }
-        let internal = format!("{parent}/{}", read_str(a[3]));
         let (off, comp, unc) = (a[5], a[6], a[7]);
         let abs = content + off;
         // Store the ON-DISK byte count: the compressed size for a compressed resource (a JetBrains
@@ -5776,7 +5815,7 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
         // "zip" scheme is deferred to `jimage_bytes` (which reads the content anyway), so the index build
         // needs only the tables, not the content.
         let stored = if comp != 0 { comp } else { unc };
-        let internal = idx.names.insert(&internal);
+        let internal = jimage_class_id(&idx.names, parent, base);
         idx.by_name
             .entry(internal)
             .or_insert((abs as u64, stored, comp != 0));
@@ -5958,12 +5997,17 @@ mod fq_tests {
         assert_eq!(idx.by_name.get(&lookup), Some(&(1, 2, false)));
 
         let package = idx.names.parent(string).expect("class has package parent");
-        let mut packages = JarPackages::default();
-        let package = packages.names.insert_from(&idx.names, package);
-        packages.packages.entry(package).or_default().has_classes = true;
+        let packages = catalog_jimage_packages(&idx);
 
+        assert!(std::sync::Arc::ptr_eq(&packages.names, &idx.names));
+        assert_eq!(packages.classes, vec![string]);
         assert_eq!(packages.names.render(package), "java/lang");
         assert!(packages.packages[&package].has_classes);
+
+        let joined = NameTree::default();
+        let via_segments = jimage_class_id(&joined, "java/lang", "String");
+        assert_eq!(joined.get("java/lang/String"), Some(via_segments));
+        assert_eq!(joined.render(via_segments), "java/lang/String");
     }
 
     #[test]
