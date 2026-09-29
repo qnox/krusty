@@ -15130,7 +15130,23 @@ impl<'a> Checker<'a> {
                 ))
                 .collect::<Vec<_>>(),
         );
-        let (member_receiver, member_overloads, _) = self.body_local_member_overload_rung(rt, name);
+        let (member_receiver, mut member_overloads, _) =
+            self.body_local_member_overload_rung(rt, name);
+        if let Some(receiver) = tower_rung
+            .receiver
+            .filter(|receiver| receiver.declared_ty != rt)
+        {
+            for candidate in self.private_members_hidden_by_smart_cast(receiver.declared_ty, name) {
+                let already_present = member_overloads.iter().any(|existing| {
+                    existing.callable.owner == candidate.callable.owner
+                        && existing.callable.name == candidate.callable.name
+                        && existing.callable.descriptor == candidate.callable.descriptor
+                });
+                if !already_present {
+                    member_overloads.push(candidate);
+                }
+            }
+        }
         let mut extension_overloads = callables
             .functions()
             .iter()

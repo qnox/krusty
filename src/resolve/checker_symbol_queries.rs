@@ -84,6 +84,30 @@ impl Checker<'_> {
         callables
     }
 
+    /// Private members declared on the receiver's type before a smart cast. A cast of `this` to a
+    /// subclass does not inherit them, but the declaring class still calls them when the subclass
+    /// has no member of that name. They rank behind the narrowed type so a real subclass member wins.
+    pub(super) fn private_members_hidden_by_smart_cast(
+        &self,
+        declared: Ty,
+        name: &str,
+    ) -> Vec<crate::libraries::FunctionInfo> {
+        self.stable_receiver_callables(declared, name)
+            .functions()
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::libraries::FnKind::Member
+                    && candidate.visibility == Visibility::Private
+                    && candidate.receiver_rank == 0
+            })
+            .cloned()
+            .map(|mut candidate| {
+                candidate.receiver_rank = candidate.receiver_rank.saturating_add(1);
+                candidate
+            })
+            .collect()
+    }
+
     pub(super) fn stable_classifier_callable_signatures(&self, ty: Ty) -> Vec<Ty> {
         if self.resolved_index.is_none() {
             return crate::symbol_resolver::classifier_callable_signatures(&self.fed_source(), ty);
