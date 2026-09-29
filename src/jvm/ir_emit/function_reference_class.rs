@@ -390,7 +390,7 @@ pub(super) fn emit_func_ref_class(
             if let Some(vc) = &fr.staticbound_recv_unbox {
                 // A VALUE-CLASS receiver (`Z(42)::ext`) is stored BOXED: `checkcast` to the box class then
                 // `unbox-impl` to the underlying the mangled target expects (`Z`→`int`).
-                let vc = vc.render();
+                let vc = super::value_class_adapters::value_class_spelling(*vc);
                 let cref = cw.class_ref(&vc);
                 inv.checkcast(cref);
                 let under = jvm_declared_ty(
@@ -528,7 +528,7 @@ pub(super) fn emit_func_ref_class(
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         inv.getstatic(unit, 1);
     } else if let Some(owner) = &fr.box_ret {
-        let owner = owner.render();
+        let owner = super::value_class_adapters::value_class_spelling(*owner);
         // A value-class-returning reference: the target returns the ERASED underlying (primitive or the
         // reference underlying) — exactly what `call_desc` requested. Box it back to the value class via
         // `box-impl` so the `Function` result is the boxed VC (`X` object) the invariant requires — a VC in

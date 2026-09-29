@@ -84,10 +84,10 @@ impl Emitter<'_> {
                 let nullable = carrier.is_nullable();
                 let carrier = super::ir_ty_to_jvm(&carrier);
                 if let Some(internal) = carrier.obj_internal() {
-                    let class = self.cw.class_ref(&internal.render());
+                    let class = self.cw.class_ref(internal.rendered());
                     code.checkcast(class);
                 }
-                let owner = classifier.render();
+                let owner = super::value_class_adapters::value_class_spelling(classifier);
                 let descriptor = format!(
                     "({})L{owner};",
                     crate::jvm::names::type_descriptor(carrier.non_null())
