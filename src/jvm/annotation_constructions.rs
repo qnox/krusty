@@ -55,7 +55,7 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
                     u32::try_from(class).expect("too many classes for a class id"),
                 )
             });
-            let interface_fragment = site.interface.rendered().replace(['/', '$'], "_");
+            let interface_fragment = site.interface.render().replace(['/', '$'], "_");
             let segment = format!("annotationImpl${interface_fragment}$0");
             let implementation = annotation_impl_name(owner, facade, &interface_fragment);
             // kotlinc declares the implementation as a child of its owner, which its
@@ -294,7 +294,7 @@ mod tests {
                 .nested_child("0")
         );
         assert_eq!(
-            internal.rendered(),
+            internal.render(),
             "sample/Host$annotationImpl$sample_Marker$0"
         );
     }

@@ -13,6 +13,8 @@
 //! `*TypeAliasesKt` `@Metadata` and are read from the classpath by `classpath::scan_types`). They
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
+use std::borrow::Cow;
+
 use crate::name_tree::FxHashMap;
 use crate::types::{CollectionKind, MappedCollection, TypeName};
 
@@ -97,7 +99,7 @@ fn class_mapper_lite_descriptor_spelling(classifier: TypeName) -> &'static str {
     {
         return retained_reference_descriptor(&companion_object_internal(owner));
     }
-    super::names::reference_descriptor(classifier.rendered())
+    retained_reference_descriptor(&classifier.render())
 }
 
 /// Retain `Lname;` for the surrounding JVM cache. These generated physical spellings must not use
@@ -427,24 +429,26 @@ pub fn to_jvm_internal(internal: &str) -> &str {
 }
 
 /// [`to_jvm_internal`] for a classifier the caller already holds. Mapped builtins, boxed primitives,
-/// and function interfaces return their static JVM spelling. Every other classifier borrows its
-/// remembered internal name.
-pub fn jvm_internal_name(internal: TypeName) -> &'static str {
+/// and function interfaces return their static JVM spelling. Every other classifier renders its
+/// internal name for this call; the spelling is not retained on the [`TypeName`].
+pub fn jvm_internal_name(internal: TypeName) -> Cow<'static, str> {
     if let Some(wrapper) = wrapper_internal(Ty::obj_name(internal)) {
-        return wrapper;
+        return Cow::Borrowed(wrapper);
     }
     if let Some(jvm) = type_name_to_jvm_builtin_internal(internal) {
-        return jvm;
+        return Cow::Borrowed(jvm);
     }
     if super::function_classifiers::is_reflective_function_classifier(internal) {
-        return crate::types::KFUNCTION_INTERNAL;
+        return Cow::Borrowed(crate::types::KFUNCTION_INTERNAL);
     }
     if let Some(function) = super::function_classifiers::classifier(internal) {
         if function.identity() == internal && !function.is_suspend() {
-            return super::names::function_interface_internal_name(function.arity());
+            return Cow::Borrowed(super::names::function_interface_internal_name(
+                function.arity(),
+            ));
         }
     }
-    internal.rendered()
+    Cow::Owned(internal.render())
 }
 
 /// Which declaration supplies a mapped builtin's SOURCE member/supertype scope. This is part of the
@@ -1445,12 +1449,12 @@ mod tests {
         assert_eq!(descriptor, "Lsample/bin6044/Outer$Middle$Inner;");
         assert!(std::ptr::eq(
             descriptor,
-            crate::jvm::names::reference_descriptor(nested.rendered()),
+            super::class_mapper_lite_descriptor(nested),
         ));
         let host = type_name("sample/bin6044/Host");
         assert!(std::ptr::eq(
             super::class_mapper_lite_descriptor(host),
-            crate::jvm::names::reference_descriptor(host.rendered()),
+            super::class_mapper_lite_descriptor(host),
         ));
     }
 
@@ -1472,8 +1476,18 @@ mod tests {
         ] {
             let identity = type_name(spelling);
             let mapped = super::jvm_internal_name(identity);
-            assert_eq!(mapped, to_jvm_internal(&identity.render()), "{spelling}");
-            assert!(std::ptr::eq(mapped, super::jvm_internal_name(identity)));
+            let again = super::jvm_internal_name(identity);
+            assert_eq!(
+                mapped.as_ref(),
+                to_jvm_internal(&identity.render()),
+                "{spelling}"
+            );
+            assert_eq!(mapped, again);
+            if let (std::borrow::Cow::Borrowed(first), std::borrow::Cow::Borrowed(second)) =
+                (&mapped, &again)
+            {
+                assert!(std::ptr::eq(*first, *second), "{spelling}");
+            }
         }
     }
 }

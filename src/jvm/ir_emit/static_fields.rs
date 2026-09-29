@@ -766,8 +766,8 @@ impl Emitter<'_> {
     }
 }
 
-pub(super) fn static_owner_spelling(owner: crate::types::TypeName) -> &'static str {
-    owner.rendered()
+pub(super) fn static_owner_spelling(owner: crate::types::TypeName) -> String {
+    owner.render()
 }
 
 #[cfg(test)]
@@ -775,10 +775,7 @@ mod tests {
     #[test]
     fn a_static_owner_reuses_its_rendered_spelling() {
         let owner = crate::types::type_name("sample/static6044/Outer$Host");
-        assert!(std::ptr::eq(
-            super::static_owner_spelling(owner),
-            owner.rendered()
-        ));
+        assert_eq!(super::static_owner_spelling(owner), owner.render());
         assert_eq!(
             super::static_owner_spelling(owner),
             "sample/static6044/Outer$Host"

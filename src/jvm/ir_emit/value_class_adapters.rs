@@ -66,8 +66,8 @@ pub(super) fn emit_value_class_box_adapter(
     code.bind(end);
 }
 
-pub(super) fn value_class_spelling(value_class: TypeName) -> &'static str {
-    value_class.rendered()
+pub(super) fn value_class_spelling(value_class: TypeName) -> String {
+    value_class.render()
 }
 
 #[cfg(test)]
@@ -77,10 +77,7 @@ mod tests {
     #[test]
     fn a_value_class_owner_reuses_its_rendered_spelling() {
         let owner = type_name("sample/box6044/Outer$X");
-        assert!(std::ptr::eq(
-            super::value_class_spelling(owner),
-            owner.rendered()
-        ));
+        assert_eq!(super::value_class_spelling(owner), owner.render());
         assert_eq!(super::value_class_spelling(owner), "sample/box6044/Outer$X");
     }
 }

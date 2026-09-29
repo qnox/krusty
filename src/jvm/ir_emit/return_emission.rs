@@ -84,7 +84,7 @@ impl Emitter<'_> {
                 let nullable = carrier.is_nullable();
                 let carrier = super::ir_ty_to_jvm(&carrier);
                 if let Some(internal) = carrier.obj_internal() {
-                    let class = self.cw.class_ref(internal.rendered());
+                    let class = self.cw.class_ref(&internal.render());
                     code.checkcast(class);
                 }
                 let owner = super::value_class_adapters::value_class_spelling(classifier);

@@ -313,21 +313,6 @@ impl TypeName {
     pub fn render(self) -> String {
         type_names().render(self.0)
     }
-
-    /// The [`Self::render`] spelling, remembered after the first use. Emission and diagnostics that
-    /// repeat a classifier name borrow this instead of walking the name tree again.
-    pub fn rendered(self) -> &'static str {
-        thread_local! {
-            static CACHE: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
-                std::cell::RefCell::default();
-        }
-        if let Some(found) = CACHE.with(|cache| cache.borrow().get(&self).copied()) {
-            return found;
-        }
-        let spelled: &'static str = Box::leak(self.render().into_boxed_str());
-        CACHE.with(|cache| cache.borrow_mut().insert(self, spelled));
-        spelled
-    }
 }
 
 impl TypeNameList {
@@ -2692,12 +2677,11 @@ mod tests {
     }
 
     #[test]
-    fn rendered_type_name_reuses_the_spelling() {
+    fn render_spells_a_nested_classifier_without_retaining_it() {
         let name = type_name("sample/rendered6044/Outer").nested_child("Inner");
-        let first = name.rendered();
+        let first = name.render();
         assert_eq!(first, "sample/rendered6044/Outer$Inner");
-        assert_eq!(first, name.render());
-        assert!(std::ptr::eq(first, name.rendered()));
+        assert_eq!(name.render(), first);
     }
 
     #[test]

@@ -241,10 +241,9 @@ impl Emitter<'_> {
     }
 }
 
-/// The classfile owner of one property realization. Emission repeats the same classifiers, so this
-/// borrows the remembered spelling instead of walking the name tree on every read.
-pub(super) fn property_realization_owner(owner: crate::types::TypeName) -> &'static str {
-    owner.rendered()
+/// The classfile owner of one property realization. The spelling lives only for this call.
+pub(super) fn property_realization_owner(owner: crate::types::TypeName) -> String {
+    owner.render()
 }
 
 #[cfg(test)]
@@ -259,9 +258,6 @@ mod tests {
             property_realization_owner(nested),
             "sample/prop6044/Outer$Inner"
         );
-        assert!(std::ptr::eq(
-            property_realization_owner(nested),
-            nested.rendered()
-        ));
+        assert_eq!(property_realization_owner(nested), nested.render());
     }
 }

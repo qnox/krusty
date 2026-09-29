@@ -44,7 +44,7 @@ pub(super) fn emit_func_ref_class(
     let call_owner = jvm_owner_or_facade(fr.call_owner, facade);
     let fq = c.fq_name();
     let superclass = if fr.adapted {
-        "kotlin/jvm/internal/AdaptedFunctionReference"
+        "kotlin/jvm/internal/AdaptedFunctionReference".to_string()
     } else {
         c.superclass()
     };
@@ -573,10 +573,16 @@ pub(super) fn emit_func_ref_class(
 
 /// The JVM class a function reference reflects or invokes. A recorded owner maps from its
 /// classifier identity; a missing owner is the file facade, which is already a physical name.
-fn jvm_owner_or_facade(owner: Option<crate::types::TypeName>, facade: &str) -> &str {
+fn jvm_owner_or_facade<'a>(
+    owner: Option<crate::types::TypeName>,
+    facade: &'a str,
+) -> std::borrow::Cow<'a, str> {
     match owner {
-        Some(owner) => crate::jvm::jvm_class_map::jvm_internal_name(owner),
-        None => facade,
+        Some(owner) => match crate::jvm::jvm_class_map::jvm_internal_name(owner) {
+            std::borrow::Cow::Borrowed(name) => std::borrow::Cow::Borrowed(name),
+            std::borrow::Cow::Owned(name) => std::borrow::Cow::Owned(name),
+        },
+        None => std::borrow::Cow::Borrowed(facade),
     }
 }
 
@@ -680,12 +686,12 @@ mod tests {
         );
         assert_eq!(jvm_owner_or_facade(None, "sample/FileKt"), "sample/FileKt");
         assert!(std::ptr::eq(
-            jvm_owner_or_facade(Some(string), "unused/Facade"),
-            jvm_owner_or_facade(Some(string), "other/Facade"),
+            jvm_owner_or_facade(Some(string), "unused/Facade").as_ref(),
+            jvm_owner_or_facade(Some(string), "other/Facade").as_ref(),
         ));
-        assert!(std::ptr::eq(
+        assert_eq!(
             jvm_owner_or_facade(Some(host), "unused/Facade"),
             jvm_owner_or_facade(Some(host), "other/Facade"),
-        ));
+        );
     }
 }
