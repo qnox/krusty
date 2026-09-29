@@ -6989,7 +6989,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   they also carry a superclass capture that their own body never mentions.
   Tests: `tests/local_superclass_capture_e2e.rs`, each cross-checked against the
   reference compiler, including
-  `a_subclass_passes_a_capture_to_a_secondary_constructor`. Corpus: `codegen/box/localClass/localHierarchy.kt`,
+  `a_subclass_passes_a_capture_to_a_secondary_constructor` and
+  `a_subclass_uses_the_selected_secondary_constructor_capture_prefix`. Corpus:
+  `codegen/box/localClass/localHierarchy.kt`,
   `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
   `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.

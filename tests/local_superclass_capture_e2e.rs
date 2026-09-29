@@ -157,6 +157,24 @@ fn a_subclass_passes_a_capture_to_a_secondary_constructor() {
     );
 }
 
+/// A local superclass with no primary constructor carries the same capture prefix on the selected
+/// super-delegating secondary constructor; there is no primary parameter list to borrow it from.
+#[test]
+fn a_subclass_uses_the_selected_secondary_constructor_capture_prefix() {
+    agrees_with_kotlinc(
+        "SecondaryOnlyConstructorCapture",
+        "fun box(): String {\n\
+         \x20   val result = \"OK\"\n\
+         \x20   open class CapturingBase {\n\
+         \x20       constructor()\n\
+         \x20       fun read() = result\n\
+         \x20   }\n\
+         \x20   class Derived : CapturingBase()\n\
+         \x20   return Derived().read()\n\
+         }\n",
+    );
+}
+
 /// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
 /// not mention `result`; it carries that value solely because its local superclass requires it.
 #[test]

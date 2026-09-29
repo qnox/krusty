@@ -139,25 +139,36 @@ pub(super) fn finalize_local_superclass_captures(
         if parent as usize == class {
             continue;
         }
-        let prefix = ir.classes[parent as usize].constructor_prefix_count as usize;
+        let prefix_count = ir.classes[parent as usize].constructor_prefix_count;
+        let prefix = usize::try_from(prefix_count)
+            .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
         if prefix == 0 {
             continue;
         }
         // A primary `super(written…)` is short by the capture prefix. A call to a secondary
         // constructor is short by that same prefix: its JVM `<init>` carries the captures ahead of
         // the parameters the source wrote, and the Kotlin signature the checker recorded does not.
-        let callee_source_len = if ir.classes[class].super_ctor.primary() {
-            let Some(source_len) = ir.classes[parent as usize]
-                .ctor_args
-                .len()
-                .checked_sub(prefix)
-            else {
-                continue;
-            };
-            source_len
+        let target = ir.classes[class].super_ctor;
+        let (callee_source_len, callee_prefix) = if target.primary() {
+            let parent_args = &ir.classes[parent as usize].ctor_args;
+            let actual = u32::try_from(parent_args.len())
+                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+            let source_len = parent_args.len().checked_sub(prefix).ok_or(
+                FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                },
+            )?;
+            (
+                source_len,
+                parent_args[..prefix]
+                    .iter()
+                    .map(|argument| argument.ty)
+                    .collect::<Vec<_>>(),
+            )
         } else {
-            let Some(secondary) = ir.classes[class]
-                .super_ctor
+            let secondary = target
                 .ordinal
                 .checked_sub(1)
                 .and_then(|index| {
@@ -165,24 +176,30 @@ pub(super) fn finalize_local_superclass_captures(
                         .secondary_ctors
                         .get(index as usize)
                 })
-            else {
-                continue;
-            };
+                .ok_or(FirFileLoweringFailure::InvalidSuperclassConstructorTarget {
+                    class: parent,
+                    target,
+                })?;
             if secondary.prefix_params.len() != prefix {
-                continue;
+                let actual = u32::try_from(secondary.prefix_params.len())
+                    .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+                return Err(FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                });
             }
-            secondary.params.len()
+            (secondary.params.len(), secondary.prefix_params.clone())
         };
         if ir.classes[class].super_args.len() != callee_source_len {
             continue;
         }
-        let parent_args = &ir.classes[parent as usize].ctor_args;
         let wanted = (0..prefix)
             .map(|field| {
                 let field = u32::try_from(field).ok()?;
                 Some((
                     *ir.class_capture_identities.get(&(parent, field))?,
-                    parent_args[field as usize].ty,
+                    callee_prefix[field as usize],
                 ))
             })
             .collect::<Option<Vec<_>>>();
