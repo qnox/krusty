@@ -1,39 +1,35 @@
 name: attribution
 
-# AGENTS.md forbids AI, assistant and tool attribution in commits and pull requests. `edited` re-runs
-# the check when only the title or body changes, which the main ci workflow does not react to.
+# AGENTS.md forbids AI, assistant and tool attribution in commits and pull requests. Commit
+# messages are checked at the start of the ci job, which already runs on a push, a merge queue,
+# and a pull request synchronize. This workflow is only the title and body: `edited` does not
+# start ci, and queueing a second runner for an 18-second check on every push was filling the
+# same runner cap as the conformance jobs.
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
-  merge_group:
-  push:
-    branches: [master]
+    types: [opened, edited, reopened]
 
 permissions:
   contents: read
   pull-requests: read
+
+# A new edit replaces the queued run. Repeated title or body updates were leaving several copies
+# of this check waiting on a runner.
+concurrency:
+  group: attribution-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   attribution:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      # A pull request checks out its merge commit, whose first parent is the base branch as it is
-      # now and whose second is the PR head, so HEAD^1..HEAD^2 is exactly the PR's own commits. The
-      # payload's `base.sha` can be stale after a restack (a force-push onto a newer base), and a
-      # range from it pulls in base-branch commits the PR does not carry.
-      - name: commits
-        env:
-          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || 'HEAD^1..HEAD^2' }}
-        run: scripts/check-attribution.sh "$RANGE"
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
       # Dependabot's text is quoted upstream release notes, which may name an assistant that
       # contributed upstream; it says nothing about who wrote this change.
       - name: title and body
-        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -44,7 +40,6 @@ jobs:
       # by an assistant's app account lands on master under that account. Warn so it is merged with
       # "Rebase and merge", which keeps the maintainer-authored commits.
       - name: opener
-        if: github.event_name == 'pull_request'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
