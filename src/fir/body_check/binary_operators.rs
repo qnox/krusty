@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// Semantic operand type used to select Kotlin's built-in equality shape. A bare type parameter
+/// contributes its declared upper bound, including that bound's nullability. This is deliberately
+/// separate from range selection: flexible platform nullability remains part of equality.
+fn equality_operand_type(ty: Ty) -> Ty {
+    match ty.canonical_semantic() {
+        Ty::TyParam(_, bound) => equality_operand_type(*bound),
+        ty => ty,
+    }
+}
+
 /// One operand of a built-in binary operation: its source expression, its checked type, and the
 /// type the operation consumes it at when that differs from the checked type.
 pub(super) struct BinaryOperand {
@@ -12,6 +22,78 @@ pub(super) struct BinaryOperand {
 }
 
 impl BodyFirChecker<'_> {
+    pub(super) fn checked_equality_expression(
+        &mut self,
+        expression: ExprId,
+        source_operation: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        debug_assert!(matches!(source_operation, BinOp::Eq | BinOp::Ne));
+        let lhs_ty = equality_operand_type(self.info.semantic_ty(lhs));
+        let rhs_ty = equality_operand_type(self.info.semantic_ty(rhs));
+        crate::trace_compiler!(
+            "fir",
+            "checked equality expression={expression:?} lhs={lhs_ty:?} rhs={rhs_ty:?}"
+        );
+        let operation = if source_operation == BinOp::Eq {
+            FirBinaryOperation::Equal
+        } else {
+            FirBinaryOperation::NotEqual
+        };
+        let nullable_numeric = lhs_ty
+            .nullable_primitive()
+            .zip(rhs_ty.nullable_primitive())
+            .and_then(|(lhs_primitive, rhs_primitive)| {
+                Ty::promote(lhs_primitive, rhs_primitive)
+                    .map(|comparison| (lhs_primitive, rhs_primitive, comparison))
+            });
+        if let Some((lhs_primitive, rhs_primitive, comparison)) = nullable_numeric {
+            let resolved = |checker: &Self, source: ExprId, ty: Ty| {
+                checker.resolved_type(
+                    checker.file.expr_span(source).ok_or_else(|| {
+                        checker.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                    })?,
+                    ty,
+                )
+            };
+            return Ok(FirExprKind::NullableNumericComparison {
+                operation,
+                lhs: self.expression(lhs)?,
+                rhs: self.expression(rhs)?,
+                lhs_primitive: resolved(self, lhs, lhs_primitive)?,
+                rhs_primitive: resolved(self, rhs, rhs_primitive)?,
+                comparison: resolved(self, expression, comparison)?,
+            });
+        }
+
+        let operands = lhs_ty
+            .nullable_primitive()
+            .filter(|primitive| *primitive == rhs_ty)
+            .map(|primitive| (lhs, rhs, primitive, true))
+            .or_else(|| {
+                rhs_ty
+                    .nullable_primitive()
+                    .filter(|primitive| *primitive == lhs_ty)
+                    .map(|primitive| (rhs, lhs, primitive, false))
+            });
+        let Some((nullable, primitive, primitive_ty, nullable_first)) = operands else {
+            return self.builtin_binary_expression(expression, source_operation, lhs, rhs);
+        };
+        Ok(FirExprKind::NullablePrimitiveComparison {
+            operation,
+            nullable: self.expression(nullable)?,
+            primitive: self.expression(primitive)?,
+            primitive_ty: self.resolved_type(
+                self.file
+                    .expr_span(primitive)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+                primitive_ty,
+            )?,
+            nullable_first,
+        })
+    }
+
     pub(super) fn builtin_binary_expression(
         &mut self,
         expression: ExprId,
