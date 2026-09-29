@@ -72,7 +72,7 @@ fn an_unsigned_member_getter_uses_the_value_class_name() {
         "UnsignedPropertyGetter",
         DELEGATE,
         "ByteDelegateTest",
-        &[common::stdlib_jar()],
+        &[common::stdlib_jar(), common::jdk_modules()],
         "21",
         &[],
     )
