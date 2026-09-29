@@ -83,7 +83,7 @@ fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
         .methods
         .iter()
         .filter(|method| method.name == "choose")
-        .map(|method| method.descriptor.clone())
+        .map(|method| method.descriptor)
         .collect::<Vec<_>>();
     descriptors.sort();
     assert_eq!(
@@ -271,8 +271,7 @@ fn value_class_body_property_round_trips() {
         .iter()
         .find(|method| method.name.starts_with("getK-"))
         .expect("the value-class pass must realize the body property with its mangled getter")
-        .name
-        .clone();
+        .name;
     let described = info
         .meta
         .class_properties
