@@ -8873,6 +8873,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every signed primitive, both bounds, both value-class carriers and all four unsigned forms, plus
   runtime interface dispatch.
 
+- **A primitive collection parameter rejects a value that is not its wrapper.** `contains`,
+  `indexOf`, `lastIndexOf`, `remove`, `containsKey`, `containsValue`, and `get`, specialized to a
+  signed primitive (`containsValue(value: Int)`), erase the parameter to `Object`. The bridge
+  tests `instanceof` of that primitive's wrapper (`java/lang/Integer`) and returns the operation's
+  neutral result (`false`, `-1`, or `null`) when the test fails, including for `null`. A value
+  that passes is unboxed through `Number` (`Boolean` and `Char` through their own wrappers) and
+  delegated to the primitive method. A nullable primitive (`Int?`) stays on the reference barrier,
+  which admits `null`. The JVM declaration provider attaches this ABI role to the exact decoded
+  Kotlin collection declaration; resolution carries that typed fact through the selected override
+  edge and bridge. An ordinary same-signature member such as `MutableCollection.add` therefore
+  keeps its cast/unbox failure instead of receiving a neutral-result guard. Neither bridge lowering
+  nor emission interprets a method spelling or reconstructs a class hierarchy.
+  Test: `tests/collection_special_member_stub_e2e.rs`
+  (`primitive_collection_bridges_reject_null_and_foreign_wrappers`).
+
+- **A value-class collection parameter rejects a value that is not its box.** `get` on
+  `Map<Wrapper, String>` (`value class Wrapper(val id: Int)`) erases to `get(Object)Object`. The
+  bridge tests `instanceof Wrapper`, returns `null` when that fails, and unboxes with `unbox-impl`
+  before the mangled member. The test names the value class, not the carrier's wrapper
+  (`java/lang/Integer`): a stored key is a `Wrapper`, and testing `Integer` makes the lookup miss.
+  The value-class unbox plan recorded for that parameter is what names the box.
+  Test: `tests/collection_special_member_stub_e2e.rs`
+  (`value_class_map_delegation_accepts_its_own_key`). Corpus:
+  `inlineClasses/interfaceDelegation/kt38337.kt`, `kt38337Generic.kt`.
+
+- **A collection bridge keeps the collection member's role when an intermediate also declares it.**
+  `class MySet<E : Map.Entry<K, V>> : AbstractSet<E>` overrides `contains(element: E)`.
+  `AbstractCollection.contains` and `Collection.contains` erase to the same `contains(Object)Boolean`
+  bridge. The bridge carries `Collection.contains`'s false-on-foreign-type role, tests
+  `instanceof java/util/Map$Entry`, and returns `false` for a foreign object. A bare checkcast to
+  `Map.Entry` throws `ClassCastException` instead.
+  Test: `tests/collection_special_member_stub_e2e.rs`
+  (`abstract_set_contains_rejects_a_foreign_entry`). Corpus:
+  `builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt`.
+
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
   `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
   `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.

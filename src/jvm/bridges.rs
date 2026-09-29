@@ -317,11 +317,18 @@ fn superclass_method_bridges(
                 continue;
             }
         }
-        if ir.classes[cid].bridges.iter().any(|bridge| {
+        if let Some(existing) = ir.classes[cid].bridges.iter_mut().find(|bridge| {
             bridge.name == bridge_name
                 && bridge.erased_params == base_params
                 && bridge.erased_ret == base_ret
         }) {
+            // Several resolved override edges erase to one physical bridge. The nearest
+            // declaration (`AbstractCollection.contains`) need not be the collection member that
+            // carries the type-safe role; a farther edge (`Collection.contains`) does. The role
+            // is already on that edge, so the bridge keeps it.
+            if existing.collection_barrier.is_none() {
+                existing.collection_barrier = edge.collection_barrier;
+            }
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);
@@ -344,6 +351,8 @@ fn superclass_method_bridges(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
+            overridden_owner: Some(edge.overridden_owner),
+            collection_barrier: edge.collection_barrier,
             parameters,
             name: bridge_name,
             erased_params: base_params,
@@ -487,6 +496,8 @@ fn push_member_extension_accessor_bridges(
     let accessor = |name, target_function, erased_ret, concrete_ret| Bridge {
         kind: BridgeKind::Function,
         target_function,
+        overridden_owner: None,
+        collection_barrier: None,
         parameters: vec![receiver.clone()],
         name,
         erased_params: vec![bridge_erasure(declared_receiver)],
@@ -550,6 +561,8 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: getter,
+            overridden_owner: None,
+            collection_barrier: None,
             parameters: Vec::new(),
             name: getter_name,
             erased_params: vec![],
@@ -574,6 +587,8 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
             target_function: setter,
+            overridden_owner: None,
+            collection_barrier: None,
             parameters: vec![BridgeParameter {
                 identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
                 semantic: edge.declared_type,
