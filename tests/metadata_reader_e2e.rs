@@ -188,10 +188,7 @@ fn metadata_decodes_value_parameter_names() {
         .find(|f| f.kotlin_name == "copy")
         .expect("Pair.copy in metadata");
     assert_eq!(
-        copy.value_params
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>(),
+        copy.value_params.iter().map(|p| p.name).collect::<Vec<_>>(),
         vec!["first".to_string(), "second".to_string()],
         "copy's value-parameter names decode from @Metadata"
     );
