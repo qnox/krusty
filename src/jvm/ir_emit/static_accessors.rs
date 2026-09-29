@@ -731,9 +731,10 @@ struct Accessor<'a> {
     flags: u16,
 }
 
-/// The field bridge another class uses for private member property `property`. A named object's
-/// plain backing field is static, so the bridge takes no instance. A declared accessor, and every
-/// instance field, still receives the owner.
+/// The bridge another class uses for private member property `property`. A source-declared
+/// accessor is `access$getX` / `access$setX` and carries that accessor's JVM type; a plain field
+/// is `access$getX$p` / `access$setX$p`. A named object's plain backing field is static, so its
+/// bridge takes no instance. A declared accessor, and every instance field, still receives the owner.
 pub(super) fn member_property_field_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
@@ -753,16 +754,21 @@ pub(super) fn member_property_field_bridge(
         .and_then(|index| class.fields.get(index as usize))
         .map(|field| type_descriptor(declared_property_accessor_jvm(ir, property, field)))
         .unwrap_or_else(|| value.to_string());
+    let carried = if declared_accessor {
+        exposed.as_str()
+    } else {
+        value
+    };
     let descriptor = if read {
         if static_field {
             format!("(){exposed}")
         } else {
-            format!("(L{owner};){value}")
+            format!("(L{owner};){carried}")
         }
     } else if static_field {
         format!("({exposed})V")
     } else {
-        format!("(L{owner};{value})V")
+        format!("(L{owner};{carried})V")
     };
     let accessor = if read {
         property_getter_name(&property.name)
@@ -777,7 +783,7 @@ pub(super) fn member_property_field_bridge(
         .map(|_| property.name.clone());
     crate::jvm::inline::PropertyAccess::AccessBridge {
         owner: owner.to_string(),
-        name: format!("access${accessor}$p"),
+        name: member_property_accessor_name(&accessor, declared_accessor),
         descriptor,
         takes_receiver: !static_field,
         inline_uninitialized_guard,

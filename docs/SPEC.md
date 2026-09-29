@@ -3490,14 +3490,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   calling the property getter or setter from there re-enters the accessor that contains the use.
   The nested class calls the owner's `access$get<X>$p` / `access$set<X>$p`, and that accessor reads
   or writes the field directly. Those methods are distinct from `access$get<X>` /
-  `access$set<X>`, which a private property-reference carrier uses to call source-declared
-  accessors; both pairs can coexist for one property. A top-level property's accessor is a static
-  method of the file facade; a member property's takes the instance. Tests:
-  `tests/backing_field_accessor_e2e.rs`
+  `access$set<X>`, which another class uses to call source-declared accessors — a property
+  reference, or a companion writing a private property whose setter is user code. Both pairs can
+  coexist for one property. A top-level property's accessor is a static method of the file facade;
+  a member property's takes the instance. Tests: `tests/backing_field_accessor_e2e.rs`
   (`an_inner_accessor_reads_its_own_backing_field`,
   `a_nested_object_reads_the_enclosing_top_level_backing_field`,
   `a_nested_object_reads_the_enclosing_instance_backing_field`,
-  `a_local_class_in_a_setter_writes_the_backing_field`).
+  `a_local_class_in_a_setter_writes_the_backing_field`,
+  `nested_field_bridges_do_not_replace_property_reference_bridges`) and
+  `a_private_property_keeps_its_source_written_setter` in `tests/companion_e2e.rs`.
 
 - **Top-level property with a backing field + custom accessor.** `val x = "OK" get() = field`,
   `var v = 0 set(value) { field = value }` at file scope. The backing field is a facade STATIC
