@@ -2540,10 +2540,26 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
     }
     let dir =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/kotlinc_server_{hash:016x}"));
-    if dir.join("KotlincServer.class").is_file() {
+    let class = dir.join("KotlincServer.class");
+    if class.is_file() {
         return Some(dir);
     }
+    // Coverage runs several test binaries at once. They share this cache, so the first
+    // compile is exclusive; the others wait and reuse the class.
     std::fs::create_dir_all(&dir).ok()?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("KotlincServer.lock"))
+        .ok()?;
+    // SAFETY: `flock` on a descriptor this function owns until it returns.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    if class.is_file() {
+        return Some(dir);
+    }
     let src_path = dir.join("KotlincServer.java");
     std::fs::write(&src_path, KOTLINC_SERVER_SRC).ok()?;
     let javac = format!("{java_home}/bin/javac");
@@ -2556,9 +2572,10 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
         .arg(&src_path)
         .output()
         .ok()?;
-    if !dir.join("KotlincServer.class").is_file() {
+    if !class.is_file() {
         eprintln!(
-            "KotlincServer javac failed: {}",
+            "KotlincServer javac failed: status {} {}",
+            out.status,
             String::from_utf8_lossy(&out.stderr)
         );
         return None;
