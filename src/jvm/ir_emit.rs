@@ -12596,7 +12596,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                         })
                         .unwrap_or(Ty::obj("java/lang/Object")),
                 ),
-                _ => Ty::obj(&crate::jvm::names::classfile_internal_name_of(fq_name)),
+                _ => Ty::obj_name(crate::jvm::jvm_class_map::to_jvm_classfile_type_name(
+                    fq_name,
+                )),
             }
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`

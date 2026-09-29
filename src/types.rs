@@ -272,6 +272,11 @@ impl TypeName {
         type_names().jvm_nested_binary_name(self.name_id(), nested)
     }
 
+    /// Compare a boundary spelling with a direct JVM nested child of this classifier identity.
+    pub(crate) fn nested_child_matches_path(self, nested: &str, path: &str) -> bool {
+        type_names().nested_child_matches_path(self.name_id(), nested, path)
+    }
+
     /// Lexicographic path ordering for deterministic internal traversal without boundary rendering.
     pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
         type_names().path_cmp(self.name_id(), other.name_id())
