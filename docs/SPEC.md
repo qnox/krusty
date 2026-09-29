@@ -2537,6 +2537,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
   must satisfy its declared bound and is passed to the inline expander for reified operations. For a
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
+- **A type parameter bounded by non-null `Any` is instantiated as `V & Any` when the argument is an
+  unbounded type parameter `V`.** `V`'s implicit bound is `Any?`, so `V` is not a subtype of `Any`,
+  but `V` and `V?` are subtypes of `(V & Any)?` and `(V & Any)?` is a subtype of `V?`. A nullable
+  occurrence therefore accepts the argument (`fun <R : Any> id(x: R?): R?` called from
+  `fun <V> f(v: V): V? = id(v)`, and `(T) -> R?` keeps the lambda parameter and yields `V?`). A
+  non-null occurrence still requires the bound: `fun <R : Any> nn(x: R)` rejects `V` because `V`
+  is not a subtype of `V & Any`, and a lambda `(T) -> R` is checked against `V & Any`. An explicit
+  type argument is not rewritten. A different bound is unchanged (`R : CharSequence` still expects
+  `CharSequence`). Test: `tests/definitely_non_null_bound_e2e.rs`.
 - **Conditional branches contribute result-type constraints to generic calls.** For `if`, `when`,
   and elvis expressions, a selected call with unbound result formals is rechecked against a sibling
   result type that can bind them. Branch order does not affect the binding. If no sibling can bind

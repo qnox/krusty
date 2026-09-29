@@ -452,6 +452,14 @@ impl Checker<'_> {
                 .iter()
                 .filter_map(|formal| binds.get(formal).map(|binding| (formal.clone(), *binding))),
         );
+        // `<R : Any>` fixed by an unbounded `V` is `V & Any` before the lambda body is checked.
+        // Checking the body against plain `V` and again against the intersection reports both.
+        crate::symbol_resolver::tighten_definitely_non_null_bindings(
+            &result_semantic,
+            &mut expectation_binds,
+            type_args.len(),
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        );
         let param_types = argument_parameters
             .iter()
             .zip(argument_map)

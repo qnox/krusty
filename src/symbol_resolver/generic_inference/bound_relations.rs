@@ -474,3 +474,54 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
             })
         })
 }
+
+/// Instantiate a formal as the definitely-non-null form of a type-parameter argument.
+///
+/// `<R : Any>` does not accept an unbounded `V` (`V`'s implicit bound is `Any?`). Kotlin's solution
+/// is the intersection `V & Any`, not a rejection and not a substitution of the bound `Any` itself:
+/// `V` and `V?` are subtypes of `(V & Any)?`, while `V` is not a subtype of non-null `V & Any`.
+/// An explicit type argument stays as written. A bound the intersection does not satisfy
+/// (`R : CharSequence`) is left unchanged.
+pub(crate) fn tighten_definitely_non_null_bindings(
+    generic_sig: &GenericSig,
+    bindings: &mut GSigBinds,
+    explicit_type_argument_count: usize,
+    mut admits: impl FnMut(Ty, Ty) -> bool,
+) {
+    for (index, (formal, bounds)) in generic_sig
+        .formals
+        .iter()
+        .zip(&generic_sig.formal_bounds)
+        .enumerate()
+    {
+        if explicit_type_argument_count > index {
+            continue;
+        }
+        let Some(stored) = bindings.get(formal).copied() else {
+            continue;
+        };
+        let actual = stored.projection_inner().unwrap_or(stored);
+        if bounds
+            .iter()
+            .all(|bound| admits(actual, ty_subst(*bound, bindings)))
+        {
+            continue;
+        }
+        let candidate = actual.non_null();
+        if !matches!(candidate, Ty::TyParam(_, _)) {
+            continue;
+        }
+        let tightened = candidate.definitely_non_null();
+        if tightened == actual {
+            continue;
+        }
+        let mut trial = bindings.clone();
+        trial.insert(formal.clone(), tightened);
+        if bounds
+            .iter()
+            .all(|bound| admits(tightened, ty_subst(*bound, &trial)))
+        {
+            bindings.insert(formal.clone(), tightened);
+        }
+    }
+}

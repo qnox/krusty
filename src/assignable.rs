@@ -151,10 +151,20 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if sub == sup {
         return true;
     }
-    // A type parameter's semantic identity is its key. The carried bound is constraint metadata and
-    // may be normalized differently while a generic call is instantiated (`Any` versus `Any?`).
-    if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
-        return true;
+    // A type parameter's semantic identity is its key. Carried bounds are constraint metadata and
+    // may be normalized differently while a generic call is instantiated, so same-named parameters
+    // stay one type. The exception is a definitely-non-null intersection: `<T>` (bound `Any?`) is
+    // not a subtype of `T & Any`, while `T & Any` remains a subtype of `T`.
+    if let (Ty::TyParam(sub_name, sub_bound), Ty::TyParam(sup_name, sup_bound)) = (sub, sup) {
+        if sub_name == sup_name {
+            if sub_bound.upper_bound_admits_null()
+                && !sup_bound.upper_bound_admits_null()
+                && sub_bound.definitely_non_null() == *sup_bound
+            {
+                return false;
+            }
+            return true;
+        }
     }
     if sub == Ty::Error || sup == Ty::Error {
         return true;
@@ -191,6 +201,19 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         // stripping the target's `?`: `<T : Any?>` is a subtype of `Any?` (and therefore fits a
         // star projection), but is not a subtype of non-null `Any`. Preserve the direct `T <: T?`
         // relation without expanding T to an unrelated upper bound first.
+        // `T?` and `(T & Any)?` name the same parameter once `?` is written on both sides.
+        // Stripping both nullabilities would ask whether `T <: T & Any`, which is false.
+        if let Ty::Nullable(sub_inner) = sub {
+            if let (Ty::TyParam(sub_name, sub_bound), Ty::TyParam(sup_name, sup_bound)) =
+                (*sub_inner, *inner)
+            {
+                if sub_name == sup_name
+                    && sub_bound.definitely_non_null() == sup_bound.definitely_non_null()
+                {
+                    return true;
+                }
+            }
+        }
         if matches!(sub, Ty::TyParam(source, _) if matches!(*inner, Ty::TyParam(target, _) if source == target))
         {
             return true;
@@ -608,6 +631,17 @@ mod tests {
         assert!(ok(parameter, Ty::nullable(s("kotlin/Any"))));
         assert!(!ok(parameter, s("kotlin/Any")));
         assert!(!ok(Ty::nullable(parameter), parameter));
+
+        let intersection = parameter.definitely_non_null();
+        assert!(
+            !ok(parameter, intersection),
+            "T is not a subtype of T & Any"
+        );
+        assert!(ok(intersection, parameter), "T & Any is a subtype of T");
+        assert!(ok(parameter, Ty::nullable(intersection)));
+        assert!(ok(Ty::nullable(parameter), Ty::nullable(intersection)));
+        assert!(ok(Ty::nullable(intersection), Ty::nullable(parameter)));
+        assert!(!ok(Ty::nullable(parameter), intersection));
     }
 
     #[test]

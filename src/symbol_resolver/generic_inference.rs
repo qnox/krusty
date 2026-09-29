@@ -14,7 +14,7 @@ pub(crate) use bound_relations::{
     complete_dependency_instantiated_bound_bindings,
     complete_return_only_captured_receiver_bindings,
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
-    resolve_bound_violating_bindings,
+    resolve_bound_violating_bindings, tighten_definitely_non_null_bindings,
 };
 #[cfg(test)]
 use call_constraints::GenericBoundViolation;

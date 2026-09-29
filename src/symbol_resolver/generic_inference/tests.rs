@@ -616,3 +616,42 @@ fn flexible_member_return_seeds_the_receivers_symbolic_argument() {
     assert_eq!(bindings.get("caller:Y"), Some(&caller_value));
     assert_eq!(ty_subst(flexible, &bindings), flexible);
 }
+
+#[test]
+fn an_unbounded_type_parameter_instantiates_an_any_bound_as_definitely_non_null() {
+    let nullable_any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let any = Ty::obj("kotlin/Any");
+    let parameter = Ty::ty_param("V", nullable_any);
+    let admits = |actual: Ty, bound: Ty| match actual.non_null() {
+        Ty::TyParam(_, parameter_bound) => {
+            !parameter_bound.upper_bound_admits_null() && parameter_bound.non_null() == bound
+        }
+        other => other == bound,
+    };
+    let signature = GenericSig {
+        formals: vec!["R".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::nullable(Ty::ty_param("R", nullable_any))],
+        ret: Ty::nullable(Ty::ty_param("R", nullable_any)),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let mut bindings = GSigBinds::from([("R".to_string(), parameter)]);
+
+    tighten_definitely_non_null_bindings(&signature, &mut bindings, 0, admits);
+
+    assert_eq!(bindings.get("R"), Some(&parameter.definitely_non_null()));
+
+    let mut explicit = GSigBinds::from([("R".to_string(), parameter)]);
+    tighten_definitely_non_null_bindings(&signature, &mut explicit, 1, admits);
+    assert_eq!(explicit.get("R"), Some(&parameter));
+
+    let character = Ty::obj("kotlin/CharSequence");
+    let character_bounded = GenericSig {
+        formal_bounds: vec![vec![character]],
+        ..signature
+    };
+    let mut rejected = GSigBinds::from([("R".to_string(), parameter)]);
+    tighten_definitely_non_null_bindings(&character_bounded, &mut rejected, 0, admits);
+    assert_eq!(rejected.get("R"), Some(&parameter));
+}

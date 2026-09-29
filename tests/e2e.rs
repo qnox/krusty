@@ -543,6 +543,8 @@ mod deferred_nullable_val_e2e;
 mod deferred_reads_inferred_member_return_e2e;
 #[path = "deferred_val_init_e2e.rs"]
 mod deferred_val_init_e2e;
+#[path = "definitely_non_null_bound_e2e.rs"]
+mod definitely_non_null_bound_e2e;
 #[path = "definitely_non_null_type_e2e.rs"]
 mod definitely_non_null_type_e2e;
 #[path = "delegate_by_lazy_e2e.rs"]
