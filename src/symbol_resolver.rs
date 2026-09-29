@@ -4991,6 +4991,20 @@ pub struct SelectedMemberProperty {
     pub property: Option<PropertyInfo>,
 }
 
+impl SelectedMemberProperty {
+    pub(crate) fn read(&self, receiver: Ty) -> Option<ResolvedMember> {
+        self.property
+            .as_ref()
+            .and_then(|property| member_property_read_from_declaration(receiver, property))
+    }
+
+    pub(crate) fn setter(&self) -> Option<ResolvedPropertySetter> {
+        self.property
+            .as_ref()
+            .and_then(member_property_write_from_declaration)
+    }
+}
+
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
@@ -5037,9 +5051,11 @@ fn resolved_member_from_info(
 }
 
 fn member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
-    nearest_member_properties(callables)
-        .into_iter()
-        .next()
+    callables
+        .properties()
+        .iter()
+        .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
+        .min_by_key(|property| property.receiver_rank)
         .cloned()
 }
 
@@ -5073,33 +5089,21 @@ fn member_property_write_from_declaration(
 }
 
 fn member_property_write_from_callables(callables: &Callables) -> Option<ResolvedPropertySetter> {
-    nearest_member_properties(callables)
-        .into_iter()
-        .find_map(member_property_write_from_declaration)
-}
-
-/// Member properties on the nearest receiver rung. A private Java field published beside a
-/// public method of the same name (`java.util.ArrayList.size`) is not the Kotlin property, so
-/// it is dropped when any non-private declaration shares that rung. A private declaration that
-/// is alone on the nearest rung stays: that is a Kotlin `private` member hiding a farther
-/// public one.
-fn nearest_member_properties(callables: &Callables) -> Vec<&PropertyInfo> {
-    let mut members = callables
+    let rank = callables
         .properties()
         .iter()
         .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
-        .collect::<Vec<_>>();
-    let Some(nearest) = members.iter().map(|property| property.receiver_rank).min() else {
-        return Vec::new();
-    };
-    members.retain(|property| property.receiver_rank == nearest);
-    if members
+        .map(|property| property.receiver_rank)
+        .min()?;
+    callables
+        .properties()
         .iter()
-        .any(|property| property.visibility != Visibility::Private)
-    {
-        members.retain(|property| property.visibility != Visibility::Private);
-    }
-    members
+        .filter(|property| {
+            property.kind == PropKind::Member
+                && property.context_count == 0
+                && property.receiver_rank == rank
+        })
+        .find_map(member_property_write_from_declaration)
 }
 
 fn select_instance_info(
