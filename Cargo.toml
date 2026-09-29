@@ -62,11 +62,17 @@ path = "src/lib.rs"
 opt-level = 3
 lto = "thin"
 
-# Fast-iteration profile for the test/conformance round. The in-loop tests don't need optimization, so
-# this is unoptimized (`opt-level = 0`, inherited from `dev`) for a seconds-long rebuild after an edit —
-# but with `overflow-checks`/`debug-assertions` OFF: krusty relies on wrapping arithmetic (hashes, JVM
-# value math), which a debug build's overflow checks abort on (SIGABRT). `debug = false` drops debuginfo
-# for a faster link. Run the round with `cargo test --profile gate …` (see run-tests.sh), not `--release`.
+# Fast-iteration profile for the test round. Test crates stay unoptimized (`opt-level = 0`,
+# inherited from `dev`) so a harness edit relinks in seconds — but with `overflow-checks` and
+# `debug-assertions` OFF: krusty relies on wrapping arithmetic (hashes, JVM value math), which a
+# debug build's overflow checks abort on (SIGABRT). `debug = false` drops debuginfo for a faster
+# link. Run the round with `cargo test --profile gate …` (see run-tests.sh), not `--release`.
+#
+# The compiler library itself is opt-level 2. The box corpus and e2e compile with that library
+# in-process; an unoptimized compiler made the corpus a 99s wall / 337s CPU run on 4 cores, and
+# the same corpus at opt-level 2 was 19s / 62s with the same pass and fail counts. `codegen-units
+# = 16` is what that measurement used. Dev's 256 units would compile a touch faster and give most
+# of the runtime back. Thin LTO stays off so a compiler edit does not pay a release link.
 [profile.gate]
 inherits = "dev"
 overflow-checks = false
@@ -74,11 +80,16 @@ debug-assertions = false
 debug = false
 incremental = true
 
+[profile.gate.package.krusty]
+opt-level = 2
+codegen-units = 16
+
 # Instrumented-coverage profile (scripts/coverage.sh). The e2e suite compiles every dependency-lib
 # fixture with krusty in-process, so the instrumented binary IS the compiler under measurement:
-# at `dev` (opt 0 + debuginfo + overflow checks) the branch-instrumented run costs ~4x the gate and
-# dominated CI wall clock. `opt-level = 1` keeps coverage counters exact (instrumentation happens
-# in MIR, before optimization) while roughly halving the instrumented run; coverage mapping does
+# at `dev` (opt 0 + debuginfo + overflow checks) the branch-instrumented run cost about 4x an
+# unoptimized compiler and dominated CI wall clock. `opt-level = 1` keeps coverage counters exact
+# (instrumentation happens in MIR, before optimization) while roughly halving the instrumented run;
+# coverage mapping does
 # not need debuginfo. `overflow-checks` stay OFF like `gate` (krusty relies on wrapping
 # arithmetic), but `debug-assertions` stay ON: this is the ONLY automated run that executes the
 # compiler's `debug_assert!` invariants — turning them off here would leave them dead in every CI
