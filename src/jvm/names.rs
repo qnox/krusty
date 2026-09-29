@@ -311,8 +311,8 @@ fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static st
 /// name instead. `Array` is erased here because a classifier-only owner has no element argument.
 pub fn array_class_descriptor(internal: impl InternalName) -> Option<&'static str> {
     if internal.internal_matches("kotlin/Array") {
-        Some(array_descriptor(type_descriptor(Ty::obj(
-            "java/lang/Object",
+        Some(array_descriptor(type_descriptor(Ty::obj_name(
+            crate::types::wk::java_object(),
         ))))
     } else {
         primitive_array_descriptor(internal)
