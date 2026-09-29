@@ -1037,57 +1037,33 @@ fn materialize_member_property(
         } else {
             false
         };
-        // A synthesized class's CAPTURE already owns a field, spliced in with its constructor
-        // argument when the class was lowered. `install_anonymous_object_captures` also registers
-        // each capture as a synthetic property, so emitting a field for that property again gives
-        // the class two identically-named fields and the JVM refuses to load it
-        // (`ClassFormatError: Duplicate field name`). Reuse the existing field for that synthetic
-        // property only. A source property of the same spelling keeps its own field: the capture
-        // is `$x` and `val x = 2` is `x`.
+        // Captures and source properties are distinct semantic storage even when their source names
+        // and types coincide. Capture lowering has already installed the constructor-prefix field;
+        // this declaration owns a new field, and the backend alone chooses their distinct physical
+        // spellings (`$x` for the capture beside source property `x`).
         let storage_ty = property.storage_ty.unwrap_or(property.ty);
-        let capture_placeholder = property.initializer.is_none()
-            && !property.flags.has(DeclarationFlags::CUSTOM_GETTER)
-            && !property.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
-            && !property.flags.has(DeclarationFlags::LATEINIT)
-            && !property.flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD)
-            && !property
-                .flags
-                .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)
-            && !property.flags.has(DeclarationFlags::MUTABLE);
-        let existing = capture_placeholder
-            .then(|| {
-                ir.classes[class_id as usize]
-                    .fields
-                    .iter()
-                    .position(|field| field.name == property.name && field.ty == storage_ty)
+        let field = u32::try_from(ir.classes[class_id as usize].fields.len())
+            .map_err(|_| FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration))?;
+        let field_type_parameter = anchor
+            .owner
+            .and_then(|classifier| {
+                classifier_type_parameter_ordinal(index, classifier, storage_ty)
+                    .and_then(|ordinal| index.type_parameter(classifier, ordinal))
             })
-            .flatten();
-        let field = u32::try_from(existing.unwrap_or(ir.classes[class_id as usize].fields.len()))
-            .map_err(|_| {
-            FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration)
-        })?;
-        if existing.is_none() {
-            let field_type_parameter = anchor
-                .owner
-                .and_then(|classifier| {
-                    classifier_type_parameter_ordinal(index, classifier, storage_ty)
-                        .and_then(|ordinal| index.type_parameter(classifier, ordinal))
-                })
-                .and_then(|parameter| index.type_parameter_name(parameter))
-                .map(str::to_owned);
-            ir.classes[class_id as usize].fields.push(IrField {
-                name: property.name.clone(),
-                ty: storage_ty,
-                constructor_store_line: 0,
-                type_param: field_type_parameter,
-                default: None,
-                flags: IrfFlags::default()
-                    .with_has_default(has_default)
-                    .with_is_final(!property.flags.has(DeclarationFlags::MUTABLE))
-                    .with_is_private(true)
-                    .with_is_lateinit(property.flags.has(DeclarationFlags::LATEINIT)),
-            });
-        }
+            .and_then(|parameter| index.type_parameter_name(parameter))
+            .map(str::to_owned);
+        ir.classes[class_id as usize].fields.push(IrField {
+            name: property.name.clone(),
+            ty: storage_ty,
+            constructor_store_line: 0,
+            type_param: field_type_parameter,
+            default: None,
+            flags: IrfFlags::default()
+                .with_has_default(has_default)
+                .with_is_final(!property.flags.has(DeclarationFlags::MUTABLE))
+                .with_is_private(true)
+                .with_is_lateinit(property.flags.has(DeclarationFlags::LATEINIT)),
+        });
         if property.flags.has(DeclarationFlags::PROPERTY_PARAMETER) {
             ir.classes[class_id as usize].ctor_param_count += 1;
         }

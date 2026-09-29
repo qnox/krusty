@@ -100,6 +100,7 @@ fn an_anonymous_object_getter_reads_the_enclosing_parameter() {
         \x20   val seed = object : F<String>() { override val head get() = \"no\" }\n\
         \x20   return seed.plus(\"OK\").head\n\
         }\n";
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
     assert_eq!(run(SRC).expect("getter reads the parameter"), "OK");
 }
 
@@ -123,6 +124,7 @@ fun box(): String {
     return if (outer.child().owner === outer) "OK" else "fail"
 }
 "#;
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
     assert_eq!(
         run(SRC).expect("labeled this is the enclosing instance"),
         "OK"
@@ -187,6 +189,7 @@ fun box() : String {
   return r
 }
 "#;
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
     assert_eq!(run(SRC).expect("flist concatenates O and K"), "OK");
 }
 
@@ -207,7 +210,11 @@ fn a_local_class_member_reads_the_enclosing_parameter() {
         \x20   return \"${c.g()}/${c.h()}/${c.y}/${c.x}\"\n\
         }\n\
         fun box(): String = f(8)\n";
-    assert_eq!(run(SRC).expect("parameter outranks the property"), "8/2/8/2");
+    assert_eq!(common::kotlinc_box_result(SRC), "8/2/8/2");
+    assert_eq!(
+        run(SRC).expect("parameter outranks the property"),
+        "8/2/8/2"
+    );
 }
 
 /// kotlinc 2.4.20: `f(8)` is `"4/0/4"`. The assignment and the read both target the function
@@ -227,6 +234,7 @@ fn a_nested_classifier_assignment_writes_the_enclosing_local() {
         \x20   return \"${o.g()}/${o.x}/$x\"\n\
         }\n\
         fun box(): String = if (f(8) == \"4/0/4\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
     assert_eq!(run(SRC).expect("assignment targets the local"), "OK");
 }
 
@@ -245,6 +253,7 @@ fn an_outer_smart_cast_applies_inside_a_nested_classifier() {
         \x20   return \"FAIL\"\n\
         }\n\
         fun box(): String = f()\n";
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
     assert_eq!(run(SRC).expect("outer smart cast reaches the object"), "OK");
 }
 
