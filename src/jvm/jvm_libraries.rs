@@ -2069,11 +2069,12 @@ impl JvmLibraries {
                     companion.push(member);
                 } else {
                     // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
-                    // `Number.toInt` declarations. The realization table carries the source name;
-                    // the classfile spelling stays the physical call.
+                    // `Number.toInt` declarations. The realization table records the classfile
+                    // owner (`java/lang/Number`); the requested name may be the Kotlin mapped
+                    // identity (`kotlin/Number`) because class lookup translates it first.
                     if let Some(source) =
                         super::mapped_builtin_declarations::source_name_for_realization(
-                            physical,
+                            ci.this_class,
                             &m.name,
                             &member.descriptor,
                         )
@@ -6086,6 +6087,45 @@ mod tests {
                 .all(|member| member.name != "intValue"),
             "provider boundary must not leak the physical Java spelling"
         );
+    }
+
+    #[test]
+    fn mapped_kotlin_number_publishes_jdk_realizations_without_stdlib() {
+        let Some(jdk) = crate::toolchain::jdk_modules() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![jdk]),
+        ));
+        let classifier = libraries
+            .classifier_record(type_name("kotlin/Number"))
+            .expect("kotlin.Number");
+        for (source, physical) in [
+            ("toByte", "byteValue"),
+            ("toShort", "shortValue"),
+            ("toInt", "intValue"),
+            ("toLong", "longValue"),
+            ("toFloat", "floatValue"),
+            ("toDouble", "doubleValue"),
+        ] {
+            assert!(
+                classifier.members.iter().any(|member| {
+                    member.name == source && member.physical_name.as_deref() == Some(physical)
+                }),
+                "missing {source} realized by {physical}"
+            );
+        }
+        assert!(classifier.members.iter().all(|member| {
+            !matches!(
+                member.name.as_str(),
+                "byteValue"
+                    | "shortValue"
+                    | "intValue"
+                    | "longValue"
+                    | "floatValue"
+                    | "doubleValue"
+            )
+        }));
     }
 
     #[test]
