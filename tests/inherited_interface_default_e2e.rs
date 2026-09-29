@@ -44,6 +44,17 @@ class Impl : C {\n\
 }\n\
 fun box(): String = Impl().foo()\n";
 
+const SPLIT_DEFAULTS: &str = "interface A {\n\
+    fun foo(a: String? = \"A\", b: String?): String\n\
+}\n\
+interface B {\n\
+    fun foo(a: String?, b: String? = \"B\"): String\n\
+}\n\
+class Impl : A, B {\n\
+    override fun foo(a: String?, b: String?) = \"$a$b\"\n\
+}\n\
+fun box(): String = Impl().foo()\n";
+
 fn box_instructions(root: &std::path::Path, class: &str, bytes: &[u8]) -> Vec<String> {
     fs::create_dir_all(root).expect("class directory");
     let class_file = root.join(format!("{class}.class"));
@@ -104,4 +115,9 @@ fn the_first_listed_supertype_supplies_the_default() {
 #[test]
 fn a_subinterface_keeps_its_leftmost_inherited_default() {
     assert_inherited_default("InheritedDefaultSub", THROUGH_SUBINTERFACE, "OK");
+}
+
+#[test]
+fn split_defaults_use_the_leftmost_provider_and_its_complete_mask() {
+    assert_inherited_default("InheritedDefaultSplit", SPLIT_DEFAULTS, "Anull");
 }

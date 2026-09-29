@@ -1514,12 +1514,8 @@ enum InheritedDefaultState {
     Ambiguous,
 }
 
-/// Choose one inherited default, or report that the clash is ambiguous.
-///
-/// Two immediate supertypes that each declare a default cannot be told apart, so the override
-/// inherits nothing. A default that is only visible through an intermediate classifier stays
-/// callable: the expression is the one found first in a left-to-right depth-first walk, even when
-/// a supertype listed later declares a nearer default (`KT-36188`).
+/// Cache each implementation owner's typed left-to-right supertype order while the composite
+/// symbol source that owns the hierarchy is live.
 fn default_supertype_orders(
     source: &dyn SymbolSource,
     edges: &[ResolvedFunctionOverride],
@@ -1533,6 +1529,13 @@ fn default_supertype_orders(
     orders
 }
 
+/// Choose one inherited default provider, or report that the clash is ambiguous.
+///
+/// Immediate supertypes conflict only when distinct providers both default the same parameter
+/// slot. Disjoint defaults contribute one combined omission bitmap, but the expression provider is
+/// still the declaration found first in a left-to-right depth-first walk. A default visible only
+/// through an intermediate classifier uses that same order even when a later supertype declares a
+/// nearer default (`KT-36188`).
 fn inherited_default_from_suppliers(
     preorders: &HashMap<TypeName, HashMap<TypeName, u32>>,
     edges: &[&ResolvedFunctionOverride],
@@ -1546,20 +1549,26 @@ fn inherited_default_from_suppliers(
             InheritedDefaultState::Absent
         };
     }
-    let mut immediate = HashSet::new();
-    for (depth, _, _, provider) in &suppliers {
-        if *depth == 1 {
-            immediate.insert(*provider);
+    let immediate = suppliers
+        .iter()
+        .filter(|(depth, _, _, _)| *depth == 1)
+        .collect::<Vec<_>>();
+    for (index, (_, _, defaults, provider)) in immediate.iter().enumerate() {
+        for (_, _, other_defaults, other_provider) in &immediate[index + 1..] {
+            if provider != other_provider
+                && defaults.iter().enumerate().any(|(parameter, left)| {
+                    *left && other_defaults.get(parameter).copied().unwrap_or(false)
+                })
+            {
+                return InheritedDefaultState::Ambiguous;
+            }
         }
-    }
-    if immediate.len() > 1 {
-        return InheritedDefaultState::Ambiguous;
     }
     let order = edges
         .first()
         .and_then(|edge| preorders.get(&edge.implementation_owner));
-    let (_, _, defaults, provider) = suppliers
-        .into_iter()
+    let (_, _, _, provider) = suppliers
+        .iter()
         .min_by_key(|(depth, owner, _, _)| {
             (
                 order
@@ -1569,6 +1578,14 @@ fn inherited_default_from_suppliers(
             )
         })
         .expect("at least one inherited default");
+    let provider = *provider;
+    let mut defaults = Vec::new();
+    for (_, _, supplier_defaults, _) in suppliers {
+        defaults.resize(defaults.len().max(supplier_defaults.len()), false);
+        for (target, supplied) in defaults.iter_mut().zip(supplier_defaults) {
+            *target |= supplied;
+        }
+    }
     InheritedDefaultState::Unique(defaults, provider)
 }
 
