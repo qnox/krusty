@@ -62,6 +62,37 @@ impl InvokeCoercion {
     }
 }
 
+/// The primitive an inlined lambda stores for a non-null unsigned parameter that `invoke` passed
+/// as the unsigned box. A nullable unsigned parameter stays that box.
+fn unsigned_inline_carrier(semantic: Ty, physical: Ty) -> Option<Ty> {
+    if semantic.is_nullable() {
+        return None;
+    }
+    let scalar = semantic.non_null().canonical_semantic();
+    if !scalar.is_unsigned() {
+        return None;
+    }
+    let class = scalar.kotlin_class_internal()?;
+    let boxed = type_descriptor(physical) == type_descriptor(Ty::nullable(scalar))
+        || type_descriptor(physical) == type_descriptor(Ty::obj_name(class));
+    boxed.then(|| ir_ty_to_jvm(&scalar))
+}
+
+/// `kotlin/UInt` when `carrier` is the primitive an inlined unsigned value is stored as.
+fn unsigned_value_class(semantic: Ty, carrier: Ty) -> Option<String> {
+    if semantic.is_nullable() {
+        return None;
+    }
+    let scalar = semantic.non_null().canonical_semantic();
+    if !scalar.is_unsigned() {
+        return None;
+    }
+    let primitive = ir_ty_to_jvm(&scalar);
+    (type_descriptor(carrier) == type_descriptor(primitive))
+        .then(|| scalar.kotlin_class_internal().map(|class| class.render()))
+        .flatten()
+}
+
 /// The parts of a literal lambda argument both route planning and compilation read.
 struct LiteralLambda {
     impl_fn: u32,
@@ -156,6 +187,12 @@ impl Emitter<'_> {
     /// implementation method takes as `physical`, and how that crosses `invoke`: a non-null value
     /// class the implementation takes boxed through `invoke`, the inline body takes unboxed.
     fn inline_parameter(&self, semantic: Ty, physical: Ty) -> (Ty, InvokeCoercion) {
+        // A non-null unsigned parameter is a native scalar, so it is not a boxed value class, but
+        // `FunctionN.invoke` still hands it over as `kotlin/UInt`. The inlined body takes the
+        // primitive carrier and the invoke boundary unboxes through `unbox-impl`.
+        if let Some(carrier) = unsigned_inline_carrier(semantic, physical) {
+            return (carrier, self.invoke_coercion(semantic, carrier));
+        }
         let unboxed = self
             .is_value_class_ty(&semantic)
             .then(|| semantic.non_null().obj_internal())
@@ -256,6 +293,9 @@ impl Emitter<'_> {
     /// `carrier`, crosses the `Object` of `invoke`: kotlinc's `StackValue.coerce` over the Kotlin
     /// types.
     fn invoke_coercion(&self, semantic: Ty, carrier: Ty) -> InvokeCoercion {
+        if let Some(class) = unsigned_value_class(semantic, carrier) {
+            return InvokeCoercion::ValueClass(class);
+        }
         if !self.is_value_class_ty(&semantic) {
             return if semantic_scalar_adapter(semantic, carrier) == carrier {
                 InvokeCoercion::Plain
@@ -305,7 +345,11 @@ impl Emitter<'_> {
         node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
         let shape = inliner::Lambda {
             node,
-            value_class_parameters: vec![None; parameter_types.len()],
+            value_class_parameters: lambda
+                .parameter_coercions
+                .iter()
+                .map(InvokeCoercion::value_class)
+                .collect(),
             parameter_types,
             return_type: "V".to_string(),
             value_class_return: None,

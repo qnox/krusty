@@ -283,3 +283,34 @@ fn unsigned_inline_splice_element_keeps_its_host_provided_box() {
         "UIntMapElementStillEmits",
     );
 }
+
+/// `map` obtains each element from `Iterator.next()` as a boxed `kotlin/UInt`. An inlined lambda
+/// that passes that element to a carrier parameter (`testUInt(it)`) unboxes through
+/// `UInt.unbox-impl` before the call. Leaving the box on the stack fails verification.
+#[test]
+fn unsigned_inlined_map_argument_unboxes_before_a_carrier_call() {
+    common::expect_box_ok_with_stdlib(
+        "const val M1: UInt = 2147483648u\n\
+         const val M2: ULong = 9223372036854775808UL\n\
+         fun testUInt(x: UInt) = when (x) {\n\
+             0u -> \"none\"\n\
+             1u -> \"one\"\n\
+             M1 -> \"M1\"\n\
+             else -> \"many\"\n\
+         }\n\
+         fun testULong(x: ULong) = when (x) {\n\
+             0UL -> \"none\"\n\
+             1UL -> \"one\"\n\
+             M2 -> \"M2\"\n\
+             else -> \"many\"\n\
+         }\n\
+         fun box(): String {\n\
+             val t1 = listOf(0u, 1u, 4u, M1).map { testUInt(it) }\n\
+             if (t1 != listOf(\"none\", \"one\", \"many\", \"M1\")) return \"UInt\"\n\
+             val t2 = listOf(0UL, 1UL, 4UL, M2).map { testULong(it) }\n\
+             if (t2 != listOf(\"none\", \"one\", \"many\", \"M2\")) return \"ULong\"\n\
+             \"OK\"\n\
+         }\n",
+        "UnsignedWhenByMap",
+    );
+}
