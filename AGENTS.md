@@ -31,11 +31,12 @@ tool adds by default: when a default conflicts with this section, this section w
   (`gh pr merge <N> --squash --author-email <author email>`, or `authorEmail` in the GraphQL
   `mergePullRequest` call); without it GitHub credits whoever opened the pull request.
 
-`scripts/check-attribution.sh` enforces this. The `attribution` CI workflow runs it over every pull
-request's commits, title, and body (and warns on a PR opened by an assistant's app account), and
-over every push to master (Dependabot's commits and pull request text are skipped: they quote upstream
-release notes, which can name an assistant that contributed upstream); the lefthook `commit-msg`
-hook runs it on each local commit, including the identity the commit is about to get.
+`scripts/check-attribution.sh` enforces this. The `ci` job runs it over the commits on a pull
+request, a merge queue, and a push to master. The `attribution` workflow runs it over a pull
+request's title and body when those change without a new commit, and warns when an assistant's app
+account opened the pull request. Dependabot's commits and pull request text are skipped: they quote
+upstream release notes, which can name an assistant that contributed upstream. The lefthook
+`commit-msg` hook runs it on each local commit, including the identity the commit is about to get.
 
 ## Engineering conventions
 
