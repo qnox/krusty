@@ -5,6 +5,27 @@
 use super::common::expect_box_same_as_kotlinc;
 
 #[test]
+fn an_inner_class_super_lambda_reads_the_enclosing_enum_entry() {
+    expect_box_same_as_kotlinc(
+        "abstract class Base(val fn: () -> Test)\n\
+         \n\
+         enum class Test(val ok: String) {\n\
+             TEST(\"OK\") {\n\
+                 inner class Inner : Base({ TEST })\n\
+         \n\
+                 override val base: Base\n\
+                     get() = Inner()\n\
+             };\n\
+         \n\
+             abstract val base: Base\n\
+         }\n\
+         \n\
+         fun box() = Test.TEST.base.fn().ok\n",
+        "EnumEntrySuperLambda",
+    );
+}
+
+#[test]
 fn an_inner_class_super_argument_reads_the_enclosing_enum_entry() {
     expect_box_same_as_kotlinc(
         "interface IFoo {\n\

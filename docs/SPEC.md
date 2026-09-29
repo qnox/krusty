@@ -4787,8 +4787,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the enclosing instance of a nested class) rather than the field. The expression's type is the
   enum, so the instance is cast to it. A constructor of a nested class reads the enclosing
   instance from its constructor parameter: `this` is still uninitialized when a superclass
-  argument or a delegate mentions the entry. A reference to a different entry stays a read of
-  that entry's static field. Tests: `tests/enum_entry_self_instance_e2e.rs`.
+  argument or a delegate mentions the entry. A lambda in that argument captures the same
+  parameter (`inner class Inner : Base({ TEST })`); it does not read the entry's static field,
+  which is still null, and it does not use the nested class's uninitialized `this`. A reference
+  to a different entry stays a read of that entry's static field. Tests:
+  `tests/enum_entry_self_instance_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.
