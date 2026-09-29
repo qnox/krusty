@@ -13,13 +13,11 @@ on:
 permissions:
   contents: read
 
-# A pull request or merge queue ref keeps one run: a new push cancels the old one. Every master push
-# gets its own group instead. GitHub keeps only one pending run per group and cancels the one it
-# displaces, so a shared master group cancelled each queued push when the next one arrived, and the
-# cancelled run turned the commit and the CI badge red although nothing had failed.
+# One run per ref. A newer push cancels the previous run, including on master, so an older
+# commit does not keep runners after it is no longer the tip.
 concurrency:
-  group: ci-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Fast, version-independent correctness gate: lint + coverage + latest-version regression
