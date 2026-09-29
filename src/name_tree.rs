@@ -1117,6 +1117,10 @@ mod tests {
             names.jvm_binary_name(metadata_child),
             "metadata/Outer$Middle$Inner$Generated"
         );
+        assert_eq!(
+            names.jvm_binary_identity(metadata_child),
+            names.insert("metadata/Outer$Middle$Inner$Generated")
+        );
         assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
         assert_eq!(
             names.jvm_nested_binary_name(metadata_nested, "Companion"),
