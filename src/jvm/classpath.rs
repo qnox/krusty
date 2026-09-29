@@ -4018,25 +4018,7 @@ impl Classpath {
 
     fn stub_overlay_contains_classifier(&self, classifier: TypeName) -> bool {
         let physical = super::jvm_class_map::to_jvm_classfile_type_name(classifier);
-        let overlay = self.stub_overlay.borrow();
-        if overlay.contains_key(&physical) {
-            return true;
-        }
-
-        // Metadata can retain source-facing dots between nested classifier segments while the
-        // parsed overlay records the physical `$` spelling. Probe that sibling directly in the
-        // interned name tree instead of rendering and round-tripping through a textual lookup.
-        let segment = physical.segment_ref();
-        if !segment.contains('.') {
-            return false;
-        }
-        let binary_segment = segment.replace('.', "$");
-        physical
-            .parent()
-            .and_then(|namespace| {
-                crate::types::existing_type_name_child(namespace, &binary_segment)
-            })
-            .is_some_and(|binary| overlay.contains_key(&binary))
+        self.stub_overlay.borrow().contains_key(&physical)
     }
 
     /// The class or builtins jar whose attached sources declare `internal`.

@@ -5606,11 +5606,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             <Self as crate::libraries::SemanticPlatform>::library_value_form(self, decl_recv);
         let rank = match form {
             Ty::Obj(want, _) if !recv.is_array() && matches!(recv, Ty::Obj(_, _)) => {
-                object_supertype_rank(&self.cp, recv, want).or_else(|| {
-                    // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every
-                    // receiver at the lowest precedence when the MRO does not list the implicit root.
-                    want.matches("java/lang/Object").then_some(u32::MAX - 1)
-                })
+                object_supertype_rank(&self.cp, recv, want)
             }
             _ => {
                 let want = type_descriptor(form);
