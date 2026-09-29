@@ -8930,7 +8930,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`(Ljava/lang/Double;D)Z`, `(DLjava/lang/Double;)Z`, `(Ljava/lang/Double;Ljava/lang/Double;)Z`,
   and the `Float` forms), marking the comparison's line before the call, and JavaScript compares
   with `===`. A nullable integral equality keeps its null tests (kotlinc's
-  `PrimitiveToObjectComparison` is a separate rule). Test: `tests/ieee754_equality_e2e.rs`.
+  `PrimitiveToObjectComparison` is a separate rule). A type parameter uses that same rule through
+  its upper bound: `<A : Double, B : Double?>` is `areEqual(D, Ljava/lang/Double;)`, and two
+  `Double?` parameters are `areEqual(Ljava/lang/Double;, Ljava/lang/Double;)`. A bound of `Any`
+  stays structural `equals`, so `-0.0 == 0.0` is false there. Test: `tests/ieee754_equality_e2e.rs`,
+  `tests/nullable_double_type_param_equality_e2e.rs`.
 
 - **`toString()` on a primitive is `String.valueOf`** (kotlinc's `FlattenStringConcatenationLowering`,
   which makes a primitive receiver's `toString()` a one-argument string concatenation, and
