@@ -688,3 +688,30 @@ fn a_finished_server_is_reused_instead_of_growing_the_pool() {
     assert_eq!(seen, vec![0, 0, 0, 0]);
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn a_panicking_caller_releases_its_server_claim() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pool = super::ServerPool::new();
+    let next_id = AtomicUsize::new(0);
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        pool.with_server(
+            1,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |_| panic!("test caller panic"),
+        )
+    }));
+    assert!(panic.is_err());
+
+    let reused = pool
+        .with_server(
+            1,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |id| *id,
+        )
+        .expect("released server");
+    assert_eq!(reused, 0);
+    assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}

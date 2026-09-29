@@ -1,35 +1,39 @@
 //! Claim a persistent JVM without herding every caller onto the first one.
 //!
-//! An idle check that locks and immediately drops the guard reports every server as free. The
-//! callers then all block on the first mutex, so a pool of size N still runs one JVM. The claim
-//! flag is flipped while the pool lock is held; the server mutex is taken only after that lock is
-//! released.
+//! Admission and release share one mutex and condition variable. A caller either claims an idle
+//! slot while holding that mutex, grows the pool, or waits until a claim is released. The claim
+//! guard returns the slot even when the test body unwinds.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub(crate) struct Pool<S> {
-    slots: Mutex<Vec<Arc<Slot<S>>>>,
-    cursor: AtomicUsize,
+    state: Mutex<PoolState<S>>,
+    available: Condvar,
 }
 
-struct Slot<S> {
-    server: Mutex<S>,
-    claimed: AtomicBool,
+struct PoolState<S> {
+    slots: Vec<SlotState<S>>,
+    cursor: usize,
 }
 
-enum Admit {
-    /// This caller set `claimed` and clears it after releasing the server mutex.
-    Claimed,
-    /// Every server was already claimed. This caller waits on one mutex and must not clear the flag.
-    Queued,
+struct SlotState<S> {
+    server: Arc<Mutex<S>>,
+    claimed: bool,
+}
+
+struct Claim<'a, S> {
+    pool: &'a Pool<S>,
+    server: Arc<Mutex<S>>,
 }
 
 impl<S> Pool<S> {
     pub(crate) fn new() -> Self {
         Self {
-            slots: Mutex::new(Vec::new()),
-            cursor: AtomicUsize::new(0),
+            state: Mutex::new(PoolState {
+                slots: Vec::new(),
+                cursor: 0,
+            }),
+            available: Condvar::new(),
         }
     }
 
@@ -39,53 +43,70 @@ impl<S> Pool<S> {
         create: impl FnOnce() -> Option<S>,
         body: impl FnOnce(&mut S) -> R,
     ) -> Option<R> {
-        let (slot, admit) = self.admit(cap, create)?;
-        let mut guard = lock_server(&slot.server);
-        let result = body(&mut guard);
-        drop(guard);
-        if matches!(admit, Admit::Claimed) {
-            slot.claimed.store(false, Ordering::Release);
-        }
-        Some(result)
+        let claim = self.admit(cap, create)?;
+        let mut server = lock(&claim.server);
+        Some(body(&mut server))
     }
 
-    fn admit(
-        &self,
-        cap: usize,
-        create: impl FnOnce() -> Option<S>,
-    ) -> Option<(Arc<Slot<S>>, Admit)> {
-        let mut slots = self.slots.lock().unwrap_or_else(|err| err.into_inner());
-        let len = slots.len();
-        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            if slots[idx]
-                .claimed
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.cursor.store(idx + 1, Ordering::Relaxed);
-                return Some((Arc::clone(&slots[idx]), Admit::Claimed));
+    fn admit(&self, cap: usize, create: impl FnOnce() -> Option<S>) -> Option<Claim<'_, S>> {
+        let mut create = Some(create);
+        let mut state = lock(&self.state);
+        loop {
+            let len = state.slots.len();
+            let start = state.cursor;
+            for offset in 0..len {
+                let index = (start + offset) % len;
+                if !state.slots[index].claimed {
+                    state.slots[index].claimed = true;
+                    state.cursor = index + 1;
+                    return Some(Claim {
+                        pool: self,
+                        server: Arc::clone(&state.slots[index].server),
+                    });
+                }
             }
+
+            if len < cap && create.is_some() {
+                let make_server = create.take().expect("server creation attempted once");
+                if let Some(server) = make_server() {
+                    let server = Arc::new(Mutex::new(server));
+                    state.slots.push(SlotState {
+                        server: Arc::clone(&server),
+                        claimed: true,
+                    });
+                    state.cursor = state.slots.len();
+                    return Some(Claim { pool: self, server });
+                }
+                if len == 0 {
+                    return None;
+                }
+            }
+
+            if len == 0 {
+                return None;
+            }
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(|err| err.into_inner());
         }
-        if len < cap {
-            let server = create()?;
-            let slot = Arc::new(Slot {
-                server: Mutex::new(server),
-                claimed: AtomicBool::new(true),
-            });
-            slots.push(Arc::clone(&slot));
-            self.cursor.store(slots.len(), Ordering::Relaxed);
-            return Some((slot, Admit::Claimed));
-        }
-        if len == 0 {
-            return None;
-        }
-        let idx = start % len;
-        Some((Arc::clone(&slots[idx]), Admit::Queued))
     }
 }
 
-fn lock_server<S>(server: &Mutex<S>) -> MutexGuard<'_, S> {
-    server.lock().unwrap_or_else(|err| err.into_inner())
+impl<S> Drop for Claim<'_, S> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.pool.state);
+        let slot = state
+            .slots
+            .iter_mut()
+            .find(|slot| Arc::ptr_eq(&slot.server, &self.server))
+            .expect("claimed server belongs to its pool");
+        assert!(slot.claimed, "server claim released twice");
+        slot.claimed = false;
+        self.pool.available.notify_one();
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
