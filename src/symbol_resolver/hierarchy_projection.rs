@@ -57,14 +57,21 @@ pub(crate) fn inherited_classifier_shape(
 /// Direct applied supertypes derived from one classifier record. Providers publish symbolic templates;
 /// core owns substitution and every transitive traversal.
 pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
-    // A function type's supertype is the arity-independent `kotlin.Function<R>`. That is Kotlin's
-    // own hierarchy — `(P) -> R` is a `FunctionN<P, R>`, and every `FunctionN` extends `Function`
-    // — and the MEMBER walk beside this one already takes it: `members_in_hierarchy` looks a
-    // function type's members up on `Function<R>`. Stating it here is what keeps the two from
-    // disagreeing; without it a lambda was not assignable to a `Function<R>` parameter at all, so
-    // `ContractBuilder.callsInPlace(lambda: Function<R>, …)` rejected every lambda written for it.
+    // A function type is the function classifier of its arity and kind: `() -> R` is
+    // `kotlin.Function0<R>`, `(P) -> R` is `Function1<P, R>`, and `suspend () -> R` is
+    // `kotlin.coroutines.SuspendFunction0<R>`. Every `FunctionN` / `SuspendFunctionN` extends the
+    // arity-independent `kotlin.Function<R>`, which stays a direct supertype so a function value
+    // remains assignable to `Function<R>` even when that classifier record is absent. Member lookup
+    // does not consult this list: `members_in_hierarchy` still reads `invoke` from `Function<R>`.
     if let Ty::Fun(signature) = ty.non_null() {
-        return vec![Ty::obj_args("kotlin/Function", &[signature.ret])];
+        let classifier =
+            crate::libraries::function_classifiers::supertype_classifier(ty.non_null());
+        let function = Ty::obj_args("kotlin/Function", &[signature.ret]);
+        return if classifier == function {
+            vec![function]
+        } else {
+            vec![classifier, function]
+        };
     }
     let Some(internal) = ty.kotlin_class_internal() else {
         return Vec::new();
@@ -376,4 +383,96 @@ pub(super) fn classifier_type_parameter_bounds(
             (formal.clone(), bound)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assignable::{is_assignable, TyCtx};
+    use crate::libraries::{function_classifiers, Callables, ResolvedSymbols};
+    use crate::symbol_resolver::SourceOracle;
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+
+    struct FunctionClassifiers;
+
+    impl SymbolSource for FunctionClassifiers {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            let identity = namespace.existing_classifier(name);
+            let classifier = identity.and_then(|identity| {
+                function_classifiers::classifier(identity)
+                    .map(|function| function_classifiers::synthetic(function))
+            });
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: classifier.as_ref().and(identity),
+                classifier,
+                callables: Callables::None,
+                importable_declaration: false,
+            })
+        }
+    }
+
+    fn admits(actual: Ty, expected: Ty) -> bool {
+        is_assignable(
+            &TyCtx::new(),
+            &SourceOracle(&FunctionClassifiers),
+            actual,
+            expected,
+        )
+    }
+
+    #[test]
+    fn function_type_is_its_function_classifier_and_function() {
+        let value = Ty::fun(Vec::new(), Ty::String);
+        let supertypes = direct_supertypes(&FunctionClassifiers, value);
+        assert_eq!(
+            supertypes,
+            vec![
+                Ty::obj_args("kotlin/Function0", &[Ty::String]),
+                Ty::obj_args("kotlin/Function", &[Ty::String]),
+            ]
+        );
+        let extension = Ty::fun_with_shape(vec![Ty::String, Ty::Int], Ty::Boolean, 0, true, false);
+        assert_eq!(
+            direct_supertypes(&FunctionClassifiers, extension)[0],
+            Ty::obj_args("kotlin/Function2", &[Ty::String, Ty::Int, Ty::Boolean])
+        );
+        let suspended = Ty::fun_suspend(Vec::new(), Ty::String);
+        assert_eq!(
+            direct_supertypes(&FunctionClassifiers, suspended)[0],
+            Ty::obj_args("kotlin/coroutines/SuspendFunction0", &[Ty::String])
+        );
+    }
+
+    #[test]
+    fn function_value_is_assignable_to_its_function_classifier() {
+        let value = Ty::fun(Vec::new(), Ty::String);
+        assert!(admits(
+            value,
+            Ty::obj_args("kotlin/Function0", &[Ty::String])
+        ));
+        assert!(admits(
+            value,
+            Ty::obj_args("kotlin/Function0", &[Ty::obj("kotlin/Any")])
+        ));
+        assert!(admits(
+            value,
+            Ty::obj_args(
+                "kotlin/Function0",
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+            )
+        ));
+        assert!(!admits(value, Ty::obj_args("kotlin/Function0", &[Ty::Int])));
+        assert!(!admits(
+            Ty::fun_suspend(Vec::new(), Ty::String),
+            Ty::obj_args("kotlin/Function0", &[Ty::String])
+        ));
+        assert!(admits(
+            Ty::fun_suspend(Vec::new(), Ty::String),
+            Ty::obj_args("kotlin/coroutines/SuspendFunction0", &[Ty::String])
+        ));
+        assert!(admits(
+            value,
+            Ty::obj_args("kotlin/Function", &[Ty::String])
+        ));
+    }
 }

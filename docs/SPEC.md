@@ -1825,6 +1825,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An unresolved qualified type names its first failed segment.** Binding records that segment once;
   diagnostics consume the recorded result without repeating lookup. A qualified `TypeRef` currently
   carries one span for the complete spelling, so its diagnostic range covers the full reference.
+- A function type is the function classifier of its arity and kind. `() -> R` is
+  `kotlin.Function0<R>`, `(P) -> R` is `kotlin.Function1<P, R>`, an extension function type keeps the
+  receiver as the first classifier argument, and `suspend () -> R` is
+  `kotlin.coroutines.SuspendFunction0<R>` rather than `Function0<R>`. Each of those classifiers still
+  extends `kotlin.Function<R>`. A value written `() -> T` is therefore a `Function0<T>`, a
+  `Function0<Any>`, and a `Function0<*>`, which is what makes it a legal key of
+  `MutableMap<Function0<*>, Any>` and of `ConcurrentHashMap<Function0<*>, Any>`. It is not a
+  `Function0<Int>`. (`tests/operator_index_e2e.rs`,
+  `src/symbol_resolver/hierarchy_projection.rs`.)
 - Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
   `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
   `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
