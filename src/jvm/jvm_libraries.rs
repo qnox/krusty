@@ -4355,10 +4355,7 @@ impl JvmLibraries {
         }
         let declared = match namespace {
             SymbolNamespace::Package(package) => tree.contains_exact_class(package, name),
-            SymbolNamespace::Classifier(owner) => {
-                let segment = format!("{}${}", owner.segment_ref(), name);
-                tree.contains_exact_class(owner.namespace(), &segment)
-            }
+            SymbolNamespace::Classifier(owner) => tree.contains_nested_class(owner, name),
         };
         declared.then(|| match namespace {
             SymbolNamespace::Package(package) => crate::types::type_name_child(package, name),
