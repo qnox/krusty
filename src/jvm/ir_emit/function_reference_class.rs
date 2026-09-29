@@ -41,6 +41,7 @@ pub(super) fn emit_func_ref_class(
     // file facade, whose name isn't known until emit) — resolve it here.
     let owner_class = fr.owner_class_or_facade(facade);
     let owner_class = crate::jvm::jvm_class_map::to_jvm_internal(&owner_class).to_string();
+    let call_owner_identity = fr.call_owner;
     let call_owner = fr.call_owner_or_facade(facade);
     let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();
     let fq = c.fq_name();
@@ -161,9 +162,11 @@ pub(super) fn emit_func_ref_class(
     };
     let signature_name = match fr.dispatch {
         FrDispatch::Static | FrDispatch::StaticBound => reflection_name,
-        FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => {
-            mapped_builtin_virtual_name(&call_owner, reflection_name, &signature_desc)
-        }
+        FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => mapped_builtin_virtual_name(
+            call_owner_identity.expect("a virtual function reference has a class owner"),
+            reflection_name,
+            &signature_desc,
+        ),
     };
     let signature = fr
         .reflection_signature
@@ -510,12 +513,20 @@ pub(super) fn emit_func_ref_class(
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
         // method a direct call would (`String.get` → `charAt`) — apply the backend's name mapping here too.
         _ if fr.call_interface => {
-            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
+            let vn = mapped_builtin_virtual_name(
+                call_owner_identity.expect("a virtual function reference has a class owner"),
+                &fr.call_name,
+                &call_desc,
+            );
             let m = cw.interface_methodref(&call_owner, vn, &call_desc);
             inv.invokeinterface(m, call_arg_words, ret_words);
         }
         _ => {
-            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
+            let vn = mapped_builtin_virtual_name(
+                call_owner_identity.expect("a virtual function reference has a class owner"),
+                &fr.call_name,
+                &call_desc,
+            );
             let m = cw.methodref(&call_owner, vn, &call_desc);
             inv.invokevirtual(m, call_arg_words, ret_words);
         }

@@ -139,17 +139,10 @@ fn physical_classfile_name(internal: &str) -> String {
 
 pub use crate::names::property_setter_name;
 
-/// Physical JVM name for a mapped Kotlin virtual member.
-pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &str) -> &'a str {
-    if let Some(owner) = crate::types::existing_type_name(owner) {
-        return mapped_builtin_virtual_name_of(owner, name, descriptor);
-    }
-    name
-}
-
-/// Identity form of [`mapped_builtin_virtual_name`]. The owner is already interned, so the rename
-/// table does not render it or look the spelling up again.
-pub fn mapped_builtin_virtual_name_of<'a>(
+/// Physical JVM name for a mapped Kotlin virtual member. The owner is already resolved and
+/// interned, so the realization table never depends on whether some earlier operation happened to
+/// intern a classfile spelling.
+pub fn mapped_builtin_virtual_name<'a>(
     owner: TypeName,
     name: &'a str,
     descriptor: &str,
@@ -169,8 +162,8 @@ pub(super) fn same_mapped_virtual_name_of(
     right: &str,
     descriptor: &str,
 ) -> bool {
-    mapped_builtin_virtual_name_of(owner, left, descriptor)
-        == mapped_builtin_virtual_name_of(owner, right, descriptor)
+    mapped_builtin_virtual_name(owner, left, descriptor)
+        == mapped_builtin_virtual_name(owner, right, descriptor)
 }
 
 fn split_field_descriptor(desc: &str) -> Option<(&str, &str)> {
@@ -399,12 +392,7 @@ mod tests {
         ];
         for (owner, name, descriptor, renamed) in cases {
             assert_eq!(
-                mapped_builtin_virtual_name(owner, name, descriptor),
-                renamed,
-                "{owner}.{name}"
-            );
-            assert_eq!(
-                mapped_builtin_virtual_name_of(crate::types::type_name(owner), name, descriptor),
+                mapped_builtin_virtual_name(crate::types::type_name(owner), name, descriptor),
                 renamed,
                 "{owner}.{name}"
             );
