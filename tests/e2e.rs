@@ -709,6 +709,8 @@ mod extension_call_operands_e2e;
 mod extension_default_args_e2e;
 #[path = "extension_default_stub_e2e.rs"]
 mod extension_default_stub_e2e;
+#[path = "extension_delegate_fields_e2e.rs"]
+mod extension_delegate_fields_e2e;
 #[path = "extension_fun_e2e.rs"]
 mod extension_fun_e2e;
 #[path = "extension_property_e2e.rs"]

@@ -75,7 +75,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
 defaultArguments/convention/incWithDefaultInGetter.kt
 delegatedProperty/delegateToConstVal.kt
-delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegation/delegationDifferentModule.kt
@@ -87,7 +86,6 @@ extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyWithInline.kt
-fieldRename/delegates.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt

@@ -156,6 +156,10 @@ fn run_backend_passes_after_plugins(
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir);
+    // Delegated properties that share a source name (extension properties for different
+    // receivers) each lower a `{name}$delegate` static. The JVM name is unique per owner:
+    // the first keeps that spelling and each later one takes the next `$N` suffix.
+    crate::jvm::property_storage::realize_delegate_static_field_names(ir);
     // Kotlin parameter nullability is already fixed in common IR. Select the JVM's entry-guard
     // realization before generic/value-class erasure changes the physical parameter types; those
     // later representation passes may then remove a guard whose carrier becomes primitive.
