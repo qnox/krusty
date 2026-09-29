@@ -403,6 +403,8 @@ mod companion_block_members_e2e;
 mod companion_const_e2e;
 #[path = "companion_cross_file_property_e2e.rs"]
 mod companion_cross_file_property_e2e;
+#[path = "companion_custom_accessor_field_e2e.rs"]
+mod companion_custom_accessor_field_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
 #[path = "companion_member_read_e2e.rs"]
