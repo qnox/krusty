@@ -39,7 +39,7 @@ pub(super) fn box_property_reference_value(
     physical: Ty,
 ) {
     if let Some(value_class) = boxed_value_class {
-        let owner = value_class.render();
+        let owner = super::value_class_adapters::value_class_spelling(value_class);
         let descriptor = format!("({})L{owner};", type_descriptor(ir_ty_to_jvm(&physical)));
         let method = cw.methodref(&owner, "box-impl", &descriptor);
         value_class_boundary_conversion(cw, code, property.prop_ty.is_nullable(), |_, code| {

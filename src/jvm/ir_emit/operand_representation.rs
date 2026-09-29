@@ -168,9 +168,11 @@ impl Emitter<'_> {
                 && crate::jvm::names::same_type_descriptor(carrier, physical)
             {
                 let descriptor = format!("(){}", type_descriptor(carrier));
-                let method = self
-                    .cw
-                    .methodref(&classifier.render(), "unbox-impl", &descriptor);
+                let method = self.cw.methodref(
+                    &super::value_class_adapters::value_class_spelling(classifier),
+                    "unbox-impl",
+                    &descriptor,
+                );
                 code.invokevirtual(method, 0, slot_words(carrier) as i32);
             }
             return;
