@@ -1,6 +1,9 @@
 //! JVM realization of default-valued function and method parameters.
 
 use super::*;
+use crate::jvm::default_parameter_representation::{
+    primitive_bounded_type_parameter, primitive_unbox_method, primitive_wrapper,
+};
 
 /// kotlinc opens an inheritable member's `$default` synthetic with a guard on the trailing marker:
 /// a `super.m()` call carrying defaults cannot dispatch through the virtual forwarding stub.
@@ -61,7 +64,7 @@ pub(super) fn emit_default_stub(
     let stub_param_tys: Vec<Ty> = real_params
         .iter()
         .enumerate()
-        .map(|(index, ty)| boxed.get(&index).copied().unwrap_or(*ty))
+        .map(|(index, ty)| stub_parameter_type(ir, fid, index, *ty))
         .collect();
     let receiver_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
     let logical_param_count = real_params
@@ -125,9 +128,15 @@ pub(super) fn emit_default_stub(
     code.aload(0);
     for (index, &(slot, ty)) in param_slots.iter().enumerate() {
         load(ty, slot, &mut code);
-        if let Some(value_class) = boxed.get(&index) {
-            emit_unbox_impl(ir, emitter.cw, value_class, &mut code);
-        }
+        emit_adapted_unbox(
+            ir,
+            emitter.cw,
+            &boxed,
+            index,
+            real_params[index],
+            ty,
+            &mut code,
+        );
     }
     let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
     let descriptor = method_descriptor(&real_params, ret);
@@ -165,7 +174,6 @@ pub(super) fn emit_default_stub(
 /// Physical parameters of an instance method's `$default` synthetic.
 pub(super) fn default_stub_params(ir: &IrFile, fid: u32, owner_ty: Ty) -> Vec<Ty> {
     let real_params = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
     let receiver_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
     let logical_param_count = real_params
         .len()
@@ -176,7 +184,7 @@ pub(super) fn default_stub_params(ir: &IrFile, fid: u32, owner_ty: Ty) -> Vec<Ty
         real_params
             .iter()
             .enumerate()
-            .map(|(index, ty)| boxed.get(&index).copied().unwrap_or(*ty)),
+            .map(|(index, ty)| stub_parameter_type(ir, fid, index, *ty)),
     );
     parameters.extend(std::iter::repeat_n(
         Ty::Int,
@@ -193,6 +201,94 @@ pub(super) fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<us
         .unwrap_or_default()
 }
 
+/// A non-null type parameter whose upper bound is a JVM primitive (`T : Char`) is that primitive
+/// on the real method, and the boxed bound (`java.lang.Character`) on the `$default` stub.
+fn primitive_type_parameter_box(declared: Ty) -> Option<Ty> {
+    primitive_bounded_type_parameter(declared).map(|(_, wrapper)| wrapper)
+}
+
+pub(super) fn stub_parameter_type(ir: &IrFile, fid: u32, index: usize, physical: Ty) -> Ty {
+    default_stub_boxed_parameters(ir, fid)
+        .get(&index)
+        .copied()
+        .or_else(|| {
+            ir.functions
+                .get(fid as usize)
+                .and_then(|function| function.params.get(index).copied())
+                .and_then(primitive_type_parameter_box)
+        })
+        .unwrap_or(physical)
+}
+
+pub(super) fn emit_primitive_value_of(cw: &mut ClassWriter, primitive: Ty, code: &mut CodeBuilder) {
+    let Some(wrapper) = primitive_wrapper(primitive) else {
+        return;
+    };
+    let owner = wrapper
+        .obj_internal()
+        .expect("a primitive wrapper names its class")
+        .render();
+    let method = cw.methodref(
+        &owner,
+        "valueOf",
+        &format!(
+            "({}){}",
+            type_descriptor(primitive),
+            type_descriptor(wrapper)
+        ),
+    );
+    code.invokestatic(method, slot_words(primitive) as i32, 1);
+}
+
+pub(super) fn emit_primitive_box_if_needed(
+    cw: &mut ClassWriter,
+    produced: Ty,
+    slot: Ty,
+    code: &mut CodeBuilder,
+) {
+    if primitive_wrapper(produced) == Some(slot) {
+        emit_primitive_value_of(cw, produced, code);
+    }
+}
+
+pub(super) fn emit_omitted_default_placeholder(
+    cw: &mut ClassWriter,
+    real: Ty,
+    stub: Ty,
+    code: &mut CodeBuilder,
+) {
+    if primitive_wrapper(real) == Some(stub) {
+        push_zero(real, code, cw);
+        emit_primitive_value_of(cw, real, code);
+        return;
+    }
+    push_zero(stub, code, cw);
+}
+
+fn emit_adapted_unbox(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    boxed: &HashMap<usize, Ty>,
+    index: usize,
+    real: Ty,
+    stub: Ty,
+    code: &mut CodeBuilder,
+) {
+    if primitive_wrapper(real) == Some(stub) {
+        let owner = stub
+            .obj_internal()
+            .expect("a primitive wrapper names its class")
+            .render();
+        let method = primitive_unbox_method(real).expect("a JVM primitive has an unbox method");
+        let unbox = cw.methodref(&owner, method, &format!("(){}", type_descriptor(real)));
+        code.invokevirtual(unbox, 0, slot_words(real) as i32);
+        return;
+    }
+    if let Some(value_class) = boxed.get(&index) {
+        emit_unbox_impl(ir, cw, value_class, code);
+    }
+}
+
 /// A static `$default` stub's trailing marker is constructor-specific only for a value-class
 /// `constructor-impl`; every function stub uses plain `Object`.
 pub(super) fn static_default_stub_marker(ir: &IrFile, fid: u32) -> Ty {
@@ -207,11 +303,8 @@ pub(super) fn static_default_stub_params(ir: &IrFile, fid: u32) -> Vec<Ty> {
     let marker = static_default_stub_marker(ir, fid);
     let function = &ir.functions[fid as usize];
     let mut parameters = jvm_function_params(ir, fid);
-    let boxed = default_stub_boxed_parameters(ir, fid);
     for (index, parameter) in parameters.iter_mut().enumerate() {
-        if let Some(boxed) = boxed.get(&index) {
-            *parameter = *boxed;
-        }
+        *parameter = stub_parameter_type(ir, fid, index, *parameter);
     }
     let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
         + usize::from(ir.extension_receiver_fns.contains(&fid));
@@ -260,6 +353,12 @@ pub(super) fn emit_default_param_overwrites(
             let skip = code.new_label();
             code.ifeq(skip);
             emitter.emit_value(*expression, code);
+            emit_primitive_box_if_needed(
+                emitter.cw,
+                ir_ty_to_jvm(&emitter.value_ty(*expression)),
+                ty,
+                code,
+            );
             store(ty, slot, code);
             code.bind(skip);
         }
@@ -299,7 +398,7 @@ pub(super) fn emit_facade_default_stub(
     let stub_param_tys = real_params
         .iter()
         .enumerate()
-        .map(|(index, parameter)| boxed.get(&index).copied().unwrap_or(*parameter))
+        .map(|(index, parameter)| stub_parameter_type(ir, fid, index, *parameter))
         .collect::<Vec<_>>();
     let ret = jvm_declared_ty(&function.ret);
     let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
@@ -375,9 +474,15 @@ pub(super) fn emit_facade_default_stub(
     } else {
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
             load(ty, slot, &mut code);
-            if let Some(value_class) = boxed.get(&index) {
-                emit_unbox_impl(ir, emitter.cw, value_class, &mut code);
-            }
+            emit_adapted_unbox(
+                ir,
+                emitter.cw,
+                &boxed,
+                index,
+                real_params[index],
+                ty,
+                &mut code,
+            );
         }
         let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
         let descriptor = method_descriptor(&real_params, ret);
