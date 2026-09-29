@@ -136,6 +136,7 @@ impl Parser<'_> {
                         false,
                         member_modifiers.iter().any(|modifier| modifier == "const"),
                         false,
+                        &member_modifiers,
                     );
                     property.receiver = Some(receiver());
                     property.visibility = visibility_of(&member_modifiers);

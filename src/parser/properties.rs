@@ -9,6 +9,7 @@ impl Parser<'_> {
         _abstract_ok: bool,
         is_const: bool,
         is_abstract: bool,
+        modifiers: &[String],
     ) -> PropDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
@@ -220,6 +221,14 @@ impl Parser<'_> {
                     visibility,
                     is_inline,
                 });
+            }
+        }
+        // `inline val`/`inline var` marks every accessor inline, the same as writing `inline` on
+        // each of them. An accessor that already wrote `inline` stays inline.
+        if modifiers.iter().any(|modifier| modifier == "inline") {
+            getter_inline = true;
+            if let Some(setter) = setter.as_mut() {
+                setter.is_inline = true;
             }
         }
         // Initializer requirements are semantic. The syntax layer retains a missing initializer for

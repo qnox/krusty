@@ -1887,15 +1887,22 @@ impl BodyFirChecker<'_> {
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
         let cause = self.statement_origin(statement)?;
         let selected = self.info.stmt_lowers.get(&statement).cloned();
+        // A write carries the same type arguments as a read of the property. The selected property
+        // is what `selected_property_substitutions` unifies; arms that only have a declaration
+        // identity leave this empty and publish no arguments.
+        let mut selected_property = None;
         let (declaration, external, dispatch_receiver, mut extension_receiver, context_args) =
             match selected {
-                Some(StmtLowering::TopLevelPropertySet(access)) => (
-                    access.property.stable_declaration,
-                    Self::external_property_setter(&access.property, false),
-                    None,
-                    None,
-                    access.context_args,
-                ),
+                Some(StmtLowering::TopLevelPropertySet(access)) => {
+                    selected_property = Some(access.property.clone());
+                    (
+                        access.property.stable_declaration,
+                        Self::external_property_setter(&access.property, false),
+                        None,
+                        None,
+                        access.context_args,
+                    )
+                }
                 Some(StmtLowering::MemberPropertyWrite {
                     stable_declaration,
                     backing_field,
@@ -2001,6 +2008,7 @@ impl BodyFirChecker<'_> {
                     let Some(receiver) = receiver else {
                         return Ok(None);
                     };
+                    selected_property = Some(access.property.clone());
                     let extension_receiver = Some(FirReceiver {
                         value: self.expression(receiver)?,
                         conversion: None,
@@ -2076,6 +2084,7 @@ impl BodyFirChecker<'_> {
                         else {
                             return Ok(None);
                         };
+                        selected_property = Some(access.property.clone());
                         let dispatch_receiver = access
                             .property
                             .setter
@@ -2195,6 +2204,12 @@ impl BodyFirChecker<'_> {
         let conversion =
             self.selected_value_conversion(value, checked_value, value_target, cause)?;
         let target = self.property_target(value, declaration, external)?;
+        let substitutions = match (declaration, selected_property.as_ref()) {
+            (Some(declaration), Some(property)) => {
+                self.selected_property_substitutions(value, declaration, property)?
+            }
+            _ => Box::new([]),
+        };
         Ok(Some(FirExprKind::PropertyWrite {
             target,
             dispatch_receiver,
@@ -2202,7 +2217,7 @@ impl BodyFirChecker<'_> {
             context_arguments,
             value: checked_value,
             conversion,
-            substitutions: Box::new([]),
+            substitutions,
         }))
     }
 }

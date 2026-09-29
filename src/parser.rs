@@ -1472,6 +1472,7 @@ impl<'a> Parser<'a> {
                         is_expect,
                         mods.iter().any(|m| m == "const"),
                         false,
+                        &mods,
                     );
                     d.visibility = visibility_of(&mods);
                     d.is_override = mods.iter().any(|m| m == "override");
@@ -2288,6 +2289,7 @@ impl<'a> Parser<'a> {
                             false,
                             mods.iter().any(|m| m == "const"),
                             false,
+                            &mods,
                         );
                         property.visibility = visibility_of(&mods);
                         property.is_open = !mods.iter().any(|m| m == "final")
@@ -2578,6 +2580,7 @@ impl<'a> Parser<'a> {
                                     false,
                                     bmods.iter().any(|m| m == "const"),
                                     bmods.iter().any(|m| m == "abstract"),
+                                    &bmods,
                                 );
                                 property.visibility = visibility_of(&bmods);
                                 property.is_open = !bmods.iter().any(|m| m == "final")
@@ -2680,6 +2683,7 @@ impl<'a> Parser<'a> {
                             true,
                             emods.iter().any(|m| m == "const"),
                             emods.iter().any(|m| m == "abstract"),
+                            &emods,
                         );
                         p.visibility = visibility_of(&emods);
                         p.is_open = !emods.iter().any(|x| x == "final")
@@ -3432,6 +3436,7 @@ impl<'a> Parser<'a> {
                             !is_abstract,
                             mods.iter().any(|m| m == "const"),
                             is_abstract,
+                            &mods,
                         );
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")
@@ -3808,6 +3813,7 @@ impl<'a> Parser<'a> {
                             true,
                             imods.iter().any(|m| m == "const"),
                             explicit_abstract,
+                            &imods,
                         );
                         if p.init.is_none() && p.getter.is_none() {
                             p.is_abstract = true;
@@ -3919,6 +3925,7 @@ impl<'a> Parser<'a> {
                             true,
                             mods.iter().any(|m| m == "const"),
                             false,
+                            &mods,
                         );
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")
@@ -4067,6 +4074,7 @@ impl<'a> Parser<'a> {
                             true,
                             mods.iter().any(|m| m == "const"),
                             false,
+                            &mods,
                         ); // init blocks may supply the value
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")

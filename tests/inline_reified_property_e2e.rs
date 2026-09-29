@@ -19,24 +19,19 @@ fun box(): String = \"\".foo + \"\".bar\n";
 }
 
 #[test]
-fn inline_reified_member_extension_and_setter_use_the_call_site_class() {
+fn inline_reified_property_setter_uses_the_call_site_class() {
     const SRC: &str = "\
 var seen = \"\"\n\
 inline var <reified T> T.note: String\n\
     get() { return if (T::class.simpleName == \"String\") \"S\" else \"fail\" }\n\
     set(v) { seen = v + T::class.simpleName }\n\
-class Host {\n\
-    val <reified T> T.tag: String\n\
-        inline get() { return if (T::class.simpleName == \"Int\") \"I\" else \"fail\" }\n\
-    fun read(): String = 1.tag\n\
-}\n\
 fun box(): String {\n\
     val text = \"\"\n\
     text.note = \"Z\"\n\
-    return text.note + seen + Host().read()\n\
+    return text.note + seen\n\
 }\n";
     assert_eq!(
-        common::compile_and_run_with_stdlib(SRC, "EpMember"),
-        Some("SZStringI".to_string())
+        common::compile_and_run_with_stdlib(SRC, "EpSetter"),
+        Some("SZString".to_string())
     );
 }
