@@ -2068,6 +2068,21 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     companion.push(member);
                 } else {
+                    // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
+                    // `Number.toInt` declarations. The realization table carries the source name;
+                    // the classfile spelling stays the physical call.
+                    if let Some(source) =
+                        super::mapped_builtin_declarations::source_name_for_realization(
+                            physical,
+                            &m.name,
+                            &member.descriptor,
+                        )
+                    {
+                        if source != member.name {
+                            member.physical_name = Some(m.name.clone());
+                            member.name = source.to_string();
+                        }
+                    }
                     members.push(member);
                 }
             }
