@@ -206,7 +206,6 @@ specialBuiltins/emptyMap.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
-syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt

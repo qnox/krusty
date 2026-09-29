@@ -234,7 +234,6 @@ specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 suspendConversion/suspendConversionNullableCCE.kt
-syntheticAccessors/kt10047.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unit/kt56723.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
