@@ -1,6 +1,6 @@
-//! `scripts/release-publisher.sh` and the ci workflow's use of it: a newer push cancels the
-//! previous run of the same ref, and overlapping release jobs publish one at a time and never
-//! move the release or the badges back to an older commit.
+//! `scripts/release-publisher.sh` and the ci workflow's use of it: master runs never share a
+//! concurrency group, and overlapping release jobs publish one at a time and never move the
+//! release or the badges back to an older commit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -285,15 +285,15 @@ fn steps(job: &str) -> Vec<&str> {
 }
 
 #[test]
-fn one_run_per_ref_and_the_release_job_publishes_under_the_lock() {
+fn master_runs_have_their_own_group_and_the_release_job_publishes_under_the_lock() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
 
     assert!(
         workflow.contains(
-            "\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n"
+            "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
         ),
-        "a newer push cancels the previous run of the same ref"
+        "master runs must be grouped by commit and pull requests by ref"
     );
 
     let job = release_job(&workflow);
