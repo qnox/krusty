@@ -1,6 +1,6 @@
-//! `scripts/release-publisher.sh` and the ci workflow's use of it: master runs never share a
-//! concurrency group, and overlapping release jobs publish one at a time and never move the
-//! release or the badges back to an older commit.
+//! `scripts/release-publisher.sh` and the ci workflow's use of it: a newer push cancels the
+//! previous run of the same ref, and overlapping release jobs publish one at a time and never
+//! move the release or the badges back to an older commit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -285,38 +285,21 @@ fn steps(job: &str) -> Vec<&str> {
 }
 
 #[test]
-fn master_runs_have_their_own_group_and_the_release_job_publishes_under_the_lock() {
+fn one_run_per_ref_and_the_release_job_publishes_under_the_lock() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
 
     assert!(
         workflow.contains(
-            "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
+            "\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n"
         ),
-        "master runs must be grouped by commit and pull requests by ref"
+        "a newer push cancels the previous run of the same ref"
     );
 
     let job = release_job(&workflow);
     assert!(
         !job.contains("concurrency:"),
         "a concurrency group on the release job cancels a queued release and its run"
-    );
-    let build_release = {
-        let start = workflow
-            .find("\n  build-release:\n")
-            .expect("ci.yml has a build-release job");
-        let end = workflow
-            .find("\n  release:\n")
-            .expect("ci.yml has a release job");
-        &workflow[start..end]
-    };
-    assert!(
-        !build_release.contains("concurrency:"),
-        "a concurrency group on the release build cancels the whole run"
-    );
-    assert!(
-        build_release.contains("scripts/release-publisher.sh check"),
-        "an older master commit skips the release build"
     );
 
     let steps = steps(job);
