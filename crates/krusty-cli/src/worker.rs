@@ -122,6 +122,7 @@ fn translate_language_features(
     source_flag: &str,
 ) -> Result<(), Refusal> {
     const MODELED: &[&str] = &[
+        "AllowAccessToProtectedFieldFromSuperCompanion",
         "ContextParameters",
         "DataClassCopyRespectsConstructorVisibility",
         "EnableNameBasedDestructuringShortForm",

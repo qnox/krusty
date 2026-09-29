@@ -1601,6 +1601,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `disable`. Tests: `tests/jvm_default_mode_e2e.rs` (differential class sets, public method
   realization and holder bytes vs kotlinc, emitted `jvmClassFlags`, behavior parity, and cross-module
   consumption) and the `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
+- Language level 2.4, kotlinc 2.4.20's default, enables every feature krusty models whose
+  `sinceVersion` is at most 2.4. Explicit backing fields and `when` guards are in that set, so
+  `val items: List<String> field = mutableListOf()` and `is A if v.ok ->` compile with no `-X`
+  flag. A protected property of a superclass companion is readable from the subclass for the
+  same reason (`AllowAccessToProtectedFieldFromSuperCompanion`, since 2.1). Name-based
+  destructuring is 2.5 and stays off. A feature with no `sinceVersion`
+  (`DataClassCopyRespectsConstructorVisibility`, context receivers) stays opt-in.
+  `-XXLanguage:-Feature` still disables a stable feature.
+  Tests: `tests/language_level_features_e2e.rs`, `src/features.rs`.
 - `-Xconsistent-data-class-copy-visibility` (language feature
   `DataClassCopyRespectsConstructorVisibility`; also reachable as `-XXLanguage:+…`): a data class's
   synthesized `copy`/`copy$default` take the PRIMARY CONSTRUCTOR's visibility instead of being

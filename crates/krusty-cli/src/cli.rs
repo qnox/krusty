@@ -662,11 +662,11 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
-    /// Explicit backing fields stay off until the build passes the flag. An ignored flag would
-    /// leave `field =` rejected in the Kotlin compiler sources.
+    /// Explicit backing fields are on at language level 2.4. The `-X` spelling is redundant,
+    /// as it is for kotlinc, and must still be modeled so it never lands in `ignored`.
     #[test]
     fn explicit_backing_fields_flag_is_modeled_not_ignored() {
-        assert!(!parse_args(&["x.kt"]).features.has("ExplicitBackingFields"));
+        assert!(parse_args(&["x.kt"]).features.has("ExplicitBackingFields"));
         let parsed = parse_args(&["-Xexplicit-backing-fields", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);

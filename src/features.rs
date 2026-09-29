@@ -13,16 +13,50 @@ pub struct LangFeatures {
 
 impl Default for LangFeatures {
     fn default() -> Self {
-        Self {
-            enabled: HashSet::from([
-                "BareArrayClassLiteral".to_string(),
-                "ContextParameters".to_string(),
-                "EnumEntries".to_string(),
-                "MultiDollarInterpolation".to_string(),
-                "PrioritizedEnumEntries".to_string(),
-            ]),
+        let mut enabled = HashSet::new();
+        for &(name, since) in OBSERVED_FEATURES {
+            if let Some(since) = since {
+                if language_level_enables(since) {
+                    enabled.insert(name.to_string());
+                }
+            }
         }
+        Self { enabled }
     }
+}
+
+/// Krusty's language level is kotlinc 2.4.20's default. A feature whose `sinceVersion` is at
+/// most this level is on; one with no `sinceVersion`, or a later one, stays opt-in.
+const LANGUAGE_LEVEL: (u16, u16) = (2, 4);
+
+/// Features the frontend observes, paired with kotlinc's `sinceVersion`. `None` means kotlinc
+/// has not assigned one, so the feature stays off until a flag or directive enables it.
+const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
+    (
+        "AllowAccessToProtectedFieldFromSuperCompanion",
+        Some((2, 1)),
+    ),
+    ("BareArrayClassLiteral", Some((1, 4))),
+    ("ContextParameters", Some((2, 4))),
+    ("ContextReceivers", None),
+    ("ContextSensitiveResolutionUsingExpectedType", None),
+    ("DataClassCopyRespectsConstructorVisibility", None),
+    ("EagerLambdaAnalysis", None),
+    ("EnableNameBasedDestructuringShortForm", None),
+    ("EnumEntries", Some((1, 9))),
+    ("ExplicitBackingFields", Some((2, 4))),
+    ("ExplicitContextArguments", Some((2, 5))),
+    ("ImplicitSignedToUnsignedIntegerConversion", None),
+    ("MultiDollarInterpolation", Some((2, 2))),
+    ("MultiPlatformProjects", None),
+    ("NameBasedDestructuring", Some((2, 5))),
+    ("PrioritizedEnumEntries", Some((2, 1))),
+    ("UnitConversionsOnArbitraryExpressions", None),
+    ("WhenGuards", Some((2, 2))),
+];
+
+fn language_level_enables(since: (u16, u16)) -> bool {
+    since.0 < LANGUAGE_LEVEL.0 || (since.0 == LANGUAGE_LEVEL.0 && since.1 <= LANGUAGE_LEVEL.1)
 }
 
 impl LangFeatures {
@@ -192,8 +226,33 @@ mod tests {
     }
 
     #[test]
+    fn language_level_enables_features_stable_in_2_4() {
+        let features = LangFeatures::new();
+        for name in [
+            "AllowAccessToProtectedFieldFromSuperCompanion",
+            "BareArrayClassLiteral",
+            "ContextParameters",
+            "EnumEntries",
+            "ExplicitBackingFields",
+            "MultiDollarInterpolation",
+            "PrioritizedEnumEntries",
+            "WhenGuards",
+        ] {
+            assert!(features.has(name), "{name} is stable in 2.4");
+        }
+        for name in [
+            "ContextReceivers",
+            "DataClassCopyRespectsConstructorVisibility",
+            "ExplicitContextArguments",
+            "NameBasedDestructuring",
+        ] {
+            assert!(!features.has(name), "{name} stays opt-in");
+        }
+    }
+
+    #[test]
     fn each_cli_feature_alias_enables_its_feature() {
-        assert!(!LangFeatures::new().has("ExplicitBackingFields"));
+        assert!(LangFeatures::new().has("ExplicitBackingFields"));
         assert!(!LangFeatures::new().has("DataClassCopyRespectsConstructorVisibility"));
         for &(flag, feature) in super::FEATURE_ALIASES {
             let mut features = LangFeatures::new();
