@@ -139,6 +139,7 @@ mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
 mod when_exhaustiveness;
+mod when_flow;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
@@ -10164,6 +10165,9 @@ pub struct TypeInfo {
     reflective_callable_references: std::collections::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
     exhaustive_whens: std::collections::HashSet<ExprId>,
+    /// Complete numeric equality plans for subject-form `when` conditions after earlier failed type
+    /// tests. Keyed by the condition expression.
+    when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     /// Full checked generic-bound shapes keyed by the bound's source span. Unlike an ordinary type
     /// use, a declaration bound retains the referenced type variables and declaration-site variance.
@@ -37202,6 +37206,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         callable_reference_types: HashMap::new(),
         reflective_callable_references: std::collections::HashSet::new(),
         exhaustive_whens: std::collections::HashSet::new(),
+        when_subject_numeric_equalities: HashMap::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
         active_statement_suppressions: Vec::new(),
@@ -38912,6 +38917,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
+        when_subject_numeric_equalities,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -39260,6 +39266,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
+        when_subject_numeric_equalities,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -40019,6 +40026,8 @@ struct Checker<'a> {
     callable_reference_types: HashMap<ExprId, Ty>,
     reflective_callable_references: std::collections::HashSet<ExprId>,
     exhaustive_whens: std::collections::HashSet<ExprId>,
+    /// See [`TypeInfo::when_subject_numeric_equalities`].
+    when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     unresolved_type_segments: HashMap<(u32, u32), String>,
     /// Transient diagnostic directives inherited from annotated enclosing statements.
@@ -53530,34 +53539,6 @@ impl<'a> Checker<'a> {
             result.push((path, ty));
         }
         (result, declined)
-    }
-
-    /// Flow facts established by one `when` condition. Predicate conditions already contain the
-    /// subject in their checked expression (`is T`, `in range`) and use ordinary condition flow.
-    /// A subject-equality condition stores only the candidate expression, so null equality must be
-    /// related to the separately stored subject here instead of being mistaken for a standalone
-    /// Boolean condition.
-    fn when_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        subject: Option<ExprId>,
-        condition: WhenCondition,
-        truth: bool,
-    ) -> (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>) {
-        if let (Some(subject), WhenCondition::SubjectEquals(candidate)) = (subject, condition) {
-            if matches!(self.file.expr(candidate), Expr::NullLit) {
-                let mut casts = Vec::new();
-                let mut declined = Vec::new();
-                if truth {
-                    self.null_branch_narrowings(scope, subject, &mut casts);
-                } else {
-                    self.null_check_narrowings(scope, subject, &mut casts, &mut declined);
-                }
-                return (casts, declined);
-            }
-            return (Vec::new(), Vec::new());
-        }
-        self.condition_narrowings(scope, condition.expression(), truth)
     }
 
     /// Negative value/classifier facts established when `cond` evaluates to `truth`. Only stable
@@ -67885,6 +67866,9 @@ impl<'a> Checker<'a> {
                         (Some(subject), false) => self.expr_expected(cond_scope, cnd, subject),
                         _ => self.expr(cond_scope, cnd),
                     };
+                    self.record_when_subject_numeric_equality(
+                        cond_scope, cnd, subject, subj_ty, condition, ct,
+                    );
                     match subj_ty {
                         // A type-test arm (`is T`) compares by `instanceof`, not `==` — no
                         // comparability constraint (it already validated its own operand/target).

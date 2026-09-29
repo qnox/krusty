@@ -7,8 +7,10 @@
 //! Removing the physical store/load pair when the subject is read once belongs to the JVM
 //! backend's bytecode temporaries pass, never to this module.
 
-use crate::fir::{FirExprId, FirWhenBranch, FirWhenCondition};
-use crate::ir::{ExprId, IrBinOp, IrExpr};
+use crate::fir::{
+    FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
+};
+use crate::ir::{ExprId, IrBinOp, IrExpr, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
@@ -55,7 +57,7 @@ impl BodyLowering<'_> {
             let mut condition = None;
             for candidate in branch.conditions.iter().copied() {
                 let candidate = match candidate {
-                    FirWhenCondition::SubjectEquals(candidate) => {
+                    FirWhenCondition::SubjectEquals { candidate, numeric } => {
                         // fir2ir builds the subject comparison, and the subject read in it, at
                         // the condition's own offsets.
                         let line = self.body.expression_debug_lines(candidate).source;
@@ -64,6 +66,8 @@ impl BodyLowering<'_> {
                             origin: branch.origin,
                         })?;
                         let subject = self.ir.add_expr(IrExpr::GetValue(subject));
+                        let (subject, candidate) =
+                            self.when_subject_equality_operands(subject, candidate, numeric);
                         let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: IrBinOp::Eq,
                             lhs: subject,
@@ -120,5 +124,36 @@ impl BodyLowering<'_> {
                 value: Some(when),
             }))
         }
+    }
+
+    /// Materialize the resolver's exact numeric equality plan. The declared subject stays a
+    /// reference, so unboxing remains distinct from a later widening (`Float` to `Double`).
+    fn when_subject_equality_operands(
+        &mut self,
+        subject: ExprId,
+        candidate: ExprId,
+        numeric: Option<FirWhenSubjectNumericEquality>,
+    ) -> (ExprId, ExprId) {
+        let Some(numeric) = numeric else {
+            return (subject, candidate);
+        };
+        let subject = self.coerce_when_operand(subject, numeric.subject_unbox);
+        let subject = numeric
+            .subject_widening
+            .map(|target| self.coerce_when_operand(subject, target))
+            .unwrap_or(subject);
+        let candidate = numeric
+            .candidate_widening
+            .map(|target| self.coerce_when_operand(candidate, target))
+            .unwrap_or(candidate);
+        (subject, candidate)
+    }
+
+    fn coerce_when_operand(&mut self, value: ExprId, target: ResolvedTy) -> ExprId {
+        self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: value,
+            type_operand: target.get(),
+        })
     }
 }
