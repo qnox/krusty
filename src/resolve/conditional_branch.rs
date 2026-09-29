@@ -169,32 +169,8 @@ impl Checker<'_> {
         let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
             return current;
         };
-        let infer = |expected| {
-            crate::symbol_resolver::infer_generic_return_bindings(
-                &signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-        };
-        // The sibling may be MORE specific than the generic result classifier: a
-        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
-        // supertype. Project the sibling to the selected call's result classifier before giving up;
-        // this is ordinary subtype information, not collection-specific approximation.
-        let expectation = if infer(sibling).is_some() {
-            sibling
-        } else {
-            let source = self.fed_source();
-            let Some(applied) = crate::assignable::applied_supertype(
-                &crate::symbol_resolver::SourceOracle(&source),
-                sibling,
-                signature.ret,
-            ) else {
-                return current;
-            };
-            if infer(applied).is_none() {
-                return current;
-            }
-            applied
+        let Some(expectation) = sibling_result_expectation(self, &signature, sibling) else {
+            return current;
         };
         crate::trace_compiler!(
             "expected_call",
@@ -202,6 +178,54 @@ impl Checker<'_> {
         );
         recheck(self, expectation)
     }
+}
+
+/// The type a sibling result contributes to an under-constrained generic call.
+///
+/// Three ordinary subtype readings are enough. Equal result classifiers unify directly
+/// (`emptyList()` beside `listOf<T>()`). A more specific sibling is read through the call's own
+/// result classifier (`mutableListOf<String>()` beside `listOf()`). A more specific call is
+/// checked against the sibling itself (`linkedSetOf()` beside `hashSetOf<T>()`, because
+/// `LinkedHashSet<T>` is a `HashSet<T>`). Calls whose arguments already fixed a formal never reach
+/// this helper.
+fn sibling_result_expectation(
+    checker: &Checker<'_>,
+    signature: &crate::libraries::GenericSig,
+    sibling: Ty,
+) -> Option<Ty> {
+    let infer = |expected| {
+        crate::symbol_resolver::infer_generic_return_bindings(
+            signature,
+            expected,
+            |actual, bound| checker.receiver_is_assignable(actual, bound),
+        )
+    };
+    if infer(sibling).is_some() {
+        return Some(sibling);
+    }
+    let source = checker.fed_source();
+    if let Some(applied) = crate::assignable::applied_supertype(
+        &crate::symbol_resolver::SourceOracle(&source),
+        sibling,
+        signature.ret,
+    ) {
+        return infer(applied).is_some().then_some(applied);
+    }
+    crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+        &source,
+        signature,
+        sibling,
+        |actual, bound| {
+            crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &crate::symbol_resolver::SourceOracle(&source),
+                actual,
+                bound,
+            )
+        },
+    )
+    .is_some()
+    .then_some(sibling)
 }
 
 /// One expression being checked, and whether its expectation is declared.

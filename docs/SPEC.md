@@ -2560,9 +2560,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
 - **Conditional branches contribute result-type constraints to generic calls.** For `if`, `when`,
   and elvis expressions, a selected call with unbound result formals is rechecked against a sibling
-  result type that can bind them. Branch order does not affect the binding. If no sibling can bind
-  the formals, the cannot-infer diagnostic is reported at the call. Test:
-  `tests/conditional_branch_inference_e2e.rs`.
+  result type that can bind them. Branch order does not affect the binding. The sibling is read
+  through ordinary subtyping: equal classifiers unify directly, a more specific sibling is projected
+  onto the call's result classifier, and a more specific call is checked against the sibling
+  (`linkedSetOf()` beside `hashSetOf<T>()` is `LinkedHashSet<T>`, because that result is a
+  `HashSet<T>`). A formal already fixed by an argument stays fixed. If no sibling can bind the
+  formals, the cannot-infer diagnostic is reported at the call. Tests:
+  `tests/conditional_branch_inference_e2e.rs`, `tests/conditional_sibling_rebind_e2e.rs`.
 - **A formal that appears only inside another formal's projected bound is inferred from that
   argument.** `<R, C : MutableCollection<in R>> id(c: C)` applied to `MutableCollection<T>` or
   `ArrayList<T>` binds `R` to `T`, including when `T` belongs to the caller. A star argument
