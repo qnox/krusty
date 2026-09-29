@@ -501,10 +501,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
 /// retargeted with the table; the declaration's own field index is a separate identity and moves
 /// with them. A `var` that only customizes its setter synthesizes its default getter from that
 /// index, so the getter still addresses the field the setter writes.
-fn retarget_surviving_field_indices(
-    ir: &mut IrFile,
-    remaps: &HashMap<ClassId, Vec<Option<u32>>>,
-) {
+fn retarget_surviving_field_indices(ir: &mut IrFile, remaps: &HashMap<ClassId, Vec<Option<u32>>>) {
     for (&class, remap) in remaps {
         for property in &mut ir.classes[class as usize].properties {
             property.backing_field = retarget_field_index(remap, property.backing_field);
