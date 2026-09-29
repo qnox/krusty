@@ -463,7 +463,7 @@ mod tests {
             &|candidate| candidate == "java/lang/Object",
         )
         .expect("stub");
-        cp.set_stub_overlay(stubs);
+        cp.set_stub_overlay(&stubs);
         assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_none());
         cp.memoize_inline_plan(
             InlinePlanCacheInput {
