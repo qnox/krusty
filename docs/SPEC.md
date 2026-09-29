@@ -3484,7 +3484,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's `BuiltInMethodsWithDifferentJvmName`), and reports interface-ness for the correct
   `invokeinterface`/`invokevirtual`. The codegen path fires ONLY for a RENAMED member; a same-named member
   (`compareTo`, `length`) is left to `resolve_instance` so a real (e.g. value-class) receiver dispatches
-  correctly. Tests: `tests/bounded_type_param_e2e.rs`.
+  correctly. A classpath with the JDK and no kotlin-stdlib still publishes those
+  renames from the class file: `kotlin/Number` loads `java/lang/Number`, and each
+  value method is exposed under its Kotlin name (`toInt`) with the classfile spelling
+  (`intValue`) retained as the physical name. The realization row matches that
+  classfile owner, not the Kotlin name the lookup started from. Tests:
+  `tests/bounded_type_param_e2e.rs`,
+  `mapped_kotlin_number_publishes_jdk_realizations_without_stdlib`,
+  `tests/classpath_number_conversion_e2e.rs`.
 
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
   upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
