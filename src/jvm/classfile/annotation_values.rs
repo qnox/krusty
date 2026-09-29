@@ -1,32 +1,23 @@
 //! The `element_value` encoding of annotations (JVMS §4.7.16.1), interning each constant as it is
 //! written.
 
-use std::borrow::Cow;
-
 use super::{u2, ClassWriter};
 use crate::kt_string::KtString;
 use crate::types::TypeName;
 
 /// The internal name an annotation type contributes to `InnerClasses`, and the `L…;` descriptor
-/// written for it. A name whose classfile spelling is that same identity borrows both; a spelling
-/// that still differs is owned so the descriptor stays the rendered name.
-fn annotation_class_text(name: TypeName) -> (Cow<'static, str>, Cow<'static, str>) {
+/// written for it. Both use the physical classfile spelling; metadata's dotted nested spelling is
+/// a semantic identity and must not escape into a descriptor or `InnerClasses` lookup.
+fn annotation_class_text(name: TypeName) -> (&'static str, &'static str) {
     let physical = crate::jvm::names::classfile_internal_name_of(name);
-    if name.matches(physical) {
-        let descriptor = crate::jvm::names::reference_descriptor(physical);
-        (Cow::Borrowed(physical), Cow::Borrowed(descriptor))
-    } else {
-        let rendered = name.render();
-        let descriptor = format!("L{rendered};");
-        (Cow::Owned(rendered), Cow::Owned(descriptor))
-    }
+    (physical, crate::jvm::names::reference_descriptor(physical))
 }
 
 impl ClassWriter {
     fn record_annotation_class(&mut self, name: TypeName) -> u16 {
         let (internal, descriptor) = annotation_class_text(name);
-        let utf8 = self.cp.utf8(&descriptor);
-        self.annotation_class_refs.insert(internal.into_owned());
+        let utf8 = self.cp.utf8(descriptor);
+        self.annotation_class_refs.insert(internal.to_owned());
         utf8
     }
 
@@ -192,9 +183,9 @@ fn repeated_annotation_reuses_one_descriptor_slot() {
 }
 
 #[test]
-fn dotted_annotation_name_keeps_its_rendered_descriptor() {
+fn dotted_annotation_name_uses_its_physical_classfile_descriptor() {
     let dotted = crate::types::type_name_child(crate::types::type_name("java/util"), "Map.Entry");
     let (internal, descriptor) = annotation_class_text(dotted);
-    assert_eq!(internal.as_ref(), "java/util/Map.Entry");
-    assert_eq!(descriptor.as_ref(), "Ljava/util/Map.Entry;");
+    assert_eq!(internal, "java/util/Map$Entry");
+    assert_eq!(descriptor, "Ljava/util/Map$Entry;");
 }
