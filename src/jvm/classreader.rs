@@ -837,8 +837,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| FieldSig {
             access: member.access,
-            name: crate::types::intern(&member.name),
-            descriptor: crate::types::intern(&member.descriptor),
+            name: super::member_spelling::intern_owned(member.name),
+            descriptor: super::member_spelling::intern_owned(member.descriptor),
             const_value: member.attributes.const_value,
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
@@ -848,8 +848,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| MethodSig {
             access: member.access,
-            name: crate::types::intern(&member.name),
-            descriptor: crate::types::intern(&member.descriptor),
+            name: super::member_spelling::intern_owned(member.name),
+            descriptor: super::member_spelling::intern_owned(member.descriptor),
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,

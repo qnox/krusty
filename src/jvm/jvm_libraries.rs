@@ -2068,7 +2068,7 @@ impl JvmLibraries {
                         )
                     {
                         if source != member.name {
-                            member.physical_name = Some(m.name.clone());
+                            member.physical_name = Some(m.name.to_owned());
                             member.name = source.to_string();
                             // The convention check above saw the classfile spelling (`charAt`).
                             // A realization that publishes that method as Kotlin `get` is the same

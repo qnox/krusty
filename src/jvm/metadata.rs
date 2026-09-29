@@ -35,7 +35,7 @@ use crate::metadata::decode::{
     packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
 };
-use crate::types::{intern, type_name, Ty, TypeName, Visibility};
+use crate::types::{type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2383,7 +2383,7 @@ fn decode_functions(
                     out.push(MetaFn::from_decoded(function::DecodedFunction {
                         kotlin_name,
                         jvm_name,
-                        jvm_desc: jvm_desc.map(|s| intern(&s)),
+                        jvm_desc: jvm_desc.map(super::member_spelling::intern_owned),
                         visibility: pf.visibility,
                         flags: MfnFlags::default()
                             .with_is_inline(pf.is_inline)
@@ -2919,8 +2919,11 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                 });
                 out.push(MetaConstructor {
                     params,
-                    jvm_name: intern(jvm_name.as_deref().unwrap_or("<init>")),
-                    jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
+                    jvm_name: jvm_name.map_or_else(
+                        || super::member_spelling::intern("<init>"),
+                        super::member_spelling::intern_owned,
+                    ),
+                    jvm_desc: jvm_desc.map(super::member_spelling::intern_owned),
                     deprecated_hidden: false,
                 });
             }

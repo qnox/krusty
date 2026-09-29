@@ -38,7 +38,13 @@ fn reference_facade_fields(src: &str, stem: &str) -> Vec<(u16, String, String)> 
 fn field_table(ci: &krusty::jvm::classreader::ClassInfo) -> Vec<(u16, String, String)> {
     ci.fields
         .iter()
-        .map(|field| (field.access, field.name.to_owned(), field.descriptor.to_owned()))
+        .map(|field| {
+            (
+                field.access,
+                field.name.to_owned(),
+                field.descriptor.to_owned(),
+            )
+        })
         .collect()
 }
 

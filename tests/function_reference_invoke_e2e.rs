@@ -357,7 +357,13 @@ fn retained_dispatching_reference_shapes_run() {
                 name.clone(),
                 info.fields
                     .iter()
-                    .map(|field| (field.name.to_owned(), field.access, field.descriptor.to_owned()))
+                    .map(|field| {
+                        (
+                            field.name.to_owned(),
+                            field.access,
+                            field.descriptor.to_owned(),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 info.methods
                     .iter()
