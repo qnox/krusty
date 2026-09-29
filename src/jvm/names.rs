@@ -144,7 +144,7 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &
     if let Some(owner) = crate::types::existing_type_name(owner) {
         return mapped_builtin_virtual_name_of(owner, name, descriptor);
     }
-    virtual_member_rename(|spelling| owner == spelling, name)
+    name
 }
 
 /// Identity form of [`mapped_builtin_virtual_name`]. The owner is already interned, so the rename
@@ -159,7 +159,7 @@ pub fn mapped_builtin_virtual_name_of<'a>(
     {
         return physical;
     }
-    virtual_member_rename(|spelling| owner.matches(spelling), name)
+    name
 }
 
 /// Whether two semantic member spellings address one mapped JVM method.
@@ -171,64 +171,6 @@ pub(super) fn same_mapped_virtual_name_of(
 ) -> bool {
     mapped_builtin_virtual_name_of(owner, left, descriptor)
         == mapped_builtin_virtual_name_of(owner, right, descriptor)
-}
-
-pub fn mapped_builtin_virtual_source_name<'a>(owner: TypeName, name: &'a str) -> &'a str {
-    if !owner.matches("java/lang/Number") {
-        return name;
-    }
-    match name {
-        "byteValue" => "toByte",
-        "shortValue" => "toShort",
-        "intValue" => "toInt",
-        "longValue" => "toLong",
-        "floatValue" => "toFloat",
-        "doubleValue" => "toDouble",
-        _ => name,
-    }
-}
-
-fn virtual_member_rename<'a>(owner_is: impl Fn(&str) -> bool, name: &'a str) -> &'a str {
-    if name == "get"
-        && (owner_is("java/lang/String")
-            || owner_is("kotlin/String")
-            || owner_is("java/lang/StringBuilder")
-            || owner_is("kotlin/text/StringBuilder"))
-    {
-        return "charAt";
-    }
-    if owner_is("kotlin/ranges/IntRange")
-        || owner_is("kotlin/ranges/LongRange")
-        || owner_is("kotlin/ranges/CharRange")
-    {
-        return match name {
-            "start" => "getFirst",
-            "endInclusive" => "getLast",
-            _ => name,
-        };
-    }
-    if name == "name"
-        && (owner_is("kotlin/reflect/KCallable")
-            || owner_is("kotlin/reflect/KProperty")
-            || owner_is("kotlin/reflect/KProperty0")
-            || owner_is("kotlin/reflect/KProperty1")
-            || owner_is("kotlin/reflect/KMutableProperty0")
-            || owner_is("kotlin/reflect/KMutableProperty1"))
-    {
-        return "getName";
-    }
-    if owner_is("java/lang/Number") {
-        return match name {
-            "toByte" => "byteValue",
-            "toShort" => "shortValue",
-            "toInt" => "intValue",
-            "toLong" => "longValue",
-            "toFloat" => "floatValue",
-            "toDouble" => "doubleValue",
-            _ => name,
-        };
-    }
-    name
 }
 
 fn split_field_descriptor(desc: &str) -> Option<(&str, &str)> {
@@ -442,42 +384,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mapped_virtual_renames_agree_for_an_interned_owner_and_its_spelling() {
+    fn mapped_virtual_renames_require_an_exact_declaration_realization() {
         let cases = [
-            ("java/lang/String", "get", "charAt"),
-            ("kotlin/String", "get", "charAt"),
-            ("java/lang/StringBuilder", "get", "charAt"),
-            ("kotlin/text/StringBuilder", "get", "charAt"),
-            ("kotlin/ranges/IntRange", "start", "getFirst"),
-            ("kotlin/ranges/LongRange", "endInclusive", "getLast"),
-            ("kotlin/reflect/KProperty0", "name", "getName"),
-            ("java/lang/Number", "toDouble", "doubleValue"),
-            ("java/lang/Number", "byteValue", "byteValue"),
-            ("demo/Foo", "get", "get"),
+            ("java/lang/CharSequence", "get", "(I)C", "charAt"),
+            (
+                "java/util/List",
+                "removeAt",
+                "(I)Ljava/lang/Object;",
+                "remove",
+            ),
+            ("java/lang/Number", "toDouble", "()D", "doubleValue"),
+            ("java/lang/Number", "toDouble", "()I", "toDouble"),
+            ("demo/Foo", "get", "()V", "get"),
         ];
-        for (owner, name, renamed) in cases {
+        for (owner, name, descriptor, renamed) in cases {
             assert_eq!(
-                mapped_builtin_virtual_name(owner, name, "()V"),
+                mapped_builtin_virtual_name(owner, name, descriptor),
                 renamed,
                 "{owner}.{name}"
             );
             assert_eq!(
-                mapped_builtin_virtual_name_of(crate::types::type_name(owner), name, "()V"),
+                mapped_builtin_virtual_name_of(crate::types::type_name(owner), name, descriptor),
                 renamed,
                 "{owner}.{name}"
             );
         }
-        assert_eq!(
-            mapped_builtin_virtual_source_name(
-                crate::types::type_name("java/lang/Number"),
-                "intValue"
-            ),
-            "toInt"
-        );
-        assert_eq!(
-            mapped_builtin_virtual_source_name(crate::types::type_name("demo/Foo"), "intValue"),
-            "intValue"
-        );
     }
 
     #[test]
