@@ -124,3 +124,80 @@ fn constant_fused_guards_preserve_reachability() {
         "constant guards must retain both unconditional and fall-through control flow"
     );
 }
+
+/// A `break` in a loop condition targets the enclosing loop. A `while` condition is outside that
+/// loop, so `while (break)` leaves the outer loop before the body. A `do`/`while` condition is
+/// inside that loop, so the body runs once and the outer loop continues. Official box
+/// `controlStructures/breakContinueInExpressions/breakInLoopConditions.kt`.
+#[test]
+fn break_in_a_loop_condition_targets_the_enclosing_loop() {
+    let src = "fun breakInDoWhileCondition(): String {\n\
+var i = 0\n\
+while (true) {\n\
+++i\n\
+var j = 0\n\
+do {\n\
+++j\n\
+} while (break)\n\
+if (j != 1) return \"FAIL1\"\n\
+if (i == 3) break\n\
+}\n\
+if (i != 3) return \"FAIL2\"\n\
+return \"OK\"\n\
+}\n\
+fun breakInWhileCondition(): String {\n\
+var i = 0\n\
+while (true) {\n\
+++i\n\
+var j = 0\n\
+while (break) {\n\
+j++\n\
+}\n\
+return \"FAIL3\"\n\
+}\n\
+if (i != 1) return \"FAIL4\"\n\
+return \"OK\"\n\
+}\n\
+fun box(): String {\n\
+val breakInDoWhileResult = breakInDoWhileCondition()\n\
+if (breakInDoWhileResult != \"OK\") return breakInDoWhileResult\n\
+return breakInWhileCondition()\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "breakInLoopConditions");
+}
+
+/// The pre-test loop is not in scope while its own condition is evaluated, so an unlabeled
+/// `continue` there resumes the enclosing loop rather than targeting the loop being entered.
+#[test]
+fn continue_in_a_while_condition_targets_the_enclosing_loop() {
+    let src = "fun box(): String {\n\
+var iterations = 0\n\
+while (++iterations < 3) {\n\
+while (continue) {\n\
+return \"FAIL-inner\"\n\
+}\n\
+return \"FAIL-outer\"\n\
+}\n\
+return if (iterations == 3) \"OK\" else \"FAIL-count: $iterations\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(src, "ContinueInWhileCondition");
+}
+
+/// A `do`/`while` condition remains inside that loop. Its unlabeled `continue` therefore targets
+/// the condition itself; compare bytes without executing the intentional infinite loop.
+#[test]
+fn continue_in_a_do_while_condition_targets_that_loop() {
+    let src = "fun spin() {\n\
+do {\n\
+} while (continue)\n\
+}\n";
+    let Some(result) = common::byte_diff_against_kotlinc(
+        "ContinueInDoWhileCondition",
+        src,
+        "ContinueInDoWhileConditionKt",
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("a do-while condition continue is byte-identical to kotlinc");
+}
