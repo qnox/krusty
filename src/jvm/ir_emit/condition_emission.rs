@@ -23,11 +23,10 @@ impl Emitter<'_> {
     /// `ifnull`, `if_acmpeq`, `lcmp;ifge`, …) instead of materializing a 0/1 boolean and testing it
     /// with `ifeq`/`ifne` — the bytecode kotlinc emits for every `if`/`while`/`for` over a comparison.
     ///
-    /// Returns `true` when the jump was emitted UNCONDITIONALLY (a constant condition that always
-    /// takes it): the caller's fall-through path is then statically unreachable, and whatever it would
-    /// emit next lands after a `goto` with nothing branching to it — dead code with no stack-map frame,
-    /// which the verifier rejects outright ("Expecting a stack map frame"). Such a caller must emit
-    /// nothing on that path. kotlinc likewise emits no body for a never-entered branch.
+    /// Returns `true` when evaluating the condition has no fall-through: either a constant takes
+    /// `target` unconditionally or the condition itself transfers control (`break`, `continue`,
+    /// `return`, or `throw`). Whatever the caller would emit next is then dead code with no incoming
+    /// stack-map state, so the caller must emit nothing on that path.
     #[must_use = "an unconditionally-taken jump makes the fall-through path dead — emitting there \
                   leaves frameless code the verifier rejects"]
     pub(super) fn emit_cond_branch(
@@ -206,6 +205,12 @@ impl Emitter<'_> {
                 code.ifeq(target);
             }
             return false;
+        }
+        // A condition that always transfers (`while (break)`, `do { … } while (break)`) emits
+        // the jump and no Boolean. Testing a missing 0/1 afterwards is an empty-stack `ifeq`.
+        if self.diverges(cond) {
+            self.emit_value(cond, code);
+            return true;
         }
         self.emit_value(cond, code);
         if jump_when_true {

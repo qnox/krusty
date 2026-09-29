@@ -87,13 +87,15 @@ impl Emitter<'_> {
             debug_lines::mark_loop_control(loop_line, code);
             self.emit(u, code);
         }
-        self.loop_stack.pop();
         if post_test {
             // `do…while`: loop back while the condition holds, then fall through to `end`.
             // A `while (true)` back-edge IS unconditional, and the only thing after it is the
             // `frame(end)`/`bind(end)` below — which is exactly what a dead-but-framed `end`
             // needs, so the flag is deliberately ignored here. Anything emitted after this
             // point in future would have to honour it.
+            //
+            // The condition is inside this loop: `do { … } while (break)` leaves THIS loop.
+            // Popping the loop first would make that transfer miss the loop it names.
             if !self.ir.expr_source_lines.contains_key(&cond) {
                 debug_lines::mark_loop_control(loop_line, code);
             }
@@ -106,6 +108,7 @@ impl Emitter<'_> {
         } else {
             code.goto(start);
         }
+        self.loop_stack.pop();
         self.bind(end, code);
     }
 }
