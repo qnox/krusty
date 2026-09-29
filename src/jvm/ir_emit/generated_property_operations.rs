@@ -40,7 +40,7 @@ impl Emitter<'_> {
             self.emit_value(value, code);
             let owner = generated_property_hash_owner(self.ir, self.bodies, ty)
                 .expect("a checked reference property has a JVM hash owner");
-            let method = self.cw.methodref(owner, "hashCode", "()I");
+            let method = self.cw.methodref(owner.as_ref(), "hashCode", "()I");
             code.invokevirtual(method, 0, 1);
         }
     }
@@ -64,7 +64,7 @@ impl Emitter<'_> {
         let descriptor = method_descriptor(&[physical, physical], Ty::Boolean);
         let method = self
             .cw
-            .methodref(owner.rendered(), "equals-impl0", &descriptor);
+            .methodref(&owner.render(), "equals-impl0", &descriptor);
         code.invokestatic(method, slot_words(physical) as i32 * 2, 1);
         true
     }
@@ -82,7 +82,7 @@ impl Emitter<'_> {
             let descriptor = method_descriptor(&[carrier], Ty::Int);
             let method = self
                 .cw
-                .methodref(owner.rendered(), "hashCode-impl", &descriptor);
+                .methodref(&owner.render(), "hashCode-impl", &descriptor);
             code.invokestatic(method, slot_words(carrier) as i32, 1);
             return true;
         }
@@ -96,13 +96,13 @@ impl Emitter<'_> {
             let descriptor = method_descriptor(&[], physical);
             let method = self
                 .cw
-                .methodref(owner.rendered(), "unbox-impl", &descriptor);
+                .methodref(&owner.render(), "unbox-impl", &descriptor);
             code.invokevirtual(method, 0, slot_words(physical) as i32);
         }
         let descriptor = method_descriptor(&[physical], Ty::Int);
         let method = self
             .cw
-            .methodref(owner.rendered(), "hashCode-impl", &descriptor);
+            .methodref(&owner.render(), "hashCode-impl", &descriptor);
         code.invokestatic(method, slot_words(physical) as i32, 1);
         true
     }
@@ -128,13 +128,13 @@ fn generated_property_hash_owner(
     ir: &IrFile,
     bodies: &dyn MethodBodies,
     ty: Ty,
-) -> Option<&'static str> {
+) -> Option<std::borrow::Cow<'static, str>> {
     if ty.is_array() || (ty.non_null().is_jvm_scalar() && !ty.is_nullable()) {
         return None;
     }
     if let Some(owner) = ty.non_null().obj_internal() {
         if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
-            return Some(owner.rendered());
+            return Some(std::borrow::Cow::Owned(owner.render()));
         }
     }
     let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
@@ -151,7 +151,7 @@ fn generated_property_hash_owner(
     {
         owner = "java/lang/Object";
     }
-    Some(owner)
+    Some(std::borrow::Cow::Borrowed(owner))
 }
 
 #[cfg(test)]
@@ -177,7 +177,7 @@ mod tests {
         let owner = generated_property_hash_owner(&ir, &NoBodies, ty).unwrap();
         assert_eq!(owner, "sample/hash6044/Host");
         assert!(std::ptr::eq(
-            owner,
+            owner.as_ref(),
             crate::jvm::names::instanceof_internal_name(ty)
         ));
         assert_eq!(

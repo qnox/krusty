@@ -169,7 +169,11 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
 fn physical_classfile_name_of(internal: TypeName) -> &'static str {
     if let Some(function) = super::function_classifiers::classifier(internal) {
         if function.identity() == internal && (function.is_reflective() || !function.is_suspend()) {
-            return crate::jvm::jvm_class_map::jvm_internal_name(internal);
+            return if function.is_reflective() {
+                crate::types::KFUNCTION_INTERNAL
+            } else {
+                function_interface_internal_name(function.arity())
+            };
         }
     }
     let mapped = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(internal);
@@ -178,7 +182,7 @@ fn physical_classfile_name_of(internal: TypeName) -> &'static str {
     if mapped.segment_ref().contains('.') {
         return Box::leak(mapped.jvm_binary_name().into_boxed_str());
     }
-    mapped.rendered()
+    Box::leak(mapped.render().into_boxed_str())
 }
 
 /// Whether `descriptor` is the object descriptor of `classifier` (`Lpkg/Foo;`). The comparison uses
@@ -443,7 +447,17 @@ pub(crate) fn reference_descriptor(classfile_name: &'static str) -> &'static str
 /// Descriptor of a companion field. The companion's own internal spelling is the classfile name:
 /// this is not a builtin mapping.
 pub(crate) fn companion_field_descriptor(companion: crate::types::TypeName) -> &'static str {
-    reference_descriptor(companion.rendered())
+    thread_local! {
+        static CACHE: std::cell::RefCell<
+            std::collections::HashMap<crate::types::TypeName, &'static str>,
+        > = std::cell::RefCell::default();
+    }
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&companion).copied()) {
+        return found;
+    }
+    let spelled = Box::leak(format!("L{};", companion.render()).into_boxed_str());
+    CACHE.with(|cache| cache.borrow_mut().insert(companion, spelled));
+    spelled
 }
 
 /// `[element` for an interned element descriptor, including another array descriptor.
@@ -824,22 +838,19 @@ mod tests {
     }
 
     #[test]
-    fn classfile_name_reuses_the_rendered_spelling() {
+    fn classfile_name_matches_the_classifier_spelling() {
         let host = crate::types::type_name("sample/classfile6044/Host");
+        assert_eq!(classfile_internal_name_of(host), host.render());
         assert!(std::ptr::eq(
             classfile_internal_name_of(host),
-            host.rendered(),
+            classfile_internal_name_of(host),
         ));
         let string = crate::types::type_name("kotlin/String");
-        let java_string = crate::types::type_name("java/lang/String");
-        assert!(std::ptr::eq(
-            classfile_internal_name_of(string),
-            java_string.rendered(),
-        ));
+        assert_eq!(classfile_internal_name_of(string), "java/lang/String");
         let function = crate::types::type_name("kotlin/Function1");
         assert!(std::ptr::eq(
             classfile_internal_name_of(function),
-            crate::jvm::jvm_class_map::jvm_internal_name(function),
+            crate::jvm::jvm_class_map::jvm_internal_name(function).as_ref(),
         ));
     }
 

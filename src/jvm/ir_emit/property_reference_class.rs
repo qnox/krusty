@@ -54,11 +54,11 @@ struct PropertyCallTarget<'a> {
 }
 
 struct PropertyReferenceTarget<'a> {
-    owner: &'static str,
-    call_owner: &'static str,
-    reflection_facade: Option<&'a str>,
-    getter_facade: Option<&'a str>,
-    setter_facade: Option<&'a str>,
+    owner: String,
+    call_owner: String,
+    reflection_facade: Option<std::borrow::Cow<'a, str>>,
+    getter_facade: Option<std::borrow::Cow<'a, str>>,
+    setter_facade: Option<std::borrow::Cow<'a, str>>,
     array_length: bool,
     getter_descriptor: String,
     getter_params: Vec<Ty>,
@@ -77,19 +77,19 @@ impl<'a> PropertyReferenceTarget<'a> {
         facade: &'a str,
     ) -> Self {
         let semantic_owner = property.owner_internal.expect("property reference owner");
-        let owner = jvm_property_owner(semantic_owner);
+        let owner = jvm_property_owner(semantic_owner).into_owned();
         let semantic_call_owner = property
             .call_owner_internal
             .expect("property reference call owner");
-        let call_owner = jvm_property_owner(semantic_call_owner);
+        let call_owner = jvm_property_owner(semantic_call_owner).into_owned();
         let reflection_facade = reflected_extension_facade(property.ext_facade, facade);
         let getter_facade = match realization.getter_bridge_owner {
-            Some(owner) => Some(owner.rendered()),
-            None => reflection_facade,
+            Some(owner) => Some(std::borrow::Cow::Owned(owner.render())),
+            None => reflection_facade.clone(),
         };
         let setter_facade = match realization.setter_bridge_owner {
-            Some(owner) => Some(owner.rendered()),
-            None => reflection_facade,
+            Some(owner) => Some(std::borrow::Cow::Owned(owner.render())),
+            None => reflection_facade.clone(),
         };
         let getter_descriptor = property_getter_descriptor(property, getter_facade.is_some());
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
@@ -120,8 +120,8 @@ impl<'a> PropertyReferenceTarget<'a> {
 
     fn getter<'b>(&'b self, property: &'b crate::ir::PropRef) -> PropertyCallTarget<'b> {
         PropertyCallTarget {
-            owner: self.call_owner,
-            facade: self.getter_facade,
+            owner: &self.call_owner,
+            facade: self.getter_facade.as_deref(),
             array_length: self.array_length,
             name: &property.getter_name,
             descriptor: &self.getter_descriptor,
@@ -141,8 +141,8 @@ impl<'a> PropertyReferenceTarget<'a> {
         params: &'b [Ty],
     ) -> PropertyCallTarget<'b> {
         PropertyCallTarget {
-            owner: self.call_owner,
-            facade: self.setter_facade,
+            owner: &self.call_owner,
+            facade: self.setter_facade.as_deref(),
             array_length: false,
             name,
             descriptor,
@@ -157,20 +157,22 @@ impl<'a> PropertyReferenceTarget<'a> {
 
 /// The JVM class a property reference reflects or invokes. An array classifier uses its
 /// descriptor (`IntArray` → `[I`); every other owner maps from its classifier identity.
-fn jvm_property_owner(owner: TypeName) -> &'static str {
+fn jvm_property_owner(owner: TypeName) -> std::borrow::Cow<'static, str> {
     crate::jvm::names::array_class_descriptor(owner)
+        .map(std::borrow::Cow::Borrowed)
         .unwrap_or_else(|| crate::jvm::jvm_class_map::jvm_internal_name(owner))
 }
 
 /// An extension or access-bridge facade recorded on the reference. `Some(None)` is the file
-/// facade, already a physical name; `Some(Some(owner))` borrows that owner's internal spelling.
+/// facade, already a physical name; `Some(Some(owner))` renders that owner's internal spelling
+/// for this reference.
 fn reflected_extension_facade<'a>(
     ext_facade: Option<Option<TypeName>>,
     facade: &'a str,
-) -> Option<&'a str> {
+) -> Option<std::borrow::Cow<'a, str>> {
     ext_facade.map(|owner| match owner {
-        Some(owner) => owner.rendered(),
-        None => facade,
+        Some(owner) => std::borrow::Cow::Owned(owner.render()),
+        None => std::borrow::Cow::Borrowed(facade),
     })
 }
 
@@ -193,7 +195,13 @@ fn emit_property_reference_constructor(
     if bound {
         code.aload(1);
     }
-    code.ldc_class(target.reflection_facade.unwrap_or(target.owner), cw);
+    code.ldc_class(
+        target
+            .reflection_facade
+            .as_deref()
+            .unwrap_or(target.owner.as_str()),
+        cw,
+    );
     code.push_string(&property.prop_name, cw);
     code.push_string(&target.signature, cw);
     code.push_int(target.reflection_facade.is_some() as i32, cw);
@@ -225,7 +233,7 @@ impl PropertyCallTarget<'_> {
     fn emit_get(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, ret: Ty) {
         if let Some(access) = self.field_access {
             let physical = ir_ty_to_jvm(&access.ty);
-            let owner = access.owner.rendered();
+            let owner = access.owner.render();
             let field = cw.fieldref(&owner, &access.name, &type_descriptor(physical));
             if access.is_static {
                 code.pop();
@@ -285,7 +293,7 @@ impl PropertyCallTarget<'_> {
             }
             code.aload(value_local);
             self.emit_property_value(cw, code, physical);
-            let owner = access.owner.rendered();
+            let owner = access.owner.render();
             let field = cw.fieldref(&owner, &access.name, &type_descriptor(physical));
             if access.is_static {
                 code.putstatic(field, slot_words(physical) as i32);
@@ -353,7 +361,7 @@ fn adapt_property_reference_value(
         emit_object_as(cw, code, physical);
         return;
     };
-    let owner = value_class.rendered();
+    let owner = value_class.render();
     let class = cw.class_ref(&owner);
     code.checkcast(class);
     let descriptor = format!("(){}", type_descriptor(ir_ty_to_jvm(&physical)));
@@ -533,11 +541,14 @@ fn emit_toplevel_prop_ref_class(
     env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Vec<u8> {
-    let owner = pr.owner_internal.map(TypeName::rendered).unwrap_or(facade);
+    let owner = pr
+        .owner_internal
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
     let call_owner = pr
         .call_owner_internal
-        .map(TypeName::rendered)
-        .unwrap_or(facade);
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
     // The accessors of an interface's static property are named by `InterfaceMethodref`s.
     let call_owner_is_interface = StaticOwner::of(pr.call_owner_internal).is_interface(ir);
     let fq = c.fq_name();
@@ -656,7 +667,7 @@ fn emit_toplevel_prop_ref_class(
             // The argument arrives as the BOXED value class through the erased `set(Object)`; the
             // accessor takes the carrier.
             if let Some(value_class) = realization.boxed_value_class {
-                let owner = value_class.rendered();
+                let owner = value_class.render();
                 let cref = cw.class_ref(&owner);
                 set.checkcast(cref);
                 let unbox = cw.methodref(
@@ -759,18 +770,18 @@ mod tests {
         assert_eq!(jvm_property_owner(int_array), "[I");
         assert_eq!(jvm_property_owner(array), "[Ljava/lang/Object;");
         assert!(std::ptr::eq(
-            jvm_property_owner(string),
-            jvm_property_owner(string),
+            jvm_property_owner(string).as_ref(),
+            jvm_property_owner(string).as_ref(),
         ));
-        assert!(std::ptr::eq(jvm_property_owner(host), host.rendered()));
+        assert_eq!(jvm_property_owner(host).as_ref(), host.render());
         assert_eq!(reflected_extension_facade(None, "sample/FileKt"), None);
         assert_eq!(
-            reflected_extension_facade(Some(None), "sample/FileKt"),
+            reflected_extension_facade(Some(None), "sample/FileKt").as_deref(),
             Some("sample/FileKt")
         );
-        assert!(std::ptr::eq(
-            reflected_extension_facade(Some(Some(host)), "sample/FileKt").unwrap(),
-            host.rendered(),
-        ));
+        assert_eq!(
+            reflected_extension_facade(Some(Some(host)), "sample/FileKt").as_deref(),
+            Some(host.render().as_str())
+        );
     }
 }

@@ -2,14 +2,11 @@ use super::test_support::blank_class;
 use super::*;
 
 #[test]
-fn a_superclass_reuses_its_rendered_spelling() {
+fn a_superclass_spelling_matches_its_classifier() {
     let mut class = blank_class("sample/super6044/Host");
     class.superclass = crate::types::type_name("sample/super6044/Outer$Base");
-    let first = class.superclass();
-    let second = class.superclass();
-    assert!(std::ptr::eq(first, second));
-    assert!(std::ptr::eq(first, class.superclass.rendered()));
-    assert_eq!(first, "sample/super6044/Outer$Base");
+    assert_eq!(class.superclass(), class.superclass.render());
+    assert_eq!(class.superclass(), "sample/super6044/Outer$Base");
 }
 
 #[test]
@@ -272,10 +269,6 @@ fn arena_builders_append_and_index() {
     assert_eq!(cid, 0);
     assert!(f.classes[cid as usize].fq_name_matches("demo/C"));
     assert_eq!(f.classes[cid as usize].fq_name(), "demo/C");
-    assert!(std::ptr::eq(
-        f.classes[cid as usize].fq_name(),
-        f.classes[cid as usize].fq_name()
-    ));
 }
 
 #[test]

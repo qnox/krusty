@@ -96,14 +96,19 @@ pub(super) fn splice_type_map(
 
 /// The JVM class a reified argument's type-bearing instruction names: a function type's
 /// `FunctionN`, an array's descriptor, otherwise the stored classifier's mapped class.
-fn reified_class_internal(ty: Ty) -> Option<&'static str> {
+fn reified_class_internal(ty: Ty) -> Option<std::borrow::Cow<'static, str>> {
     let value = ty.non_null();
     if let Ty::Fun(signature) = value {
-        return (!signature.suspend)
-            .then(|| super::names::function_interface_internal_name(signature.params.len()));
+        return (!signature.suspend).then(|| {
+            std::borrow::Cow::Borrowed(super::names::function_interface_internal_name(
+                signature.params.len(),
+            ))
+        });
     }
     if value.is_array() {
-        return Some(super::names::instanceof_internal_name(value));
+        return Some(std::borrow::Cow::Borrowed(
+            super::names::instanceof_internal_name(value),
+        ));
     }
     let internal = stored_value_ty(ty).kotlin_class_internal()?;
     Some(super::jvm_class_map::jvm_internal_name(internal))
@@ -239,24 +244,34 @@ mod tests {
     #[test]
     fn reified_argument_borrows_the_mapped_jvm_class() {
         let host = Ty::obj("sample/reified6044/Host");
-        assert_eq!(reified_class_internal(Ty::Int), Some("java/lang/Integer"));
-        assert_eq!(reified_class_internal(Ty::String), Some("java/lang/String"));
-        assert_eq!(reified_class_internal(Ty::Unit), Some("kotlin/Unit"));
         assert_eq!(
-            reified_class_internal(Ty::obj("kotlin/collections/MutableList")),
+            reified_class_internal(Ty::Int).as_deref(),
+            Some("java/lang/Integer")
+        );
+        assert_eq!(
+            reified_class_internal(Ty::String).as_deref(),
+            Some("java/lang/String")
+        );
+        assert_eq!(
+            reified_class_internal(Ty::Unit).as_deref(),
+            Some("kotlin/Unit")
+        );
+        assert_eq!(
+            reified_class_internal(Ty::obj("kotlin/collections/MutableList")).as_deref(),
             Some("java/util/List")
         );
         assert_eq!(
-            reified_class_internal(host),
+            reified_class_internal(host).as_deref(),
             Some("sample/reified6044/Host")
         );
         assert_eq!(
-            reified_class_internal(Ty::obj("kotlin/IntArray")),
+            reified_class_internal(Ty::obj("kotlin/IntArray")).as_deref(),
             Some("[I")
         );
+        let integer = reified_class_internal(Ty::Int).unwrap();
         assert!(std::ptr::eq(
-            reified_class_internal(host).unwrap(),
-            reified_class_internal(host).unwrap(),
+            integer.as_ref(),
+            reified_class_internal(Ty::Int).unwrap().as_ref(),
         ));
     }
 
@@ -275,7 +290,7 @@ mod tests {
                 (
                     "T".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "kotlin/Unit",
+                        internal: std::borrow::Cow::Borrowed("kotlin/Unit"),
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),
@@ -284,7 +299,7 @@ mod tests {
                 (
                     "R".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "java/lang/String",
+                        internal: std::borrow::Cow::Borrowed("java/lang/String"),
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),

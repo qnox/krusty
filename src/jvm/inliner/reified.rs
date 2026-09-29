@@ -16,7 +16,7 @@ enum Repoint {
     Class {
         instruction: usize,
         mode: i32,
-        class: &'static str,
+        class: std::borrow::Cow<'static, str>,
         nullable: bool,
         intrinsic: Option<TypeCheckRole>,
         rendered: String,
@@ -74,7 +74,7 @@ pub(super) fn specialize(
                 set_type_operand(&mut node.nodes[*instruction], class)?;
                 erase_marker(node, marker);
                 let target = ReifiedTarget {
-                    class,
+                    class: class.as_ref(),
                     nullable: *nullable,
                     intrinsic: *intrinsic,
                     rendered,
@@ -171,7 +171,7 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                 }) => Repoint::Class {
                     instruction: target,
                     mode,
-                    class: internal,
+                    class: internal.clone(),
                     nullable: *nullable || argument.ends_with('?'),
                     intrinsic: *intrinsic,
                     rendered: rendered.clone(),
@@ -362,7 +362,7 @@ mod tests {
             classes: HashMap::from([(
                 "T".to_owned(),
                 ReifiedArgument::Class {
-                    internal: "java/lang/String",
+                    internal: std::borrow::Cow::Borrowed("java/lang/String"),
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -395,7 +395,7 @@ mod tests {
                 classes: HashMap::from([(
                     "T".to_owned(),
                     ReifiedArgument::Class {
-                        internal: "java/lang/String",
+                        internal: std::borrow::Cow::Borrowed("java/lang/String"),
                         nullable,
                         intrinsic: None,
                         rendered: String::new(),

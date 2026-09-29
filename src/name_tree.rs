@@ -536,23 +536,31 @@ impl NameTree {
         if id == Self::ROOT {
             return String::new();
         }
-        let mut parts = Vec::new();
+        // Parents point toward the root, so the spelling is filled from the end. One buffer is
+        // the whole allocation: the segment list is not materialized.
         let mut len = 0usize;
         let mut cur = id;
         while cur != Self::ROOT {
             let node = self.node(cur);
             len += node.segment.len() + usize::from(node.sep != 0);
-            parts.push((node.sep, &*node.segment));
             cur = node.parent.expect("non-root name node has a parent");
         }
-        let mut out = String::with_capacity(len);
-        for (sep, segment) in parts.into_iter().rev() {
-            if sep != 0 {
-                out.push(sep as char);
+        let mut out = vec![0u8; len];
+        let mut end = len;
+        cur = id;
+        while cur != Self::ROOT {
+            let node = self.node(cur);
+            let segment = node.segment.as_bytes();
+            end -= segment.len();
+            out[end..end + segment.len()].copy_from_slice(segment);
+            if node.sep != 0 {
+                end -= 1;
+                out[end] = node.sep;
             }
-            out.push_str(segment);
+            cur = node.parent.expect("non-root name node has a parent");
         }
-        out
+        debug_assert_eq!(end, 0);
+        String::from_utf8(out).expect("name segments are utf-8")
     }
 
     /// Render a classifier for a JVM classfile constant, translating source/metadata dots only in

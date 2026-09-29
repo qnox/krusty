@@ -161,7 +161,7 @@ impl StringTable {
             }
             let mut record = Pb::new();
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
-            let index = self.intern_owned(format!("L{};", classifier.rendered()), record);
+            let index = self.intern_owned(format!("L{};", classifier.render()), record);
             self.descriptor_ids.insert(classifier, index);
             return index;
         }
@@ -1020,10 +1020,18 @@ mod tests {
         assert_eq!(strings.class_id(classifier), first);
         assert_eq!(strings.strings.len(), len);
         assert_eq!(strings.strings[first as usize], "Lsample/Box;");
+        assert_eq!(
+            strings.strings[first as usize].as_str(),
+            format!("L{};", classifier.render())
+        );
 
         let nested = crate::types::type_name("pkg/Outer").nested_child("Inner");
         let nested_id = strings.class_id(nested);
         assert_eq!(strings.strings[nested_id as usize], "Lpkg/Outer$Inner;");
+        assert_eq!(
+            strings.strings[nested_id as usize].as_str(),
+            format!("L{};", nested.render())
+        );
         let len = strings.strings.len();
         assert_eq!(strings.class_id(nested), nested_id);
         assert_eq!(strings.strings.len(), len);
