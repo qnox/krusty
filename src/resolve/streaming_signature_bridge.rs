@@ -520,7 +520,10 @@ impl ProductionSignatureSemantics<'_> {
         let Some(stub) = self.headers.stub(declaration) else {
             return Self::failure();
         };
-        if stub.kind != crate::fir::DeclarationKind::Property {
+        // A written type that failed to resolve already reports that reference. "Add an explicit
+        // type" belongs only to a property whose type was supposed to be inferred.
+        if stub.kind != crate::fir::DeclarationKind::Property || stub.signature_inference.is_none()
+        {
             return Self::failure();
         }
         let Some(name) = stub
