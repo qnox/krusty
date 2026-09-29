@@ -338,6 +338,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(expr_end_lines);
     copy_map!(value_names);
     copy_map!(logical_types);
+    copy_map!(deferred_local_types);
     if let Some(result) = ir.whens.exhaustive.get(&source).copied() {
         ir.whens.exhaustive.insert(target, result);
     }

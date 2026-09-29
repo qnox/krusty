@@ -68,6 +68,7 @@ mod inline_call;
 mod interface_compatibility;
 mod lambda_class_names;
 mod local_updates;
+mod local_variable_representation;
 mod loop_emission;
 mod member_schedule;
 mod metadata_member_order;
@@ -8425,79 +8426,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
                 index, ty, init, ..
-            } => {
-                // A mutable captured local is represented explicitly by a `RefNew` initializer.
-                // Its source type remains `ty`, while the local SLOT stores the backend's holder.
-                // Representation selection belongs here; common lowering never names `Ref$IntRef`.
-                let jt = init
-                    .filter(|initializer| {
-                        matches!(self.ir.expr(*initializer), IrExpr::RefNew { .. })
-                    })
-                    .map(|initializer| self.value_ty(initializer))
-                    // A local declaration always owns a value slot. In particular, semantic Unit
-                    // is the `kotlin/Unit` singleton here; only a callable control-flow return uses
-                    // the JVM void representation.
-                    .unwrap_or_else(|| ir_ty_to_jvm(&stored_value_ty(ty)));
-                // Reuse the slot if this value-index is already live with a compatible verification
-                // type. A spilled local is declared twice — once by the dispatch loop-top restore,
-                // once by its real in-body declaration in a resume state — for the SAME value-index.
-                // They must share a slot: then the loop-top restore's assignment covers the fresh path
-                // too, so the slot reads as definitely-assigned in later frames. A fresh slot per
-                // declaration instead leaves the in-body slot `top` on the fresh edge to a `?: continue`
-                // target — a StackMapTable VerifyError (ResAgg getAllResources/getResourceById). Reuse
-                // only when the verification types agree: identical, or both reference types (the
-                // restore reads an `Object` continuation field and the in-body decl may be a narrower
-                // reference — the wider header type still verifies every subtype back-edge). Never
-                // reuse across differing primitives (e.g. an `int` slot as a `float` — same width but a
-                // different verification category would pin a wrong frame type).
-                let is_ref = |t: Ty| matches!(t, Ty::String | Ty::Obj(..)) || t.is_array();
-                let reuse = self
-                    .slots
-                    .get(&index)
-                    .copied()
-                    .filter(|(_, ejt)| *ejt == jt || (is_ref(*ejt) && is_ref(jt)))
-                    .map(|(s, _)| s);
-                // The slot is entered BEFORE the initializer, as kotlinc's `visitVariable` does, so
-                // the initializer's own locals and temporaries sit above it. A call operand's holder
-                // is entered after its value, which kotlinc keeps on the stack or stores then.
-                let holds_operand = self.ir.call_operand_bindings.contains(&e);
-                let entered = reuse.or_else(|| {
-                    (!holds_operand).then(|| self.enter_unassigned_value(index, jt, false))
-                });
-                if let Some(cell) = init.and_then(|i| self.stored_shared_cell(e, i)) {
-                    let slot = entered
-                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
-                    self.unassigned_values.remove(&index);
-                    self.slots.insert(index, (slot, jt));
-                    self.emit_shared_cell_declaration(e, slot, cell, code);
-                    return;
-                }
-                let slot = if let Some(i) = init {
-                    let source = self.emit_consumed_operand(i, code);
-                    let semantic = self.ir.logical_types.get(&i).copied().unwrap_or(source);
-                    self.adapt_physical_operand(source, semantic, Some(ty), jt, code);
-                    // kotlinc's `visitVariable` marks the initializer's line, then the
-                    // declaration's, before the store (after an inlined call, both are written).
-                    debug_lines::mark_expression_start(self.ir, i, code);
-                    debug_lines::mark_statement(self.ir, e, code);
-                    let slot = entered
-                        .unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand));
-                    self.unassigned_values.remove(&index);
-                    store(jt, slot, code);
-                    self.mark_suspend_lambda_parameter_read(e, code);
-                    slot
-                } else {
-                    self.unassigned_values.insert(index);
-                    entered.unwrap_or_else(|| self.enter_unassigned_value(index, jt, holds_operand))
-                };
-                // A re-declared value takes its type from this declaration once it is initialized.
-                self.slots.insert(index, (slot, jt));
-                // A source local becomes visible after its initializing store. An uninitialized
-                // one (`lateinit var`) still has a lexical lifetime: its declaration emits no
-                // store, so its debug range opens here, and the later checked assignment only
-                // initializes the already-live slot.
-                self.open_declared_local(e, slot, jt, code);
-            }
+            } => self.emit_local_variable(e, index, ty, init, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
                     self.run.set_emit_error(

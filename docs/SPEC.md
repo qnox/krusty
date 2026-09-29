@@ -9579,9 +9579,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return is compiled and RUN to show its returned expression is evaluated exactly once.
 
 - **An uninitialized type-parameter local keeps that parameter's erased slot when inlined.**
-  `var result: R` with no initializer is a store of `R`'s zero. Unbounded `R`, and any bound that
-  erases to a reference, occupies a reference slot, so the zero is `aconst_null` and the slot stays
-  that reference after an inline call binds `R` to a JVM primitive. A later `Int` value is boxed
+  `var result: R` with no initializer records that declaration fact in common IR while its semantic
+  type specializes normally. Unbounded `R`, and any bound that erases to a reference, occupies a
+  JVM-owned reference slot, so its physical zero is `aconst_null` and the slot stays that reference
+  after an inline call binds `R` to a JVM primitive. A later `Int` value is boxed
   with `Integer.valueOf` into the slot, and a primitive use (the caller's `Int` return) unboxes
   with `checkcast Number; intValue`. Retargeting the local itself to `int` unboxes the `null` and
   throws. A primitive bound (`R : Int`) is already that primitive, so the zero becomes `iconst_0`

@@ -7,6 +7,7 @@
 //! `0`. Specializing the unbounded local itself to `int` unboxes the `null`.
 
 use super::common;
+use std::rc::Rc;
 
 const UNBOUNDED: &str = "\
 inline fun <R> f(size: Int, block: () -> R): R {\n\
@@ -25,6 +26,15 @@ const PRIMITIVE_BOUND: &str = "\
 inline fun <R : Int> f(block: () -> R): R {\n\
     var result: R\n\
     result = block()\n\
+    return result\n\
+}\n\
+fun computeResult() = f { 42 }\n\
+fun box() = if (computeResult() == 42) \"OK\" else \"FAIL\"\n\
+";
+
+const INITIALIZED: &str = "\
+inline fun <R> f(block: () -> R): R {\n\
+    val result: R = block()\n\
     return result\n\
 }\n\
 fun computeResult() = f { 42 }\n\
@@ -118,4 +128,54 @@ fn an_uninitialized_primitive_bound_local_stays_unboxed_like_kotlinc() {
 fn an_uninitialized_generic_local_runs() {
     common::expect_box_ok_with_stdlib(UNBOUNDED, "DeferredGenericLocal");
     common::expect_box_ok_with_stdlib(PRIMITIVE_BOUND, "DeferredPrimitiveBoundLocal");
+    common::expect_box_ok_with_stdlib(INITIALIZED, "InitializedGenericLocal");
+}
+
+#[test]
+fn an_initialized_generic_local_still_specializes_to_a_primitive_slot() {
+    assert_same_value_operations(
+        "InitializedGenericLocal",
+        INITIALIZED,
+        "int computeResult();",
+    );
+}
+
+#[test]
+fn common_ir_keeps_specialized_semantics_and_deferred_declaration_provenance() {
+    let platform = || {
+        let classpath = Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            common::stdlib_jar(),
+        ]));
+        Box::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ) as Box<dyn krusty::libraries::SemanticPlatform>
+    };
+    let (files, diagnostics) =
+        common::capture_common_ir(UNBOUNDED, "DeferredGenericLocal", platform());
+    assert_eq!(diagnostics, Vec::<String>::new());
+    let [ir] = files.as_slice() else {
+        panic!("expected one common-IR file, got {}", files.len());
+    };
+    assert!(ir
+        .deferred_local_types
+        .iter()
+        .any(|(&declaration, declared)| {
+            matches!(declared.non_null(), krusty::types::Ty::TyParam(..))
+                && matches!(
+                    ir.expr(declaration),
+                    krusty::ir::IrExpr::Variable {
+                        ty: krusty::types::Ty::Int,
+                        ..
+                    }
+                )
+        }));
+
+    let (files, diagnostics) =
+        common::capture_common_ir(INITIALIZED, "InitializedGenericLocal", platform());
+    assert_eq!(diagnostics, Vec::<String>::new());
+    let [ir] = files.as_slice() else {
+        panic!("expected one common-IR file, got {}", files.len());
+    };
+    assert_eq!(ir.deferred_local_types, Default::default());
 }

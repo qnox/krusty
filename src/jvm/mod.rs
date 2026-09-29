@@ -26,6 +26,7 @@ mod debug_local_names;
 mod declaration_collisions;
 mod default_call_operands;
 mod default_parameter_representation;
+mod deferred_local_storage;
 mod external_calls;
 pub mod frame_audit;
 mod fresh_storage;

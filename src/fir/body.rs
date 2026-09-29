@@ -1720,6 +1720,9 @@ pub enum FirStatementKind {
         ty: ResolvedTy,
         mutable: bool,
         lateinit: bool,
+        /// The source omitted an initializer (`var value: T`), so the initializer expression is
+        /// the parser's semantic zero placeholder rather than a written expression.
+        deferred: bool,
         initializer: Option<FirExprId>,
         conversion: Option<FirConversion>,
     },

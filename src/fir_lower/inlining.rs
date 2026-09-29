@@ -511,11 +511,9 @@ impl BodyLowering<'_> {
         for &(source, copy) in &copies {
             self.ir.mark_inline_copy(copy);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
-            // A source local is not: `var result: R` with no initializer is the erased slot of
-            // `R`, and a reference erasure cannot become a primitive just because this call
-            // binds `R` to one. A primitive bound (`R : Int`) already is that primitive, so its
-            // zero is refreshed like a temporary's.
-            let (generated_zero, deferred_reference) = synthetic_variable_default(self.ir, source);
+            // A deferred source local carries explicit declaration provenance instead: its
+            // semantic type specializes normally, and each backend selects its physical zero.
+            let generated_zero = synthetic_temporary_default(self.ir, source);
             // Reified/type-parameter substitutions are lexical: they apply inside nested lambda
             // templates even though those templates own an independent value-numbering domain.
             // Value rebasing and return rewriting remain protected below, but the checked type
@@ -526,22 +524,6 @@ impl BodyLowering<'_> {
                 self.ir.exprs.get_mut(copy as usize)?,
                 &reified_bindings,
             );
-            if let Some(original) = deferred_reference {
-                let specialized_to_scalar = matches!(
-                    self.ir.expr(copy),
-                    IrExpr::Variable { ty, .. } if ty.is_jvm_scalar()
-                );
-                if specialized_to_scalar {
-                    if let IrExpr::Variable { ty, .. } = self.ir.exprs.get_mut(copy as usize)? {
-                        *ty = original;
-                    }
-                    if let Some(logical) = self.ir.logical_types.get_mut(&copy) {
-                        if logical.is_jvm_scalar() {
-                            *logical = original;
-                        }
-                    }
-                }
-            }
             if let Some(previous_zero) = generated_zero {
                 let replacement = match self.ir.expr(copy) {
                     IrExpr::Variable { ty, .. } => IrConst::zero_for_value_type(*ty),
@@ -970,19 +952,9 @@ fn rebase_values(
     Some(())
 }
 
-/// The synthetic zero of a cloned local, and the type a source local must keep when
-/// specialization would retarget a reference slot to a primitive.
-///
-/// `var result: R` with no initializer is lowered as a store of `R`'s zero. Unbounded `R`
-/// (and any other bound that erases to a reference) occupies a reference slot: the zero is
-/// `null`, and a later primitive value is boxed into that slot. Specializing the local
-/// itself to `Int` unboxes the `null`. A primitive bound (`R : Int`) is already a primitive
-/// slot, so its zero is refreshed to `0` after the type specializes. Compiler temporaries
-/// keep the refresh either way; only a named source local is held on the erased reference.
-fn synthetic_variable_default(
-    ir: &crate::ir::IrFile,
-    source: ExprId,
-) -> (Option<IrConst>, Option<Ty>) {
+/// The synthetic zero of a compiler temporary. Deferred source locals carry an explicit
+/// declaration fact in common IR instead of being recognized from their constant's shape.
+fn synthetic_temporary_default(ir: &crate::ir::IrFile, source: ExprId) -> Option<IrConst> {
     let IrExpr::Variable {
         ty,
         init: Some(initial),
@@ -990,22 +962,18 @@ fn synthetic_variable_default(
         ..
     } = ir.expr(source)
     else {
-        return (None, None);
+        return None;
     };
+    if *named {
+        return None;
+    }
     let IrExpr::Const(value) = ir.expr(*initial) else {
-        return (None, None);
+        return None;
     };
     if *value != IrConst::zero_for_value_type(*ty) {
-        return (None, None);
+        return None;
     }
-    let primitive_bound = matches!(
-        ty.non_null(),
-        Ty::TyParam(_, bound) if !ty.is_nullable() && bound.is_jvm_scalar()
-    );
-    let keeps_reference_slot =
-        *named && matches!(ty.non_null(), Ty::TyParam(..)) && !primitive_bound;
-    let refresh = (!named || primitive_bound).then(|| value.clone());
-    (refresh, keeps_reference_slot.then_some(*ty))
+    Some(value.clone())
 }
 
 fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {

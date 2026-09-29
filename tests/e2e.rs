@@ -487,8 +487,6 @@ mod cross_file_companion_fun_e2e;
 mod cross_file_ctor_default_e2e;
 #[path = "cross_file_inline_call_e2e.rs"]
 mod cross_file_inline_call_e2e;
-#[path = "deferred_generic_local_e2e.rs"]
-mod deferred_generic_local_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
 #[path = "cross_file_serializer_inner_classes_e2e.rs"]
@@ -537,6 +535,8 @@ mod default_args_synthetic_e2e;
 mod default_import_resolution_e2e;
 #[path = "default_stub_super_guard_e2e.rs"]
 mod default_stub_super_guard_e2e;
+#[path = "deferred_generic_local_e2e.rs"]
+mod deferred_generic_local_e2e;
 #[path = "deferred_nullable_val_e2e.rs"]
 mod deferred_nullable_val_e2e;
 #[path = "deferred_reads_inferred_member_return_e2e.rs"]
