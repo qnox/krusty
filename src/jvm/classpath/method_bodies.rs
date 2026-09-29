@@ -89,8 +89,8 @@ impl crate::jvm::inline::MethodBodies for Classpath {
             })
             .map(|candidate| crate::jvm::inline::StaticMemberRealization {
                 owner: candidate.owner.render(),
-                name: candidate.name,
-                descriptor: candidate.descriptor,
+                name: candidate.name.to_owned(),
+                descriptor: candidate.descriptor.to_owned(),
             });
         let realization = matches.next()?;
         matches

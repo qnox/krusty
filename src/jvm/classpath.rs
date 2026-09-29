@@ -680,8 +680,8 @@ impl<T> EntryCache<T> {
     }
 }
 
-fn push_id_dedup(m: &mut HashMap<String, Vec<NameId>>, key: &str, id: NameId) {
-    let v = m.entry(key.to_string()).or_default();
+fn push_id_dedup(m: &mut HashMap<&'static str, Vec<NameId>>, key: &'static str, id: NameId) {
+    let v = m.entry(key).or_default();
     if v.last().copied() != Some(id) && !v.contains(&id) {
         v.push(id);
     }
@@ -736,10 +736,10 @@ struct PkgMembers {
     by_source: HashMap<String, Vec<usize>>,
     /// The same callables keyed by their JVM method name (`sumOfInt`), for the literal-name extension
     /// lookup that mirrors [`Classpath::find_extensions`] (which keys by the bytecode name).
-    by_jvm: HashMap<String, Vec<usize>>,
+    by_jvm: HashMap<&'static str, Vec<usize>>,
     /// Receiver (first-parameter) descriptor → the facades declaring a static with that receiver — the
     /// scoped analogue of [`Classpath::find_extension_owners`]. Deduped, declaration order.
-    owners_by_recv: HashMap<String, Vec<NameId>>,
+    owners_by_recv: HashMap<&'static str, Vec<NameId>>,
 }
 
 impl PkgMembers {
@@ -806,7 +806,7 @@ fn global_pkg_tree_base_cache() -> &'static std::sync::Mutex<PkgTreeBaseMap> {
 struct ExtByName {
     owner_names: NameTree,
     /// first-parameter descriptor (the extension receiver) → indices into [`Self::all`].
-    by_recv: HashMap<String, Vec<usize>>,
+    by_recv: HashMap<&'static str, Vec<usize>>,
     /// every candidate of this name (top-level + extensions), for the receiver-less `find_top_level`.
     all: Vec<ExtCandidateRecord>,
 }
@@ -829,9 +829,9 @@ impl ExtByName {
 #[derive(Clone, Debug)]
 struct ExtCandidateRecord {
     owner: NameId,
-    name: String,
-    descriptor: String,
-    ret_desc: String,
+    name: &'static str,
+    descriptor: &'static str,
+    ret_desc: &'static str,
     signature: Option<String>,
     public: bool,
 }
@@ -840,9 +840,9 @@ impl ExtCandidateRecord {
     fn from_candidate(owner: NameId, cand: &ExtCandidate) -> Self {
         ExtCandidateRecord {
             owner,
-            name: cand.name.clone(),
-            descriptor: cand.descriptor.clone(),
-            ret_desc: cand.ret_desc.clone(),
+            name: cand.name,
+            descriptor: cand.descriptor,
+            ret_desc: cand.ret_desc,
             signature: cand.signature.clone(),
             public: cand.public,
         }
@@ -851,9 +851,9 @@ impl ExtCandidateRecord {
     fn render(&self, owner_names: &NameTree) -> ExtCandidate {
         ExtCandidate {
             owner: type_name_from(owner_names, self.owner),
-            name: self.name.clone(),
-            descriptor: self.descriptor.clone(),
-            ret_desc: self.ret_desc.clone(),
+            name: self.name,
+            descriptor: self.descriptor,
+            ret_desc: self.ret_desc,
             signature: self.signature.clone(),
             public: self.public,
         }
@@ -1029,9 +1029,12 @@ impl std::error::Error for BuiltinsLoadError {
 #[derive(Clone, Debug)]
 pub struct ExtCandidate {
     pub owner: TypeName,
-    pub name: String,
-    pub descriptor: String,
-    pub ret_desc: String,
+    /// JVM method name. Already the interned classfile spelling, so a lookup does not copy it.
+    pub name: &'static str,
+    /// JVM method descriptor. Already the interned classfile spelling.
+    pub descriptor: &'static str,
+    /// Return-type descriptor, a suffix of [`Self::descriptor`].
+    pub ret_desc: &'static str,
     /// The method's generic `Signature` attribute, if any — for recovering the parameterized return
     /// type of a generic top-level function (`listOf<T>` → `List<T>`).
     pub signature: Option<String>,
@@ -1052,13 +1055,13 @@ pub struct ExtCandidate {
 struct EntryExt {
     owner_names: NameTree,
     /// method name → owner ROOT classes in THIS entry (super-walk within the entry).
-    by_name: HashMap<String, Vec<NameId>>,
+    by_name: HashMap<&'static str, Vec<NameId>>,
     /// receiver descriptor → `(method name, owner)` for each receiver-taking static in this entry.
-    by_recv_raw: HashMap<String, Vec<(String, NameId)>>,
+    by_recv_raw: HashMap<&'static str, Vec<(&'static str, NameId)>>,
     /// JVM names this entry marks as genuine top-level, and as extensions (unioned across the cp at
     /// compose to decide `toplevel_only = union(top) - union(ext)`).
-    toplevel_names: std::collections::HashSet<String>,
-    ext_names: std::collections::HashSet<String>,
+    toplevel_names: std::collections::HashSet<&'static str>,
+    ext_names: std::collections::HashSet<&'static str>,
 }
 
 /// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → target-name ID.
@@ -2885,13 +2888,13 @@ impl Classpath {
                 if !root_public && m.is_public() {
                     continue;
                 }
-                let Some((_, ret_desc)) = descriptor_parts(&m.descriptor) else {
+                let Some((_, ret_desc)) = descriptor_parts(m.descriptor) else {
                     continue;
                 };
                 out.push(ExtCandidateRecord {
                     owner,
-                    name: m.name.to_owned(),
-                    descriptor: m.descriptor.to_owned(),
+                    name: m.name,
+                    descriptor: m.descriptor,
                     ret_desc,
                     signature: m.signature.clone(),
                     public: root_public && m.is_public(),
@@ -4356,19 +4359,16 @@ impl Classpath {
         let want_params: Option<String> =
             value_param_descs.and_then(|vps| recv_desc.map(|rd| format!("{rd}{}", vps.concat())));
         // The parameter section of `c`'s descriptor (between the parens).
-        let params_of = |c: &ExtCandidate| -> Option<String> {
+        let params_of = |c: &ExtCandidate| -> Option<&str> {
             c.descriptor
                 .split_once('(')
-                .and_then(|(_, r)| r.split_once(')'))
-                .map(|(p, _)| p.to_string())
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(params, _)| params)
         };
         let by_recv = |c: &ExtCandidate| match recv_desc {
             None => true,
-            Some(rd) => {
-                descriptor_parts(&c.descriptor)
-                    .and_then(|(fp, _)| fp)
-                    .as_deref()
-                    == Some(rd)
+            Some(expected) => {
+                descriptor_parts(c.descriptor).and_then(|(first, _)| first) == Some(expected)
             }
         };
         let named: Vec<ExtCandidate> = self
@@ -4394,23 +4394,15 @@ impl Classpath {
         } else {
             full
         };
-        let ret_of = |c: &ExtCandidate| c.descriptor.rsplit_once(')').map(|(_, r)| r.to_string());
         // A concrete expected return picks the exact overload (`maxOrNull(Iterable)Double`); a type-var
         // return (none given) prefers the generic-bound overload (`…Comparable`/`…Object`) over the numeric
         // specializations that share the receiver.
         match ret_desc {
-            Some(rd) => cands
-                .iter()
-                .find(|c| ret_of(c).as_deref() == Some(rd))
-                .cloned(),
+            Some(expected) => cands.iter().find(|c| c.ret_desc == expected).cloned(),
             None => cands
                 .iter()
-                .find(|c| matches!(ret_of(c).as_deref(), Some("Ljava/lang/Comparable;")))
-                .or_else(|| {
-                    cands
-                        .iter()
-                        .find(|c| matches!(ret_of(c).as_deref(), Some("Ljava/lang/Object;")))
-                })
+                .find(|c| c.ret_desc == "Ljava/lang/Comparable;")
+                .or_else(|| cands.iter().find(|c| c.ret_desc == "Ljava/lang/Object;"))
                 .cloned(),
         }
         .or_else(|| cands.into_iter().next())
@@ -4472,7 +4464,7 @@ impl Classpath {
                 if !root_public && m.is_public() {
                     continue;
                 }
-                let Some((_, ret_desc)) = descriptor_parts(&m.descriptor) else {
+                let Some((_, ret_desc)) = descriptor_parts(m.descriptor) else {
                     continue;
                 };
                 let public = root_public && m.is_public();
@@ -4481,8 +4473,8 @@ impl Classpath {
                     // non-public inline implementation can only be spliced from the class that actually
                     // declares its bytecode, so retain the current superclass/part as its owner.
                     owner: if public { root } else { cn },
-                    name: m.name.to_owned(),
-                    descriptor: m.descriptor.to_owned(),
+                    name: m.name,
+                    descriptor: m.descriptor,
                     ret_desc,
                     signature: m.signature.clone(),
                     public,
@@ -4562,7 +4554,9 @@ impl Classpath {
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
                     // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.
-                    if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
+                    if let Some(recv) =
+                        descriptor_parts(cand.descriptor).and_then(|(first, _)| first)
+                    {
                         let owners = m.owners_by_recv.entry(recv).or_default();
                         if owners.last().copied() != Some(candidate_owner)
                             && !owners.contains(&candidate_owner)
@@ -4570,7 +4564,7 @@ impl Classpath {
                             owners.push(candidate_owner);
                         }
                     }
-                    let jvm_name = cand.name.clone();
+                    let jvm_name = cand.name;
                     let idx = m.candidates.len();
                     m.candidates
                         .push(ExtCandidateRecord::from_candidate(candidate_owner, cand));
@@ -4806,7 +4800,9 @@ impl Classpath {
                 let owner = grouped.owner_names.insert_from(&p.owner_names, owner_id);
                 for cand in self.rebuild_ext_candidate_records(owner, root, method_name) {
                     let cand_idx = grouped.all.len();
-                    if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
+                    if let Some(recv) =
+                        descriptor_parts(cand.descriptor).and_then(|(first, _)| first)
+                    {
                         grouped.by_recv.entry(recv).or_default().push(cand_idx);
                     }
                     grouped.all.push(cand);
@@ -5849,14 +5845,14 @@ fn capitalize(name: &str) -> String {
     }
 }
 
-fn descriptor_parts(desc: &str) -> Option<(Option<String>, String)> {
+fn descriptor_parts(desc: &str) -> Option<(Option<&str>, &str)> {
     let params = desc.strip_prefix('(')?;
     let ret = params.find(')')?;
     let first = (!params.starts_with(')')).then(|| {
         let mut cursor = params;
-        read_one_type(&mut cursor).to_string()
+        read_one_type(&mut cursor)
     });
-    Some((first, params[ret + 1..].to_string()))
+    Some((first, &params[ret + 1..]))
 }
 
 /// Read one complete JVM type descriptor from the start of `s`, advancing past it.
@@ -6105,10 +6101,10 @@ mod fq_tests {
     fn toplevel_only_unions_across_entries() {
         let cp = Classpath::new(vec![]);
         let mut a = EntryExt::default();
-        a.toplevel_names.insert("run".into());
+        a.toplevel_names.insert("run");
         let mut b = EntryExt::default();
-        b.ext_names.insert("run".into());
-        b.toplevel_names.insert("println".into());
+        b.ext_names.insert("run");
+        b.toplevel_names.insert("println");
         *cp.ext.borrow_mut() = Some(std::rc::Rc::new(vec![
             std::sync::Arc::new(a),
             std::sync::Arc::new(b),
@@ -6126,20 +6122,17 @@ mod fq_tests {
         let mut a = EntryExt::default();
         let a_owner = a.owner_names.insert("kotlin/collections/CollectionsKt");
         a.by_recv_raw.insert(
-            "Ljava/lang/Iterable;".to_string(),
-            vec![
-                ("map".to_string(), a_owner),
-                ("filter".to_string(), a_owner),
-            ],
+            "Ljava/lang/Iterable;",
+            vec![("map", a_owner), ("filter", a_owner)],
         );
         let mut b = EntryExt::default();
         let b_owner = b.owner_names.insert("demo/DemoKt");
         let b_top = b.owner_names.insert("demo/TopKt");
         b.by_recv_raw.insert(
-            "Ljava/lang/Iterable;".to_string(),
-            vec![("map".to_string(), b_owner), ("runAll".to_string(), b_top)],
+            "Ljava/lang/Iterable;",
+            vec![("map", b_owner), ("runAll", b_top)],
         );
-        b.toplevel_names.insert("runAll".to_string());
+        b.toplevel_names.insert("runAll");
         *cp.ext.borrow_mut() = Some(std::rc::Rc::new(vec![
             std::sync::Arc::new(a),
             std::sync::Arc::new(b),
@@ -6250,9 +6243,9 @@ mod fq_tests {
             .insert("kotlin/collections/CollectionsKt");
         let record = ExtCandidateRecord {
             owner,
-            name: "map".to_string(),
-            descriptor: "(Ljava/lang/Iterable;)Ljava/util/List;".to_string(),
-            ret_desc: "Ljava/util/List;".to_string(),
+            name: "map",
+            descriptor: "(Ljava/lang/Iterable;)Ljava/util/List;",
+            ret_desc: "Ljava/util/List;",
             signature: None,
             public: true,
         };
@@ -6260,7 +6253,7 @@ mod fq_tests {
         cached.all.push(record);
         cached
             .by_recv
-            .entry("Ljava/lang/Iterable;".to_string())
+            .entry("Ljava/lang/Iterable;")
             .or_default()
             .push(0);
 
@@ -6277,9 +6270,9 @@ mod fq_tests {
             .insert("kotlin/collections/CollectionsKt");
         members.candidates.push(ExtCandidateRecord {
             owner,
-            name: "sumOfInt".to_string(),
-            descriptor: "(Ljava/lang/Iterable;)I".to_string(),
-            ret_desc: "I".to_string(),
+            name: "sumOfInt",
+            descriptor: "(Ljava/lang/Iterable;)I",
+            ret_desc: "I",
             signature: None,
             public: true,
         });
@@ -6288,11 +6281,7 @@ mod fq_tests {
             .entry("sumOf".to_string())
             .or_default()
             .push(0);
-        members
-            .by_jvm
-            .entry("sumOfInt".to_string())
-            .or_default()
-            .push(0);
+        members.by_jvm.entry("sumOfInt").or_default().push(0);
 
         assert_eq!(members.owner_names.len(), 4);
         assert_eq!(members.by_source["sumOf"], vec![0]);
@@ -6302,6 +6291,15 @@ mod fq_tests {
             .owner
             .matches("kotlin/collections/CollectionsKt"));
         assert_eq!(rendered[0].name, "sumOfInt");
+        assert!(std::ptr::eq(rendered[0].name, members.candidates[0].name));
+        assert!(std::ptr::eq(
+            rendered[0].descriptor,
+            members.candidates[0].descriptor
+        ));
+        assert!(std::ptr::eq(
+            rendered[0].ret_desc,
+            members.candidates[0].ret_desc
+        ));
     }
 
     #[test]

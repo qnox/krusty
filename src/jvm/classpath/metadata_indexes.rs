@@ -34,17 +34,18 @@ struct ClassLite {
     is_public: bool,
     super_class: Option<NameId>,
     /// `(name, descriptor, generic-signature, is_public)` of each static method (excl `<init>`/`<clinit>`).
-    /// Non-public ones (`@InlineOnly`) are kept for the inliner; the flag gates normal resolution.
-    statics: Vec<(String, String, Option<String>, bool)>,
+    /// Name and descriptor are the interned classfile spellings. Non-public ones (`@InlineOnly`) are
+    /// kept for the inliner; the flag gates normal resolution.
+    statics: Vec<(&'static str, &'static str, Option<String>, bool)>,
     /// JVM names of functions `@Metadata` marks as genuine TOP-LEVEL (NO extension receiver). A top-level
     /// generic whose first parameter erases to `Object` (`assertEquals<T>(T, T, String)`) is otherwise
     /// indistinguishable in bytecode from an extension, so a name that is ONLY ever top-level must NOT be
     /// keyed by its first parameter in `by_recv`. Name-keyed (not name+desc): `@Metadata` often omits the
     /// method descriptor (`jvm_desc=None`).
-    toplevel_names: HashSet<String>,
+    toplevel_names: HashSet<&'static str>,
     /// JVM names `@Metadata` marks as EXTENSIONS (receiver of any kind — class OR type parameter). A name
     /// that is an extension anywhere is NEVER excluded from `by_recv` (so `takeIf`/`uppercase` stay indexed).
-    ext_names: HashSet<String>,
+    ext_names: HashSet<&'static str>,
 }
 
 /// Copy an interned classifier into the local index by its stored `/` segments.
@@ -83,8 +84,8 @@ fn collect_class_bytes(
         .filter(|method| method.is_static() && !method.name.starts_with('<'))
         .map(|method| {
             (
-                method.name.to_owned(),
-                method.descriptor.to_owned(),
+                method.name,
+                method.descriptor,
                 method.signature.clone(),
                 method.is_public(),
             )
@@ -97,9 +98,9 @@ fn collect_class_bytes(
         .chain(crate::jvm::metadata::class_functions(&class).iter())
     {
         if function.is_extension() {
-            ext_names.insert(function.jvm_name.to_owned());
+            ext_names.insert(function.jvm_name);
         } else {
-            toplevel_names.insert(function.jvm_name.to_owned());
+            toplevel_names.insert(function.jvm_name);
         }
     }
     all.insert(
@@ -213,8 +214,8 @@ pub(super) fn build_entry_ext(
     for class in all.values() {
         extensions
             .toplevel_names
-            .extend(class.toplevel_names.iter().cloned());
-        extensions.ext_names.extend(class.ext_names.iter().cloned());
+            .extend(class.toplevel_names.iter().copied());
+        extensions.ext_names.extend(class.ext_names.iter().copied());
     }
     for (&root, root_class) in &all {
         let mut root_id = None;
@@ -227,8 +228,8 @@ pub(super) fn build_entry_ext(
             let Some(class) = all.get(&class_name) else {
                 break;
             };
-            for (method_name, descriptor, _signature, public) in &class.statics {
-                if !root_class.is_public && *public {
+            for &(method_name, descriptor, _, public) in &class.statics {
+                if !root_class.is_public && public {
                     continue;
                 }
                 let Some((first_parameter, _return_descriptor)) = descriptor_parts(descriptor)
@@ -243,7 +244,7 @@ pub(super) fn build_entry_ext(
                         .by_recv_raw
                         .entry(receiver)
                         .or_default()
-                        .push((method_name.clone(), owner));
+                        .push((method_name, owner));
                 }
             }
             current = class.super_class;

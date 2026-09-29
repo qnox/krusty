@@ -10,11 +10,11 @@ use crate::types::TypeName;
 
 use super::{descriptor_parts, Classpath, ExtCandidate};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PhysicalCallableIdentity {
     owner: TypeName,
-    name: String,
-    descriptor: String,
+    name: &'static str,
+    descriptor: &'static str,
 }
 
 #[derive(Default)]
@@ -27,8 +27,8 @@ impl CallableUnion {
     fn push(&mut self, candidate: ExtCandidate) {
         let identity = PhysicalCallableIdentity {
             owner: candidate.owner,
-            name: candidate.name.clone(),
-            descriptor: candidate.descriptor.clone(),
+            name: candidate.name,
+            descriptor: candidate.descriptor,
         };
         if self.seen.insert(identity) {
             self.candidates.push(candidate);
@@ -74,9 +74,8 @@ pub(super) fn extensions_in_scope(
                 let Some(candidate) = members.candidates.get(index) else {
                     continue;
                 };
-                if descriptor_parts(&candidate.descriptor)
+                if descriptor_parts(candidate.descriptor)
                     .and_then(|(first_parameter, _)| first_parameter)
-                    .as_deref()
                     == Some(recv_desc)
                 {
                     union.push(candidate.render(&members.owner_names));
@@ -123,16 +122,12 @@ mod tests {
 
     use super::{CallableUnion, Classpath, ExtCandidate};
 
-    fn candidate(owner: &str, name: &str, descriptor: &str) -> ExtCandidate {
+    fn candidate(owner: &str, name: &'static str, descriptor: &'static str) -> ExtCandidate {
         ExtCandidate {
             owner: type_name(owner),
-            name: name.to_string(),
-            descriptor: descriptor.to_string(),
-            ret_desc: descriptor
-                .split_once(')')
-                .expect("test descriptor")
-                .1
-                .to_string(),
+            name,
+            descriptor,
+            ret_desc: descriptor.split_once(')').expect("test descriptor").1,
             signature: None,
             public: true,
         }
@@ -167,7 +162,9 @@ mod tests {
         assert_eq!(candidates[2].owner, type_name("sample/BKt"));
     }
 
-    fn identities(candidates: Vec<ExtCandidate>) -> Vec<(crate::types::TypeName, String, String)> {
+    fn identities(
+        candidates: Vec<ExtCandidate>,
+    ) -> Vec<(crate::types::TypeName, &'static str, &'static str)> {
         candidates
             .into_iter()
             .map(|candidate| (candidate.owner, candidate.name, candidate.descriptor))

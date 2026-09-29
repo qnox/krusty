@@ -713,9 +713,9 @@ impl JvmLibraries {
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
             // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
             let descriptor = if suspend {
-                strip_continuation_param(&c.descriptor)
+                strip_continuation_param(c.descriptor)
             } else {
-                c.descriptor.clone()
+                c.descriptor.to_owned()
             };
             // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
             // SOURCE signature — a CPS Continuation, `$default` mask/marker, or `@Composable`
@@ -820,14 +820,7 @@ impl JvmLibraries {
                 declared_ret,
                 // Selected by its Kotlin name, which reflection names (see the extension path).
                 reflection_name: Some(name.to_string()),
-                ..LibraryCallable::library(
-                    c.owner,
-                    c.name.clone(),
-                    params,
-                    ret,
-                    physical_ret,
-                    descriptor,
-                )
+                ..LibraryCallable::library(c.owner, c.name, params, ret, physical_ret, descriptor)
             };
             callable.physical_params = physical_params;
             if !is_default && call_sig.param_defaults.iter().any(|default| *default) {
@@ -4620,11 +4613,11 @@ impl JvmLibraries {
                 let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
                     (mf.jvm_name.to_owned(), d.to_string(), by_name(&mf.jvm_name))
                 } else if let Some(c) = by_name(&mf.jvm_name) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_owned(), c.descriptor.to_owned(), Some(c))
                 } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_owned(), c.descriptor.to_owned(), Some(c))
                 } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_owned(), c.descriptor.to_owned(), Some(c))
                 } else {
                     continue;
                 };
