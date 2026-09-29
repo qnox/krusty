@@ -2183,9 +2183,8 @@ fn decode_functions(
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
                             // Param names are plain string-table entries (like the JVM name/desc), not class names.
-                            name: value_parameter::parameter_name(
-                                &resolve_string(records, d2, p.name_id as usize)
-                                    .unwrap_or_default(),
+                            name: value_parameter::parameter_name_owned(
+                                resolve_string(records, d2, p.name_id as usize).unwrap_or_default(),
                             ),
                             flags: MvpFlags::default()
                                 .with_has_default(declared.declares_default)
