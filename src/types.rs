@@ -179,6 +179,20 @@ pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
     fresh
 }
 
+/// A constructor-declared type parameter that hides a class type parameter of the same spelling.
+/// The JVM signature uses one name for both; they are different inference variables. Diagnostics
+/// still print the source spelling.
+pub(crate) fn constructor_type_parameter(source: &str) -> &'static str {
+    let source = intern(source);
+    let semantic = intern(&format!("\0ctor:{source}"));
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
+
 impl TypeName {
     pub const ROOT: TypeName = TypeName(NameId(0));
 

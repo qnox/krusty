@@ -1009,6 +1009,8 @@ mod java_array_covariance_e2e;
 mod java_bridge_members_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
+#[path = "java_constructor_expected_type_e2e.rs"]
+mod java_constructor_expected_type_e2e;
 #[path = "java_ctor_sam_conversion_e2e.rs"]
 mod java_ctor_sam_conversion_e2e;
 #[path = "java_flexible_collection_e2e.rs"]
