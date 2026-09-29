@@ -262,7 +262,7 @@ pub(in crate::resolve) fn source_type_universe(
                     class_names.insert(c.name.clone(), internal.clone());
                 }
             }
-            let package = super::super::source_package::identity(file.package.as_deref());
+            let package = source_package_ids[i];
             for (alias, _) in &file.type_aliases {
                 user_aliases.insert(crate::types::type_name_child(package, alias));
             }
@@ -513,7 +513,7 @@ pub(in crate::resolve) fn source_type_universe(
         // with a CLASSIFIER target, so a function-type alias (`typealias Handler<T> = (T) -> String`,
         // whose target has no class name) is absent from it — and it abbreviates like any other.
         let package = &source_packages[file_index];
-        let package_name = super::super::source_package::identity(Some(package.as_str()));
+        let package_name = source_package_ids[file_index];
         for (alias, _, _) in &file_type_aliases[file_index] {
             let identity = crate::types::type_name_child(package_name, alias);
             source_alias_identities.push((alias.clone(), identity));
