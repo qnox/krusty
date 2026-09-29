@@ -563,14 +563,24 @@ impl NameTree {
             return String::new();
         }
         let node = self.node(id);
-        let parent = node.parent.expect("non-root name node has a parent");
-        let mut out = self.render(parent);
-        if node.sep != 0 {
-            out.push(node.sep as char);
+        if !node.segment.contains('.') {
+            return self.render(id);
         }
-        for ch in node.segment.chars() {
-            out.push(if ch == '.' { '$' } else { ch });
-        }
+
+        let mut out = match node.parent {
+            Some(parent) if parent != Self::ROOT => {
+                let mut prefix = self.render(parent);
+                prefix.push(node.sep as char);
+                prefix
+            }
+            _ => String::new(),
+        };
+        out.reserve(node.segment.len());
+        out.extend(
+            node.segment
+                .chars()
+                .map(|ch| if ch == '.' { '$' } else { ch }),
+        );
         out
     }
 
@@ -1044,6 +1054,11 @@ mod tests {
         assert_eq!(
             names.jvm_binary_name(metadata_nested),
             "metadata/Outer$Middle$Inner"
+        );
+        let metadata_child = names.nested_child_of(metadata_nested, "Generated");
+        assert_eq!(
+            names.jvm_binary_name(metadata_child),
+            "metadata/Outer$Middle$Inner$Generated"
         );
         assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
 

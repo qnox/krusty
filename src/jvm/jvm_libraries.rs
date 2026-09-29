@@ -5958,7 +5958,7 @@ mod tests {
         collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
         java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
         parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig,
+        parse_method_gsig, suspend_return_from_gsig,
     };
     use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
@@ -6918,6 +6918,26 @@ mod tests {
         assert_eq!(
             desc_to_ty("Ldemo/NotYetInterned;"),
             Ty::obj("demo/NotYetInterned")
+        );
+    }
+
+    #[test]
+    fn suspend_generic_signature_keeps_a_canonical_unit_return() {
+        let signature = crate::libraries::GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: vec![Ty::obj_args(
+                "kotlin/coroutines/Continuation",
+                &[Ty::obj("kotlin/Unit")],
+            )],
+            ret: Ty::obj("java/lang/Object"),
+            return_policy: GenericReturnPolicy::Exact,
+        };
+
+        assert_eq!(
+            suspend_return_from_gsig(&signature, &std::collections::HashMap::new()),
+            Some(Ty::Unit)
         );
     }
 
