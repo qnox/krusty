@@ -4281,7 +4281,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         // Alias chains are structurally expanded first; the remaining classifier spellings then bind
         // through this declaration file's ordinary imports and class table.
         let package_source = &source_packages[file_index];
-        let package = super::super::source_package::identity(Some(package_source.as_str()));
+        let package = source_package_ids[file_index];
         let mut visible_aliases = Vec::new();
         // Qualified spellings are absolute and independent of import precedence.
         for (declaration_file_index, declaration_package) in source_packages.iter().enumerate() {
@@ -4323,10 +4323,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         {
             let spelling = &import.visible_name;
             let imported = super::super::source_package::identity(Some(import.path.as_str()));
-            for (declaration_file_index, declaration_package) in source_packages.iter().enumerate()
+            for (declaration_file_index, &declaration_package) in
+                source_package_ids.iter().enumerate()
             {
-                let declaration_package =
-                    super::super::source_package::identity(Some(declaration_package.as_str()));
                 for (name, formals, target) in &file_type_aliases[declaration_file_index] {
                     if crate::types::type_name_child(declaration_package, name) == imported {
                         visible_aliases.push((spelling.clone(), formals.clone(), target.clone()));
