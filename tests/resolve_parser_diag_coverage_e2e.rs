@@ -261,13 +261,18 @@ fn when_with_two_else_branches() {
 #[test]
 fn when_guard_requires_its_language_feature() {
     let d = diags(
-        "sealed interface V\nclass A(val ok: Boolean) : V\nfun f(v: V) = when (v) { is A if v.ok -> 1; else -> 0 }",
+        "// LANGUAGE: -WhenGuards\n\
+         sealed interface V\nclass A(val ok: Boolean) : V\nfun f(v: V) = when (v) { is A if v.ok -> 1; else -> 0 }",
     );
-    assert!(
-        d.iter()
-            .any(|message| message.contains("when guards are disabled")),
-        "{d:?}"
+    assert_eq!(d, ["when guards are disabled by the language feature set"]);
+}
+
+#[test]
+fn when_guard_is_accepted_at_the_default_language_level() {
+    let d = diags(
+        "sealed interface V\nclass A(val ok: Boolean) : V\nfun f(v: V) = when (v) { is A if v.ok -> 1; else -> 0 }\nfun box(): Int = 0",
     );
+    assert!(d.is_empty(), "{d:?}");
 }
 
 // ===========================================================================
