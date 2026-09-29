@@ -1830,6 +1830,8 @@ mod string_plus_indy_e2e;
 mod subtype_receiver_extension_call_e2e;
 #[path = "super_argument_capture_e2e.rs"]
 mod super_argument_capture_e2e;
+#[path = "super_collection_size_e2e.rs"]
+mod super_collection_size_e2e;
 #[path = "super_default_args_e2e.rs"]
 mod super_default_args_e2e;
 #[path = "super_interface_default_e2e.rs"]
