@@ -10,11 +10,14 @@ fn java_setter_is_a_var_whatever_it_returns() {
         public class Fluent {\n\
         \x20 private String name = \"\";\n\
         \x20 private int count;\n\
+        \x20 private long serial;\n\
         \x20 private String label = \"\";\n\
         \x20 public String getName() { return name; }\n\
         \x20 public Fluent setName(String name) { this.name = name; return this; }\n\
         \x20 public int getCount() { return count; }\n\
         \x20 public String setCount(int count) { this.count = count; return \"set\"; }\n\
+        \x20 public long getSerial() { return serial; }\n\
+        \x20 public long setSerial(long serial) { this.serial = serial; return serial; }\n\
         \x20 public String getLabel() { return label; }\n\
         \x20 public void setLabel(String label) { this.label = label; }\n\
         }\n";
@@ -32,9 +35,11 @@ fn java_setter_is_a_var_whatever_it_returns() {
         \x20 val f = Fluent()\n\
         \x20 f.name = \"a\"\n\
         \x20 f.count = 3\n\
+        \x20 f.serial = 9L\n\
         \x20 f.label = \"b\"\n\
         \x20 if (f.name != \"a\") return \"name\"\n\
         \x20 if (f.count != 3) return \"count\"\n\
+        \x20 if (f.serial != 9L) return \"serial\"\n\
         \x20 if (f.label != \"b\") return \"label\"\n\
         \x20 val c = Child()\n\
         \x20 c.name = \"c\"\n\
