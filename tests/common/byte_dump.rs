@@ -13,11 +13,14 @@
 //! stored once inside it, and the whole archive compresses together. A text index in that archive
 //! records the open range for each dump.
 //!
-//! `KRUSTY_RECORD=1` ignores a stored dump and recompiles. Under CI a missing dump still compiles
-//! with kotlinc, and the result is not written: CI does not bless dumps nobody committed.
+//! `KRUSTY_RECORD=1` ignores a stored dump, recompiles, and rewrites the archive. A release or RC
+//! with no matching dump fails the test instead of compiling: the archive has to be updated and
+//! committed. A snapshot, dev, or beta build still compiles, because that version is not an
+//! immutable artifact and never reads or writes the archive. CI does not write dumps.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -244,9 +247,10 @@ fn fnv64(mut hash: u64, bytes: &[u8]) -> u64 {
 
 /// Kotlinc's bytes for each of `classes`, from the recorded dump or from `compile`.
 ///
-/// `compile` runs only on a miss (or `KRUSTY_RECORD=1`) and returns the internal-name → bytes map
-/// of that compile. `None` from `compile`, or a requested class absent from its map, yields `None`.
-/// A non-release compiler always takes `compile` and does not touch the dump directory.
+/// `compile` runs only for `KRUSTY_RECORD=1`, or for a compiler that is not a release or RC.
+/// A release or RC with no matching dump fails the test and does not compile. `None` from
+/// `compile` yields `None`. A non-release compiler always takes `compile` and does not touch the
+/// archive.
 pub fn kotlinc_class_dumps(
     stem: &str,
     jvm_target: &str,
@@ -398,10 +402,8 @@ fn recall(
     let Some(compiler) = query.compiler else {
         return compile();
     };
-    let cached = if query.force {
-        None
-    } else {
-        load_files(
+    if !query.force {
+        if let Some(hit) = load_files(
             query.root,
             query.module,
             query.key,
@@ -409,9 +411,13 @@ fn recall(
             query.fingerprint,
         )
         .filter(|hit| accept(hit))
-    };
-    if let Some(hit) = cached {
-        return Some(hit);
+        {
+            return Some(hit);
+        }
+        refuse_missing_dump(&format!(
+            "module {} key {} fingerprint {:032x}",
+            query.module, query.key, query.fingerprint
+        ));
     }
     let produced = compile()?;
     if query.write {
@@ -425,6 +431,15 @@ fn recall(
         );
     }
     Some(produced)
+}
+
+fn refuse_missing_dump(detail: &str) -> ! {
+    let compiler = published_compiler_id().unwrap_or_else(|| "this release".to_string());
+    panic!(
+        "tests/recorded-bytes.zz has no class dump for {detail} under kotlinc {compiler}. \
+         This run does not compile with kotlinc for a release or RC that already uses the archive. \
+         Update the archive with KRUSTY_RECORD=1 and commit tests/recorded-bytes.zz."
+    );
 }
 
 fn entry_key(case: &str, stem: &str, jvm_target: &str, variant: &str, suffix: &str) -> String {
@@ -987,6 +1002,234 @@ fn record_forced() -> bool {
     std::env::var_os("KRUSTY_RECORD").is_some_and(|flag| flag == "1")
 }
 
+thread_local! {
+    static LIVE_KOTLINC: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `body` as a diagnostic comparison. Those calls need kotlinc's stderr, which the class
+/// archive does not store, so they compile even for a release that already has dumps.
+pub fn with_live_kotlinc<T>(body: impl FnOnce() -> T) -> T {
+    LIVE_KOTLINC.with(|flag| {
+        let previous = flag.replace(true);
+        let value = body();
+        flag.set(previous);
+        value
+    })
+}
+
+fn live_kotlinc() -> bool {
+    LIVE_KOTLINC.with(Cell::get)
+}
+
+const INVOCATION_MODULE: &str = "_invocations";
+const JAR_ENTRY: &str = "__jar__";
+
+struct Invocation {
+    out: PathBuf,
+    fingerprint: u128,
+    label: String,
+}
+
+/// Class files recorded for this `kotlinc` invocation.
+///
+/// `Some` replays those files into the invocation's `-d` output and must not compile. `None`
+/// means the caller compiles: `KRUSTY_RECORD=1`, a live diagnostic comparison, or a compiler
+/// that does not use the archive. A release or RC with no matching dump panics.
+pub fn replay_class_dump(args: &[String]) -> Option<BTreeMap<String, Vec<u8>>> {
+    if live_kotlinc() {
+        return None;
+    }
+    let Some(compiler) = compiler_dump_version() else {
+        return None;
+    };
+    if record_forced() {
+        return None;
+    }
+    let Some(invocation) = parse_invocation(args) else {
+        refuse_missing_dump(
+            "a kotlinc invocation that does not name an output directory and source files",
+        );
+    };
+    let key = hex128(invocation.fingerprint);
+    if let Some(files) = load_files(
+        &dumps_root(),
+        INVOCATION_MODULE,
+        &key,
+        compiler,
+        invocation.fingerprint,
+    ) {
+        return Some(files);
+    }
+    refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
+}
+
+/// Write a replayed dump into the invocation's `-d` path.
+pub fn write_replayed_classes(args: &[String], files: &BTreeMap<String, Vec<u8>>) {
+    let invocation = parse_invocation(args).expect("replayed class dump names an output directory");
+    write_output(&invocation.out, files);
+}
+
+/// Store class files produced while `KRUSTY_RECORD=1`. A live diagnostic comparison and a
+/// non-release compiler do not write the archive.
+pub fn remember_class_dump(args: &[String]) {
+    if live_kotlinc() || !record_forced() || !ci_allows_write() {
+        return;
+    }
+    let Some(compiler) = compiler_dump_version() else {
+        return;
+    };
+    let Some(invocation) = parse_invocation(args) else {
+        return;
+    };
+    let Some(files) = read_output_tree(&invocation.out) else {
+        return;
+    };
+    store_files(
+        &dumps_root(),
+        INVOCATION_MODULE,
+        &hex128(invocation.fingerprint),
+        compiler,
+        invocation.fingerprint,
+        &files,
+    );
+}
+
+fn parse_invocation(args: &[String]) -> Option<Invocation> {
+    let mut out = None;
+    let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut classpath = Vec::new();
+    let mut flags = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-d" || arg == "-destination" {
+            out = args.get(index + 1).map(PathBuf::from);
+            index += 2;
+            continue;
+        }
+        if arg == "-cp" || arg == "-classpath" {
+            if let Some(value) = args.get(index + 1) {
+                classpath.extend(std::env::split_paths(value));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = arg
+            .strip_prefix("-cp=")
+            .or_else(|| arg.strip_prefix("-classpath="))
+        {
+            classpath.extend(std::env::split_paths(value));
+            index += 1;
+            continue;
+        }
+        if is_source_arg(arg) {
+            let bytes = std::fs::read(arg).ok()?;
+            let name = basename(arg);
+            sources.push((name, bytes));
+            index += 1;
+            continue;
+        }
+        flags.push(normalize_invocation_flag(arg));
+        index += 1;
+    }
+    let out = out?;
+    if sources.is_empty() {
+        return None;
+    }
+    let label = sources
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut blob = Vec::new();
+    for (name, bytes) in &sources {
+        blob.extend_from_slice(name.as_bytes());
+        blob.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        blob.extend_from_slice(bytes);
+    }
+    let classpath = classpath_content_fingerprint(&classpath);
+    let flags = flags.join("\n");
+    Some(Invocation {
+        out,
+        fingerprint: fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()]),
+        label,
+    })
+}
+
+fn is_source_arg(arg: &str) -> bool {
+    let path = Path::new(arg);
+    let ext = path.extension().and_then(|ext| ext.to_str());
+    matches!(ext, Some("kt" | "kts" | "java")) && path.is_file()
+}
+
+fn normalize_invocation_flag(arg: &str) -> String {
+    let Some(path) = arg.strip_prefix("-Xplugin=") else {
+        return arg.to_string();
+    };
+    let bytes = std::fs::read(path).unwrap_or_default();
+    format!("-Xplugin={}", hex128(fingerprint_parts(&[&bytes])))
+}
+
+fn classpath_content_fingerprint(paths: &[PathBuf]) -> String {
+    let mut rows: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            if path.is_dir() {
+                format!("dir:{:016x}", hash_tree(path))
+            } else {
+                let bytes = std::fs::read(path).unwrap_or_default();
+                format!("file:{:032x}", fingerprint_parts(&[&bytes]))
+            }
+        })
+        .collect();
+    rows.sort();
+    rows.join("\n")
+}
+
+fn read_output_tree(out: &Path) -> Option<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    if out.is_file() {
+        files.insert(JAR_ENTRY.to_string(), std::fs::read(out).ok()?);
+        return Some(files);
+    }
+    if out.exists() {
+        read_tree(out, out, &mut files)?;
+    }
+    Some(files)
+}
+
+fn read_tree(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Option<()> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            read_tree(root, &path, files)?;
+        } else if path.is_file() {
+            let relative = path.strip_prefix(root).ok()?;
+            let name = relative.to_string_lossy().replace('\\', "/");
+            files.insert(name, std::fs::read(&path).ok()?);
+        }
+    }
+    Some(())
+}
+
+fn write_output(out: &Path, files: &BTreeMap<String, Vec<u8>>) {
+    if let Some(bytes) = files.get(JAR_ENTRY) {
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).expect("create kotlinc output directory");
+        }
+        std::fs::write(out, bytes).expect("write replayed kotlinc jar");
+        return;
+    }
+    std::fs::create_dir_all(out).expect("create kotlinc output directory");
+    for (relative, bytes) in files {
+        let path = out.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create replayed class directory");
+        }
+        std::fs::write(path, bytes).expect("write replayed class file");
+    }
+}
+
 fn ci_allows_write() -> bool {
     std::env::var_os("CI").is_none()
 }
@@ -1147,24 +1390,24 @@ mod tests {
             *compiles += 1;
             Some(files(b"class-a"))
         };
-        let query = |compiler, fingerprint| Recall {
+        let query = |compiler, fingerprint, force| Recall {
             root: &root,
             module: "mod",
             key: "case|Stem|default|plain",
             compiler,
             fingerprint,
-            force: false,
+            force,
             write: true,
         };
         let first = recall(
-            query(Some(version("2.4.20-RC2")), fingerprint),
+            query(Some(version("2.4.20-RC2")), fingerprint, true),
             |_| true,
             || compile(&mut compiles),
         );
         assert_eq!(first.unwrap().get("pkg/A").unwrap(), b"class-a");
         assert_eq!(compiles, 1);
         let second = recall(
-            query(Some(version("2.4.20-RC")), fingerprint),
+            query(Some(version("2.4.20-RC")), fingerprint, false),
             |_| true,
             || compile(&mut compiles),
         );
@@ -1172,44 +1415,66 @@ mod tests {
         assert_eq!(compiles, 1, "a matching dump skips kotlinc");
 
         let changed = fingerprint_parts(&[b"source-v2"]);
-        let third = recall(
-            query(Some(version("2.4.20-RC2")), changed),
+        let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recall(
+                query(Some(version("2.4.20-RC2")), changed, false),
+                |_| true,
+                || compile(&mut compiles),
+            )
+        }));
+        let message = panic_message(missing.expect_err("a new fingerprint must fail"));
+        assert!(
+            message.contains("tests/recorded-bytes.zz") && message.contains("KRUSTY_RECORD=1"),
+            "{message}"
+        );
+        assert_eq!(compiles, 1, "a missing release dump does not compile");
+
+        let snapshot = recall(
+            query(None, changed, false),
             |_| true,
             || compile(&mut compiles),
         );
-        assert_eq!(third.unwrap().get("pkg/A").unwrap(), b"class-a");
-        assert_eq!(compiles, 2, "a new fingerprint recompiles");
-
-        let snapshot = recall(query(None, changed), |_| true, || compile(&mut compiles));
         assert!(snapshot.is_some());
-        assert_eq!(compiles, 3);
-        let again = recall(query(None, changed), |_| true, || compile(&mut compiles));
+        assert_eq!(compiles, 2);
+        let again = recall(
+            query(None, changed, false),
+            |_| true,
+            || compile(&mut compiles),
+        );
         assert!(again.is_some());
-        assert_eq!(compiles, 4, "a snapshot never reuses a dump");
+        assert_eq!(compiles, 3, "a snapshot never reuses a dump");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn ci_does_not_write_a_missing_dump() {
+    fn a_missing_release_dump_fails_without_compiling() {
         let root = temp_root("ci");
         let fingerprint = fingerprint_parts(&[b"source"]);
-        let got = recall(
-            Recall {
-                root: &root,
-                module: "mod",
-                key: "case|Stem|default|plain",
-                compiler: Some(version("2.4.20-release-1")),
-                fingerprint,
-                force: false,
-                write: false,
-            },
-            |_| true,
-            || Some(files(b"bytes")),
-        );
-        assert_eq!(got.unwrap().get("pkg/A").unwrap(), b"bytes");
+        let mut compiled = false;
+        let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recall(
+                Recall {
+                    root: &root,
+                    module: "mod",
+                    key: "case|Stem|default|plain",
+                    compiler: Some(version("2.4.20-release-1")),
+                    fingerprint,
+                    force: false,
+                    write: false,
+                },
+                |_| true,
+                || {
+                    compiled = true;
+                    Some(files(b"bytes"))
+                },
+            )
+        }));
+        let message = panic_message(missing.expect_err("a missing dump must fail the test"));
+        assert!(message.contains("KRUSTY_RECORD=1"), "{message}");
+        assert!(!compiled, "a missing release dump does not compile");
         assert!(
             !archive_path(&root).exists(),
-            "a miss that is not allowed to record leaves no dump"
+            "a miss that is not recorded leaves no dump"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1221,15 +1486,27 @@ mod tests {
         assert_ne!(classes_suffix(&["pkg/A"]), "#tree");
     }
 
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_string())
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
-    fn a_hit_missing_a_requested_class_is_recompiled() {
+    fn a_hit_missing_a_requested_class_fails_until_recorded() {
         let root = temp_root("missing");
         let fingerprint = fingerprint_parts(&[b"source"]);
         let release = version("2.4.20");
         let key = "case|Stem|default|plain";
         store_files(&root, "mod", key, release, fingerprint, &files(b"one"));
         let mut compiles = 0u32;
-        let query = Recall {
+        let mut query = Recall {
             root: &root,
             module: "mod",
             key,
@@ -1238,6 +1515,19 @@ mod tests {
             force: false,
             write: true,
         };
+        let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recall(
+                query,
+                |hit| hit.contains_key("pkg/Missing"),
+                || {
+                    compiles += 1;
+                    Some(files(b"unused"))
+                },
+            )
+        }));
+        assert!(missing.is_err(), "an incomplete dump is not a hit");
+        assert_eq!(compiles, 0, "an incomplete dump does not compile");
+        query.force = true;
         let replaced = recall(
             query,
             |hit| hit.contains_key("pkg/Missing"),
@@ -1248,8 +1538,9 @@ mod tests {
                 Some(map)
             },
         );
-        assert_eq!(compiles, 1, "an incomplete dump is not a hit");
+        assert_eq!(compiles, 1);
         assert_eq!(replaced.unwrap().get("pkg/Missing").unwrap(), b"present");
+        query.force = false;
         let reused = recall(
             query,
             |hit| hit.contains_key("pkg/Missing"),
@@ -1260,6 +1551,25 @@ mod tests {
         );
         assert_eq!(compiles, 1, "the completed dump is reused");
         assert_eq!(reused.unwrap().get("pkg/A").unwrap(), b"two");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_invocation_fingerprint_ignores_the_output_directory() {
+        let root = temp_root("inv");
+        let source = root.join("Lib.kt");
+        std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+        let args = |out: &str| {
+            vec![
+                "-d".to_string(),
+                root.join(out).to_string_lossy().into_owned(),
+                source.to_string_lossy().into_owned(),
+            ]
+        };
+        let left = parse_invocation(&args("out-a")).expect("left invocation");
+        let right = parse_invocation(&args("out-b")).expect("right invocation");
+        assert_eq!(left.fingerprint, right.fingerprint);
+        assert_ne!(left.out, right.out);
         let _ = std::fs::remove_dir_all(&root);
     }
 

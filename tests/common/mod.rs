@@ -2608,7 +2608,23 @@ impl KotlincServer {
 /// arguments (`["-d", out, "-cp", cp, "Lib.kt"]`). Returns `(exit_code, stderr)` — `exit_code == 0`
 /// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
 /// `kotlinc`). Overlapping calls use distinct JVMs up to [`server_pool_cap`].
+///
+/// A release or RC replays class files from `tests/recorded-bytes.zz` and does not compile when
+/// that dump is missing: the test fails and tells you to update the archive with `KRUSTY_RECORD=1`.
+/// [`byte_dump::with_live_kotlinc`] opts out for a comparison that needs kotlinc's stderr.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
+    if let Some(files) = byte_dump::replay_class_dump(args) {
+        byte_dump::write_replayed_classes(args, &files);
+        return Some((0, String::new()));
+    }
+    let result = kotlinc_compile_live(args)?;
+    if result.0 == 0 {
+        byte_dump::remember_class_dump(args);
+    }
+    Some(result)
+}
+
+fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
     static POOL: OnceLock<Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>> =
         OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");

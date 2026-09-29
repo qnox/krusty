@@ -200,8 +200,9 @@ fn compiler_diagnostics_with_args(
         .map(|classpath| vec!["-cp".to_string(), classpath.to_string_lossy().into_owned()])
         .unwrap_or_default();
     reference_args.extend_from_slice(reference_extra_args);
-    let (reference_code, reference_stderr) =
-        kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
+    let (reference_code, reference_stderr) = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args)
+    });
     let result = CompilerDiagnosticResult {
         krusty_code: krusty.status.code().unwrap_or_else(|| {
             panic!(
@@ -223,7 +224,9 @@ fn compiler_diagnostics_with_args(
 pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, sources);
-    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let (_, stderr) = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &work.join("out"), extra_args)
+    });
     let _ = std::fs::remove_dir_all(work);
     render_errors(&stderr)
 }
@@ -284,7 +287,9 @@ pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[S
 pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, sources);
-    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let (_, stderr) = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &work.join("out"), extra_args)
+    });
     let _ = std::fs::remove_dir_all(work);
     error_blocks(&stderr, true)
 }
@@ -374,7 +379,9 @@ pub fn reference_error_messages(tag: &str, source: &str) -> Vec<String> {
 pub fn reference_error_messages_files(sources: &[(&str, &str)]) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, sources);
-    let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), &[]);
+    let (_, stderr) = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &work.join("out"), &[])
+    });
     let _ = std::fs::remove_dir_all(work);
     compiler_errors(&stderr)
         .into_iter()
@@ -724,7 +731,9 @@ pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> S
 pub fn kotlinc_named_source_result(filename: &str, source: &str) -> (i32, String) {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, &[(filename, source)]);
-    let result = kotlinc_paths_result(&source_paths, &work.join("out"), &[]);
+    let result = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &work.join("out"), &[])
+    });
     let _ = std::fs::remove_dir_all(work);
     result
 }
@@ -739,7 +748,9 @@ pub fn kotlinc_source_result_with_args(
     let source_name = format!("{tag}.kt");
     let source_paths = write_fixture_sources(&work, &[(source_name.as_str(), source)]);
     let output = work.join("out");
-    let result = kotlinc_paths_result(&source_paths, &output, extra_args);
+    let result = common::byte_dump::with_live_kotlinc(|| {
+        kotlinc_paths_result(&source_paths, &output, extra_args)
+    });
     let _ = std::fs::remove_dir_all(work);
     result
 }

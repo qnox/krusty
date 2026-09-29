@@ -164,12 +164,15 @@ stream: a text index, then each distinct output once. An index entry is an open 
 a content fingerprint and a blob id: `2.4.20..` covers that release and every newer one until a
 later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
 release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
-still matches the fixture and the compiler's version falls in the range; otherwise the check runs
-kotlinc and, outside CI, rewrites the archive. A release (`2.4.20`, `2.4.20-release-482`)
-and an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) may read and write dumps. A snapshot, dev,
-or beta build never does — that version string is not a stable artifact. `KRUSTY_RECORD=1`
-recompiles and rewrites the ranges the run reaches. The archive is read at runtime and is not
-compiled into the test binary. The corpus byte-diff cache under `target/cache/ref-classes/` follows
+still matches the fixture and the compiler's version falls in the range. A release
+(`2.4.20`, `2.4.20-release-482`) or an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no
+matching dump fails the test and does not run kotlinc. The failure names `tests/recorded-bytes.zz`
+and `KRUSTY_RECORD=1`: that flag recompiles, rewrites the ranges the run reaches, and the archive
+update is committed. A snapshot, dev, or beta build never reads or writes dumps — that version
+string is not a stable artifact, so it still compiles. Class-file kotlinc calls go through the same
+archive. A comparison that needs kotlinc's own stderr still compiles, because the archive stores
+class files and not diagnostic text. The archive is read at runtime and is not compiled into the
+test binary. The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler.
 
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
