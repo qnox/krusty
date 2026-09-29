@@ -4499,6 +4499,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   later, and a bridge made from its descriptor would duplicate the method. Tests:
   `tests/superclass_bridge_e2e.rs`, `tests/suspend_class_implements_interface_e2e.rs`,
   `src/fir/index_tests.rs::a_dependency_override_edge_carries_the_declarations_own_signature`.
+- **A bridge names its parameters after the declaration it overrides.** kotlinc's `BridgeLowering`
+  copies the bridge's value parameters from the overridden function, so the bridge's
+  `LocalVariableTable` carries the overridden declaration's names, not the override's:
+  `override fun f(y: String)` of `I<T>.f(x: T)` has a bridge `f(Ljava/lang/Object;)` whose
+  parameter is `x`, `setValue(value)` of `MutableMap.MutableEntry` names it `newValue`, and
+  `invoke(text)` of `(String) -> String` names it `p1`. Each override edge carries the overridden
+  declaration's parameter identities beside the implementation's. A builtin member publishes its
+  `.kotlin_builtins` parameter names like any other metadata declaration. A Java binary declaration
+  still publishes none, so its bridge has no parameter rows where kotlinc writes `p0`, `p1`.
+  Tests: `tests/bridge_parameter_names_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type

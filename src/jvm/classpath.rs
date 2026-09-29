@@ -391,6 +391,7 @@ macro_rules! cache_stat {
     }};
 }
 
+mod builtin_members;
 mod inline_plan_cache;
 
 pub(super) use inline_plan_cache::InlinePlanCacheInput;
@@ -1284,6 +1285,7 @@ struct BuiltinMember {
     return_value_status: crate::types::ReturnValueStatus,
     ret_nullable: bool,
     annotations: Vec<crate::types::TypeName>,
+    param_names: Vec<String>,
 }
 
 struct BuiltinConstructor {
@@ -1447,6 +1449,7 @@ impl BuiltinsFile {
                         return_value_status: m.return_value_status,
                         ret_nullable: m.ret_nullable,
                         annotations: m.annotations,
+                        param_names: m.param_names,
                     }
                 })
                 .collect();
@@ -3065,173 +3068,6 @@ impl Classpath {
         let file = self.builtins_file_for_package(Self::builtins_package_for(kotlin_outer));
         let class = file.get_name(nested)?;
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
-    }
-
-    /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
-    /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
-    /// backend/provider and descriptor data.
-    pub fn builtin_members(&self, internal: &str) -> Vec<crate::libraries::LibraryMember> {
-        self.builtin_members_name(type_name(internal))
-    }
-
-    pub fn builtin_members_name(
-        &self,
-        internal_id: TypeName,
-    ) -> Vec<crate::libraries::LibraryMember> {
-        let catalog_complete = self.catalog_complete();
-        if catalog_complete {
-            if let Some(members) = self.builtin_members.borrow_mut().get(&internal_id) {
-                cache_stat!(builtin_members, true);
-                return members.as_ref().clone();
-            }
-        }
-        cache_stat!(builtin_members, false);
-        let f = self.builtins_file_for_package(Self::builtins_package_for(internal_id));
-        let members: Vec<_> = f
-            .get_name(internal_id)
-            .map(|class| {
-                class.members.iter().map(|m| {
-                    // A `LibraryMember` states the member in its ERASED, JVM-descriptor shape (the form
-                    // a classpath member arrives in, and the form overload alignment compares against);
-                    // the declared shape rides along in `generic_sig`. Both are the one decoded builtin
-                    // signature, erased here.
-                    // Kotlin array classes are semantic builtin classifiers with no loadable JVM
-                    // class or callable methods. Preserve their selected declaration without an
-                    // opaque method descriptor; the JVM emitter realizes the exact `actual`
-                    // signature with array bytecodes (or a metadata-verified helper).
-                    let descriptor = if Ty::obj_name(internal_id).is_array() {
-                        String::new()
-                    } else {
-                        builtin_descriptor(&m.generic_sig)
-                    };
-                    let params: Vec<Ty> = m
-                        .generic_sig
-                        .params
-                        .iter()
-                        .map(|p| builtin_erased(*p))
-                        .collect();
-                    let ret = builtin_erased(m.generic_sig.ret);
-                    crate::trace_compiler!(
-                        "resolve",
-                        "builtin member {}.{} declared_ret={:?} erased_ret={ret:?}",
-                        internal_id,
-                        m.name,
-                        m.generic_sig.ret,
-                    );
-                    let physical_ret = ret;
-                    // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
-                    // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
-                    // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
-                    let owner = crate::jvm::jvm_class_map::to_jvm_type_name(internal_id);
-                    // Interface dispatch: prefer the real class flag, else the builtin's OWN
-                    // `.kotlin_builtins` `CLASS_KIND` — a Kotlin builtin and the JVM class it maps to
-                    // always agree on interface-ness (`List`/`java.util.List`, `Number`/`java.lang
-                    // .Number`), and every member here comes from a builtins entry that carries the flag
-                    // — so no curated per-name table is needed (the old fallback covered a handful of
-                    // names and answered `false` for every `java/util/*`, emitting `invokevirtual` on an
-                    // interface).
-                    let is_iface = self
-                        .find_name(owner)
-                        .map(|ci| ci.is_interface())
-                        .unwrap_or(class.kind == crate::libraries::TypeKind::Interface);
-                    let kind = if m.is_property {
-                        super::mapped_builtin_declarations::MappedBuiltinMemberKind::Property
-                    } else {
-                        super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function
-                    };
-                    let physical_name = self
-                        .mapped_builtin_realization(internal_id, &m.name, &descriptor, kind)
-                        .map(|(_, name)| name.to_string())
-                        .unwrap_or_else(|| {
-                            if m.is_property {
-                                ordinary_builtin_property_jvm_name(internal_id, &m.name)
-                            } else {
-                                m.name.clone()
-                            }
-                        });
-                    let physical_name = (physical_name != m.name).then_some(physical_name);
-                    let realization = crate::libraries::builtin_member_realization::realization(
-                        crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
-                            owner: internal_id,
-                            name: &m.name,
-                            params: &m.generic_sig.params,
-                            ret: m.generic_sig.ret,
-                            is_property: m.is_property,
-                            is_operator: m.is_operator,
-                            is_infix: m.is_infix,
-                            annotations: &m.annotations,
-                        },
-                    );
-                    crate::libraries::LibraryMember {
-                        external_identity: None,
-                        external_default_provider: None,
-                        external_property_identity: None,
-                        singleton_dispatch: None,
-                        name: m.name.clone(),
-                        owner: Some(owner),
-                        physical_name,
-                        physical_params: params.clone(),
-                        params,
-                        ret,
-                        physical_ret,
-                        descriptor,
-                        realization,
-                        signature: None,
-                        // A builtin member carries no JVM `Signature` string, so its DECODED signature
-                        // is the only record of a type-parameter return/parameter — without it a
-                        // generic member would resolve with an `Any`-erased return.
-                        generic_sig: Some(m.generic_sig.clone()),
-                        projected_return_hazard: false,
-                        // `ret_nullable` — the declared return nullability from the `.kotlin_builtins`
-                        // `Type.nullable` flag (`Map.get(K): V?`); the JVM descriptor erases it.
-                        flags: crate::libraries::LmFlags::default()
-                            .with_ret_nullable(m.ret_nullable)
-                            .with_is_interface(is_iface)
-                            .with_is_operator(m.is_operator)
-                            .with_is_infix(m.is_infix)
-                            .with_is_abstract(m.is_abstract)
-                            .with_inherited_by_delegation(
-                                super::jvm_libraries::inherited_by_delegation(
-                                    m.is_abstract,
-                                    true,
-                                    &m.annotations,
-                                ),
-                            ),
-                        inline: crate::libraries::InlineKind::None,
-                        reified: false,
-                        inline_body_plan: None,
-                        // Builtin (`.kotlin_builtins`) members are all public API.
-                        visibility: crate::libraries::Visibility::Public,
-                        call_sig: crate::libraries::CallSig::metadata_plain(
-                            m.generic_sig.params.len(),
-                        ),
-                        context_count: 0,
-                        annotations: m.annotations.clone(),
-                        contract: None,
-                        equality_bound: None,
-                        return_value_status: Some(m.return_value_status),
-                        default_values: Vec::new(),
-                        default_realization: None,
-                        constructor_realization: None,
-                        declared_ret: None,
-                        implicit_classifier_callable: None,
-                        associated_classifier: None,
-                        associated_access_owner: None,
-                        plugin_expression: None,
-                        stable_declaration: None,
-                        source_member: None,
-                    }
-                })
-            })
-            .into_iter()
-            .flatten()
-            .collect();
-        if catalog_complete {
-            self.builtin_members
-                .borrow_mut()
-                .insert(internal_id, std::rc::Rc::new(members.clone()));
-        }
-        members
     }
 
     /// Constructors declared by a classless Kotlin builtin. Their descriptor is deliberately empty:
