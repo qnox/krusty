@@ -88,7 +88,6 @@ extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyWithInline.kt
-fieldRename/delegates.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
