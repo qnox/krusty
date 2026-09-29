@@ -182,7 +182,6 @@ reified/safecast.kt
 sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt
 secondaryConstructors/localClasses.kt
-specialBuiltins/enumAsOrdinaled.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt43286.kt

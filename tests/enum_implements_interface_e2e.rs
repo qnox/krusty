@@ -25,6 +25,27 @@ fun box(): String { val x: HasV = E.A; val y: HasV = E.B; return x.v() + y.v() }
     assert_eq!(run(SRC).expect("per-entry override compiles + runs"), "OK");
 }
 
+/// `Enum.ordinal`/`name` are JVM methods `ordinal()`/`name()`, while an interface property of the
+/// same spelling is `getOrdinal()`/`getName()`. The enum must bridge the interface accessor to the
+/// inherited method.
+#[test]
+fn enum_inherits_interface_ordinal_and_name() {
+    const SRC: &str = "interface Ordinaled { val ordinal: Int }\n\
+interface Named { val name: String }\n\
+enum class E : Ordinaled, Named { X }\n\
+fun box(): String {\n\
+    val ordinaled: Ordinaled = E.X\n\
+    val named: Named = E.X\n\
+    if (ordinaled.ordinal != 0) return \"fail ordinal\"\n\
+    if (named.name != \"X\") return \"fail name\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("enum interface ordinal and name compile and run"),
+        "OK"
+    );
+}
+
 #[test]
 fn default_method_via_interface() {
     const SRC: &str = "interface HasV { fun v(): String = \"OK\" }\n\

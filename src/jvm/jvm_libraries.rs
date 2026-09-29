@@ -4103,7 +4103,11 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     visibility: function.visibility,
-                    owner: function.callable.owner,
+                    // The property belongs to the classifier being read (`kotlin/Enum`). Its
+                    // getter keeps the mapped JVM method (`java/lang/Enum.ordinal`). Override
+                    // plans look the declaration up by this owner, so an enum that implements
+                    // `val ordinal` can bridge `getOrdinal` to `ordinal()`.
+                    owner: cn,
                     receiver_rank: 0,
                     source_key: None,
                     stable_declaration: None,
