@@ -83,13 +83,10 @@ argument, member, initializer, or assignment location is a test failure.
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
-corpus, then everything else), then runs twenty-two balanced whole-module shards of the e2e binary.
-On a host with at least four CPUs, three of those shards run at once and each shard's
-`--test-threads` is half the CPU count. One shard at a time leaves cores idle. Three shards at a
-full thread count push a shard past its two-minute deadline. `KRUSTY_E2E_PARALLEL` and
-`KRUSTY_E2E_THREADS` override the width and the thread count, and `KRUSTY_E2E_SHARDS` overrides the
-shard count. Hosts with fewer than four CPUs run one shard at a time across every CPU. The remaining
-small test binaries then run in parallel.
+corpus, then everything else), then runs the e2e binary once. The corpus pass parallelizes internally
+across every CPU. The e2e binary uses `--test-threads` equal to the CPU count, and the kotlinc, javap,
+and box-runner pools are the same width, so those calls do not queue while cores sit idle. The
+remaining small test binaries then run in parallel.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -98,9 +95,8 @@ filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the t
 `--test-threads=<count>` arguments do not change identity. Because slugging is deliberately lossy,
 `run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
 earlier run. The failure report reads the exact invocation's log, and the timing table lists each
-invocation separately because each is a separate process with its own wall time. E2e shard logs use
-the explicit labels `shard-1-of-22`, and so on; every shard's reported selected-test count must equal
-the planner's count, so filtering cannot silently reduce coverage.
+invocation separately because each is a separate process with its own wall time. The e2e log is the
+plain binary name; the conformance corpus log uses the explicit label `corpus`.
 
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
@@ -161,9 +157,9 @@ fails instead of recording.
 `KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
 output is ever recorded, so a recorded value stays an oracle for krusty.
 
-The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
-seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
-defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
+The general test-binary deadline defaults to 120 seconds. The conformance corpus process and the e2e
+process each default to 900 seconds, adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS` and
+`KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -260,8 +256,8 @@ Performance-relevant harness state:
   (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
   `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
   per lib entry — the convergence inventory for making byte equality the assertion.
-- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
-  to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+- Persistent JVM pools (kotlinc compiler servers, JavaRunner) default to one JVM per CPU.
+  `KRUSTY_SERVER_POOL=<n>` overrides in either direction (for example `1` on a swapping host).
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
   static state is fresh per `box()` call and runner JVMs are shared across tests.
 
@@ -269,17 +265,11 @@ Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
-- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for each
-  full-suite or focused conformance pass.
-- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
-  each full-suite e2e shard.
-- `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
-  run.
-- `KRUSTY_E2E_PARALLEL=<count>` overrides how many e2e shards run at once. The default is 3 when the
-  host has at least four CPUs and 1 otherwise, and it never exceeds the shard count.
-- `KRUSTY_E2E_THREADS=<count>` overrides how many libtest threads each e2e shard uses. The default is
-  half the CPU count while more than one shard is in flight, and every CPU when a single shard owns
-  the machine.
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 900-second deadline for the
+  full-suite or focused conformance corpus process.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 900-second deadline for the e2e process.
+- `KRUSTY_CONFORMANCE_SHARDS=<count>` partitions the box corpus across that many processes. The plain
+  gate leaves this at 1.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.

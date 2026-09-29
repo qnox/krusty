@@ -19,7 +19,6 @@ cd "$(dirname "$0")"
 # Shared with instrumented coverage, which executes the already-built test binaries directly.
 source "$(dirname "$0")/scripts/test-deadline.sh"
 source "$(dirname "$0")/scripts/libtest-shards.sh"
-source "$(dirname "$0")/scripts/e2e-parallel.sh"
 source "$(dirname "$0")/scripts/target-hygiene.sh"
 
 # `gate` is a Cargo profile, not a target dir; and cargo never prunes `target/` itself. Refuse the
@@ -337,17 +336,24 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 # The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
 # conformance test in a fresh process. This still executes the full conformance binary's test set; it
 # just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
-# Pass 1 is a single #[test] that parallelizes internally (rayon). Partition its sorted corpus across
-# fresh processes so every process receives the same 120-second deadline as the rest of the gate;
-# each shard retains the conformance floor and the stable modulo partition covers every case once.
-# Pass 2 is ~40 independent JVM-backed tests, so give it real threads (bounded: each can hold a
-# kotlinc-server or runner JVM, so `ncpu` capped at 4 keeps the JVM count sane on big hosts).
-conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
+# Pass 1 is a single #[test] that parallelizes internally (rayon) across every CPU. The plain gate
+# runs that corpus as one process. `KRUSTY_CONFORMANCE_SHARDS` above 1 is the override that partitions
+# the sorted corpus when one process cannot hold it; each piece still uses one libtest thread because
+# rayon owns the cores.
+# Pass 2 is ~40 independent JVM-backed tests. Give it one libtest thread per CPU; the server pool is
+# the same size, so those threads do not queue on a single kotlinc or javac JVM.
+conf_threads="$ncpu"
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
   conformance_shards="$KRUSTY_CONFORMANCE_SHARDS"
   libtest_require_positive_shard_count \
     "$conformance_shards" "run-tests.sh: KRUSTY_CONFORMANCE_SHARDS"
+  if [ "$conformance_shards" -eq 1 ]; then
+    echo "run-tests.sh: conformance corpus" >&2
+    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+      run_one \
+        "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "corpus"
+  else
   for ((shard = 0; shard < conformance_shards; shard++)); do
     label="box-shard-$((shard + 1))-of-$conformance_shards"
     echo "run-tests.sh: conformance $label" >&2
@@ -357,6 +363,7 @@ if [ -n "$gate" ]; then
       run_one \
         "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
   done
+  fi
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
     run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
 fi
@@ -371,106 +378,18 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary joins the product tests that drive kotlinc plus a persistent JVM box runner. Run it
-# after conformance and before the small-binary pool. Each in-flight shard gets a box-runner pool
-# sized to its thread count so its `box()` calls do not queue on too few JVMs. One shard leaves
-# cores idle; three shards at `--test-threads=$ncpu` push a shard past the two-minute deadline.
-# `e2e_schedule` picks a width and a thread count that stay inside the deadline (3 shards and
-# `ncpu/2` threads on a host with at least 4 CPUs). `KRUSTY_E2E_PARALLEL` and `KRUSTY_E2E_THREADS`
-# override those. The pool runs outside the `-P jobs` fan-out. The whole
-# binary can exceed the per-process ceiling, so greedily balance whole top-level test modules into
-# shards. Each shard skips the other modules and must report exactly its planned test count; a lossy
-# libtest skip filter therefore fails visibly instead of silently reducing coverage.
+# The e2e binary drives kotlinc plus a persistent JVM box runner. Run it once, after conformance and
+# before the small-binary pool, with one libtest thread per CPU. The kotlinc/javap server pool and
+# the box-runner pool default to that same width, so in-flight calls do not queue on a handful of
+# JVMs and the rest of the host does not sit idle. Splitting the binary into processes restarts
+# those JVMs and the classpath for every piece; one process keeps them warm.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 if [ -n "$e2e_bin" ]; then
-  e2e_shards="$KRUSTY_E2E_SHARDS"
-  libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
-  if ! read -r e2e_parallel e2e_threads < <(e2e_schedule "$ncpu" "$e2e_shards" "${KRUSTY_E2E_PARALLEL:-}" "${KRUSTY_E2E_THREADS:-}"); then
-    echo "run-tests.sh: KRUSTY_E2E_PARALLEL and KRUSTY_E2E_THREADS must be canonical positive integers" >&2
-    exit 1
-  fi
-  e2e_listing="$logdir/e2e-tests.list"
-  e2e_plan="$logdir/e2e-shards.plan"
-  e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
-  libtest_write_shard_plan \
-    "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
-  pool="${KRUSTY_BOX_RUNNER_POOL:-$e2e_threads}"
-  echo "run-tests.sh: e2e shards=$e2e_shards parallel=$e2e_parallel threads=$e2e_threads" >&2
-  # bash 3.2 has no `wait -n`. A fifo of N tokens is the slot pool: fd 3 stays open for the children.
-  e2e_slot_dir="$(mktemp -d)"
-  mkfifo "$e2e_slot_dir/slots"
-  exec 3<>"$e2e_slot_dir/slots"
-  rm -rf "$e2e_slot_dir"
-  for ((slot = 0; slot < e2e_parallel; slot++)); do
-    printf 'x\n' >&3
-  done
-  e2e_pids=()
-  # A bad plan can be discovered after earlier shards have already started. Stop that process tree
-  # (the worker, the deadline supervisor, and the JVMs it forked) before the log directory disappears.
-  kill_descendants() {
-    local pid="$1" child
-    local children=()
-    while read -r child; do
-      [ -n "$child" ] && children+=("$child")
-    done < <(pgrep -P "$pid" 2>/dev/null || true)
-    if [ "${#children[@]}" -gt 0 ]; then
-      for child in "${children[@]}"; do
-        kill_descendants "$child"
-      done
-    fi
-    kill -TERM "$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-  }
-  stop_e2e_pool() {
-    local pid
-    if [ "${#e2e_pids[@]}" -gt 0 ]; then
-      for pid in "${e2e_pids[@]}"; do
-        kill_descendants "$pid"
-      done
-      for pid in "${e2e_pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-      done
-    fi
-    exec 3>&- || true
-  }
-  for ((shard = 0; shard < e2e_shards; shard++)); do
-    skip_args=()
-    skip_file="$logdir/e2e-shard-$shard.skips"
-    expected_tests="$(libtest_shard_expected_tests "$e2e_plan" "$shard")"
-    if [ "$expected_tests" -eq 0 ]; then
-      echo "run-tests.sh: e2e shard $((shard + 1))/$e2e_shards was assigned no tests" >&2
-      stop_e2e_pool
-      exit 1
-    fi
-    if ! libtest_shard_skip_patterns \
-      "$e2e_plan" "$e2e_listing" "$shard" >"$skip_file"; then
-      echo "run-tests.sh: could not build safe filters for e2e shard $((shard + 1))/$e2e_shards" >&2
-      stop_e2e_pool
-      exit 1
-    fi
-    while IFS= read -r pattern; do
-      skip_args+=(--skip "$pattern")
-    done <"$skip_file"
-    label="shard-$((shard + 1))-of-$e2e_shards"
-    read -r -u 3 _
-    (
-      trap 'printf "x\n" >&3' EXIT
-      echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
-      KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
-        KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-          "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$e2e_threads" "$label" "$expected_tests"
-    ) &
-    e2e_pids+=("$!")
-  done
-  e2e_pool_status=0
-  for pid in "${e2e_pids[@]}"; do
-    wait "$pid" || e2e_pool_status=$?
-  done
-  exec 3>&-
-  if [ "$e2e_pool_status" -ne 0 ]; then
-    echo "run-tests.sh: an e2e shard worker exited $e2e_pool_status" >&2
-    exit "$e2e_pool_status"
-  fi
+  pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
+  echo "run-tests.sh: e2e threads=$ncpu box-runners=$pool" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_E2E_TIMEOUT_SECONDS" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
+      "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.

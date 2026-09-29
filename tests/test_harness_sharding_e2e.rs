@@ -140,92 +140,15 @@ fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
     }
 }
 
-fn e2e_schedule(
-    ncpu: u32,
-    shards: u32,
-    width: Option<&str>,
-    threads: Option<&str>,
-) -> std::process::Output {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("e2e-parallel.sh");
-    Command::new("bash")
-        .args([
-            "-c",
-            "source \"$1\"; e2e_schedule \"$2\" \"$3\" \"$4\" \"$5\"",
-            "e2e-schedule",
-        ])
-        .arg(script)
-        .arg(ncpu.to_string())
-        .arg(shards.to_string())
-        .arg(width.unwrap_or(""))
-        .arg(threads.unwrap_or(""))
-        .output()
-        .expect("run e2e schedule")
-}
-
 #[test]
-fn e2e_schedule_keeps_three_shards_under_the_deadline() {
-    let four_cores = e2e_schedule(4, 22, None, None);
-    assert!(
-        four_cores.status.success(),
-        "{}",
-        String::from_utf8_lossy(&four_cores.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(four_cores.stdout).expect("utf-8"),
-        "3 2\n"
-    );
-
-    let eight_cores = e2e_schedule(8, 22, None, None);
-    assert!(eight_cores.status.success());
-    assert_eq!(
-        String::from_utf8(eight_cores.stdout).expect("utf-8"),
-        "3 4\n"
-    );
-
-    let two_cores = e2e_schedule(2, 22, None, None);
-    assert!(two_cores.status.success());
-    assert_eq!(String::from_utf8(two_cores.stdout).expect("utf-8"), "1 2\n");
-
-    let capped = e2e_schedule(4, 2, None, None);
-    assert!(capped.status.success());
-    assert_eq!(String::from_utf8(capped.stdout).expect("utf-8"), "2 2\n");
-
-    let single = e2e_schedule(4, 22, Some("1"), None);
-    assert!(single.status.success());
-    assert_eq!(String::from_utf8(single.stdout).expect("utf-8"), "1 4\n");
-
-    let override_capped = e2e_schedule(4, 22, Some("100"), Some("2"));
-    assert!(override_capped.status.success());
-    assert_eq!(
-        String::from_utf8(override_capped.stdout).expect("utf-8"),
-        "22 2\n"
-    );
-
-    for invalid in ["0", "00", "01", "-1", "two"] {
-        let bad_width = e2e_schedule(4, 22, Some(invalid), None);
-        assert!(
-            !bad_width.status.success(),
-            "e2e schedule accepted width {invalid:?}"
-        );
-        let bad_threads = e2e_schedule(4, 22, None, Some(invalid));
-        assert!(
-            !bad_threads.status.success(),
-            "e2e schedule accepted threads {invalid:?}"
-        );
-    }
-}
-
-#[test]
-fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
+fn canonical_gate_defaults_run_corpus_and_e2e_as_one_process() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
         .join("test-gate-defaults.sh");
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -241,7 +164,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 120, 4, 22]);
+    assert_eq!(values, [120, 900, 900, 1]);
 }
 
 #[cfg(unix)]
@@ -276,7 +199,7 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
-        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/4\n"
+        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/1\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
     fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
@@ -308,6 +231,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_SHARDS", "4")
         .output()
         .expect("run reporting conformance fixture");
 
@@ -353,6 +277,7 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_SHARDS", "4")
         .output()
         .expect("run failing-shard conformance fixture");
 
