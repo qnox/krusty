@@ -98,13 +98,15 @@ impl StringTable {
         }
     }
 
-    fn intern(&mut self, string: String, record: Pb) -> u32 {
-        let hash = string_record_hash(&string, record.as_bytes());
-        if let Some(index) = self.latest_match(hash, &string, record.as_bytes()) {
+    /// A hit returns the existing index and does not allocate. The table copies `string` only when
+    /// the string and record pair is new.
+    fn intern(&mut self, string: &str, record: Pb) -> u32 {
+        let hash = string_record_hash(string, record.as_bytes());
+        if let Some(index) = self.latest_match(hash, string, record.as_bytes()) {
             return index;
         }
         let index = self.strings.len() as u32;
-        self.strings.push(string);
+        self.strings.push(string.to_owned());
         self.records.push(record);
         self.dedup.entry(hash).or_default().push(index);
         index
@@ -122,13 +124,13 @@ impl StringTable {
     }
 
     pub(crate) fn local(&mut self, string: &str) -> u32 {
-        self.intern(string.to_owned(), Pb::new())
+        self.intern(string, Pb::new())
     }
 
     pub(crate) fn builtin(&mut self, predefined: usize) -> u32 {
         let mut record = Pb::new();
         record.field_varint(2, predefined as u64);
-        self.intern(String::new(), record)
+        self.intern("", record)
     }
 
     pub(crate) fn class_id(&mut self, classifier: TypeName) -> u32 {
@@ -145,7 +147,10 @@ impl StringTable {
             }
             let mut record = Pb::new();
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
-            let index = self.intern(format!("L{};", classifier.render()), record);
+            let index = self.intern(
+                crate::jvm::names::reference_descriptor(classifier.rendered()),
+                record,
+            );
             self.descriptor_ids.insert(classifier, index);
             return index;
         }
@@ -1004,10 +1009,18 @@ mod tests {
         assert_eq!(strings.class_id(classifier), first);
         assert_eq!(strings.strings.len(), len);
         assert_eq!(strings.strings[first as usize], "Lsample/Box;");
+        assert_eq!(
+            strings.strings[first as usize].as_str(),
+            crate::jvm::names::reference_descriptor(classifier.rendered())
+        );
 
         let nested = crate::types::type_name("pkg/Outer").nested_child("Inner");
         let nested_id = strings.class_id(nested);
         assert_eq!(strings.strings[nested_id as usize], "Lpkg/Outer$Inner;");
+        assert_eq!(
+            strings.strings[nested_id as usize].as_str(),
+            crate::jvm::names::reference_descriptor(nested.rendered())
+        );
         let len = strings.strings.len();
         assert_eq!(strings.class_id(nested), nested_id);
         assert_eq!(strings.strings.len(), len);
