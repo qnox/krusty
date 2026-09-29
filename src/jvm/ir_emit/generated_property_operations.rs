@@ -40,7 +40,7 @@ impl Emitter<'_> {
             self.emit_value(value, code);
             let owner = generated_property_hash_owner(self.ir, self.bodies, ty)
                 .expect("a checked reference property has a JVM hash owner");
-            let method = self.cw.methodref(&owner, "hashCode", "()I");
+            let method = self.cw.methodref(owner, "hashCode", "()I");
             code.invokevirtual(method, 0, 1);
         }
     }
@@ -64,7 +64,7 @@ impl Emitter<'_> {
         let descriptor = method_descriptor(&[physical, physical], Ty::Boolean);
         let method = self
             .cw
-            .methodref(&owner.render(), "equals-impl0", &descriptor);
+            .methodref(owner.rendered(), "equals-impl0", &descriptor);
         code.invokestatic(method, slot_words(physical) as i32 * 2, 1);
         true
     }
@@ -82,7 +82,7 @@ impl Emitter<'_> {
             let descriptor = method_descriptor(&[carrier], Ty::Int);
             let method = self
                 .cw
-                .methodref(&owner.render(), "hashCode-impl", &descriptor);
+                .methodref(owner.rendered(), "hashCode-impl", &descriptor);
             code.invokestatic(method, slot_words(carrier) as i32, 1);
             return true;
         }
@@ -96,13 +96,13 @@ impl Emitter<'_> {
             let descriptor = method_descriptor(&[], physical);
             let method = self
                 .cw
-                .methodref(&owner.render(), "unbox-impl", &descriptor);
+                .methodref(owner.rendered(), "unbox-impl", &descriptor);
             code.invokevirtual(method, 0, slot_words(physical) as i32);
         }
         let descriptor = method_descriptor(&[physical], Ty::Int);
         let method = self
             .cw
-            .methodref(&owner.render(), "hashCode-impl", &descriptor);
+            .methodref(owner.rendered(), "hashCode-impl", &descriptor);
         code.invokestatic(method, slot_words(physical) as i32, 1);
         true
     }
@@ -124,28 +124,65 @@ impl Emitter<'_> {
 /// JVM dispatch owner for a generated property's reference `hashCode` call. Common IR carries only
 /// the declared Kotlin type; interface dispatch and boxed scalar ownership are representation facts
 /// derived here by the backend. `None` means the classfile seeder can use its primitive/array rule.
-fn generated_property_hash_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> Option<String> {
+fn generated_property_hash_owner(
+    ir: &IrFile,
+    bodies: &dyn MethodBodies,
+    ty: Ty,
+) -> Option<&'static str> {
     if ty.is_array() || (ty.non_null().is_jvm_scalar() && !ty.is_nullable()) {
         return None;
     }
     if let Some(owner) = ty.non_null().obj_internal() {
         if crate::jvm::value_classes::is_boxed_value_class(ir, owner) {
-            return Some(owner.render());
+            return Some(owner.rendered());
         }
     }
     let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
-        "java/lang/Object".to_owned()
+        "java/lang/Object"
     } else {
-        crate::jvm::names::instanceof_internal_name(ty.non_null()).to_owned()
+        crate::jvm::names::instanceof_internal_name(ty.non_null())
     };
     if ty
         .non_null()
         .obj_internal()
         .and_then(|name| ir.class_id_by_name(name))
         .is_some_and(|class| ir.classes[class as usize].is_interface)
-        || bodies.owner_is_interface(&owner)
+        || bodies.owner_is_interface(owner)
     {
-        owner = "java/lang/Object".to_owned();
+        owner = "java/lang/Object";
     }
     Some(owner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generated_property_hash_owner;
+    use crate::ir::IrFile;
+    use crate::jvm::classreader::MethodCode;
+    use crate::jvm::inline::MethodBodies;
+    use crate::types::Ty;
+
+    struct NoBodies;
+
+    impl MethodBodies for NoBodies {
+        fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_reference_hash_owner_reuses_the_instanceof_spelling() {
+        let ir = IrFile::with_package(None);
+        let ty = Ty::obj("sample/hash6044/Host");
+        let owner = generated_property_hash_owner(&ir, &NoBodies, ty).unwrap();
+        assert_eq!(owner, "sample/hash6044/Host");
+        assert!(std::ptr::eq(
+            owner,
+            crate::jvm::names::instanceof_internal_name(ty)
+        ));
+        assert_eq!(
+            generated_property_hash_owner(&ir, &NoBodies, Ty::nullable(Ty::Int)).unwrap(),
+            "java/lang/Object"
+        );
+    }
 }
