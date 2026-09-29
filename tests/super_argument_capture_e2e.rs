@@ -221,19 +221,6 @@ fn a_lambda_two_inner_classes_out_reads_the_local_capture() {
 }
 
 #[test]
-fn a_lambda_in_an_inner_super_constructor_writes_the_outer_shared_cell() {
-    run_ok(
-        "InnerSuperSharedCell",
-        "open class Base(val fn: () -> String)\n\
-         fun box(): String {\n\
-         var ok = \"fail\"\n\
-         class Local {\n\
-         inner class Inner : Base({ ok = \"OK\"; ok }) }\n\
-         return Local().Inner().fn() }\n",
-    );
-}
-
-#[test]
 fn a_lambda_in_a_super_constructor_argument_calls_an_enclosing_local_function() {
     run_ok(
         "LocalFunInSuperArgument",

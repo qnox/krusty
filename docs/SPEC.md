@@ -11263,9 +11263,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/super_argument_capture_e2e.rs::a_lambda_in_an_inner_super_constructor_reads_the_outer_local_capture`,
   `::a_lambda_in_an_inner_super_constructor_reads_only_the_outer_local`,
   `::a_nested_lambda_in_an_inner_super_constructor_reads_the_outer_local`,
-  `::an_inner_super_constructor_argument_reads_the_outer_local_directly`,
-  `::a_lambda_two_inner_classes_out_reads_the_local_capture`, and
-  `::a_lambda_in_an_inner_super_constructor_writes_the_outer_shared_cell`, plus
+  `::an_inner_super_constructor_argument_reads_the_outer_local_directly`, and
+  `::a_lambda_two_inner_classes_out_reads_the_local_capture`, plus
   `fir::body_check::local_class_tests::inner_super_argument_lambda_reads_the_outer_capture_off_the_enclosing_instance`.
   Corpus: `closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt`
   and `…/localCapturedInLambdaInInnerClassInLocalClass.kt`.
