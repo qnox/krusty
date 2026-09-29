@@ -13,11 +13,6 @@ fn assert_kotlinc_accepts(tag: &str, source: &str) {
     assert_eq!(code, 0, "kotlinc rejected {tag}: {diagnostics}");
 }
 
-fn assert_kotlinc_rejects(tag: &str, source: &str) {
-    let (code, _) = common::kotlinc_source_result(tag, source);
-    assert_ne!(code, 0, "kotlinc accepted {tag}");
-}
-
 #[test]
 fn operator_get() {
     const SRC: &str = "class M(val s: String) { operator fun get(i: Int): Char = s[i] }\n\
@@ -78,12 +73,29 @@ fn function_value_is_not_a_different_function_classifier() {
     wrong[f] = f()\n\
     return \"OK\"\n\
 }\n";
-    assert_kotlinc_rejects("FunctionClassifierMapKeyMismatch", SRC);
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
+    let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
+    assert_eq!(result.krusty_code, 1);
+    assert_eq!(result.reference_code, 1);
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
     assert_eq!(
-        diagnostics,
-        ["'MutableMap<Function0<Int>, Any>' is not an array (cannot index-assign)"]
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 4,
+            column: 1,
+            message: "'MutableMap<Function0<Int>, Any>' is not an array (cannot index-assign)"
+                .to_string(),
+        }]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 4,
+            column: 7,
+            message:
+                "argument type mismatch: actual type is '() -> String', but '() -> Int' was expected."
+                    .to_string(),
+        }]
     );
 }
