@@ -284,7 +284,7 @@ fn incdec_trailing_lambda_value_local_target() {
 /// Closing-block detection is generic rather than lambda-specific: an `if` branch exposes its last
 /// expression as the branch value too. Prefix returns the assigned value and postfix returns the old
 /// value; index targets exercise the same shared member/index assignment builder. The parser unit
-/// regression separately inspects the expansion to prove a custom member getter is read only once.
+/// regression separately inspects the expansion. A prefix form re-reads the getter after the write.
 #[test]
 fn incdec_trailing_branch_value_and_index_target() {
     const SRC: &str = "fun box(): String {\n\
@@ -316,8 +316,10 @@ fn member_and_index_incdec_values_work_in_ordinary_expression_positions() {
     assert_eq!(run(SRC).expect("ordinary incdec access values"), "OK");
 }
 
+/// Postfix keeps the first getter result. Prefix is `p = p.inc()` and then the value of `p`,
+/// so the custom getter runs again. Together that is three reads and two writes.
 #[test]
-fn access_incdec_value_reads_custom_property_once() {
+fn access_incdec_value_re_reads_a_custom_property_on_prefix() {
     const SRC: &str = r#"
 class Box {
     var reads = 0
@@ -335,7 +337,7 @@ fun box(): String {
     val post = holder.value++
     val pre = ++holder.value
     return if (post == 10 && pre == 12 && holder.raw() == 12
-        && holder.reads == 2 && holder.writes == 2) "OK" else "fail"
+        && holder.reads == 3 && holder.writes == 2) "OK" else "fail ${holder.reads}/${holder.writes}/${holder.raw()}/$post/$pre"
 }
 "#;
     let (code, stderr) = common::kotlinc_source_result("AccessIncDecGetterOnce", SRC);
@@ -346,8 +348,10 @@ fun box(): String {
     assert_eq!(run(SRC).expect("custom-property incdec value"), "OK");
 }
 
+/// Same call count as a property: postfix uses the first `get`, prefix calls `get` again after
+/// `set`. The row and column are still evaluated once each.
 #[test]
-fn nary_index_incdec_value_uses_one_get_and_one_set() {
+fn nary_index_incdec_value_re_reads_on_prefix() {
     const SRC: &str = r#"
 class Grid {
     var gets = 0
@@ -372,7 +376,7 @@ fun box(): String {
     val post = use(grid[1, 2]++)
     val pre = use(++grid[1, 2])
     return if (post == 20 && pre == 22 && grid.stored == 22
-        && grid.gets == 2 && grid.sets == 2) "OK" else "fail"
+        && grid.gets == 3 && grid.sets == 2) "OK" else "fail ${grid.gets}/${grid.sets}/${grid.stored}/$post/$pre"
 }
 "#;
     let (code, stderr) = common::kotlinc_source_result("NaryIndexIncDecValue", SRC);
