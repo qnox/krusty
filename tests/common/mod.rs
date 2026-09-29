@@ -276,20 +276,21 @@ pub(crate) fn cached_classpath(
     jdk_modules: Option<&Path>,
 ) -> std::rc::Rc<Classpath> {
     let mut paths = cp_jars.to_vec();
-    if let Some(path) = jdk_modules {
-        paths.push(path.to_path_buf());
+    paths.extend(jdk_modules.map(Path::to_path_buf));
+    if !paths.iter().all(|path| path.is_file()) {
+        return std::rc::Rc::new(Classpath::new(paths));
     }
     thread_local! {
-        static CACHE: std::cell::RefCell<
-            std::collections::HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>,
-        > = std::cell::RefCell::new(std::collections::HashMap::new());
+        static CACHE: std::cell::RefCell<HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>> =
+            std::cell::RefCell::new(HashMap::new());
     }
     CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(paths)))
-            .clone()
+        if let Some(hit) = cache.borrow().get(&paths) {
+            return std::rc::Rc::clone(hit);
+        }
+        let cp = std::rc::Rc::new(Classpath::new(paths.clone()));
+        cache.borrow_mut().insert(paths, std::rc::Rc::clone(&cp));
+        cp
     })
 }
 
@@ -481,7 +482,6 @@ pub fn compile_in_process_metadata_cp_module(
 /// [`compile_in_process_metadata_cp_module`] at an explicit class-file major (kotlinc
 /// `-jvm-target`), for byte-identity fixtures whose codegen forks on the target — string
 /// concatenation is `invokedynamic` from JVM 9 (major 53) on.
-#[allow(dead_code)]
 pub fn compile_in_process_metadata_cp_module_target(
     src: &str,
     stem: &str,
@@ -494,7 +494,7 @@ pub fn compile_in_process_metadata_cp_module_target(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
+    let cp = cached_classpath(cp_jars, None);
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
