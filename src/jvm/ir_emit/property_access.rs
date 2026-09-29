@@ -204,7 +204,11 @@ impl Emitter<'_> {
     /// Source name of the `lateinit` property `bridge` (`access$get<X>$p`) reads, when that bridge
     /// is a raw backing-field load rather than a getter.
     pub(super) fn access_bridge_lateinit_name(&self, owner: &str, bridge: &str) -> Option<String> {
-        let class = self.ir.classes.iter().find(|class| class.fq_name_matches(owner))?;
+        let class = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name_matches(owner))?;
         class.properties.iter().find_map(|property| {
             let expected = format!(
                 "access${}$p",
