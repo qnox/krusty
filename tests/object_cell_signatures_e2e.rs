@@ -54,14 +54,20 @@ const STEM: &str = "ObjectCellSignatures";
 /// Every field's and method's name, descriptor and generic `Signature`, in declaration order.
 fn declarations(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
     let class = parse_class(bytes).expect("a parseable class");
-    let fields = class
-        .fields
-        .into_iter()
-        .map(|field| (field.name.to_owned(), field.descriptor.to_owned(), field.signature));
-    let methods = class
-        .methods
-        .into_iter()
-        .map(|method| (method.name.to_owned(), method.descriptor.to_owned(), method.signature));
+    let fields = class.fields.into_iter().map(|field| {
+        (
+            field.name.to_owned(),
+            field.descriptor.to_owned(),
+            field.signature,
+        )
+    });
+    let methods = class.methods.into_iter().map(|method| {
+        (
+            method.name.to_owned(),
+            method.descriptor.to_owned(),
+            method.signature,
+        )
+    });
     fields.chain(methods).collect()
 }
 

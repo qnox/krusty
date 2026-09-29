@@ -239,7 +239,13 @@ fn field_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
     class
         .fields
         .iter()
-        .map(|field| (field.name.to_owned(), field.descriptor.to_owned(), field.access))
+        .map(|field| {
+            (
+                field.name.to_owned(),
+                field.descriptor.to_owned(),
+                field.access,
+            )
+        })
         .collect()
 }
 

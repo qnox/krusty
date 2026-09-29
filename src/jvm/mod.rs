@@ -48,6 +48,7 @@ mod local_class_names;
 mod local_classifiers;
 mod local_properties;
 mod mapped_builtin_declarations;
+mod member_spelling;
 pub mod metadata;
 mod metadata_flags;
 mod metadata_method_signatures;

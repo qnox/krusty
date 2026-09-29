@@ -2,16 +2,14 @@
 //! bound are absent on almost every declaration, so the common record keeps one pointer and
 //! allocates that side record only when one of those facts is present.
 
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::Arc;
 
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{CallSig, GenericSig};
-use crate::name_tree::{FxBuildHasher, FxHasher};
 use crate::types::{ContextParameterKind, ReturnValueStatus, Ty, TypeName, Visibility};
 
 use super::{MetaValueParam, MfnFlags};
+use crate::jvm::member_spelling;
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
@@ -124,8 +122,8 @@ fn pack_extras(
 impl MetaFn {
     pub(super) fn from_decoded(decoded: DecodedFunction) -> Self {
         Self {
-            kotlin_name: intern_function_name(decoded.kotlin_name),
-            jvm_name: intern_function_name(decoded.jvm_name),
+            kotlin_name: member_spelling::intern_owned(decoded.kotlin_name),
+            jvm_name: member_spelling::intern_owned(decoded.jvm_name),
             jvm_desc: decoded.jvm_desc,
             visibility: decoded.visibility,
             flags: decoded.flags,
@@ -308,28 +306,6 @@ impl MetaFn {
     pub fn extension_call_sig(&self) -> CallSig {
         self.member_call_sig()
     }
-}
-
-const FUNCTION_NAME_SHARDS: usize = 64;
-
-fn intern_function_name(name: String) -> &'static str {
-    static NAMES: OnceLock<[RwLock<HashSet<&'static str, FxBuildHasher>>; FUNCTION_NAME_SHARDS]> =
-        OnceLock::new();
-    let mut hash = FxHasher::default();
-    name.hash(&mut hash);
-    let shard = &NAMES.get_or_init(|| std::array::from_fn(|_| RwLock::new(HashSet::default())))
-        [hash.finish() as usize % FUNCTION_NAME_SHARDS];
-    if let Some(&existing) = shard.read().unwrap().get(name.as_str()) {
-        return existing;
-    }
-
-    let mut names = shard.write().unwrap();
-    if let Some(&existing) = names.get(name.as_str()) {
-        return existing;
-    }
-    let stored = Box::leak(name.into_boxed_str());
-    names.insert(stored);
-    stored
 }
 
 #[cfg(test)]
