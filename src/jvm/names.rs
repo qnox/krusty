@@ -515,6 +515,8 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
 /// settles `is Nothing` before a backend sees it.
 pub(crate) fn instanceof_internal_name(t: Ty) -> &'static str {
     match t {
+        Ty::Pending => unreachable!("a not-determined type reached a JVM instanceof name"),
+        Ty::Nothing => unreachable!("Nothing reached a JVM instanceof name"),
         Ty::String => "java/lang/String",
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
             Ty::UByte => "kotlin/UByte",
@@ -875,6 +877,18 @@ mod tests {
         assert_eq!(array, "[I");
         let function = instanceof_internal_name(Ty::fun(vec![Ty::Int], Ty::String));
         assert!(std::ptr::eq(function, function_interface_internal_name(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "a not-determined type reached a JVM instanceof name")]
+    fn instanceof_name_rejects_an_undetermined_type() {
+        instanceof_internal_name(Ty::Pending);
+    }
+
+    #[test]
+    #[should_panic(expected = "Nothing reached a JVM instanceof name")]
+    fn instanceof_name_rejects_nothing() {
+        instanceof_internal_name(Ty::Nothing);
     }
 
     #[test]
