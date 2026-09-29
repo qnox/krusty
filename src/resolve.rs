@@ -44198,11 +44198,16 @@ impl<'a> Checker<'a> {
                     "postponed argument call={call:?} parameter={parameter} expected={nested_expected:?} generic_ret={:?}",
                     generic_sig.ret,
                 );
-                let concrete_nested = crate::symbol_resolver::nested_result_from_concrete_parameter(
-                    &generic_sig,
-                    nested_expected,
-                    &signature.formals,
-                );
+                let concrete_nested =
+                    match crate::symbol_resolver::nested_result_from_concrete_parameter(
+                        &generic_sig,
+                        nested_expected,
+                        &signature.formals,
+                        |actual, bound| self.receiver_is_assignable(actual, bound),
+                    ) {
+                        Ok(result) => result,
+                        Err(()) => continue,
+                    };
                 let mut nested_bindings = if concrete_nested.is_some() {
                     crate::symbol_resolver::GSigBinds::new()
                 } else {

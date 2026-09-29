@@ -40,14 +40,19 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
 /// variable that occurs in it was solved that way, so a still-open outer variable such as the `T`
 /// in `fun <T> take(x: List<T>)` contributes nothing and the enclosing expectation can still
 /// supply it.
+///
+/// `Ok(None)` means there is no complete concrete solution and ordinary expected-result inference
+/// may continue. `Err(())` means concrete evidence conflicted or violated a declaration bound, so
+/// the nested candidate is inapplicable and must not fall back.
 pub(crate) fn nested_result_from_concrete_parameter(
     nested: &GenericSig,
     parameter: Ty,
     outer_formals: &[String],
-) -> Option<Ty> {
+    mut admits: impl FnMut(Ty, Ty) -> bool,
+) -> Result<Option<Ty>, ()> {
     let mut binds = GSigBinds::new();
     if !bind_concrete_parameter(nested, nested.ret, parameter, outer_formals, &mut binds) {
-        return None;
+        return Err(());
     }
     let mut solved_a_result_variable = false;
     for formal in &nested.formals {
@@ -56,18 +61,21 @@ pub(crate) fn nested_result_from_concrete_parameter(
         }
         solved_a_result_variable = true;
         if !binds.contains_key(formal) {
-            return None;
+            return Ok(None);
         }
     }
     if !solved_a_result_variable {
-        return None;
+        return Ok(None);
+    }
+    if !super::generic_bindings_satisfy_bounds(nested, &binds, &mut admits) {
+        return Err(());
     }
     let instantiated = super::ty_subst_keep_unbound(nested.ret, &binds);
-    (!nested
+    Ok((!nested
         .formals
         .iter()
         .any(|formal| crate::types::ty_mentions_param(instantiated, std::slice::from_ref(formal))))
-    .then_some(instantiated)
+    .then_some(instantiated))
 }
 
 fn bind_concrete_parameter(
@@ -256,12 +264,13 @@ mod tests {
                     "gather:A".to_string(),
                     "gather:R".to_string()
                 ],
+                |actual, bound| actual == bound || bound == any,
             ),
-            Some(box_of(&[
+            Ok(Some(box_of(&[
                 Ty::String,
                 Ty::star_projection(any),
                 Ty::obj_args("kotlin/collections/List", &[Ty::String]),
-            ]))
+            ])))
         );
     }
 
@@ -277,8 +286,33 @@ mod tests {
         let parameter = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("take:T", any)]);
 
         assert_eq!(
-            nested_result_from_concrete_parameter(&generic, parameter, &["take:T".to_string()]),
-            None
+            nested_result_from_concrete_parameter(
+                &generic,
+                parameter,
+                &["take:T".to_string()],
+                |actual, bound| actual == bound,
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_concrete_parameter_cannot_violate_the_nested_declaration_bound() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let number = Ty::obj("kotlin/Number");
+        let nested = Ty::ty_param("producer:T", number);
+        let generic = signature(
+            &["producer:T"],
+            vec![vec![number]],
+            Ty::obj_args("sample/Box", &[nested]),
+        );
+        let parameter = Ty::obj_args("sample/Box", &[Ty::String]);
+
+        assert_eq!(
+            nested_result_from_concrete_parameter(&generic, parameter, &[], |actual, bound| {
+                actual == bound || bound == any
+            }),
+            Err(())
         );
     }
 }
