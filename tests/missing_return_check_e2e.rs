@@ -14,25 +14,23 @@ fn diags(src: &str) -> Vec<String> {
 }
 
 fn assert_missing_return(src: &str) {
-    let d = diags(src);
-    if d.iter().any(|m| m == "<skip: no stdlib>") {
+    let diagnostics = diags(src);
+    if diagnostics == ["<skip: no stdlib>"] {
         return;
     }
-    assert!(
-        d.iter().any(|m| m.contains("'return' expression required")),
-        "expected a missing-return diagnostic, got: {d:?}\nsrc: {src}"
+    assert_eq!(
+        diagnostics,
+        ["a 'return' expression required in a function with a block body ('{...}')"],
+        "source: {src}"
     );
 }
 
 fn assert_accepts(src: &str) {
-    let d = diags(src);
-    if d.iter().any(|m| m == "<skip: no stdlib>") {
+    let diagnostics = diags(src);
+    if diagnostics == ["<skip: no stdlib>"] {
         return;
     }
-    assert!(
-        !d.iter().any(|m| m.contains("'return' expression required")),
-        "unexpected missing-return diagnostic on valid code: {d:?}\nsrc: {src}"
-    );
+    assert_eq!(diagnostics, Vec::<String>::new(), "source: {src}");
 }
 
 // ---- must be REJECTED ------------------------------------------------------
@@ -173,4 +171,14 @@ try { throw Exception() } catch (e: Throwable) { x = \"OK\"; break } finally { r
 } while (false)\n\
 }\n",
     );
+}
+
+#[test]
+fn while_false_body_return_does_not_count() {
+    assert_missing_return("fun f(): Int { while (false) { return 1 } }");
+}
+
+#[test]
+fn do_while_conditional_return_can_still_fall_through() {
+    assert_missing_return("fun f(): Int { do { if (false) return 1 } while (false) }");
 }
