@@ -201,6 +201,28 @@ fun box(): String {\n\
     common::expect_box_ok_with_stdlib(SRC, "ClassFieldInsideLocalInSetter");
 }
 
+/// A compound backing-field update from a local class must use the same bridge as separate reads
+/// and writes; the JVM's direct-field subtraction fast path is legal only in the owning class.
+#[test]
+fn a_local_class_compound_update_uses_the_backing_field_bridge() {
+    const SRC: &str = "class Counter {\n\
+    var value: Int = 5\n\
+        set(amount) {\n\
+            class Local {\n\
+                fun subtract() { field -= amount }\n\
+            }\n\
+            Local().subtract()\n\
+        }\n\
+    fun read() = value\n\
+}\n\
+fun box(): String {\n\
+    val counter = Counter()\n\
+    counter.value = 2\n\
+    return if (counter.read() == 3) \"OK\" else \"FAIL: ${counter.read()}\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "NestedCompoundBackingFieldUpdate");
+}
+
 /// A private property's reference must call its declared accessors while nested code in those
 /// accessors reads and writes the backing field. The two operations have distinct JVM bridges.
 #[test]

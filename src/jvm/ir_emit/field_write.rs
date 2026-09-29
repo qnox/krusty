@@ -31,7 +31,18 @@ impl Emitter<'_> {
             self.emit_static_storage_field(receiver, value, &owner, &name, field_ty, code);
             return;
         }
-        if self.emit_int_self_sub(receiver, class, index, value, code) {
+        let cross_class_method = super::static_accessors::cross_class_backing_field_method(
+            self.cw,
+            self.ir,
+            &self.facade,
+            self.static_owner,
+            class,
+            index,
+            true,
+        );
+        if cross_class_method.is_none()
+            && self.emit_int_self_sub(receiver, class, index, value, code)
+        {
             return;
         }
         if self.diverges(value) {
@@ -62,15 +73,7 @@ impl Emitter<'_> {
         ) {
             code.mark_line(statement_line);
         }
-        if let Some(method) = super::static_accessors::cross_class_backing_field_method(
-            self.cw,
-            self.ir,
-            &self.facade,
-            self.static_owner,
-            class,
-            index,
-            true,
-        ) {
+        if let Some(method) = cross_class_method {
             code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);
         } else {
             let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
