@@ -927,6 +927,8 @@ mod inline_lambda_return_scope_e2e;
 mod inline_lambda_value_return_e2e;
 #[path = "inline_object_regeneration_e2e.rs"]
 mod inline_object_regeneration_e2e;
+#[path = "inline_only_extension_property_e2e.rs"]
+mod inline_only_extension_property_e2e;
 #[path = "inline_preparation_sibling_annotation_e2e.rs"]
 mod inline_preparation_sibling_annotation_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]

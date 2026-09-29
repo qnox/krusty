@@ -429,11 +429,15 @@ impl JvmLibraries {
             ),
             None => None,
         };
-        // An exact compiler intrinsic may deliberately have no callable public accessor.
-        // `coroutineContext` is a public `@InlineOnly` suspend property whose private JVM
-        // getter throws; the provider publishes its semantic declaration and marks the
-        // compiler realization instead of exposing that physical method as a fallback.
-        if !getter_method.public && property_intrinsic.is_none() {
+        // A public Kotlin property whose JVM accessor is private is an inline body, not a
+        // callable. The property stays visible and the getter is `MustInline`, so a read splices
+        // that body. A non-public declaration with no compiler realization stays hidden. An exact
+        // compiler intrinsic may also have no callable public accessor (`coroutineContext`'s
+        // private getter throws); the provider still publishes the semantic declaration and the
+        // checker uses the realization.
+        let getter_inline =
+            super::inline_capability::property_accessor_inline(getter_method.public);
+        if !getter_method.public && property_intrinsic.is_none() && !mp.visibility.is_public() {
             return None;
         }
         let mut getter = LibraryCallable::library(
@@ -447,6 +451,7 @@ impl JvmLibraries {
         getter.params = semantic_context.iter().copied().chain(receiver).collect();
         getter.source_receiver = receiver;
         getter.context_count = context_count;
+        getter.inline = getter_inline;
         getter.generic_sig = property_gsig.clone().map(Box::new);
         getter.compiler_intrinsic = property_intrinsic;
         let setter = mp.setter.clone().and_then(|setter_sig| {
