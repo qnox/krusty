@@ -18,3 +18,23 @@ return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "D");
 }
+
+/// A parenthesized extension callee is evaluated before its receiver.
+/// Official box `extensionFunctions/executionOrder.kt`.
+#[test]
+fn parenthesized_extension_callee_runs_before_the_receiver() {
+    let src = "var result = \"\"\n\
+fun getReceiver(): Int {\n\
+result += \"getReceiver->\"\n\
+return 1\n\
+}\n\
+fun getFun(b: Int.(Int) -> Unit): Int.(Int) -> Unit {\n\
+result += \"getFun()->\"\n\
+return b\n\
+}\n\
+fun box(): String {\n\
+getReceiver().(getFun({ result += \"End\" }))(1)\n\
+return if (result == \"getFun()->getReceiver->End\") \"OK\" else result\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "executionOrder");
+}

@@ -1410,8 +1410,12 @@ fn extension_access_lowers_to_a_bound_function_wrapper_without_lookup() {
         .position(|function| function.name.starts_with("$fir_extension_bind_"))
         .expect("bound extension wrapper") as u32;
     assert_eq!(ir.functions[wrapper as usize].params.len(), 2);
-    assert_eq!(
+    assert!(matches!(
         ir.functions[wrapper as usize].params[0],
+        Ty::Fun(_)
+    ));
+    assert_eq!(
+        ir.functions[wrapper as usize].params[1],
         Ty::obj("kotlin/Any")
     );
     assert_eq!(ir.functions[wrapper as usize].ret, Ty::String);

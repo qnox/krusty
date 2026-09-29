@@ -1900,6 +1900,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter with an *implicit* receiver (the builder pattern `instructions()` / `recv.block()`) needs
   receiver-rebinding the checker does not yet model, so those still skip cleanly rather than
   miscompile (0-FAIL preserved).
+- **A parenthesized extension callee is evaluated before its receiver.** `receiver.(fn)(args)`
+  evaluates `fn`, then `receiver`, then the call. The bound wrapper's first value is that function
+  and its second is the receiver.
+  `parenthesized_extension_callee_runs_before_the_receiver` in `tests/extension_fun_e2e.rs`; box
+  corpus `extensionFunctions/executionOrder.kt`.
 - Labeled loops `l@ for/while/do { … break@l / continue@l }`: the `l@` label is parsed onto the loop
   (AST + IR carry an `Option<String>` label); the emitter's loop stack keeps each loop's source label, so
   a `break@l`/`continue@l` targets the nearest enclosing loop carrying `l` (an unlabeled `break`/`continue`

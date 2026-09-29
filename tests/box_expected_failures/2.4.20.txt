@@ -92,7 +92,6 @@ enum/enumEntryReferenceFromInnerClassConstructor1.kt
 enum/enumEntryReferenceFromInnerClassConstructor2.kt
 enum/enumEntryReferenceFromInnerClassConstructor3.kt
 evaluate/intrinsicConst/enumNameWithInit.kt
-extensionFunctions/executionOrder.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
