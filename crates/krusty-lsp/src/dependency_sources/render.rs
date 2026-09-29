@@ -275,7 +275,7 @@ fn render_functions(text: &mut String, members: &mut Vec<(MemberKey, Span)>, fns
         let name_hi = text.len() as u32;
         members.push((
             MemberKey {
-                name: f.jvm_name.clone(),
+                name: f.jvm_name.to_owned(),
                 descriptor: f.jvm_desc.unwrap_or_default().to_string(),
             },
             Span::new(name_lo, name_hi),

@@ -856,7 +856,7 @@ fn data_class_emits_metadata_debug_tables_and_annotations() {
         .meta
         .class_functions
         .iter()
-        .map(|f| f.kotlin_name.as_str())
+        .map(|f| f.kotlin_name)
         .collect();
     assert_eq!(
         fns,
@@ -914,7 +914,7 @@ fn generic_list_property_with_default_metadata_byte_identical() {
                 .collect::<Vec<_>>(),
             m.class_functions
                 .iter()
-                .map(|f| f.kotlin_name.clone())
+                .map(|f| f.kotlin_name)
                 .collect::<Vec<_>>(),
         )
     };

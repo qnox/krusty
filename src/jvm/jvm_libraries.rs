@@ -1083,7 +1083,7 @@ impl JvmLibraries {
                 singleton_dispatch: Some(Box::new(singleton.clone())),
                 ..LibraryCallable::library(
                     owner,
-                    function.jvm_name.clone(),
+                    function.jvm_name,
                     params,
                     ret,
                     physical_ret,
@@ -1765,9 +1765,9 @@ impl JvmLibraries {
                         );
                         continue;
                     };
-                    member.name = declaration.kotlin_name.clone();
+                    member.name = declaration.kotlin_name.to_owned();
                     if declaration.jvm_name != declaration.kotlin_name {
-                        member.physical_name = Some(declaration.jvm_name.clone());
+                        member.physical_name = Some(declaration.jvm_name.to_owned());
                     }
                     let mut logical_params = signature.params.clone();
                     if declaration.is_extension() {
@@ -4619,7 +4619,7 @@ impl JvmLibraries {
                 };
                 // Match the bytecode method to recover its descriptor and inline implementation details.
                 let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
-                    (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
+                    (mf.jvm_name.to_owned(), d.to_string(), by_name(&mf.jvm_name))
                 } else if let Some(c) = by_name(&mf.jvm_name) {
                     (c.name.clone(), c.descriptor.clone(), Some(c))
                 } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
@@ -4718,7 +4718,7 @@ impl JvmLibraries {
                     // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
                     // recoverable from the spelling, so the provider publishes both, as a
                     // classifier member does (`LibraryCallable::classifier_member`).
-                    reflection_name: Some(mf.kotlin_name.clone()),
+                    reflection_name: Some(mf.kotlin_name.to_owned()),
                     ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
                 callable.physical_params = physical_params;

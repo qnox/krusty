@@ -97,9 +97,9 @@ fn collect_class_bytes(
         .chain(crate::jvm::metadata::class_functions(&class).iter())
     {
         if function.is_extension() {
-            ext_names.insert(function.jvm_name.clone());
+            ext_names.insert(function.jvm_name.to_owned());
         } else {
-            toplevel_names.insert(function.jvm_name.clone());
+            toplevel_names.insert(function.jvm_name.to_owned());
         }
     }
     all.insert(

@@ -2819,7 +2819,7 @@ impl Classpath {
             let Some(ci) = self.find_name(cn) else { break };
             for f in self.meta_functions_name(cn).iter() {
                 if f.jvm_desc.is_some() && f.ret_class.is_some() {
-                    names.insert(f.kotlin_name.clone());
+                    names.insert(f.kotlin_name.to_owned());
                 }
             }
             cur = ci.super_class;
@@ -4557,7 +4557,7 @@ impl Classpath {
                         metas
                             .iter()
                             .find(|metadata| metadata.jvm_name == jvm_name)
-                            .map(|metadata| metadata.kotlin_name.clone())
+                            .map(|metadata| metadata.kotlin_name.to_owned())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
                     // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.

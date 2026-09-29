@@ -146,11 +146,7 @@ fn a_class_carries_its_own_metadata_by_default() {
         .find(|(name, _)| name == "Point")
         .expect("krusty emits Point.class");
     let meta = parse_class(bytes).expect("Point.class parses").meta;
-    let functions: Vec<&str> = meta
-        .class_functions
-        .iter()
-        .map(|f| f.kotlin_name.as_str())
-        .collect();
+    let functions: Vec<&str> = meta.class_functions.iter().map(|f| f.kotlin_name).collect();
     assert_eq!(
         functions,
         [
@@ -567,11 +563,7 @@ fn a_body_property_adds_no_component_or_copy_parameter() {
         .find(|(name, _)| name == "P")
         .expect("krusty emits P.class");
     let meta = parse_class(bytes).expect("P.class parses").meta;
-    let functions: Vec<&str> = meta
-        .class_functions
-        .iter()
-        .map(|f| f.kotlin_name.as_str())
-        .collect();
+    let functions: Vec<&str> = meta.class_functions.iter().map(|f| f.kotlin_name).collect();
     assert_eq!(
         functions,
         ["component1", "copy", "equals", "hashCode", "toString"],

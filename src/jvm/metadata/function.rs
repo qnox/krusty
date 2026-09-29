@@ -18,8 +18,12 @@ use super::{MetaValueParam, MfnFlags};
 /// fallback.
 #[derive(Clone, Debug)]
 pub struct MetaFn {
-    pub kotlin_name: String,
-    pub jvm_name: String,
+    /// Kotlin source name. Equal names share one interned spelling, the same way a constructor's
+    /// JVM name and `jvm_desc` do. The record keeps the pointer, not an owned copy per function.
+    pub kotlin_name: &'static str,
+    /// JVM method name. When metadata does not rename the function this is the same spelling as
+    /// [`Self::kotlin_name`].
+    pub jvm_name: &'static str,
     /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
     pub jvm_desc: Option<&'static str>,
@@ -117,8 +121,8 @@ fn pack_extras(
 impl MetaFn {
     pub(super) fn from_decoded(decoded: DecodedFunction) -> Self {
         Self {
-            kotlin_name: decoded.kotlin_name,
-            jvm_name: decoded.jvm_name,
+            kotlin_name: crate::types::intern(&decoded.kotlin_name),
+            jvm_name: crate::types::intern(&decoded.jvm_name),
             jvm_desc: decoded.jvm_desc,
             visibility: decoded.visibility,
             flags: decoded.flags,
@@ -336,8 +340,24 @@ mod tests {
         assert!(function.only_input_type_formals().is_empty());
         assert_eq!(function.equality_bound(), None);
         // Three empty vectors and an `Option<Ty>` used to sit on every function. The side
-        // record is one pointer. Pin the size so those fields cannot move back onto `MetaFn`.
-        assert_eq!(size_of::<MetaFn>(), 296);
+        // record is one pointer, and the two method names are interned pointers rather than
+        // owned strings. Pin the size so neither can move back onto `MetaFn`.
+        assert_eq!(size_of::<MetaFn>(), 280);
+    }
+
+    #[test]
+    fn repeated_method_names_share_one_spelling() {
+        let mut first = blank();
+        first.kotlin_name = "equals".to_string();
+        first.jvm_name = "equals".to_string();
+        let mut renamed = blank();
+        renamed.kotlin_name = "equals".to_string();
+        renamed.jvm_name = "equals$default".to_string();
+        let shared = MetaFn::from_decoded(first);
+        let other = MetaFn::from_decoded(renamed);
+        assert!(std::ptr::eq(shared.kotlin_name, shared.jvm_name));
+        assert!(std::ptr::eq(shared.kotlin_name, other.kotlin_name));
+        assert!(!std::ptr::eq(other.kotlin_name, other.jvm_name));
     }
 
     #[test]
