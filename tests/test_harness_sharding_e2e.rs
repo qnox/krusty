@@ -626,3 +626,65 @@ fn run_tests_wires_target_hygiene_before_building() {
         "prune must run before the first cargo build"
     );
 }
+
+#[test]
+fn overlapping_callers_hold_distinct_servers_up_to_the_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::Duration;
+
+    let pool = super::ServerPool::<usize>::new();
+    let next_id = AtomicUsize::new(0);
+    let active = AtomicUsize::new(0);
+    let max_active = AtomicUsize::new(0);
+    let seen = Mutex::new(Vec::new());
+    thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                pool.with_server(
+                    2,
+                    || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+                    |id| {
+                        let now = active.fetch_add(1, Ordering::AcqRel) + 1;
+                        max_active.fetch_max(now, Ordering::Relaxed);
+                        seen.lock().unwrap_or_else(|err| err.into_inner()).push(*id);
+                        thread::sleep(Duration::from_millis(80));
+                        active.fetch_sub(1, Ordering::AcqRel);
+                    },
+                )
+                .expect("cap allows a server");
+            });
+        }
+    });
+    let seen = seen.lock().unwrap_or_else(|err| err.into_inner());
+    let mut ids = seen.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids,
+        vec![0, 1],
+        "both servers must run, not a queue on the first"
+    );
+    assert_eq!(max_active.load(Ordering::Relaxed), 2);
+    assert_eq!(next_id.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_finished_server_is_reused_instead_of_growing_the_pool() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pool = super::ServerPool::new();
+    let next_id = AtomicUsize::new(0);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        pool.with_server(
+            2,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |id| seen.push(*id),
+        )
+        .expect("server");
+    }
+    assert_eq!(seen, vec![0, 0, 0, 0]);
+    assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
