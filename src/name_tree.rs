@@ -585,6 +585,21 @@ impl NameTree {
         out
     }
 
+    /// Identity used by JVM classfiles for `id`. Metadata/source dots in the classifier's final
+    /// segment become `$`; the namespace nodes remain unchanged.
+    pub(crate) fn jvm_binary_identity(&self, id: NameId) -> NameId {
+        if id == Self::ROOT {
+            return id;
+        }
+        let node = self.node(id);
+        if !node.segment.contains('.') {
+            return id;
+        }
+        let parent = node.parent.expect("non-root name node has a parent");
+        let segment = node.segment.replace('.', "$");
+        self.child_of(parent, &segment)
+    }
+
     /// JVM classfile spelling of a nested classifier below `owner`, without interning the child.
     pub(crate) fn jvm_nested_binary_name(&self, owner: NameId, nested: &str) -> String {
         let mut out = self.jvm_binary_name(owner);
@@ -1037,6 +1052,7 @@ mod tests {
         let sibling = names.insert("kotlin/collections/Mapper");
         let other_package = names.insert("other/Map$Entry");
         let dotted = names.insert("kotlin/collections/Map.Entry");
+        assert_eq!(names.jvm_binary_identity(dotted), entry);
         assert_eq!(
             names.path_cmp(entry, sibling),
             std::cmp::Ordering::Less,
