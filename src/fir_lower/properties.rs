@@ -1037,16 +1037,30 @@ fn materialize_member_property(
         } else {
             false
         };
-        // A synthesized class's CAPTURE already owns a field, spliced in with its constructor
-        // argument when the class was lowered. `install_anonymous_object_captures` also registers
-        // each capture as a synthetic property, so emitting a field for that property again gives
-        // the class two identically-named fields and the JVM refuses to load it
-        // (`ClassFormatError: Duplicate field name`). Reuse the existing field instead.
+        // Capture lowering has already installed the constructor-prefix field and a synthetic
+        // property of the same spelling. That property is the capture: reuse its field. A second
+        // field of the source spelling is never stored by the constructor, and a suspend method
+        // that reads it (`collector.block()`) invokes a null `Function2`. A source property keeps
+        // its own field beside the capture (`$block` and `block`); the JVM spells the capture with
+        // the `$` prefix.
         let storage_ty = property.storage_ty.unwrap_or(property.ty);
-        let existing = ir.classes[class_id as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == property.name && field.ty == storage_ty);
+        let capture_placeholder = property.initializer.is_none()
+            && !property.flags.has(DeclarationFlags::CUSTOM_GETTER)
+            && !property.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
+            && !property.flags.has(DeclarationFlags::LATEINIT)
+            && !property.flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD)
+            && !property
+                .flags
+                .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)
+            && !property.flags.has(DeclarationFlags::MUTABLE);
+        let existing = capture_placeholder
+            .then(|| {
+                ir.classes[class_id as usize]
+                    .fields
+                    .iter()
+                    .position(|field| field.name == property.name && field.ty == storage_ty)
+            })
+            .flatten();
         let field = u32::try_from(existing.unwrap_or(ir.classes[class_id as usize].fields.len()))
             .map_err(|_| {
             FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration)

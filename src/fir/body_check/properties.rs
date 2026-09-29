@@ -302,13 +302,17 @@ impl BodyFirChecker<'_> {
     /// body's exact receiver/capture frames. Returning `None` lets callers with a genuinely
     /// coordinate-only receiver use the ordinary depth path; callers such as backing fields require
     /// this identity to be materializable.
+    ///
+    /// `current_receiver` is the resolver's current-rung flag. An inherited member of the current
+    /// instance may name a supertype, but a labeled enclosing `this` is a different value even when
+    /// the current classifier extends that supertype.
     fn materialize_classifier_dispatch_receiver(
         &mut self,
         owner: DeclarationId,
         ty: ResolvedTy,
         origin: OriginId,
         span: Option<Span>,
-        inherited_dispatch_is_current: bool,
+        current_receiver: bool,
     ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
         let classifier = self
             .index
@@ -316,12 +320,13 @@ impl BodyFirChecker<'_> {
             .or_else(|| self.index.enclosing_classifier(owner))
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let current_storage_owner = self.current_storage_owner();
-        // An inherited member is read through the current instance. That does not apply to a
-        // different receiver that only names a supertype: a superclass constructor's arguments
-        // (`object : A(b)` inside `A`) and `this@Outer` when `inner class Inner : Outer`.
+        // An inherited member is read through the current instance. That applies only when the
+        // selected receiver is the current rung: `this@Outer` inside a subclass nested in `Outer`
+        // is the enclosing instance, even though the subclass extends `Outer` (`objects/flist.kt`).
+        // A superclass constructor's arguments cannot use the current instance either.
         let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
             current == owner
-                || (inherited_dispatch_is_current
+                || current_receiver
                     && !self.constructor_prefix_capture_access
                     && self
                         .index
@@ -330,7 +335,7 @@ impl BodyFirChecker<'_> {
                             hierarchy
                                 .iter()
                                 .any(|entry| entry.classifier == classifier.classifier)
-                        }))
+                        })
         });
         if current_storage_is_owner && self.body.local_callable().is_none() {
             let depth = self

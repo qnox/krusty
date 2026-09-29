@@ -192,7 +192,6 @@ multiplatform/k2/kt66970.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nullCheckOptimization/kt22410.kt
-objects/flist.kt
 objects/interfaceCompanionObjectReference.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt

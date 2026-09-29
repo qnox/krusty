@@ -299,18 +299,17 @@ fn pass_two_discovers_anonymous_super_outer_receiver_inside_local_class() {
 
 #[test]
 fn property_initializer_captures_same_named_enclosing_value() {
-    run_ok(
-        "AnonPropertyInitializerShadow",
-        "interface Value { val value: Int; fun read(): Int }\n\
+    const SOURCE: &str = "interface Value { val value: Int; fun read(): Int }\n\
          fun make(value: Int): Value = object : Value {\n\
              override val value: Int = value + 1\n\
              override fun read(): Int = value\n\
          }\n\
          fun box(): String {\n\
              val result = make(41)\n\
-             return if (result.value == 42 && result.read() == 42) \"OK\" else \"FAIL\"\n\
-         }\n",
-    );
+             return if (result.value == 42 && result.read() == 41) \"OK\" else \"FAIL\"\n\
+         }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonPropertyInitializerShadow", SOURCE);
 }
 
 #[test]
@@ -386,4 +385,28 @@ fn an_anonymous_object_two_callables_deep_writes_through_the_shared_cell() {
          return ok }\n";
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("AnonSharedCellWriteThrough", SOURCE);
+}
+
+/// An inlined suspend lambda stored on the anonymous object is that object's capture.
+/// `coroutines/unsafeTransform.kt` NPEs when the generated field `block` is left null.
+#[test]
+fn an_inlined_suspend_lambda_capture_is_initialized() {
+    const SOURCE: &str = "import kotlin.coroutines.*\n\
+         interface Flow<T> { suspend fun collect(collector: FlowCollector<T>) }\n\
+         fun interface FlowCollector<T> { suspend fun emit(value: T) }\n\
+         inline fun <T> unsafeFlow(crossinline block: suspend FlowCollector<T>.() -> Unit): Flow<T> {\n\
+             return object : Flow<T> {\n\
+                 override suspend fun collect(collector: FlowCollector<T>) { collector.block() }\n\
+             }\n\
+         }\n\
+         fun builder(c: suspend () -> Unit) {\n\
+             c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+         }\n\
+         fun box(): String {\n\
+             var seen = \"fail\"\n\
+             builder { unsafeFlow<String> { emit(\"OK\") }.collect { seen = it } }\n\
+             return seen\n\
+         }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonInlineSuspendLambdaCapture", SOURCE);
 }

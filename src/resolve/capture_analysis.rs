@@ -69,7 +69,8 @@ pub(super) fn used_names(file: &File, expression: ExprId, outer: &HashSet<String
 /// Whether a property initializer or delegate reads an enclosing value with the property's own
 /// spelling. Kotlin keeps the declaration being initialized out of that value lookup: in
 /// `fun f(x: Int) = object { val x: Int = x }`, the right-hand `x` is the lexical parameter.
-/// Accessors and other member bodies still see the property normally.
+/// A function local stays visible through a same-named accessor too; capture selection keeps
+/// that local beside the member. `this.x` is the property.
 pub(super) fn own_property_initializer_uses_outer_name(
     file: &File,
     declaration: DeclId,
@@ -98,10 +99,11 @@ pub(super) fn local_fun_body_uses_any(
     outer: &HashSet<String>,
 ) -> bool {
     fn class_uses(file: &File, class: &ClassDecl, active: &HashSet<String>) -> bool {
-        // Class members and constructor parameters shadow enclosing values throughout the class
-        // body. Nested local declarations are still traversed below, so a value used only by a
-        // local function inside a nested local class is carried through every enclosing capture
-        // boundary.
+        // A name this class introduces hides an enclosing value only when the enclosing scope
+        // does not already have that value. A function local keeps its spelling through a
+        // same-named property (`fun f(x: Int) { class C { val x = 2; fun g() = x } }`). Nested
+        // local declarations are still traversed below, so a value used only by a local function
+        // inside a nested local class is carried through every enclosing capture boundary.
         let mut class_active = active.clone();
         for name in class
             .props
@@ -110,7 +112,9 @@ pub(super) fn local_fun_body_uses_any(
             .chain(class.body_props.iter().map(|property| &property.name))
             .chain(class.methods.iter().map(|method| &method.name))
         {
-            class_active.remove(name);
+            if !active.contains(name.as_str()) {
+                class_active.remove(name);
+            }
         }
         if class
             .base_args

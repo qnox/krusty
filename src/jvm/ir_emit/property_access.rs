@@ -8,6 +8,25 @@
 
 use super::*;
 
+/// Exact field selected for a property declared in this compilation.
+///
+/// A capture spliced ahead of a source property can share its IR spelling (`x` beside the capture
+/// the JVM names `$x`). The property records its own backing-field index; a declaration with no
+/// backing field is reached through its accessor. External fallback access has no local declaration
+/// identity and retains the classfile-name lookup used at that boundary.
+pub(super) fn declared_property_field<'a>(
+    class: &'a crate::ir::IrClass,
+    declared: Option<&crate::ir::IrProperty>,
+    name: &str,
+) -> Option<&'a crate::ir::IrField> {
+    match declared {
+        Some(property) => property
+            .backing_field
+            .and_then(|index| class.fields.get(index as usize)),
+        None => class.fields.iter().find(|field| field.name == name),
+    }
+}
+
 impl Emitter<'_> {
     /// Select the property-read realization available from declarations emitted by this compilation.
     /// `None` deliberately means the external bytecode-provider path must decide.

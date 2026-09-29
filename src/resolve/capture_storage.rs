@@ -220,15 +220,103 @@ pub(super) fn anonymous_descendants(
     ))
 }
 
+fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
+    // A nested lambda is another runtime closure, but a value from outside the anonymous class
+    // still has to cross the class boundary before that closure can capture it.
+    let matches = match file.expr(expression) {
+        Expr::SafeCall { name: member, .. } => member == name,
+        Expr::Call { callee, .. } => {
+            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
+        }
+        _ => false,
+    };
+    if matches {
+        return true;
+    }
+    let mut expressions = Vec::new();
+    let mut statements = Vec::new();
+    file.any_child_expr(
+        expression,
+        &mut |child| {
+            expressions.push(child);
+            false
+        },
+        &mut |statement| {
+            statements.push(statement);
+            false
+        },
+    );
+    expressions
+        .into_iter()
+        .any(|child| expression_has_member_call_named(file, child, name))
+        || statements.into_iter().any(|statement| {
+            let mut children = Vec::new();
+            file.any_child_stmt(statement, &mut |child| {
+                children.push(child);
+                false
+            });
+            children
+                .into_iter()
+                .any(|child| expression_has_member_call_named(file, child, name))
+        })
+}
+
+fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
+    let expressions = anonymous_body_expressions(file, declaration);
+    expressions
+        .iter()
+        .any(|expression| file.expr_uses_name_deep(*expression, name))
+        || matches!(ty, Ty::Fun(signature) if signature.has_receiver)
+            && expressions
+                .into_iter()
+                .any(|expression| expression_has_member_call_named(file, expression, name))
+}
+
+pub(super) fn anonymous_descendant_uses_name(
+    file: &File,
+    declaration: DeclId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    name: &str,
+    ty: Ty,
+    function_local: bool,
+) -> bool {
+    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+        enclosing_value_visible_beside_member(file, candidate, name, function_local)
+            && (anonymous_body_uses_name(file, candidate, name, ty)
+                || candidate != declaration
+                    && matches!(file.decl(candidate), Decl::Class(class) if class
+                        .interface_delegations
+                        .iter()
+                        .any(|delegation| file.expr_uses_name_deep(delegation.value, name))))
+    })
+}
+
+/// Whether `name` still denotes an enclosing value inside `declaration`.
+///
+/// A same-named member hides a top-level or class property, except when the member's own
+/// initializer reads that value (`val x = x`). A function local or parameter keeps the
+/// unqualified spelling through the member, its getter, and assignments (`objects/flist.kt`).
+/// `this.name` is a member access and is not a use of the local.
+pub(super) fn enclosing_value_visible_beside_member(
+    file: &File,
+    declaration: DeclId,
+    name: &str,
+    function_local: bool,
+) -> bool {
+    function_local
+        || !anonymous_body_bound_value_names(file, declaration).contains(name)
+        || capture_analysis::own_property_initializer_uses_outer_name(file, declaration, name)
+}
+
 pub(super) fn anonymous_descendant_writes_name(
     file: &File,
     declaration: DeclId,
     lexical_scope: &AnonymousLexicalClassScope,
     name: &str,
+    function_local: bool,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        (!anonymous_body_bound_value_names(file, candidate).contains(name)
-            || capture_analysis::own_property_initializer_uses_outer_name(file, candidate, name))
+        enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_writes_name(file, candidate, name)
                 || candidate != declaration
                     && matches!(file.decl(candidate), Decl::Class(class) if class
