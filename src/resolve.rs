@@ -72,6 +72,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
+mod enum_entries;
 mod finalized_projection;
 mod for_loop_iteration;
 mod function_exit;
@@ -10419,14 +10420,17 @@ pub struct ResolvedExtensionCall {
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
 }
 
-/// Exact enum entry selected by frontend lookup. The name is the declaration-owned entry name,
-/// not a source spelling recovered by lowering; together with the classifier it is the stable
-/// semantic identity consumed by FIR and target realization.
+/// Exact enum entry selected by frontend lookup. Current-module entries carry their stable
+/// declaration identity; dependency entries retain the provider-normalized classifier, ordinal,
+/// and declaration-owned name needed for target realization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedEnumEntry {
     pub classifier: TypeName,
     pub ordinal: u32,
     pub name: String,
+    /// Stable source declaration identity when the selected entry belongs to the current module.
+    /// Dependency entries have no local declaration and remain target-realized static reads.
+    pub declaration: Option<crate::fir::DeclarationId>,
 }
 
 impl ResolvedExtensionCall {
@@ -16013,67 +16017,6 @@ impl<'a> Checker<'a> {
             [] => return None,
         };
         Some(self.record_associated_property(Some(expression), property, true))
-    }
-
-    fn classifier_enum_entry_ordinal(&self, owner: TypeName, name: &str) -> Option<usize> {
-        self.resolver()
-            .classifier(owner)?
-            .enum_entries
-            .iter()
-            .position(|entry| entry == name)
-    }
-
-    fn classifier_has_enum_entry(&self, owner: TypeName, name: &str) -> bool {
-        self.classifier_enum_entry_ordinal(owner, name).is_some()
-    }
-
-    fn record_enum_entry(&mut self, expression: ExprId, owner: TypeName, name: &str) {
-        let ordinal = self.classifier_enum_entry_ordinal(owner, name);
-        if let Some(ordinal) = ordinal.and_then(|ordinal| u32::try_from(ordinal).ok()) {
-            self.resolved_enum_entries.insert(
-                expression,
-                ResolvedEnumEntry {
-                    classifier: owner,
-                    ordinal,
-                    name: name.to_owned(),
-                },
-            );
-        }
-    }
-
-    /// Enum entries and static members exported by a classifier star import (`import Game.*`) use
-    /// the classifier as their import scope; treating every star path as a package loses this rung.
-    fn explicitly_imported_enum_entry(&self, name: &str) -> Option<(TypeName, String)> {
-        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
-            return None;
-        };
-        let is_entry = self.classifier_has_enum_entry(owner, &declared_name);
-        is_entry.then_some((owner, declared_name))
-    }
-
-    fn star_imported_enum_entry(&self, scope: &CheckerScope<'_>, name: &str) -> Option<TypeName> {
-        let mut selected = None;
-        for import in self
-            .file
-            .import_paths
-            .iter()
-            .filter(|import| import.wildcard)
-        {
-            let Some(owner) = self.select_classifier(scope, &import.path()).found() else {
-                continue;
-            };
-            let is_entry = self.classifier_has_enum_entry(owner, name);
-            if !is_entry {
-                continue;
-            }
-            match selected {
-                None => selected = Some(owner),
-                Some(previous) if previous == owner => {}
-                Some(_) => return None,
-            }
-        }
-        selected
     }
 
     /// A read of a top-level property named through its package (`pkg.topLevelProp`).

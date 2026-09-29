@@ -34,6 +34,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod enum_entries;
 mod failure;
 mod inline_body_plan;
 #[cfg(test)]
@@ -1885,11 +1886,8 @@ impl BodyFirChecker<'_> {
                             classifier: singleton.classifier,
                         }
                     } else if let Some(entry) = self.info.resolved_enum_entry(expression) {
-                        FirExprKind::EnumEntry {
-                            classifier: entry.classifier,
-                            ordinal: entry.ordinal,
-                            name: entry.name.clone().into_boxed_str(),
-                        }
+                        let entry = entry.clone();
+                        self.enum_entry_kind(expression, &entry)?
                     } else if let Some((depth, delegate)) = self.delegated_binding(name) {
                         return self.delegated_read(expression, depth, delegate);
                     } else if let Some(local) = self.local_binding(name) {
@@ -2476,11 +2474,8 @@ impl BodyFirChecker<'_> {
                 }
                 Expr::Member { receiver, .. } => {
                     if let Some(entry) = self.info.resolved_enum_entry(expression) {
-                        FirExprKind::EnumEntry {
-                            classifier: entry.classifier,
-                            ordinal: entry.ordinal,
-                            name: entry.name.clone().into_boxed_str(),
-                        }
+                        let entry = entry.clone();
+                        self.enum_entry_kind(expression, &entry)?
                     } else if let Some(constant) = self.info.resolved_constants.get(&expression) {
                         // The constant payload is the selected value, but Kotlin still evaluates an
                         // ordinary VALUE receiver (`config().VALUE`) for effects before inlining it.
