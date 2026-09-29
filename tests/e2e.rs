@@ -905,6 +905,8 @@ mod inferred_property_type_args_e2e;
 mod infix_newline_operand_e2e;
 #[path = "inheritance_e2e.rs"]
 mod inheritance_e2e;
+#[path = "inherited_interface_default_e2e.rs"]
+mod inherited_interface_default_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
