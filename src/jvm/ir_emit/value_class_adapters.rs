@@ -12,7 +12,7 @@ pub(super) fn emit_value_class_unbox_adapter(
     target: Ty,
     nullable: bool,
 ) {
-    let value_class = value_class.render();
+    let value_class = value_class_spelling(value_class);
     let value_class_ref = cw.class_ref(&value_class);
     code.checkcast(value_class_ref);
     let unbox = cw.methodref(
@@ -44,7 +44,7 @@ pub(super) fn emit_value_class_box_adapter(
     carrier: Ty,
     nullable: bool,
 ) {
-    let value_class = value_class.render();
+    let value_class = value_class_spelling(value_class);
     let box_impl = cw.methodref(
         &value_class,
         "box-impl",
@@ -64,4 +64,23 @@ pub(super) fn emit_value_class_box_adapter(
     code.pop();
     code.aconst_null();
     code.bind(end);
+}
+
+pub(super) fn value_class_spelling(value_class: TypeName) -> &'static str {
+    value_class.rendered()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::type_name;
+
+    #[test]
+    fn a_value_class_owner_reuses_its_rendered_spelling() {
+        let owner = type_name("sample/box6044/Outer$X");
+        assert!(std::ptr::eq(
+            super::value_class_spelling(owner),
+            owner.rendered()
+        ));
+        assert_eq!(super::value_class_spelling(owner), "sample/box6044/Outer$X");
+    }
 }

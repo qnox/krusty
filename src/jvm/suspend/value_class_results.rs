@@ -89,7 +89,7 @@ pub(super) fn boxed_carrier(
     carrier: Ty,
 ) -> ExprId {
     let physical = crate::jvm::ir_emit::ir_ty_to_jvm(&carrier);
-    let owner = classifier.render();
+    let owner = classifier.rendered();
     let descriptor = format!(
         "({})L{owner};",
         crate::jvm::names::type_descriptor(physical.non_null())

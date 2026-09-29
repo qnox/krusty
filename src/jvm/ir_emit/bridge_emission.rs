@@ -441,7 +441,7 @@ fn emit_bridge(
         // boxed value class is not an instance of. Nor may the two JVM types deciding it: an
         // `Any`-carrier value class has `Object` on both sides of the boundary and still has to
         // be unboxed, so the PLAN decides, not a type comparison.
-        let owner = plan.owner.render();
+        let owner = super::value_class_adapters::value_class_spelling(plan.owner);
         let ci = cw.class_ref(&owner);
         code.checkcast(ci);
         let unbox = cw.methodref(&owner, "unbox-impl", &format!("(){}", type_descriptor(er)));
