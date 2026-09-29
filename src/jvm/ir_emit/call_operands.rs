@@ -244,6 +244,15 @@ impl Emitter<'_> {
                 .is_continuation(call, parameter_index)
             {
                 this.coerce_reference_on_stack(source, target, code);
+                // A primitive-bounded type parameter is a primitive on the real method and the JDK
+                // wrapper on `$default`. A supplied argument, and the primitive-zero placeholder,
+                // are still the primitive here.
+                super::method_defaults::emit_primitive_box_if_needed(
+                    this.cw,
+                    ir_ty_to_jvm(&source),
+                    target,
+                    code,
+                );
             }
         });
         Ok(())
