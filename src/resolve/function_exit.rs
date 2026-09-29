@@ -48,9 +48,22 @@ impl Checker<'_> {
     pub(super) fn stmt_diverges(&self, s: StmtId) -> bool {
         match self.file.stmt(s) {
             Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
-            Stmt::Expr(e) => self.expr_diverges(*e),
+            Stmt::Expr(e) => self.expr_diverges(*e) || self.try_never_completes(*e),
             _ => false,
         }
+    }
+
+    /// A `try` statement never continues when its result is `Nothing`, or when its `finally` is.
+    ///
+    /// The body's value stays the `try`'s type even if `finally` aborts, so the result alone misses
+    /// `try { x = "OK" } finally { throw … }`. Either way the next statement does not run, and
+    /// recording its write would replace the value a later `finally` actually reads.
+    fn try_never_completes(&self, e: ExprId) -> bool {
+        let Expr::Try { finally, .. } = self.file.expr(e) else {
+            return false;
+        };
+        self.expr_types[e.0 as usize] == Ty::Nothing
+            || finally.is_some_and(|finally| self.expr_types[finally.0 as usize] == Ty::Nothing)
     }
 
     /// Whether the block-body expression `e` transfers control out of the function on every path — a

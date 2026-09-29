@@ -2683,7 +2683,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one-sided assignment whose other edge is still nullable, leave the declared type and drop a fact
   the entry had proven. A non-exhaustive `when` has an extra edge on which no arm ran. Parent-frame
   facts that a completing edge invalidated stay invalid; the agreed type itself is recorded on the
-  continuation. An assignment the checker has already marked unreachable does not change that type:
+  continuation. A `try` whose result is `Nothing`, or whose `finally` is `Nothing`, does not
+  complete, so the assignment after it is unreachable and does not change that type:
   `try { throw … } finally { x = "OK" }; x = 117` does not publish `117` into the outer `finally`,
   which still reads the value the inner `finally` stored. `tests/var_smartcast_e2e.rs`.
 - **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:

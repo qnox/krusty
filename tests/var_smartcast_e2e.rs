@@ -479,6 +479,31 @@ fn finally_keeps_the_value_a_skipped_assignment_does_not_replace() {
 }
 
 #[test]
+fn finally_keeps_the_value_when_a_throwing_finally_skips_the_next_assignment() {
+    const SRC: &str = "fun box(): String {\n\
+    var result = \"fail\"\n\
+    try {\n\
+        var x: Any = 42\n\
+        try {\n\
+            try {\n\
+                x = \"OK\"\n\
+            } finally {\n\
+                throw Error()\n\
+            }\n\
+            x = 117\n\
+        } finally {\n\
+            result = x.toString()\n\
+        }\n\
+    } catch (_: Throwable) { }\n\
+    return result\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("throwing finally skips the dead assignment"),
+        "OK"
+    );
+}
+
+#[test]
 fn nullable_receiver_extension_call_reports_unsafe_call() {
     const SRC: &str = "fun f(s: String?): Int {\n\
     return s.trim().length\n\
