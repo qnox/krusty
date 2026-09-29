@@ -1102,9 +1102,9 @@ fn primitive_hash_code(receiver: crate::types::Ty) -> Option<(crate::types::Type
     if receiver.is_nullable() || scalar != receiver || receiver.is_unsigned() {
         return None;
     }
-    let wrapper = crate::jvm::jvm_class_map::wrapper_internal(receiver)?;
+    let wrapper = crate::jvm::jvm_class_map::wrapper_type_name(receiver)?;
     let descriptor = crate::jvm::names::method_descriptor(&[scalar], crate::types::Ty::Int);
-    Some((crate::types::type_name(wrapper), descriptor))
+    Some((wrapper, descriptor))
 }
 
 /// The class a virtual call names. kotlinc calls an inherited member through the dispatch

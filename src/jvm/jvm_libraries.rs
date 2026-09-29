@@ -757,8 +757,8 @@ impl JvmLibraries {
             let ret = if suspend {
                 match ret_metadata.class {
                     Some(ty) if ty.is_jvm_scalar() && ret_metadata.nullable => {
-                        super::jvm_class_map::wrapper_internal(ty)
-                            .map(Ty::obj)
+                        super::jvm_class_map::wrapper_type_name(ty)
+                            .map(Ty::obj_name)
                             .unwrap_or(ty)
                     }
                     Some(ty) => ty,
@@ -2088,9 +2088,8 @@ impl JvmLibraries {
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
             // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
-            let rendered_internal = internal_name.render();
             let is_mapped_builtin =
-                super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal;
+                super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_gsig_name(internal_name);
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
@@ -2128,7 +2127,7 @@ impl JvmLibraries {
             // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
             // and `Any`, and every subtype test against them would start failing).
             let kotlin_scope_is_authoritative = is_mapped_builtin
-                && self.cp.builtin_is_interface(&rendered_internal).is_some()
+                && self.cp.builtin_is_interface_name(internal_name).is_some()
                 // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
                 // there avoids a classpath-origin branch (and a second collection/String name list)
                 // in this loader; this site only combines that semantic policy with the runtime
