@@ -239,7 +239,7 @@ fn field_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
     class
         .fields
         .iter()
-        .map(|field| (field.name.clone(), field.descriptor.clone(), field.access))
+        .map(|field| (field.name.to_owned(), field.descriptor.to_owned(), field.access))
         .collect()
 }
 
@@ -251,8 +251,8 @@ fn method_flags(bytes: &[u8]) -> Vec<(String, String, u16)> {
         .iter()
         .map(|method| {
             (
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
                 method.access,
             )
         })

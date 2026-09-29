@@ -57,11 +57,11 @@ fn declarations(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
     let fields = class
         .fields
         .into_iter()
-        .map(|field| (field.name, field.descriptor, field.signature));
+        .map(|field| (field.name.to_owned(), field.descriptor.to_owned(), field.signature));
     let methods = class
         .methods
         .into_iter()
-        .map(|method| (method.name, method.descriptor, method.signature));
+        .map(|method| (method.name.to_owned(), method.descriptor.to_owned(), method.signature));
     fields.chain(methods).collect()
 }
 

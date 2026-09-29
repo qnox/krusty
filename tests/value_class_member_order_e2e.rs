@@ -18,8 +18,8 @@ fn members(bytes: &[u8]) -> Vec<(u16, String, String)> {
         .map(|method| {
             (
                 method.access,
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
             )
         })
         .collect()

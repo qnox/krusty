@@ -29,8 +29,11 @@ pub enum JavaNullability {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
     pub access: u16,
-    pub name: String,
-    pub descriptor: String,
+    /// JVM method name. Equal names share one interned spelling with every other classfile member
+    /// and with metadata method names.
+    pub name: &'static str,
+    /// JVM method descriptor. Equal descriptors share one interned spelling.
+    pub descriptor: &'static str,
     /// The method's generic `Signature` attribute (JVM generics) if present, e.g. `listOf`'s
     /// `<T:Ljava/lang/Object;>([TT;)Ljava/util/List<TT;>;`. Carries the type parameters and how the
     /// parameter/return types use them — what the erased `descriptor` drops. `None` if non-generic.
@@ -86,8 +89,10 @@ impl MethodSig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldSig {
     pub access: u16,
-    pub name: String,
-    pub descriptor: String,
+    /// JVM field name. Equal names share one interned spelling with method names.
+    pub name: &'static str,
+    /// JVM field descriptor. Equal descriptors share one interned spelling with method descriptors.
+    pub descriptor: &'static str,
     /// The compile-time `ConstantValue` of a `static final` field, if present (e.g.
     /// `IntCompanionObject.MAX_VALUE` → `Int(2147483647)`). What kotlinc inlines at a use site.
     pub const_value: Option<ConstVal>,
@@ -832,8 +837,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| FieldSig {
             access: member.access,
-            name: member.name,
-            descriptor: member.descriptor,
+            name: crate::types::intern(&member.name),
+            descriptor: crate::types::intern(&member.descriptor),
             const_value: member.attributes.const_value,
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
@@ -843,8 +848,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| MethodSig {
             access: member.access,
-            name: member.name,
-            descriptor: member.descriptor,
+            name: crate::types::intern(&member.name),
+            descriptor: crate::types::intern(&member.descriptor),
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
@@ -1782,5 +1787,31 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    #[test]
+    fn repeated_member_spellings_share_one_interned_copy() {
+        let emit = |class_name: &str| {
+            let mut writer = ClassWriter::new(class_name, "java/lang/Object");
+            writer.add_field(super::ACC_PUBLIC, "value", "I");
+            writer.add_abstract_method(super::ACC_PUBLIC | 0x0400, "value", "()I");
+            parse_class(&writer.finish()).expect("class parses")
+        };
+        let first = emit("demo/First");
+        let second = emit("demo/Second");
+        assert!(std::ptr::eq(first.fields[0].name, second.fields[0].name));
+        assert!(std::ptr::eq(first.fields[0].name, first.methods[0].name));
+        assert!(std::ptr::eq(
+            first.fields[0].descriptor,
+            second.fields[0].descriptor
+        ));
+        assert!(std::ptr::eq(
+            first.methods[0].descriptor,
+            second.methods[0].descriptor
+        ));
+        assert!(!std::ptr::eq(
+            first.fields[0].descriptor,
+            first.methods[0].descriptor
+        ));
     }
 }

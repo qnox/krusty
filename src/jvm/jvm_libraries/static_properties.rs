@@ -89,8 +89,8 @@ impl JvmLibraries {
         let mut field = JvmStaticField {
             external_identity: None,
             owner: internal,
-            name: field.name.clone(),
-            descriptor: field.descriptor.clone(),
+            name: field.name.to_owned(),
+            descriptor: field.descriptor.to_owned(),
             ty,
             constant,
             visibility: declaration.visibility,
@@ -159,7 +159,7 @@ impl JvmLibraries {
                     external_identity: None,
                     owner: cur,
                     name: name.to_string(),
-                    descriptor: f.descriptor.clone(),
+                    descriptor: f.descriptor.to_owned(),
                     ty,
                     constant,
                     visibility: if f.access & 0x0001 != 0 {

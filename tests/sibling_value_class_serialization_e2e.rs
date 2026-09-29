@@ -44,7 +44,7 @@ fn constructors(bytes: &[u8]) -> Vec<(u16, String)> {
         .methods
         .iter()
         .filter(|method| method.name == "<init>")
-        .map(|method| (method.access, method.descriptor.clone()))
+        .map(|method| (method.access, method.descriptor.to_owned()))
         .collect::<Vec<_>>();
     out.sort();
     out
