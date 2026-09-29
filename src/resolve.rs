@@ -67457,6 +67457,10 @@ impl<'a> Checker<'a> {
             // body throws before its trailing would be typed by the dead trailing, and the lowerer
             // would emit that dead code (an unframed branch target → VerifyError).
             let mut diverged = false;
+            // A non-completing `try` does not publish the next statement's write, but that
+            // statement is still lowered. Erasing it leaves the backend's jump to the
+            // continuation aimed past the last instruction (`null as Nothing` in `try`/`catch`).
+            let mut suppressed_continuation = false;
             let signature_default_cutoff = self
                 .signature_defaults_only
                 .then(|| {
@@ -67473,15 +67477,22 @@ impl<'a> Checker<'a> {
             let mut signature_defaults_complete = false;
             for s in &stmts {
                 let unreachable = diverged;
-                if unreachable {
+                let suppress_flow = suppressed_continuation && !unreachable;
+                if unreachable || suppress_flow {
                     self.unreachable_statement_depth += 1;
                     self.stmt(scope, *s);
                     self.unreachable_statement_depth -= 1;
-                    self.stmt_lowers.insert(*s, StmtLowering::Erased);
+                    if unreachable {
+                        self.stmt_lowers.insert(*s, StmtLowering::Erased);
+                    }
                 } else {
                     self.stmt(scope, *s);
                 }
                 diverged = diverged || self.stmt_diverges(*s);
+                if let Stmt::Expr(expression) = self.file.stmt(*s) {
+                    suppressed_continuation =
+                        suppressed_continuation || self.try_never_completes(*expression);
+                }
                 // Early-return guard: `if (x !is T) return …` (a diverging then) narrows a
                 // stable `x` to `T` for the remaining statements of this block. An `else if`
                 // CHAIN narrows level by level — `if (x is A) return …; else if (x !is B)
@@ -67590,7 +67601,14 @@ impl<'a> Checker<'a> {
                 // reaching a `{ … ; lambda }` result).
                 Some(_) if trailing_contract.is_some() => Ty::Unit,
                 Some(te) => {
-                    let trailing_ty = self.expr_result(scope, te, expected, value_required);
+                    let trailing_ty = if suppressed_continuation && !diverged {
+                        self.unreachable_statement_depth += 1;
+                        let ty = self.expr_result(scope, te, expected, value_required);
+                        self.unreachable_statement_depth -= 1;
+                        ty
+                    } else {
+                        self.expr_result(scope, te, expected, value_required)
+                    };
                     // Only where the block's VALUE is used. A statement block after a diverging
                     // statement transfers control and produces nothing — `fun f() { return "OK"; …
                     // }` is the shape — and calling it by its trailing statement's type says the

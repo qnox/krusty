@@ -504,6 +504,24 @@ fn finally_keeps_the_value_when_a_throwing_finally_skips_the_next_assignment() {
 }
 
 #[test]
+fn cast_to_nothing_in_try_still_returns_from_the_catch() {
+    const SRC: &str = "fun box(): String {\n\
+    try {\n\
+        null as Nothing\n\
+    } catch (_: ClassCastException) {\n\
+        return \"OK\"\n\
+    } catch (_: NullPointerException) {\n\
+        return \"OK\"\n\
+    }\n\
+    return \"Fail\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("catch returns after null as Nothing"),
+        "OK"
+    );
+}
+
+#[test]
 fn nullable_receiver_extension_call_reports_unsafe_call() {
     const SRC: &str = "fun f(s: String?): Int {\n\
     return s.trim().length\n\

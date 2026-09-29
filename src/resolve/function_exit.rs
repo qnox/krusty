@@ -48,7 +48,7 @@ impl Checker<'_> {
     pub(super) fn stmt_diverges(&self, s: StmtId) -> bool {
         match self.file.stmt(s) {
             Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
-            Stmt::Expr(e) => self.expr_diverges(*e) || self.try_never_completes(*e),
+            Stmt::Expr(e) => self.expr_diverges(*e),
             _ => false,
         }
     }
@@ -57,8 +57,11 @@ impl Checker<'_> {
     ///
     /// The body's value stays the `try`'s type even if `finally` aborts, so the result alone misses
     /// `try { x = "OK" } finally { throw … }`. Either way the next statement does not run, and
-    /// recording its write would replace the value a later `finally` actually reads.
-    fn try_never_completes(&self, e: ExprId) -> bool {
+    /// recording its write would replace the value a later `finally` actually reads. The statement
+    /// stays in the lowering: a `try` the backend emits as a jump (`null as Nothing` before a
+    /// `catch`) lands on that following code, and deleting it aims the jump past the last
+    /// instruction.
+    pub(super) fn try_never_completes(&self, e: ExprId) -> bool {
         let Expr::Try { finally, .. } = self.file.expr(e) else {
             return false;
         };
