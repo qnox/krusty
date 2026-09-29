@@ -49,6 +49,8 @@ hook runs it on each local commit, including the identity the commit is about to
   (`./run-tests.sh --test metadata_return_types`); any argument deliberately falls back to Cargo's
   normal runner. Set `KRUSTY_TEST_JOBS=<n>` only when profiling the full-suite binary scheduler. Do
   not use `--release` for tests: the longer build cycle costs more than the faster run saves.
+  `gate` keeps test crates unoptimized and builds the `krusty` library at opt-level 2 with 16
+  codegen units, so in-process corpus and e2e compiles are not an unoptimized compiler.
 - `gate` is a Cargo **profile**, never a target dir: `--profile gate`, not `--target-dir target/gate`
   or `CARGO_TARGET_DIR=target/gate` (that nests a dev-profile build nothing reuses; the harness
   refuses it). Do not kill a running `cargo`/`rustc` casually: each kill strands per-codegen-unit
