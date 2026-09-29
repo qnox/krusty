@@ -1201,11 +1201,27 @@ fn is_source_arg(arg: &str) -> bool {
 }
 
 fn normalize_invocation_flag(arg: &str) -> String {
-    let Some(path) = arg.strip_prefix("-Xplugin=") else {
+    if let Some(path) = arg.strip_prefix("-Xplugin=") {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        return format!("-Xplugin={}", hex128(fingerprint_parts(&[&bytes])));
+    }
+    // A flag whose value is a scratch path (`-Xcommon-sources=/tmp/.../A.kt`) names the same
+    // inputs wherever the files were written. Hash those bytes and keep every other flag literal.
+    let Some((name, value)) = arg.split_once('=') else {
         return arg.to_string();
     };
-    let bytes = std::fs::read(path).unwrap_or_default();
-    format!("-Xplugin={}", hex128(fingerprint_parts(&[&bytes])))
+    if value.is_empty() || !value.split(',').all(|part| Path::new(part).is_file()) {
+        return arg.to_string();
+    }
+    let hashed = value
+        .split(',')
+        .map(|part| {
+            let bytes = std::fs::read(part).unwrap_or_default();
+            hex128(fingerprint_parts(&[&bytes]))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{name}={hashed}")
 }
 
 fn classpath_content_fingerprint(paths: &[PathBuf]) -> String {
@@ -1611,6 +1627,40 @@ mod tests {
         let right = parse_invocation(&args("out-b")).expect("right invocation");
         assert_eq!(left.fingerprint, right.fingerprint);
         assert_ne!(left.out, right.out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_common_sources_flag_ignores_its_scratch_path() {
+        let root = temp_root("common-src");
+        let left_dir = root.join("left");
+        let right_dir = root.join("right");
+        std::fs::create_dir_all(&left_dir).unwrap();
+        std::fs::create_dir_all(&right_dir).unwrap();
+        let text = "expect class A\n";
+        std::fs::write(left_dir.join("Common.kt"), text).unwrap();
+        std::fs::write(right_dir.join("Common.kt"), text).unwrap();
+        let flag = |dir: &Path| {
+            format!(
+                "-Xcommon-sources={},{}",
+                dir.join("Common.kt").display(),
+                dir.join("Common.kt").display()
+            )
+        };
+        assert_eq!(
+            normalize_invocation_flag(&flag(&left_dir)),
+            normalize_invocation_flag(&flag(&right_dir))
+        );
+        assert_ne!(flag(&left_dir), flag(&right_dir));
+        std::fs::write(right_dir.join("Common.kt"), "expect class B\n").unwrap();
+        assert_ne!(
+            normalize_invocation_flag(&flag(&left_dir)),
+            normalize_invocation_flag(&flag(&right_dir))
+        );
+        assert_eq!(
+            normalize_invocation_flag("-jvm-target=17"),
+            "-jvm-target=17"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
