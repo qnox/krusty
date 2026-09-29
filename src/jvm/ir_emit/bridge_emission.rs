@@ -290,7 +290,7 @@ fn emit_bridge(
         code.instance_of(concrete_class);
         code.ifne(dispatch);
         emit_barrier_outcome(barrier.outcome, cw, &mut code);
-        let mut locals = vec![VerifType::ObjectName(c.fq_name())];
+        let mut locals = vec![VerifType::ObjectName(c.fq_name().to_owned())];
         locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
         code.bind(dispatch);
     }
