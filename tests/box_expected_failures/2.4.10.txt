@@ -81,7 +81,6 @@ enum/enumEntriesNameClashes.kt
 evaluate/intrinsicConst/enumNameWithInit.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
-extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyWithInline.kt
 fieldRename/delegates.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
