@@ -45,3 +45,22 @@ fn inner_class_outer_labeled_this() {
 fun box(): String = B().C().g()\n";
     common::expect_box_ok_with_stdlib(SRC, "Main");
 }
+
+/// An inner class that extends its enclosing class has two different instances of that class:
+/// its own (`this`) and the captured enclosing instance (`this@Outer`). Subtyping must not collapse
+/// the labeled receiver onto the inner instance.
+#[test]
+fn inner_class_extending_outer_reads_enclosing_instance() {
+    const SRC: &str = "open class Outer private constructor(val s: String) {\n\
+    inner class Inner : Outer(\"O\") {\n\
+        fun foo(): String = this.s + this@Outer.s\n\
+    }\n\
+    class Nested : Outer(\"K\")\n\
+    fun bar() = Inner()\n\
+}\n\
+fun box(): String {\n\
+    val inner = Outer.Nested().bar()\n\
+    return inner.foo()\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "Main");
+}

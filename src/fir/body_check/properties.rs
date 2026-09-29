@@ -280,7 +280,7 @@ impl BodyFirChecker<'_> {
         let ty = ResolvedTy::new(Ty::obj_name(classifier.classifier))
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
 
-        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span)?
+        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span, true)?
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
             .map(Some)
     }
@@ -289,12 +289,21 @@ impl BodyFirChecker<'_> {
     /// body's exact receiver/capture frames. Returning `None` lets callers with a genuinely
     /// coordinate-only receiver use the ordinary depth path; callers such as backing fields require
     /// this identity to be materializable.
+    ///
+    /// `inherited_dispatch_is_current` is true when this classifier is a view of the instance under
+    /// construction or in hand: an enum entry's `this` is the enum, and an inherited backing field
+    /// lives on the subclass. It is false for a different receiver that only happens to name a
+    /// supertype. `inner class Inner : Outer` makes `Inner` a subtype of the enclosing `Outer`, but
+    /// `this@Outer` is the captured enclosing instance. A superclass-constructor argument is the same
+    /// split (`object : A(b)` inside `A`): the instance under construction cannot stand in for that
+    /// enclosing value.
     fn materialize_classifier_dispatch_receiver(
         &mut self,
         owner: DeclarationId,
         ty: ResolvedTy,
         origin: OriginId,
         span: Option<Span>,
+        inherited_dispatch_is_current: bool,
     ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
         let classifier = self
             .index
@@ -302,12 +311,10 @@ impl BodyFirChecker<'_> {
             .or_else(|| self.index.enclosing_classifier(owner))
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let current_storage_owner = self.current_storage_owner();
-        // An inherited member is read through the current instance, which a superclass
-        // constructor's arguments cannot use: there a supertype names an enclosing instance
-        // (`object : A(b)` inside `A`, an inner class's outer `A` whose inner chain extends `A`).
         let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
             current == owner
-                || !self.constructor_prefix_capture_access
+                || (inherited_dispatch_is_current
+                    && !self.constructor_prefix_capture_access
                     && self
                         .index
                         .classifier_hierarchy(current)
@@ -315,7 +322,7 @@ impl BodyFirChecker<'_> {
                             hierarchy
                                 .iter()
                                 .any(|entry| entry.classifier == classifier.classifier)
-                        })
+                        }))
         });
         if current_storage_is_owner && self.body.local_callable().is_none() {
             let depth = self
@@ -561,9 +568,13 @@ impl BodyFirChecker<'_> {
             }));
         }
         if let Some(owner) = selected.classifier {
-            if let Some(receiver) =
-                self.materialize_classifier_dispatch_receiver(owner, selected_ty, origin, span)?
-            {
+            if let Some(receiver) = self.materialize_classifier_dispatch_receiver(
+                owner,
+                selected_ty,
+                origin,
+                span,
+                selected.current,
+            )? {
                 return Ok(Some(receiver));
             }
         }
