@@ -53,6 +53,15 @@ pub enum FirFileLoweringFailure {
         expected: u32,
         actual: u32,
     },
+    InvalidSuperclassConstructorTarget {
+        class: crate::ir::ClassId,
+        target: crate::ir::IrConstructorTarget,
+    },
+    InvalidSuperclassCapturePrefix {
+        class: crate::ir::ClassId,
+        expected: u32,
+        actual: u32,
+    },
     UndeterminedType(crate::ir::UndeterminedIrType),
     ValueIdentityOverflow,
     /// The frontend's selected entry point has no realization in this file's function arena.

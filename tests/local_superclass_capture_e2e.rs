@@ -137,6 +137,44 @@ fn a_mutable_capture_stays_one_cell_across_the_hierarchy() {
     );
 }
 
+/// The subclass calls a no-argument SECONDARY constructor. That `<init>` still takes the capture
+/// ahead of its empty source parameter list; calling `A.<init>()` does not resolve.
+#[test]
+fn a_subclass_passes_a_capture_to_a_secondary_constructor() {
+    agrees_with_kotlinc(
+        "SecondaryConstructorCapture",
+        "fun box(): String {\n\
+         \x20   val z = \"K\"\n\
+         \x20   open class A(val x: String) {\n\
+         \x20       constructor() : this(\"O\")\n\
+         \x20       val y: String\n\
+         \x20           get() = z\n\
+         \x20   }\n\
+         \x20   class B : A()\n\
+         \x20   val b = B()\n\
+         \x20   return b.x + b.y\n\
+         }\n",
+    );
+}
+
+/// A local superclass with no primary constructor carries the same capture prefix on the selected
+/// super-delegating secondary constructor; there is no primary parameter list to borrow it from.
+#[test]
+fn a_subclass_uses_the_selected_secondary_constructor_capture_prefix() {
+    agrees_with_kotlinc(
+        "SecondaryOnlyConstructorCapture",
+        "fun box(): String {\n\
+         \x20   val result = \"OK\"\n\
+         \x20   open class CapturingBase {\n\
+         \x20       constructor()\n\
+         \x20       fun read() = result\n\
+         \x20   }\n\
+         \x20   class Derived : CapturingBase()\n\
+         \x20   return Derived().read()\n\
+         }\n",
+    );
+}
+
 /// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
 /// not mention `result`; it carries that value solely because its local superclass requires it.
 #[test]

@@ -126,8 +126,9 @@ pub(super) fn classifier_type_parameter_ordinal(
 /// (`resolve::local_capture_dependencies`). Each forwarded field retains the superclass capture's
 /// stable semantic coordinate, so lowering never joins two constructor prefixes by field spelling.
 ///
-/// Only a call that is short by exactly the parent's prefix is filled. Anything else is a shape
-/// this does not understand and is left for the arity check downstream to report.
+/// Only a call that is short by exactly the parent's prefix is filled, whether it reaches the
+/// primary constructor or a secondary one. Anything else is a shape this does not understand and
+/// is left for the arity check downstream to report.
 pub(super) fn finalize_local_superclass_captures(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
@@ -138,12 +139,59 @@ pub(super) fn finalize_local_superclass_captures(
         if parent as usize == class {
             continue;
         }
-        let prefix = ir.classes[parent as usize].constructor_prefix_count as usize;
+        let prefix_count = ir.classes[parent as usize].constructor_prefix_count;
+        let prefix = usize::try_from(prefix_count)
+            .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
         if prefix == 0 {
             continue;
         }
-        let parent_args = &ir.classes[parent as usize].ctor_args;
-        if parent_args.len() != ir.classes[class].super_args.len() + prefix {
+        // A primary `super(written…)` is short by the capture prefix. A call to a secondary
+        // constructor is short by that same prefix: its JVM `<init>` carries the captures ahead of
+        // the parameters the source wrote, and the Kotlin signature the checker recorded does not.
+        let target = ir.classes[class].super_ctor;
+        let (callee_source_len, callee_prefix) = if target.primary() {
+            let parent_args = &ir.classes[parent as usize].ctor_args;
+            let actual = u32::try_from(parent_args.len())
+                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+            let source_len = parent_args.len().checked_sub(prefix).ok_or(
+                FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                },
+            )?;
+            (
+                source_len,
+                parent_args[..prefix]
+                    .iter()
+                    .map(|argument| argument.ty)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let secondary = target
+                .ordinal
+                .checked_sub(1)
+                .and_then(|index| {
+                    ir.classes[parent as usize]
+                        .secondary_ctors
+                        .get(index as usize)
+                })
+                .ok_or(FirFileLoweringFailure::InvalidSuperclassConstructorTarget {
+                    class: parent,
+                    target,
+                })?;
+            if secondary.prefix_params.len() != prefix {
+                let actual = u32::try_from(secondary.prefix_params.len())
+                    .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+                return Err(FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                });
+            }
+            (secondary.params.len(), secondary.prefix_params.clone())
+        };
+        if ir.classes[class].super_args.len() != callee_source_len {
             continue;
         }
         let wanted = (0..prefix)
@@ -151,7 +199,7 @@ pub(super) fn finalize_local_superclass_captures(
                 let field = u32::try_from(field).ok()?;
                 Some((
                     *ir.class_capture_identities.get(&(parent, field))?,
-                    parent_args[field as usize].ty,
+                    callee_prefix[field as usize],
                 ))
             })
             .collect::<Option<Vec<_>>>();
