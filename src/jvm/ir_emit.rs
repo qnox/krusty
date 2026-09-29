@@ -146,7 +146,6 @@ use metadata_policy::{
     finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
-pub(crate) use method_defaults::primitive_bounded_type_parameter;
 use method_defaults::{
     body_has_reified_markers, default_stub_access, default_stub_params, emit_default_stub,
     emit_facade_default_stub, static_default_stub_marker, static_default_stub_params,

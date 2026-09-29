@@ -1,6 +1,9 @@
 //! JVM realization of default-valued function and method parameters.
 
 use super::*;
+use crate::jvm::default_parameter_representation::{
+    primitive_bounded_type_parameter, primitive_unbox_method, primitive_wrapper,
+};
 
 /// kotlinc opens an inheritable member's `$default` synthetic with a guard on the trailing marker:
 /// a `super.m()` call carrying defaults cannot dispatch through the virtual forwarding stub.
@@ -198,62 +201,10 @@ pub(super) fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<us
         .unwrap_or_default()
 }
 
-/// `(primitive, JDK wrapper)` when `declared` is a non-null type parameter bounded by a JVM
-/// primitive. The real method keeps the primitive; the `$default` stub takes the wrapper.
-pub(crate) fn primitive_bounded_type_parameter(declared: Ty) -> Option<(Ty, Ty)> {
-    let Ty::TyParam(_, bound) = declared.non_null() else {
-        return None;
-    };
-    if declared.is_nullable() {
-        return None;
-    }
-    let primitive = ir_ty_to_jvm(bound);
-    primitive_wrapper(primitive).map(|wrapper| (primitive, wrapper))
-}
-
 /// A non-null type parameter whose upper bound is a JVM primitive (`T : Char`) is that primitive
 /// on the real method, and the boxed bound (`java.lang.Character`) on the `$default` stub.
-pub(crate) fn primitive_type_parameter_box(declared: Ty) -> Option<Ty> {
+fn primitive_type_parameter_box(declared: Ty) -> Option<Ty> {
     primitive_bounded_type_parameter(declared).map(|(_, wrapper)| wrapper)
-}
-
-fn primitive_wrapper(primitive: Ty) -> Option<Ty> {
-    let internal = match primitive {
-        Ty::Boolean => "java/lang/Boolean",
-        Ty::Byte => "java/lang/Byte",
-        Ty::Short => "java/lang/Short",
-        Ty::Char => "java/lang/Character",
-        Ty::Int => "java/lang/Integer",
-        Ty::Long => "java/lang/Long",
-        Ty::Float => "java/lang/Float",
-        Ty::Double => "java/lang/Double",
-        _ => return None,
-    };
-    Some(Ty::obj(internal))
-}
-
-/// `(unbox method, primitive)` when `wrapper` is a JDK boxed primitive.
-fn primitive_value_method(wrapper: &Ty) -> Option<(&'static str, Ty)> {
-    let name = wrapper.obj_internal()?;
-    if name.matches("java/lang/Boolean") {
-        Some(("booleanValue", Ty::Boolean))
-    } else if name.matches("java/lang/Byte") {
-        Some(("byteValue", Ty::Byte))
-    } else if name.matches("java/lang/Short") {
-        Some(("shortValue", Ty::Short))
-    } else if name.matches("java/lang/Character") {
-        Some(("charValue", Ty::Char))
-    } else if name.matches("java/lang/Integer") {
-        Some(("intValue", Ty::Int))
-    } else if name.matches("java/lang/Long") {
-        Some(("longValue", Ty::Long))
-    } else if name.matches("java/lang/Float") {
-        Some(("floatValue", Ty::Float))
-    } else if name.matches("java/lang/Double") {
-        Some(("doubleValue", Ty::Double))
-    } else {
-        None
-    }
 }
 
 pub(super) fn stub_parameter_type(ir: &IrFile, fid: u32, index: usize, physical: Ty) -> Ty {
@@ -295,11 +246,8 @@ pub(super) fn emit_primitive_box_if_needed(
     slot: Ty,
     code: &mut CodeBuilder,
 ) {
-    let Some((_, primitive)) = primitive_value_method(&slot) else {
-        return;
-    };
-    if produced == primitive {
-        emit_primitive_value_of(cw, primitive, code);
+    if primitive_wrapper(produced) == Some(slot) {
+        emit_primitive_value_of(cw, produced, code);
     }
 }
 
@@ -309,12 +257,10 @@ pub(super) fn emit_omitted_default_placeholder(
     stub: Ty,
     code: &mut CodeBuilder,
 ) {
-    if let Some((_, primitive)) = primitive_value_method(&stub) {
-        if real == primitive {
-            push_zero(primitive, code, cw);
-            emit_primitive_value_of(cw, primitive, code);
-            return;
-        }
+    if primitive_wrapper(real) == Some(stub) {
+        push_zero(real, code, cw);
+        emit_primitive_value_of(cw, real, code);
+        return;
     }
     push_zero(stub, code, cw);
 }
@@ -328,16 +274,15 @@ fn emit_adapted_unbox(
     stub: Ty,
     code: &mut CodeBuilder,
 ) {
-    if let Some((method, primitive)) = primitive_value_method(&stub) {
-        if real == primitive {
-            let owner = stub
-                .obj_internal()
-                .expect("a primitive wrapper names its class")
-                .render();
-            let unbox = cw.methodref(&owner, method, &format!("(){}", type_descriptor(primitive)));
-            code.invokevirtual(unbox, 0, slot_words(primitive) as i32);
-            return;
-        }
+    if primitive_wrapper(real) == Some(stub) {
+        let owner = stub
+            .obj_internal()
+            .expect("a primitive wrapper names its class")
+            .render();
+        let method = primitive_unbox_method(real).expect("a JVM primitive has an unbox method");
+        let unbox = cw.methodref(&owner, method, &format!("(){}", type_descriptor(real)));
+        code.invokevirtual(unbox, 0, slot_words(real) as i32);
+        return;
     }
     if let Some(value_class) = boxed.get(&index) {
         emit_unbox_impl(ir, cw, value_class, code);

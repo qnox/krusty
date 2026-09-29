@@ -222,7 +222,11 @@ pub(super) fn realize_default_arguments(
     let mut supplied = arguments.into_iter();
     let mut physical = Vec::with_capacity(parameters.len() + masks.len() + 1);
     let mut plan = Vec::with_capacity(parameters.len() + masks.len() + 1);
-    let mut primitive_bound_slots = Vec::new();
+    let primitive_bounds = parameters
+        .iter()
+        .copied()
+        .map(super::default_parameter_representation::primitive_bounded_type_parameter)
+        .collect::<Vec<_>>();
     for (parameter, ty) in parameters.iter().copied().enumerate() {
         let parameter = u32::try_from(parameter).ok()?;
         if defaults.contains(&parameter) {
@@ -236,13 +240,9 @@ pub(super) fn realize_default_arguments(
             // method and the JDK wrapper on `$default`. The omitted slot is the primitive zero;
             // emission boxes it with `valueOf`, which is what kotlinc writes even though the stub
             // overwrites the slot when the mask bit is set.
-            let produced = match crate::jvm::ir_emit::primitive_bounded_type_parameter(ty) {
-                Some((primitive, wrapper)) => {
-                    primitive_bound_slots.push((parameter as usize, wrapper));
-                    primitive
-                }
-                None => ty,
-            };
+            let produced = primitive_bounds[parameter as usize]
+                .map(|(primitive, _)| primitive)
+                .unwrap_or(ty);
             let placeholder = ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
                 produced,
             )));
@@ -254,8 +254,10 @@ pub(super) fn realize_default_arguments(
             plan.push(DefaultCallOperand::supplied(argument));
         }
     }
-    for (index, wrapper) in primitive_bound_slots {
-        parameters[index] = wrapper;
+    for (parameter, primitive_bound) in parameters.iter_mut().zip(primitive_bounds) {
+        if let Some((_, wrapper)) = primitive_bound {
+            *parameter = wrapper;
+        }
     }
     if supplied.next().is_some() {
         return None;
