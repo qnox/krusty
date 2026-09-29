@@ -140,63 +140,79 @@ fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
     }
 }
 
-fn e2e_parallel_width(
+fn e2e_schedule(
     ncpu: u32,
     shards: u32,
-    override_width: Option<&str>,
+    width: Option<&str>,
+    threads: Option<&str>,
 ) -> std::process::Output {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
         .join("e2e-parallel.sh");
-    let override_width = override_width.unwrap_or("");
     Command::new("bash")
         .args([
             "-c",
-            "source \"$1\"; e2e_parallel_width \"$2\" \"$3\" \"$4\"",
-            "e2e-parallel-width",
+            "source \"$1\"; e2e_schedule \"$2\" \"$3\" \"$4\" \"$5\"",
+            "e2e-schedule",
         ])
         .arg(script)
         .arg(ncpu.to_string())
         .arg(shards.to_string())
-        .arg(override_width)
+        .arg(width.unwrap_or(""))
+        .arg(threads.unwrap_or(""))
         .output()
-        .expect("run e2e parallel width")
+        .expect("run e2e schedule")
 }
 
 #[test]
-fn e2e_parallel_width_caps_the_shard_pool() {
-    let three = e2e_parallel_width(4, 22, None);
+fn e2e_schedule_keeps_three_shards_under_the_deadline() {
+    let four_cores = e2e_schedule(4, 22, None, None);
     assert!(
-        three.status.success(),
+        four_cores.status.success(),
         "{}",
-        String::from_utf8_lossy(&three.stderr)
+        String::from_utf8_lossy(&four_cores.stderr)
     );
-    assert_eq!(String::from_utf8(three.stdout).expect("utf-8"), "3\n");
+    assert_eq!(
+        String::from_utf8(four_cores.stdout).expect("utf-8"),
+        "3 2\n"
+    );
 
-    let two_cores = e2e_parallel_width(2, 22, None);
+    let eight_cores = e2e_schedule(8, 22, None, None);
+    assert!(eight_cores.status.success());
+    assert_eq!(
+        String::from_utf8(eight_cores.stdout).expect("utf-8"),
+        "3 4\n"
+    );
+
+    let two_cores = e2e_schedule(2, 22, None, None);
     assert!(two_cores.status.success());
-    assert_eq!(String::from_utf8(two_cores.stdout).expect("utf-8"), "1\n");
+    assert_eq!(String::from_utf8(two_cores.stdout).expect("utf-8"), "1 2\n");
 
-    let capped = e2e_parallel_width(4, 2, None);
+    let capped = e2e_schedule(4, 2, None, None);
     assert!(capped.status.success());
-    assert_eq!(String::from_utf8(capped.stdout).expect("utf-8"), "2\n");
+    assert_eq!(String::from_utf8(capped.stdout).expect("utf-8"), "2 2\n");
 
-    let overridden = e2e_parallel_width(4, 22, Some("4"));
-    assert!(overridden.status.success());
-    assert_eq!(String::from_utf8(overridden.stdout).expect("utf-8"), "4\n");
+    let single = e2e_schedule(4, 22, Some("1"), None);
+    assert!(single.status.success());
+    assert_eq!(String::from_utf8(single.stdout).expect("utf-8"), "1 4\n");
 
-    let override_capped = e2e_parallel_width(4, 22, Some("100"));
+    let override_capped = e2e_schedule(4, 22, Some("100"), Some("2"));
     assert!(override_capped.status.success());
     assert_eq!(
         String::from_utf8(override_capped.stdout).expect("utf-8"),
-        "22\n"
+        "22 2\n"
     );
 
     for invalid in ["0", "00", "01", "-1", "two"] {
-        let output = e2e_parallel_width(4, 22, Some(invalid));
+        let bad_width = e2e_schedule(4, 22, Some(invalid), None);
         assert!(
-            !output.status.success(),
-            "e2e parallel width accepted {invalid:?}"
+            !bad_width.status.success(),
+            "e2e schedule accepted width {invalid:?}"
+        );
+        let bad_threads = e2e_schedule(4, 22, None, Some(invalid));
+        assert!(
+            !bad_threads.status.success(),
+            "e2e schedule accepted threads {invalid:?}"
         );
     }
 }

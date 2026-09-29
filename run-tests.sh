@@ -372,21 +372,21 @@ while IFS= read -r b; do
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
 # The e2e binary joins the product tests that drive kotlinc plus a persistent JVM box runner. Run it
-# after conformance and before the small-binary pool. Each shard uses `--test-threads=$ncpu` and a
-# matching box-runner pool so its own `box()` calls do not queue on too few JVMs. Those threads wait
-# on the JVMs, so one shard leaves cores idle. A bounded pool (default three shards when the host has
-# at least three CPUs; `KRUSTY_E2E_PARALLEL` overrides) runs outside the `-P jobs` fan-out. Wider than
-# that, a 4-core host stops gaining throughput and a shard drifts toward its deadline. The whole
+# after conformance and before the small-binary pool. Each in-flight shard gets a box-runner pool
+# sized to its thread count so its `box()` calls do not queue on too few JVMs. One shard leaves
+# cores idle; three shards at `--test-threads=$ncpu` push a shard past the two-minute deadline.
+# `e2e_schedule` picks a width and a thread count that stay inside the deadline (3 shards and
+# `ncpu/2` threads on a host with at least 4 CPUs). `KRUSTY_E2E_PARALLEL` and `KRUSTY_E2E_THREADS`
+# override those. The pool runs outside the `-P jobs` fan-out. The whole
 # binary can exceed the per-process ceiling, so greedily balance whole top-level test modules into
 # shards. Each shard skips the other modules and must report exactly its planned test count; a lossy
 # libtest skip filter therefore fails visibly instead of silently reducing coverage.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
-pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
   e2e_shards="$KRUSTY_E2E_SHARDS"
   libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
-  if ! e2e_parallel="$(e2e_parallel_width "$ncpu" "$e2e_shards" "${KRUSTY_E2E_PARALLEL:-}")"; then
-    echo "run-tests.sh: KRUSTY_E2E_PARALLEL must be a canonical positive integer" >&2
+  if ! read -r e2e_parallel e2e_threads < <(e2e_schedule "$ncpu" "$e2e_shards" "${KRUSTY_E2E_PARALLEL:-}" "${KRUSTY_E2E_THREADS:-}"); then
+    echo "run-tests.sh: KRUSTY_E2E_PARALLEL and KRUSTY_E2E_THREADS must be canonical positive integers" >&2
     exit 1
   fi
   e2e_listing="$logdir/e2e-tests.list"
@@ -394,7 +394,8 @@ if [ -n "$e2e_bin" ]; then
   e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
   libtest_write_shard_plan \
     "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
-  echo "run-tests.sh: e2e shards=$e2e_shards parallel=$e2e_parallel" >&2
+  pool="${KRUSTY_BOX_RUNNER_POOL:-$e2e_threads}"
+  echo "run-tests.sh: e2e shards=$e2e_shards parallel=$e2e_parallel threads=$e2e_threads" >&2
   # bash 3.2 has no `wait -n`. A fifo of N tokens is the slot pool: fd 3 stays open for the children.
   e2e_slot_dir="$(mktemp -d)"
   mkfifo "$e2e_slot_dir/slots"
@@ -457,7 +458,7 @@ if [ -n "$e2e_bin" ]; then
       echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
       KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
         KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-          "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
+          "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$e2e_threads" "$label" "$expected_tests"
     ) &
     e2e_pids+=("$!")
   done

@@ -84,10 +84,12 @@ argument, member, initializer, or assignment location is a test failure.
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
 corpus, then everything else), then runs twenty-two balanced whole-module shards of the e2e binary.
-Each shard uses `--test-threads` equal to the host CPU count. Up to three of those shards run at once
-on a host with at least three CPUs, because one shard's threads spend most of their time waiting on
-box-runner JVMs. `KRUSTY_E2E_PARALLEL` overrides that width and `KRUSTY_E2E_SHARDS` overrides the
-shard count. The remaining small test binaries then run in parallel.
+On a host with at least four CPUs, three of those shards run at once and each shard's
+`--test-threads` is half the CPU count. One shard at a time leaves cores idle. Three shards at a
+full thread count push a shard past its two-minute deadline. `KRUSTY_E2E_PARALLEL` and
+`KRUSTY_E2E_THREADS` override the width and the thread count, and `KRUSTY_E2E_SHARDS` overrides the
+shard count. Hosts with fewer than four CPUs run one shard at a time across every CPU. The remaining
+small test binaries then run in parallel.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -274,7 +276,10 @@ Optional profiling knobs:
 - `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
   run.
 - `KRUSTY_E2E_PARALLEL=<count>` overrides how many e2e shards run at once. The default is 3 when the
-  host has at least three CPUs and 1 otherwise, and it never exceeds the shard count.
+  host has at least four CPUs and 1 otherwise, and it never exceeds the shard count.
+- `KRUSTY_E2E_THREADS=<count>` overrides how many libtest threads each e2e shard uses. The default is
+  half the CPU count while more than one shard is in flight, and every CPU when a single shard owns
+  the machine.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
