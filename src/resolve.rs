@@ -151,7 +151,7 @@ use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
 use capture_storage::{
     anonymous_body_bound_value_names, anonymous_body_expressions, anonymous_descendant_writes_name,
-    anonymous_descendants, local_class_capture_expressions,
+    anonymous_descendants, enclosing_value_visible_beside_member, local_class_capture_expressions,
 };
 use collection_literals::{default_factory, standard_factory};
 use constant_evaluation::{
@@ -18625,32 +18625,38 @@ impl<'a> Checker<'a> {
                             AnonymousObjectCaptureSource::LexicalValue
                         }
                     };
+                    let function_local = matches!(local.origin, ReceiverFnValueOrigin::Local);
+                    let written_here = self.fn_reassigned.contains(name)
+                        || anonymous_descendant_writes_name(
+                            self.file,
+                            declaration,
+                            &self.anonymous_lexical_scope,
+                            name,
+                            function_local,
+                        );
+                    let shared_cell = capture_storage::CapturedBinding {
+                        delegated: local.delegate_storage_ty.is_some(),
+                        mutable: local.is_var,
+                        already_shared: local.shared_storage_cell,
+                        written_here,
+                    }
+                    .is_shared_cell();
+                    // A shared cell keeps the declared type so a later write of `null` into
+                    // `var x: Any?` still type-checks. A copied value takes the type proven at
+                    // this construction, including a smart cast of that local.
+                    let ty = if local.is_var && (shared_cell || local.delegate_storage_ty.is_some())
+                    {
+                        local.ty
+                    } else {
+                        narrows.get(name).copied().unwrap_or(local.ty)
+                    };
                     candidates.push(AnonymousCaptureCandidate {
                         name: name.to_string(),
-                        // A mutable capture denotes its declared storage cell, not the value's
-                        // current flow type. `var x: Any? = Any()` may be narrowed to `Any` at this
-                        // construction point, but a nested classifier must still be able to write
-                        // `null` through the shared cell.
-                        ty: if local.is_var {
-                            local.ty
-                        } else {
-                            narrows.get(name).copied().unwrap_or(local.ty)
-                        },
-                        shared_cell: capture_storage::CapturedBinding {
-                            delegated: local.delegate_storage_ty.is_some(),
-                            mutable: local.is_var,
-                            already_shared: local.shared_storage_cell,
-                            written_here: self.fn_reassigned.contains(name)
-                                || anonymous_descendant_writes_name(
-                                    self.file,
-                                    declaration,
-                                    &self.anonymous_lexical_scope,
-                                    name,
-                                ),
-                        }
-                        .is_shared_cell(),
+                        ty,
+                        shared_cell,
                         source,
                         delegate_storage: local.delegate_storage_ty,
+                        function_local,
                         receiver_label: None,
                         receiver: None,
                     });
@@ -18685,6 +18691,7 @@ impl<'a> Checker<'a> {
                                 },
                                 ty: receiver.ty,
                                 shared_cell: false,
+                                function_local: false,
                                 source: if receiver.class_receiver {
                                     AnonymousObjectCaptureSource::EnclosingInstance {
                                         current: receiver.current,
@@ -37582,10 +37589,10 @@ fn anonymous_descendant_uses_name(
     lexical_scope: &AnonymousLexicalClassScope,
     name: &str,
     ty: Ty,
+    function_local: bool,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        (!anonymous_body_bound_value_names(file, candidate).contains(name)
-            || capture_analysis::own_property_initializer_uses_outer_name(file, candidate, name))
+        enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_uses_name(file, candidate, name, ty)
                 || candidate != declaration
                     && matches!(file.decl(candidate), Decl::Class(class) if class
@@ -37602,6 +37609,9 @@ struct AnonymousCaptureCandidate {
     shared_cell: bool,
     source: AnonymousObjectCaptureSource,
     delegate_storage: Option<Ty>,
+    /// The candidate is a function parameter or local, not a top-level or class property.
+    /// That local keeps its unqualified name inside a nested classifier that redeclares it.
+    function_local: bool,
     receiver_label: Option<Box<str>>,
     receiver: Option<crate::fir::FirCapturedReceiver>,
 }
@@ -37695,7 +37705,6 @@ fn record_anonymous_construction_captures(
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
         return Vec::new();
     };
-    let bound = anonymous_body_bound_value_names(file, declaration);
     crate::trace_compiler!(
         "resolve",
         "anonymous capture candidates declaration={declaration:?} construction={construction:?} candidates={:?}",
@@ -37728,33 +37737,34 @@ fn record_anonymous_construction_captures(
                 | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
                 | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
                 AnonymousObjectCaptureSource::LexicalValue => {
-                    (!bound.contains(&candidate.name)
-                        || capture_analysis::own_property_initializer_uses_outer_name(
+                    enclosing_value_visible_beside_member(
+                        file,
+                        declaration,
+                        &candidate.name,
+                        candidate.function_local,
+                    ) && (candidate.delegate_storage.is_some()
+                        || anonymous_descendant_uses_name(
                             file,
                             declaration,
+                            lexical_scope,
                             &candidate.name,
+                            candidate.ty,
+                            candidate.function_local,
+                        )
+                        || anonymous_descendant_uses_selected_local_callable_capture(
+                            file,
+                            declaration,
+                            lexical_scope,
+                            &candidate.name,
+                            selected_local_callables,
+                        )
+                        || anonymous_descendant_writes_name(
+                            file,
+                            declaration,
+                            lexical_scope,
+                            &candidate.name,
+                            candidate.function_local,
                         ))
-                        && (candidate.delegate_storage.is_some()
-                            || anonymous_descendant_uses_name(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                                candidate.ty,
-                            )
-                            || anonymous_descendant_uses_selected_local_callable_capture(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                                selected_local_callables,
-                            )
-                            || anonymous_descendant_writes_name(
-                                file,
-                                declaration,
-                                lexical_scope,
-                                &candidate.name,
-                            ))
                 }
             }
         })
@@ -49064,21 +49074,6 @@ impl<'a> Checker<'a> {
         enum_entry_property: Option<u32>,
         selected_receiver_identity: Option<(usize, usize)>,
     ) {
-        // A function local or parameter keeps the unqualified name inside every classifier
-        // nested in that function, including the classifier's own property and its getter.
-        // `fun plus(head: T) = object { val head get() = head }` reads the parameter
-        // (`objects/flist.kt`); installing this property would hide it and the getter would
-        // call itself. `this.name` is a member access and still reads the property. An
-        // enclosing class member is not a local, so a nested constructor `val` still shadows
-        // it.
-        if self.lookup(scope, name).is_some_and(|local| {
-            matches!(
-                local.origin,
-                ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_)
-            )
-        }) {
-            return;
-        }
         let implicit_receivers = self.implicit_receivers(scope);
         let receiver_identity = selected_receiver_identity
             .or_else(|| {

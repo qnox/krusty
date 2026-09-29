@@ -180,8 +180,8 @@ fn a_local_class_member_reads_the_enclosing_parameter() {
         \x20   val c = C()\n\
         \x20   return \"${c.g()}/${c.h()}/${c.y}/${c.x}\"\n\
         }\n\
-        fun box(): String = if (f(8) == \"8/2/8/2\") \"OK\" else \"FAIL\"\n";
-    assert_eq!(run(SRC).expect("parameter outranks the property"), "OK");
+        fun box(): String = f(8)\n";
+    assert_eq!(run(SRC).expect("parameter outranks the property"), "8/2/8/2");
 }
 
 /// kotlinc 2.4.20: `f(8)` is `"4/0/4"`. The assignment and the read both target the function

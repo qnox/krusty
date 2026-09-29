@@ -932,6 +932,24 @@ fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, Stri
     )
 }
 
+/// The field a property read or write in this compilation should touch.
+///
+/// A capture spliced ahead of a source property shares the IR spelling (`x` beside the capture
+/// the JVM names `$x`). The property records its own backing-field index; the first field of
+/// that spelling is the capture. A property with no backing field is reached through its accessor.
+fn declared_property_field<'a>(
+    class: &'a crate::ir::IrClass,
+    declared: Option<&crate::ir::IrProperty>,
+    name: &str,
+) -> Option<&'a crate::ir::IrField> {
+    match declared {
+        Some(property) => property
+            .backing_field
+            .and_then(|index| class.fields.get(index as usize)),
+        None => class.fields.iter().find(|field| field.name == name),
+    }
+}
+
 /// Physical JVM name of an instance backing field. Kotlin permits an instance property and a
 /// companion property with the same source name, but the JVM field signature does not include the
 /// STATIC flag. kotlinc therefore keeps the companion static's source name and suffixes the instance
@@ -9137,11 +9155,7 @@ impl<'a> Emitter<'a> {
                 is_interface: is_jvm_interface(class),
             });
         }
-        let field = class
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .filter(|_| declared.is_none_or(|p| p.backing_field.is_some()));
+        let field = declared_property_field(class, declared, name);
         let setter_name = declared
             .and_then(|p| p.setter_jvm_name.clone())
             .unwrap_or_else(|| crate::names::property_setter_name(name));
@@ -9224,11 +9238,7 @@ impl<'a> Emitter<'a> {
                 is_interface: interface,
             });
         }
-        let field = class
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .filter(|_| declared.is_none_or(|p| p.backing_field.is_some()));
+        let field = declared_property_field(class, declared, name);
         // A declaration-specified JVM name wins; otherwise the checker's selected accessor identity
         // refines the naming convention. Backend value-class mangling lives in a different table and
         // therefore cannot overwrite an inherited generic declaration here.

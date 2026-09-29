@@ -6707,8 +6707,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the property. A block local inside the nested classifier is nearer and wins. A constructor
   property with no enclosing local still shadows the enclosing class (`class L(val tag: String)`
   inside `Outer.tag` reads `L`'s `tag`). A smart cast of the outer local applies in the nested
-  body. Verified against kotlinc 2.4.20. The property is not installed as a lexical value binding
-  when that local is already visible, so flow and capture keep following the local.
+  body. Verified against kotlinc 2.4.20. The nested classifier captures the local. An unqualified
+  read or assignment uses that capture; `this.name` reads the property's own field.
   Tests: `tests/local_class_scope_e2e.rs`
   (`an_anonymous_object_getter_reads_the_enclosing_parameter`,
   `a_local_class_member_reads_the_enclosing_parameter`,

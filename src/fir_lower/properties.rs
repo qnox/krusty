@@ -1041,12 +1041,27 @@ fn materialize_member_property(
         // argument when the class was lowered. `install_anonymous_object_captures` also registers
         // each capture as a synthetic property, so emitting a field for that property again gives
         // the class two identically-named fields and the JVM refuses to load it
-        // (`ClassFormatError: Duplicate field name`). Reuse the existing field instead.
+        // (`ClassFormatError: Duplicate field name`). Reuse the existing field for that synthetic
+        // property only. A source property of the same spelling keeps its own field: the capture
+        // is `$x` and `val x = 2` is `x`.
         let storage_ty = property.storage_ty.unwrap_or(property.ty);
-        let existing = ir.classes[class_id as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == property.name && field.ty == storage_ty);
+        let capture_placeholder = property.initializer.is_none()
+            && !property.flags.has(DeclarationFlags::CUSTOM_GETTER)
+            && !property.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
+            && !property.flags.has(DeclarationFlags::LATEINIT)
+            && !property.flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD)
+            && !property
+                .flags
+                .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)
+            && !property.flags.has(DeclarationFlags::MUTABLE);
+        let existing = capture_placeholder
+            .then(|| {
+                ir.classes[class_id as usize]
+                    .fields
+                    .iter()
+                    .position(|field| field.name == property.name && field.ty == storage_ty)
+            })
+            .flatten();
         let field = u32::try_from(existing.unwrap_or(ir.classes[class_id as usize].fields.len()))
             .map_err(|_| {
             FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration)

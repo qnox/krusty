@@ -220,15 +220,32 @@ pub(super) fn anonymous_descendants(
     ))
 }
 
+/// Whether `name` still denotes an enclosing value inside `declaration`.
+///
+/// A same-named member hides a top-level or class property, except when the member's own
+/// initializer reads that value (`val x = x`). A function local or parameter keeps the
+/// unqualified spelling through the member, its getter, and assignments (`objects/flist.kt`).
+/// `this.name` is a member access and is not a use of the local.
+pub(super) fn enclosing_value_visible_beside_member(
+    file: &File,
+    declaration: DeclId,
+    name: &str,
+    function_local: bool,
+) -> bool {
+    function_local
+        || !anonymous_body_bound_value_names(file, declaration).contains(name)
+        || capture_analysis::own_property_initializer_uses_outer_name(file, declaration, name)
+}
+
 pub(super) fn anonymous_descendant_writes_name(
     file: &File,
     declaration: DeclId,
     lexical_scope: &AnonymousLexicalClassScope,
     name: &str,
+    function_local: bool,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        (!anonymous_body_bound_value_names(file, candidate).contains(name)
-            || capture_analysis::own_property_initializer_uses_outer_name(file, candidate, name))
+        enclosing_value_visible_beside_member(file, candidate, name, function_local)
             && (anonymous_body_writes_name(file, candidate, name)
                 || candidate != declaration
                     && matches!(file.decl(candidate), Decl::Class(class) if class

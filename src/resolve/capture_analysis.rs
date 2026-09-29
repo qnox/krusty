@@ -69,7 +69,8 @@ pub(super) fn used_names(file: &File, expression: ExprId, outer: &HashSet<String
 /// Whether a property initializer or delegate reads an enclosing value with the property's own
 /// spelling. Kotlin keeps the declaration being initialized out of that value lookup: in
 /// `fun f(x: Int) = object { val x: Int = x }`, the right-hand `x` is the lexical parameter.
-/// A same-named accessor reads that parameter too; `this.x` is the property.
+/// A function local stays visible through a same-named accessor too; capture selection keeps
+/// that local beside the member. `this.x` is the property.
 pub(super) fn own_property_initializer_uses_outer_name(
     file: &File,
     declaration: DeclId,
