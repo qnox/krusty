@@ -14,6 +14,23 @@ use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
 
+/// Move the predeclared delegate-field coordinates when local-class capture storage is inserted
+/// ahead of them. The delegation map owns these coordinates; capture lowering only reports the
+/// prefix it inserted.
+pub(super) fn shift_predeclared_field_indices(
+    ir: &mut IrFile,
+    declaration: DeclarationId,
+    prefix: u32,
+) {
+    for ((owner, _), field) in &mut ir.checked_interface_delegation_fields {
+        if *owner == declaration {
+            *field = field
+                .checked_add(prefix)
+                .expect("captured class field index overflow");
+        }
+    }
+}
+
 /// The physical constructor slot of declared primary-constructor parameter `parameter`. The
 /// constructor lowering has laid `ctor_args` out as the compiler prefix (local captures) followed
 /// by the declared value parameters, so the slot is read off that recorded layout rather than
