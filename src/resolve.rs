@@ -25259,7 +25259,9 @@ impl<'a> Checker<'a> {
                     );
                     // A write replaces the prior data-flow fact with the assigned value's exact
                     // subtype, or clears it when the value is as wide as storage / unstable.
-                    if is_var {
+                    // An unreachable write is erased and must not replace the fact a `finally`
+                    // that actually runs will read.
+                    if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
                         self.set_local_narrow(scope, &name, narrowing);
                         // A write under a live smart-cast shadow must also move the PROOF binding:

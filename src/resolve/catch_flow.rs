@@ -22,6 +22,11 @@ impl Checker<'_> {
         name: &str,
         narrowed: Option<Ty>,
     ) {
+        // A statement after `throw` or `return` is still type-checked, then erased. Recording its
+        // write would publish a value that does not run into a later `finally`.
+        if self.unreachable_statement_depth != 0 {
+            return;
+        }
         if let Some(local) = self.lookup(scope, name) {
             scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
             if let Some(identity) = local.lexical_capture_identity {

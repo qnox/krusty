@@ -454,6 +454,31 @@ fun box(): String = if (f(\"ab\") == 2) \"OK\" else \"FAIL\"\n";
 }
 
 #[test]
+fn finally_keeps_the_value_a_skipped_assignment_does_not_replace() {
+    const SRC: &str = "fun box(): String {\n\
+    var result = \"fail\"\n\
+    try {\n\
+        var x: Any = 42\n\
+        try {\n\
+            try {\n\
+                throw Error()\n\
+            } finally {\n\
+                x = \"OK\"\n\
+            }\n\
+            x = 117\n\
+        } finally {\n\
+            result = x.toString()\n\
+        }\n\
+    } catch (_: Throwable) { }\n\
+    return result\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("finally reads the assignment that ran"),
+        "OK"
+    );
+}
+
+#[test]
 fn nullable_receiver_extension_call_reports_unsafe_call() {
     const SRC: &str = "fun f(s: String?): Int {\n\
     return s.trim().length\n\
