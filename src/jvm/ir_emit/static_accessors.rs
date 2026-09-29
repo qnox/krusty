@@ -721,7 +721,7 @@ impl Accessor<'_> {
                 &name,
                 &descriptor,
                 None,
-                &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+                &[("<set-?>".to_string(), type_descriptor(ty).to_owned(), 0)],
             );
             return;
         }
