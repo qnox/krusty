@@ -44,7 +44,7 @@ pub(super) fn emit_func_ref_class(
     let call_owner = jvm_owner_or_facade(fr.call_owner, facade);
     let fq = c.fq_name();
     let superclass = if fr.adapted {
-        "kotlin/jvm/internal/AdaptedFunctionReference".to_string()
+        "kotlin/jvm/internal/AdaptedFunctionReference"
     } else {
         c.superclass()
     };
