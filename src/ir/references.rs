@@ -207,10 +207,6 @@ pub struct PropRef {
 }
 
 impl FuncRef {
-    pub fn call_owner_key(&self) -> String {
-        self.call_owner.map(TypeName::render).unwrap_or_default()
-    }
-
     pub fn call_owner_is_facade(&self) -> bool {
         self.call_owner.is_none()
     }
