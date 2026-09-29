@@ -1750,7 +1750,7 @@ impl JvmLibraries {
                             .map(|parameter| parameter.name.as_str())
                             .collect::<Vec<_>>(),
                         declaration
-                            .context_params
+                            .context_params()
                             .iter()
                             .map(|parameter| parameter.name.as_str())
                             .collect::<Vec<_>>(),
@@ -1798,7 +1798,7 @@ impl JvmLibraries {
                     member.reified = declaration.has_reified_type_params();
                     member.annotations = declaration.annotations.clone();
                     member.contract = declaration.contract.clone();
-                    member.equality_bound = declaration.equality_bound;
+                    member.equality_bound = declaration.equality_bound();
                     member.return_value_status = Some(declaration.return_value_status);
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
