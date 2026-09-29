@@ -3488,9 +3488,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   renames from the class file: `kotlin/Number` loads `java/lang/Number`, and each
   value method is exposed under its Kotlin name (`toInt`) with the classfile spelling
   (`intValue`) retained as the physical name. The realization row matches that
-  classfile owner, not the Kotlin name the lookup started from. Tests:
+  classfile owner, not the Kotlin name the lookup started from. A renamed member
+  whose Kotlin name is an operator convention (`charAt` published as `get`) is an
+  operator on the Java face as well as on the builtins face. `StringBuilder`
+  lists both `java.lang.CharSequence` and `kotlin.CharSequence`; the hierarchy
+  keeps one `get(Int): Char`, and that survivor has to stay indexable. Tests:
   `tests/bounded_type_param_e2e.rs`,
   `mapped_kotlin_number_publishes_jdk_realizations_without_stdlib`,
+  `java_charsequence_get_realization_is_an_operator`,
   `tests/classpath_number_conversion_e2e.rs`.
 
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's

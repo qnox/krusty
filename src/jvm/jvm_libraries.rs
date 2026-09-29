@@ -2082,6 +2082,18 @@ impl JvmLibraries {
                         if source != member.name {
                             member.physical_name = Some(m.name.clone());
                             member.name = source.to_string();
+                            // The convention check above saw the classfile spelling (`charAt`).
+                            // A realization that publishes that method as Kotlin `get` is the same
+                            // operator a Java method declared `get` would be, so index syntax on a
+                            // `StringBuilder` still reaches `CharSequence` through the Java face.
+                            if uses_java_type_semantics
+                                && java_method_has_operator_convention(
+                                    &member.name,
+                                    member.params.len(),
+                                )
+                            {
+                                member.set_is_operator(true);
+                            }
                         }
                     }
                     members.push(member);
@@ -5963,6 +5975,34 @@ mod tests {
         assert!(java_method_has_operator_convention("set", 4));
         assert!(!java_method_has_operator_convention("get", 0));
         assert!(!java_method_has_operator_convention("set", 1));
+    }
+
+    #[test]
+    fn java_charsequence_get_realization_is_an_operator() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ));
+        let sequence = libraries
+            .classifier_record(type_name("java/lang/CharSequence"))
+            .expect("java.lang.CharSequence");
+        let operator_get = sequence
+            .declared_callables
+            .get("get")
+            .expect("CharSequence.get")
+            .functions()
+            .iter()
+            .any(|function| {
+                function.flags.operator
+                    && function.callable.reflection_name.as_deref() == Some("get")
+                    && function.callable.params.len() == 1
+            });
+        assert!(operator_get, "realized charAt must be operator get");
     }
 
     #[test]
