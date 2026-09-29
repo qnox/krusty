@@ -1,12 +1,10 @@
 //! Shared test helpers.
 
-pub mod box_pool;
 pub(crate) mod byte_dump;
 mod kotlin_metadata;
 mod kotlinc_lib;
 pub mod language_directives;
 mod metadata_diff;
-pub mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
@@ -20,7 +18,7 @@ pub use source_set_compile::compile_in_process_files;
 
 pub(crate) use kotlin_metadata::raw_kotlin_metadata;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -1346,20 +1344,65 @@ pub fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
     None
 }
 
-struct BoxClaimGuard<'a> {
-    pool: &'a Mutex<box_pool::RunnerPool<Arc<BoxRunner>>>,
-    cp: String,
-    id: u64,
-    retire: bool,
+struct RunnerPool {
+    runners: HashMap<String, Arc<BoxRunner>>,
+    order: VecDeque<String>,
 }
 
-impl Drop for BoxClaimGuard<'_> {
-    fn drop(&mut self) {
-        let mut pool = self.pool.lock().unwrap_or_else(|err| err.into_inner());
-        if self.retire {
-            pool.retire(&self.cp, self.id);
-        } else {
-            pool.release(&self.cp, self.id);
+impl RunnerPool {
+    fn new() -> Self {
+        RunnerPool {
+            runners: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn touch(&mut self, cp: &str) {
+        self.order.retain(|k| k != cp);
+        self.order.push_back(cp.to_string());
+    }
+
+    fn insert(&mut self, cp: String, runner: Arc<BoxRunner>) {
+        self.runners.insert(cp.clone(), runner);
+        self.touch(&cp);
+        self.prune();
+    }
+
+    fn get(&mut self, cp: &str) -> Option<Arc<BoxRunner>> {
+        let runner = self.runners.get(cp).cloned();
+        if runner.is_some() {
+            self.touch(cp);
+        }
+        runner
+    }
+
+    fn remove(&mut self, cp: &str) {
+        self.runners.remove(cp);
+        self.order.retain(|k| k != cp);
+    }
+
+    fn prune(&mut self) {
+        self.runners.retain(|_, r| r.alive.load(Ordering::SeqCst));
+        self.order.retain(|k| self.runners.contains_key(k));
+        let max = std::env::var("KRUSTY_BOX_RUNNER_POOL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(2);
+        while self.runners.len() > max {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            let removable = self
+                .runners
+                .get(&old)
+                .is_some_and(|r| Arc::strong_count(r) == 1);
+            if removable {
+                self.runners.remove(&old);
+            } else {
+                self.order.push_back(old);
+                break;
+            }
         }
     }
 }
@@ -1414,16 +1457,15 @@ fn dir_classes(dir: &Path) -> Option<Arc<ClassSet>> {
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
 /// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
 ///
-/// The runner is concurrency-safe (id-tagged requests, demuxed responses). Callers that share a
-/// classpath take distinct JVMs up to [`box_pool::width_from_env`], so in-flight `box()` calls use
-/// the host's cores instead of queueing inside one JVM.
+/// The runner is concurrency-safe (id-tagged requests, demuxed responses), so callers on different
+/// threads share one JVM without an exclusive round-trip lock.
 #[allow(dead_code)]
 pub fn run_box(
     classes: &[(String, Vec<u8>)],
     box_class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<String> {
-    static POOL: OnceLock<Mutex<box_pool::RunnerPool<Arc<BoxRunner>>>> = OnceLock::new();
+    static POOL: OnceLock<Mutex<RunnerPool>> = OnceLock::new();
     let _pg = ProfGuard::new("box");
     let java_home = java_home();
     let java = format!("{java_home}/bin/java");
@@ -1457,47 +1499,42 @@ pub fn run_box(
     let classes: &[(String, Vec<u8>)] = &classes;
     let pool = POOL.get_or_init(|| {
         sweep_stale_temp_dirs();
-        Mutex::new(box_pool::RunnerPool::new())
+        Mutex::new(RunnerPool::new())
     });
-    let width = box_pool::width_from_env();
-    let claim = acquire_box_runner(pool, &cp, width, &java)?;
-    let mut guard = BoxClaimGuard {
-        pool,
-        cp: cp.clone(),
-        id: claim.id,
-        retire: false,
+
+    // Fetch (or spin up) the runner for this classpath under the pool lock, then release the lock so
+    // the actual round-trip runs concurrently with other threads' calls. The pool is capped because a
+    // single grouped e2e binary can see many short-lived temp classpaths; without recycling, each one
+    // leaves behind a persistent JVM for the rest of the process.
+    let get_runner = || -> Option<Arc<BoxRunner>> {
+        let mut map = pool.lock().unwrap();
+        let needs_runner = map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst));
+        if needs_runner {
+            map.insert(cp.clone(), Arc::new(BoxRunner::new(&java, &cp)?));
+        }
+        map.get(&cp)
     };
-    match claim.runner.try_run(classes, box_class) {
-        Ok(result) => Some(result),
+
+    let runner = get_runner()?;
+    match runner.try_run(classes, box_class) {
+        Ok(s) => Some(s),
         Err(_) => {
-            // The JVM died or timed out. Drop that lane and retry once on a fresh runner.
-            guard.retire = true;
-            drop(guard);
-            let fresh = acquire_box_runner(pool, &cp, width, &java)?;
-            let _guard = BoxClaimGuard {
-                pool,
-                cp,
-                id: fresh.id,
-                retire: false,
-            };
-            fresh.runner.try_run(classes, box_class).ok()
+            // The JVM died or timed out. Replace the dead runner (if another thread hasn't already)
+            // and retry once on a fresh one.
+            {
+                let mut map = pool.lock().unwrap();
+                if map
+                    .runners
+                    .get(&cp)
+                    .is_some_and(|r| Arc::ptr_eq(r, &runner))
+                {
+                    map.remove(&cp);
+                }
+            }
+            let fresh = get_runner()?;
+            fresh.try_run(classes, box_class).ok()
         }
     }
-}
-
-fn acquire_box_runner(
-    pool: &Mutex<box_pool::RunnerPool<Arc<BoxRunner>>>,
-    cp: &str,
-    width: usize,
-    java: &str,
-) -> Option<box_pool::Claim<Arc<BoxRunner>>> {
-    let mut map = pool.lock().unwrap_or_else(|err| err.into_inner());
-    map.acquire(
-        cp,
-        width,
-        |runner| runner.alive.load(Ordering::SeqCst),
-        || BoxRunner::new(java, cp).map(Arc::new),
-    )
 }
 
 /// Compile `src` in-process and run `box()` on the persistent JVM. `cp_jars` is BOTH the compile
@@ -2607,10 +2644,14 @@ impl KotlincServer {
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
 /// arguments (`["-d", out, "-cp", cp, "Lib.kt"]`). Returns `(exit_code, stderr)` — `exit_code == 0`
 /// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
-/// `kotlinc`). Overlapping calls use distinct JVMs up to [`server_pool_cap`].
+/// `kotlinc`). One server JVM is shared across all calls (keyed by the compiler jar).
+#[allow(dead_code)]
+/// A per-classpath pool of persistent compiler servers, each behind its own `Arc<Mutex>` so callers
+/// hold the (brief) map lock only to pick/grow a server, then release it before the long compile.
+type ServerPool<S> = Mutex<HashMap<String, Vec<Arc<Mutex<S>>>>>;
+
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    static POOL: OnceLock<Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>> =
-        OnceLock::new();
+    static POOL: OnceLock<ServerPool<KotlincServer>> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
     let java_home = java_home();
     let java = format!("{java_home}/bin/java");
@@ -2625,37 +2666,40 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
     // its `server_dir`.
     let cp = server_dir.to_string_lossy().into_owned();
-    let pool = {
-        let pools = POOL.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut map = pools.lock().unwrap_or_else(|err| err.into_inner());
-        Arc::clone(
-            map.entry(cp.clone())
-                .or_insert_with(|| Arc::new(server_pool::Pool::new())),
-        )
+    let server = {
+        let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = pool.lock().unwrap();
+        let servers = map.entry(cp.clone()).or_default();
+        if let Some(idle) = servers.iter().find(|s| s.try_lock().is_ok()) {
+            idle.clone()
+        } else if servers.len() < server_pool_cap() {
+            let s = Arc::new(Mutex::new(KotlincServer::new(&java, &cp, &lib_dir)?));
+            servers.push(s.clone());
+            s
+        } else {
+            // At cap and all busy — block on the least-recently-added (spreads simple contention).
+            servers[0].clone()
+        }
     };
-    pool.with_server(
-        server_pool_cap(),
-        || KotlincServer::new(&java, &cp, &lib_dir),
-        |server| match server.try_compile(args) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                *server = KotlincServer::new(&java, &cp, &lib_dir)?;
-                server.try_compile(args).ok()
-            }
-        },
-    )
-    .flatten()
+    let mut server = server.lock().unwrap();
+    match server.try_compile(args) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            // Server JVM died — restart once and retry.
+            *server = KotlincServer::new(&java, &cp, &lib_dir)?;
+            server.try_compile(args).ok()
+        }
+    }
 }
 
-/// How many persistent kotlinc and JavaRunner JVMs to keep. One JVM per host CPU, so a test
-/// process with that many threads does not queue every compile on the first server.
-/// `KRUSTY_SERVER_POOL` overrides (for example `1` on a memory-tight host).
+/// How many persistent compiler-server JVMs to pool per classpath. One server. A second kotlinc
+/// JVM increased wall time on the classpath slice; `KRUSTY_SERVER_POOL` overrides.
 fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .unwrap_or(1)
 }
 
 // --- Persistent javac+run server ------------------------------------------
@@ -2876,30 +2920,38 @@ pub fn javac_run_proc(
     main_class: &str,
     proc_path: &str,
 ) -> Option<String> {
-    // A pool of runner JVMs. The claim is held across the run, so overlapping javac/javap calls use
-    // distinct JVMs instead of queueing on the first one.
-    static POOL: OnceLock<server_pool::Pool<JavaRunner>> = OnceLock::new();
+    // A POOL of runner JVMs (not one global), so Java-driver tests run N-wide instead of serializing
+    // on a single mutex held across the whole javac+run. The pool lock is released before the run.
+    static POOL: OnceLock<Mutex<Vec<Arc<Mutex<JavaRunner>>>>> = OnceLock::new();
     let java_home = java_home();
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;
     }
     let runner_dir = setup_java_runner(&java_home)?;
-    let pool = POOL.get_or_init(server_pool::Pool::new);
-    pool.with_server(
-        server_pool_cap(),
-        || JavaRunner::new(&java, &runner_dir),
-        |runner| match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                *runner = JavaRunner::new(&java, &runner_dir)?;
-                runner
-                    .try_run(driver_path, cp, outdir, main_class, proc_path)
-                    .ok()
-            }
-        },
-    )
-    .flatten()
+    let runner = {
+        let pool = POOL.get_or_init(|| Mutex::new(Vec::new()));
+        let mut v = pool.lock().unwrap();
+        if let Some(idle) = v.iter().find(|r| r.try_lock().is_ok()) {
+            idle.clone()
+        } else if v.len() < server_pool_cap() {
+            let r = Arc::new(Mutex::new(JavaRunner::new(&java, &runner_dir)?));
+            v.push(r.clone());
+            r
+        } else {
+            v[0].clone()
+        }
+    };
+    let mut runner = runner.lock().unwrap();
+    match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            *runner = JavaRunner::new(&java, &runner_dir)?;
+            runner
+                .try_run(driver_path, cp, outdir, main_class, proc_path)
+                .ok()
+        }
+    }
 }
 
 /// The `SourceDebugExtension` (SMAP) payload of a compiled class, one entry per line, or an empty

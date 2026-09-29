@@ -271,9 +271,10 @@ Performance-relevant harness state:
   (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
   `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
   per lib entry — the convergence inventory for making byte equality the assertion.
-- Persistent JVM pools (kotlinc compiler servers, JavaRunner, and box runners for one classpath)
-  default to one JVM per host CPU. `KRUSTY_SERVER_POOL=<n>` and `KRUSTY_BOX_RUNNER_POOL=<n>` override
-  that width (for example `1` on a memory-tight host).
+- Kotlinc and JavaRunner pools default to one JVM. A second server increased wall time on the
+  classpath slice. `KRUSTY_SERVER_POOL=<n>` overrides.
+- Box runners stay one JVM per classpath. `KRUSTY_BOX_RUNNER_POOL` still caps how many distinct
+  classpaths keep a runner.
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
   static state is fresh per `box()` call and runner JVMs are shared across tests.
 

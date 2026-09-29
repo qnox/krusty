@@ -340,8 +340,8 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 # runs that corpus as one process. `KRUSTY_CONFORMANCE_SHARDS` above 1 partitions the sorted corpus
 # when one process cannot hold it; each piece still uses one libtest thread because rayon owns the
 # cores.
-# Pass 2 is ~40 independent JVM-backed tests. Give it one libtest thread per CPU. The server pool
-# is the same width, so those threads do not queue on a single kotlinc or javac JVM.
+# Pass 2 is ~40 independent JVM-backed tests. Give it one libtest thread per CPU. The kotlinc and
+# javac pools stay at one JVM unless `KRUSTY_SERVER_POOL` says otherwise.
 conf_threads="$ncpu"
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
@@ -378,16 +378,14 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary drives kotlinc plus persistent JVM box runners. Run it once, after conformance and
-# before the small-binary pool, with one libtest thread per CPU. The kotlinc/javap server pool and
-# the box-runner lane default to that same width, so in-flight calls use every core. Splitting the
-# binary into processes restarts those JVMs and the compiler classpath for every piece.
+# The e2e binary drives kotlinc plus a persistent JVM box runner. Run it once, after conformance
+# and before the small-binary pool, with one libtest thread per CPU. Splitting the binary into
+# processes restarts that JVM and the compiler classpath for every piece.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 if [ -n "$e2e_bin" ]; then
-  pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
-  echo "run-tests.sh: e2e threads=$ncpu box-runners=$pool" >&2
+  echo "run-tests.sh: e2e threads=$ncpu" >&2
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_E2E_TIMEOUT_SECONDS" \
-    KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
+    run_one \
       "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 

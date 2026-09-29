@@ -10,8 +10,6 @@ mod captured_field_storage_e2e;
 mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
-pub(crate) use common_core::box_pool::RunnerPool as BoxRunnerPool;
-pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/e2e.rs"]
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
