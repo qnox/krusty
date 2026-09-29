@@ -4154,12 +4154,13 @@ impl JvmLibraries {
                         .overloads
                         .into_iter()
                         .find(|setter| {
+                            // Java synthetic-property pairing is declaration-shape matching, not
+                            // call overload selection. A `setX` is the setter when its single
+                            // value parameter is the getter's exact semantic storage type. The
+                            // method's return type is not part of that shape: a fluent or
+                            // otherwise non-void Java setter is still a `var`, and the assignment
+                            // discards the result. Core assignability belongs above this boundary.
                             setter.callable.params.len() == 1
-                                && setter.callable.ret == Ty::Unit
-                                // Java synthetic-property pairing is declaration-shape matching,
-                                // not call overload selection. Publish only the setter whose single
-                                // value parameter is the getter's exact semantic storage type; core
-                                // assignability belongs above this provider boundary.
                                 && self.library_value_form(ty)
                                     == self.library_value_form(setter.callable.params[0])
                         });
@@ -5700,8 +5701,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let setter_callables =
                     crate::symbol_resolver::members_in_hierarchy(source, receiver, &setter_name);
                 let setter = setter_callables.functions().iter().cloned().find(|setter| {
+                    // Same pairing as a setter declared on the receiver: one value parameter of
+                    // the getter's storage type. The Java method may return anything.
                     setter.semantic_params().len() == 1
-                        && setter.callable.ret == Ty::Unit
                         && self.library_value_form(ty)
                             == self.library_value_form(setter.semantic_params()[0])
                 });

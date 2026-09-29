@@ -71,6 +71,26 @@ impl Emitter<'_> {
                     self.emit(expression, code);
                     return;
                 }
+                // A property assignment is `Unit` even when the Java setter returns the receiver
+                // or another value. That coercion is also a declaration-result coercion, and it
+                // carries no physical type: `value_ty` names the language result (`kotlin/Long`
+                // for a `long` setter) while the invoke leaves the descriptor's return. Drop
+                // whatever the stack tracker says the producer pushed. A void call leaves the
+                // height unchanged and is not popped.
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if *type_operand == crate::types::Ty::Unit && !self.diverges(*arg) => {
+                    let before = code.stack_height();
+                    self.emit_value(*arg, code);
+                    match code.stack_height() - before {
+                        1 => code.pop(),
+                        2 => code.pop2(),
+                        _ => {}
+                    }
+                    return;
+                }
                 // A generic call's erased result is discarded as it is. Reading it as the
                 // substituted type (a `checkcast`, an unboxing) exists only for a consumer, and
                 // kotlinc pops the erased value.

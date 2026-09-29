@@ -1007,6 +1007,8 @@ mod java_class_intrinsic_e2e;
 mod java_ctor_sam_conversion_e2e;
 #[path = "java_flexible_collection_e2e.rs"]
 mod java_flexible_collection_e2e;
+#[path = "java_fluent_setter_e2e.rs"]
+mod java_fluent_setter_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]

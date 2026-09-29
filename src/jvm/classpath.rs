@@ -5376,13 +5376,34 @@ fn class_property_write_access(
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
     };
+    // The bean getter's return descriptor, when this class declares one. A matching one-argument
+    // `setX` is the setter whatever it returns; without a getter, only a `void` setter remains,
+    // which is the shape a metadata-less fallback used before a getter was known.
+    let getter_return = [
+        crate::names::property_getter_name(property),
+        format!("is{}", capitalize(property)),
+    ]
+    .into_iter()
+    .find_map(|name| {
+        ci.methods.iter().find_map(|method| {
+            let (parameters, ret) = super::names::parse_method_descriptor(&method.descriptor)?;
+            (method.name == name && parameters.is_empty() && ret != "V").then_some(ret)
+        })
+    });
     let one_arg = |name: &str| {
         ci.methods
             .iter()
-            .find(|m| {
-                m.name == name
-                    && super::names::parse_method_descriptor(&m.descriptor)
-                        .is_some_and(|(parameters, ret)| parameters.len() == 1 && ret == "V")
+            .find(|method| {
+                method.name == name
+                    && super::names::parse_method_descriptor(&method.descriptor).is_some_and(
+                        |(parameters, ret)| {
+                            parameters.len() == 1
+                                && match getter_return {
+                                    Some(expected) => parameters[0] == expected,
+                                    None => ret == "V",
+                                }
+                        },
+                    )
             })
             .cloned()
     };

@@ -5838,13 +5838,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `captures_inner_shadowed_local` — runtime-verified).
 
 - **A Java accessor pair without `@Metadata` is a writable synthetic property.** `x.text = v` on a
-  Java receiver resolves the write to the single-argument `void` setter named by Kotlin's accessor
-  rules (`text` → `setText`, `isOpen` → `setOpen`) — but only when the getter also resolves
-  (kotlinc synthesizes the property from the getter; a setter alone creates none), and never when
-  the receiver has a real `@Metadata` property (a Kotlin `val` stays read-only even if a `setX`
-  exists). Among setter overloads, the one whose parameter matches the getter's type wins; an
-  ambiguous remainder resolves to none
-  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`).
+  Java receiver resolves the write to the single-argument setter named by Kotlin's accessor rules
+  (`text` → `setText`, `isOpen` → `setOpen`) — but only when the getter also resolves (kotlinc
+  synthesizes the property from the getter; a setter alone creates none), and never when the
+  receiver has a real `@Metadata` property (a Kotlin `val` stays read-only even if a `setX`
+  exists). The setter's return type is not part of the pair: `void`, a fluent receiver, or any
+  other return still makes a `var`, and the assignment calls that method and discards the result.
+  Among setter overloads, the one whose parameter matches the getter's type wins; an ambiguous
+  remainder resolves to none
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`,
+  `java_fluent_setter_e2e::java_setter_is_a_var_whatever_it_returns`).
 
 - **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
   signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on
