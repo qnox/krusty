@@ -1,5 +1,6 @@
 //! Shared test helpers.
 
+mod box_request;
 mod kotlin_metadata;
 mod kotlinc_lib;
 pub mod language_directives;
@@ -1226,7 +1227,7 @@ impl BoxRunner {
         })
     }
 
-    fn try_run(&self, classes: &[(String, Vec<u8>)], box_class: &str) -> std::io::Result<String> {
+    fn try_run(&self, classes: &[(&str, &[u8])], box_class: &str) -> std::io::Result<String> {
         if !self.alive.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -1237,19 +1238,9 @@ impl BoxRunner {
         let (tx, rx) = mpsc::channel();
         self.waiters.lock().unwrap().insert(id, tx);
 
-        // Frame the whole request into one buffer, then write it under the stdin lock so concurrent
-        // requests never interleave on the pipe.
-        let mut buf = Vec::with_capacity(64);
-        buf.extend_from_slice(&id.to_be_bytes());
-        buf.extend_from_slice(&(classes.len() as u32).to_be_bytes());
-        for (name, data) in classes {
-            buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
-            buf.extend_from_slice(name.as_bytes());
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(data);
-        }
-        buf.extend_from_slice(&(box_class.len() as u16).to_be_bytes());
-        buf.extend_from_slice(box_class.as_bytes());
+        // One exact-sized frame, written under the stdin lock so concurrent requests never
+        // interleave on the pipe. Class bodies are copied once, from the caller's buffers.
+        let buf = box_request::frame_box_request(id, classes, box_class);
         {
             let mut stdin = self.stdin.lock().unwrap();
             stdin.write_all(&buf)?;
@@ -1399,52 +1390,6 @@ impl RunnerPool {
     }
 }
 
-/// `(internal_name, bytes)` pairs, the shape BoxRunner's in-memory classloader consumes.
-#[allow(dead_code)]
-type ClassSet = Vec<(String, Vec<u8>)>;
-
-/// Recursively collect `(internal_name, bytes)` for every `.class` under a directory classpath
-/// entry, memoized by directory path. Safe to memoize: cached lib dirs are immutable once published
-/// (`compile_libs`), and per-test scratch dirs are unique per allocation, so a path's contents never
-/// change between calls within one process.
-#[allow(dead_code)]
-fn dir_classes(dir: &Path) -> Option<Arc<ClassSet>> {
-    type DirClassesMemo = Mutex<HashMap<PathBuf, Arc<ClassSet>>>;
-    static MEMO: OnceLock<DirClassesMemo> = OnceLock::new();
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = memo
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(dir)
-        .cloned()
-    {
-        return Some(hit);
-    }
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Option<()> {
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(root, &path, out)?;
-            } else if path.extension().is_some_and(|e| e == "class") {
-                let rel = path.strip_prefix(root).ok()?;
-                let name = rel
-                    .to_string_lossy()
-                    .trim_end_matches(".class")
-                    .replace(std::path::MAIN_SEPARATOR, "/");
-                out.push((name, std::fs::read(&path).ok()?));
-            }
-        }
-        Some(())
-    }
-    let mut classes = Vec::new();
-    walk(dir, dir, &mut classes)?;
-    let arc = Arc::new(classes);
-    memo.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(dir.to_path_buf(), arc.clone());
-    Some(arc)
-}
-
 /// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
 /// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
@@ -1472,23 +1417,22 @@ pub fn run_box(
     // lib object's static state would poison every later box() sharing that (now cached) lib. Jars
     // (stdlib, reflect, coroutines) stay on the system classpath: they are large, shared, and tests
     // don't assert on their mutable static state.
-    let mut request_classes: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut held_dirs = Vec::new();
     let mut cp = runner_dir.to_string_lossy().into_owned();
     for j in cp_jars {
         if j.is_dir() {
-            request_classes.extend(dir_classes(j)?.iter().cloned());
+            held_dirs.push(box_request::dir_classes(j)?);
         } else {
             cp.push(':');
             cp.push_str(&j.to_string_lossy());
         }
     }
-    let classes = if request_classes.is_empty() {
-        std::borrow::Cow::Borrowed(classes)
-    } else {
-        request_classes.extend(classes.iter().cloned());
-        std::borrow::Cow::Owned(request_classes)
-    };
-    let classes: &[(String, Vec<u8>)] = &classes;
+    let mut parts =
+        Vec::with_capacity(held_dirs.iter().map(|set| set.len()).sum::<usize>() + classes.len());
+    box_request::borrow_dir_classes(&held_dirs, &mut parts);
+    for (name, data) in classes {
+        parts.push((name.as_str(), data.as_slice()));
+    }
     let pool = POOL.get_or_init(|| {
         sweep_stale_temp_dirs();
         Mutex::new(RunnerPool::new())
@@ -1508,7 +1452,7 @@ pub fn run_box(
     };
 
     let runner = get_runner()?;
-    match runner.try_run(classes, box_class) {
+    match runner.try_run(&parts, box_class) {
         Ok(s) => Some(s),
         Err(_) => {
             // The JVM died or timed out. Replace the dead runner (if another thread hasn't already)
@@ -1524,7 +1468,7 @@ pub fn run_box(
                 }
             }
             let fresh = get_runner()?;
-            fresh.try_run(classes, box_class).ok()
+            fresh.try_run(&parts, box_class).ok()
         }
     }
 }

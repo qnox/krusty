@@ -7110,7 +7110,7 @@ mod tests {
         )
         .expect("member stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
         let libraries = initialized_libraries(classpath);
 
         assert!(crate::symbol_resolver::declared_member_callables(
@@ -7159,7 +7159,7 @@ mod tests {
         )
         .expect("field-hiding stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
         let libraries = initialized_libraries(classpath);
         let resolver = crate::symbol_resolver::SymbolResolver::new(&libraries);
 
@@ -7195,7 +7195,7 @@ mod tests {
         )
         .expect("protected associated-property stub");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
         let libraries = initialized_libraries(classpath);
 
         let base = type_name("sample/Base");
@@ -7229,7 +7229,7 @@ mod tests {
         )
         .expect("generic field stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
+        classpath.set_stub_overlay(&stubs);
         let libraries = initialized_libraries(classpath);
         let shape = libraries
             .classifier_record(type_name("sample/Holder"))
