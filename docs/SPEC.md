@@ -9578,6 +9578,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
   return is compiled and RUN to show its returned expression is evaluated exactly once.
 
+- **An uninitialized type-parameter local keeps that parameter's erased slot when inlined.**
+  `var result: R` with no initializer is a store of `R`'s zero. Unbounded `R`, and any bound that
+  erases to a reference, occupies a reference slot, so the zero is `aconst_null` and the slot stays
+  that reference after an inline call binds `R` to a JVM primitive. A later `Int` value is boxed
+  with `Integer.valueOf` into the slot, and a primitive use (the caller's `Int` return) unboxes
+  with `checkcast Number; intValue`. Retargeting the local itself to `int` unboxes the `null` and
+  throws. A primitive bound (`R : Int`) is already that primitive, so the zero becomes `iconst_0`
+  and the slot stays unboxed. A local that is initialized at the declaration (`val result: R =
+  block()`) specializes to the type argument, including a primitive slot. Test:
+  `tests/deferred_generic_local_e2e.rs`. Corpus: `codegen/box/boxingOptimization/kt48394.kt`.
+
 - **The inline expansion's argument slotting honors the trailing-lambda rule.** A syntactic
   trailing lambda binds the LAST parameter; omitted middles take their default expressions
   (substituted directly — an inline fn has no `$default` method). The positional fill previously put
