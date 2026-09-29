@@ -34,6 +34,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod enum_entries;
 mod failure;
 mod inline_body_plan;
 #[cfg(test)]
@@ -1004,78 +1005,6 @@ impl BodyFirChecker<'_> {
             .expect("too many checked-body implicit receivers");
     }
 
-    /// A local callable nested under an enum entry cannot read that entry's static field: the
-    /// field is still uninitialized while a nested constructor argument runs. Capture the entry
-    /// instance from the enclosing constructor instead, and let the callable load that parameter.
-    fn enum_entry_kind(
-        &mut self,
-        expression: ExprId,
-        classifier: crate::types::TypeName,
-        ordinal: u32,
-        name: &str,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        if self.body.local_callable().is_some() {
-            if let Some(path) = self.enclosing_enum_entry_path(classifier, name) {
-                if !path.is_empty() {
-                    let origin = self.expression_origin(expression)?;
-                    let ty = self.expression_type(expression)?;
-                    self.body
-                        .add_implicit_receiver_capture(FirImplicitReceiverCapture {
-                            origin,
-                            enclosing_depth: 0,
-                            current: false,
-                            depth: 0,
-                            path: path.clone().into_boxed_slice(),
-                            ty,
-                        });
-                    return Ok(FirExprKind::CapturedImplicitReceiver {
-                        enclosing_depth: 0,
-                        current: false,
-                        depth: 0,
-                        path: path.into_boxed_slice(),
-                    });
-                }
-            }
-        }
-        Ok(FirExprKind::EnumEntry {
-            classifier,
-            ordinal,
-            name: name.to_owned().into_boxed_str(),
-        })
-    }
-
-    /// Classifiers between this body and its enclosing enum entry, innermost first.
-    ///
-    /// An empty path means the body is the entry itself. `None` means this body is not inside
-    /// the named entry.
-    fn enclosing_enum_entry_path(
-        &self,
-        classifier: crate::types::TypeName,
-        name: &str,
-    ) -> Option<Vec<DeclarationId>> {
-        let mut current = DeclarationId::from_raw(self.body.owner().raw());
-        let mut path = Vec::new();
-        loop {
-            let anchor = self.index.declaration_anchor(current)?;
-            if anchor.kind == crate::fir::DeclarationKind::EnumEntry {
-                let entry_name = self.index.declaration_name(current)?;
-                if entry_name != name {
-                    return None;
-                }
-                let enum_declaration = anchor.owner?;
-                let header = self.index.classifier_header(enum_declaration)?;
-                if header.classifier != classifier {
-                    return None;
-                }
-                return Some(path);
-            }
-            if anchor.kind == crate::fir::DeclarationKind::Classifier {
-                path.push(current);
-            }
-            current = anchor.owner?;
-        }
-    }
-
     /// Semantic receiver frame exposed to a nested callable. Direct callable receivers are ordinary
     /// slots. A non-local member body can additionally expose outer instances through an `inner`
     /// classifier chain; publish the exact declaration path for each such coordinate so a nested
@@ -1957,10 +1886,8 @@ impl BodyFirChecker<'_> {
                             classifier: singleton.classifier,
                         }
                     } else if let Some(entry) = self.info.resolved_enum_entry(expression) {
-                        let classifier = entry.classifier;
-                        let ordinal = entry.ordinal;
-                        let name = entry.name.clone();
-                        self.enum_entry_kind(expression, classifier, ordinal, &name)?
+                        let entry = entry.clone();
+                        self.enum_entry_kind(expression, &entry)?
                     } else if let Some((depth, delegate)) = self.delegated_binding(name) {
                         return self.delegated_read(expression, depth, delegate);
                     } else if let Some(local) = self.local_binding(name) {
@@ -2613,10 +2540,8 @@ impl BodyFirChecker<'_> {
                 }
                 Expr::Member { receiver, .. } => {
                     if let Some(entry) = self.info.resolved_enum_entry(expression) {
-                        let classifier = entry.classifier;
-                        let ordinal = entry.ordinal;
-                        let name = entry.name.clone();
-                        self.enum_entry_kind(expression, classifier, ordinal, &name)?
+                        let entry = entry.clone();
+                        self.enum_entry_kind(expression, &entry)?
                     } else if let Some(constant) = self.info.resolved_constants.get(&expression) {
                         // The constant payload is the selected value, but Kotlin still evaluates an
                         // ordinary VALUE receiver (`config().VALUE`) for effects before inlining it.

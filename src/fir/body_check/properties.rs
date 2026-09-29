@@ -2221,11 +2221,8 @@ impl BodyFirChecker<'_> {
             });
         }
         if let Some(entry) = self.info.resolved_enum_entry(expression) {
-            return Ok(FirExprKind::EnumEntry {
-                classifier: entry.classifier,
-                ordinal: entry.ordinal,
-                name: entry.name.clone().into_boxed_str(),
-            });
+            let entry = entry.clone();
+            return self.enum_entry_kind(expression, &entry);
         }
         // `::v.isInitialized` on a `lateinit var`. kotlinc compiles it to a NULL CHECK on the
         // backing field — a lateinit field holds `null` until assigned — so there is no reflection

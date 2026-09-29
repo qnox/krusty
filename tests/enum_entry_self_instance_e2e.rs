@@ -70,13 +70,14 @@ fn an_inner_class_initializer_calls_the_enclosing_enum_entry() {
              FOO {\n\
                  inner class Inner {\n\
                      val fooFoo = FOO.foo()\n\
+                     val qualified = Test.FOO\n\
                  }\n\
          \n\
                  val z = Inner()\n\
          \n\
                  override fun foo() = \"OK\"\n\
          \n\
-                 override fun bar() = z.fooFoo\n\
+                 override fun bar() = if (z.qualified === this) z.fooFoo else \"qualified\"\n\
              }\n\
          }\n\
          \n\
