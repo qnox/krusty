@@ -4053,7 +4053,7 @@ impl Classpath {
     /// [`Self::method_code`] for a classifier that is already interned. The body cache and the
     /// multifile superclass walk stay on that identity; a classfile spelling is built only when an
     /// uncached entry has to read bytes.
-    pub fn method_code_name(
+    pub(super) fn method_code_name(
         &self,
         internal: TypeName,
         name: &str,
