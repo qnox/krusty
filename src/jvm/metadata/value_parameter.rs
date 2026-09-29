@@ -80,7 +80,11 @@ impl MvpFlags {
 
 /// Parameter source name. Equal names share one interned spelling.
 pub(super) fn parameter_name(spelling: &str) -> &'static str {
-    crate::types::intern(spelling)
+    crate::jvm::member_spelling::intern(spelling)
+}
+
+pub(super) fn parameter_name_owned(spelling: String) -> &'static str {
+    crate::jvm::member_spelling::intern_owned(spelling)
 }
 
 #[derive(Clone, Debug)]
