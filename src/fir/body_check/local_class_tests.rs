@@ -261,6 +261,55 @@ fn a_constructor_prefix_read_carries_its_frame_in_fir() {
 }
 
 #[test]
+fn inner_super_argument_lambda_reads_the_outer_capture_off_the_enclosing_instance() {
+    let (_, bodies) = checked_streamed_bodies(
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val o = \"O\"\n\
+         class Local {\n\
+         inner class Inner(k: String) : Base({ o + k }) }\n\
+         return Local().Inner(\"K\").fn() }\n",
+    );
+    // `from_enclosing` is a field read whose receiver is already the outer instance.
+    // `from_this` is the verifier bug: the lambda captured uninitialized `this` and walked
+    // `this$0` itself.
+    fn storage_reads(body: &FirBody, from_enclosing: &mut u32, from_this: &mut u32) {
+        for raw in 0..body.expression_count() {
+            let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
+                continue;
+            };
+            if let FirExprKind::CapturedClassStorageRead { path, receiver, .. } = &expression.kind {
+                match body.expr(*receiver).map(|receiver| &receiver.kind) {
+                    Some(FirExprKind::CapturedImplicitReceiver { path: walk, .. })
+                        if path.is_empty() && !walk.is_empty() =>
+                    {
+                        *from_enclosing += 1;
+                    }
+                    Some(FirExprKind::CapturedImplicitReceiver { path: walk, .. })
+                        if walk.is_empty() =>
+                    {
+                        *from_this += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if let FirExprKind::Lambda { body: nested, .. } = &expression.kind {
+                storage_reads(nested, from_enclosing, from_this);
+            }
+        }
+    }
+    let (mut from_enclosing, mut from_this) = (0, 0);
+    for body in &bodies {
+        storage_reads(body, &mut from_enclosing, &mut from_this);
+    }
+    assert_eq!(
+        (from_enclosing, from_this),
+        (1, 0),
+        "the outer capture is read from the enclosing instance, not from this"
+    );
+}
+
+#[test]
 fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
     let (index, bodies) = checked_streamed_bodies(
         "interface Callback { fun invoke(): String }\n\
