@@ -262,7 +262,7 @@ impl Emitter<'_> {
 
 /// The classfile owner of one property realization. Emission repeats the same classifiers, so this
 /// borrows the remembered spelling instead of walking the name tree on every read.
-fn property_realization_owner(owner: crate::types::TypeName) -> &'static str {
+pub(super) fn property_realization_owner(owner: crate::types::TypeName) -> &'static str {
     owner.rendered()
 }
 
