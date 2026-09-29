@@ -113,14 +113,15 @@ fn plain_parameter_nullability(
     }
     if matches!(argument.ty, Ty::PlatformNullable(_)) {
         0
+    } else if argument.ty.is_nullable() {
+        // `p: T?` is nullable at the occurrence. The parameter's bound answers only a bare `T`.
+        2
     } else if let Some(parameter) = argument.type_param {
         let name = c
             .type_params
             .get(parameter as usize)
             .expect("a constructor parameter's type parameter is declared by its class");
         u8::from(!ir.class_type_param_admits_null(fq_name, name))
-    } else if matches!(argument.ty, Ty::Nullable(_)) {
-        2
     } else {
         1
     }

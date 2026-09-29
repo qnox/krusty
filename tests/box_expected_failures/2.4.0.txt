@@ -97,7 +97,6 @@ functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
 increment/argumentWithSideEffects.kt
 inference/capturedSelfInsideIntersection.kt
-inference/capturedTypeAsLambdaInputType.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/kt67609.kt
 inference/overrideDefaultProperty.kt

@@ -9116,12 +9116,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`abstract_set_contains_rejects_a_foreign_entry`). Corpus:
   `builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt`.
 
-- **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
-  `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
-  `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.
-  An UNBOUNDED `T` puts the same entry at pc 0, so the bound is what moves it. Found while fixture-
-  reducing the bridge-return unbox above (whose test therefore holds its slot as `Any?`); it accounts
-  for the corpus's `ClassFormatError:Invalid pc in LineNumberTable` bucket and is not fixed here.
+- **A nullable use of a bounded type parameter is `@Nullable` and unguarded.** `var c: T?` and a
+  constructor parameter `p: T?` admit null even when `T : Number` or `T : Any`. The field, the
+  getter, the setter parameter, and a plain constructor parameter are `@Nullable`, and the setter
+  has no `checkNotNullParameter`. Its `LineNumberTable` entry is at pc 0. Classifying the
+  occurrence by the bound instead marked it `@NotNull` and placed the line entry at the width of a
+  null check the setter does not emit (`pc == code_length`), so loading the class threw
+  `ClassFormatError: Invalid pc in LineNumberTable`. A BARE `T` still follows the bound: `<T : Any>`
+  is `@NotNull` and guarded, an unbounded `<T>` is unannotated. Test:
+  `tests/type_parameter_nullability_e2e.rs`. Corpus:
+  `inference/capturedTypeAsLambdaInputType.kt`.
 
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
