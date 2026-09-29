@@ -5078,7 +5078,9 @@ fn member_property_write_from_declaration(
     declaration: &PropertyInfo,
 ) -> Option<ResolvedPropertySetter> {
     let setter = declaration.setter.clone()?;
-    (setter.params.len() == 1 && setter.ret == Ty::Unit).then_some(ResolvedPropertySetter {
+    // Writability is the presence of a one-argument setter. Kotlin setters return `Unit`; a Java
+    // bean setter may return the receiver or any other value, and the assignment discards it.
+    (setter.params.len() == 1).then_some(ResolvedPropertySetter {
         callable: setter,
         visibility: declaration.setter_visibility,
         source_member: declaration.source_member,
