@@ -492,7 +492,7 @@ impl JvmLibraries {
             context_param_names: mp
                 .context_params
                 .iter()
-                .map(|parameter| parameter.name.clone())
+                .map(|parameter| parameter.name.to_owned())
                 .collect(),
             context_parameter_identities,
             getter,

@@ -242,7 +242,7 @@ impl MetaFn {
         let (lambda_receivers, lambda_receiver_params) = self.lambda_receiver_shape();
         let mut sig = CallSig::metadata_function(
             parameters.len(),
-            parameters.iter().map(|p| p.name.clone()).collect(),
+            parameters.iter().map(|p| p.name.to_owned()).collect(),
             parameters.iter().map(|p| p.has_default()).collect(),
             lambda_receivers,
             lambda_receiver_params,
@@ -259,7 +259,7 @@ impl MetaFn {
             sig.parameter_identities[ordinal] = match kind {
                 ContextParameterKind::Named => ResolvedParameterIdentity::ContextValue {
                     ordinal: ordinal as u32,
-                    source_name: parameter.name.as_str().into(),
+                    source_name: parameter.name.into(),
                 },
                 ContextParameterKind::Anonymous => {
                     ResolvedParameterIdentity::AnonymousContextParameter {
@@ -366,7 +366,7 @@ mod tests {
         let mut decoded = blank();
         decoded.context_params = vec![MetaValueParam {
             ty: Ty::obj("kotlin/Any").obj_internal(),
-            name: "ctx".to_string(),
+            name: "ctx",
             flags: super::super::MvpFlags::default(),
             recv_fun_receiver: None,
         }];

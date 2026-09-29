@@ -1745,12 +1745,12 @@ impl JvmLibraries {
                         declaration
                             .value_params
                             .iter()
-                            .map(|parameter| parameter.name.as_str())
+                            .map(|parameter| parameter.name)
                             .collect::<Vec<_>>(),
                         declaration
                             .context_params()
                             .iter()
-                            .map(|parameter| parameter.name.as_str())
+                            .map(|parameter| parameter.name)
                             .collect::<Vec<_>>(),
                     );
                     let Some(signature) = declaration.generic_sig.clone() else {
@@ -3875,7 +3875,7 @@ impl JvmLibraries {
                         context_param_names: mp
                             .context_params
                             .iter()
-                            .map(|parameter| parameter.name.clone())
+                            .map(|parameter| parameter.name.to_owned())
                             .collect(),
                         context_parameter_identities: mp.context_parameter_identities(),
                         getter,
@@ -4022,7 +4022,7 @@ impl JvmLibraries {
                     context_param_names: mp
                         .context_params
                         .iter()
-                        .map(|parameter| parameter.name.clone())
+                        .map(|parameter| parameter.name.to_owned())
                         .collect(),
                     context_parameter_identities: mp.context_parameter_identities(),
                     getter,

@@ -78,10 +78,16 @@ impl MvpFlags {
     }
 }
 
+/// Parameter source name. Equal names share one interned spelling.
+pub(super) fn parameter_name(spelling: &str) -> &'static str {
+    crate::types::intern(spelling)
+}
+
 #[derive(Clone, Debug)]
 pub struct MetaValueParam {
     pub ty: Option<TypeName>,
-    pub name: String,
+    /// Source name. Repeated names (`value`, `other`, and the rest) share one interned spelling.
+    pub name: &'static str,
     /// Bit-packed `has_default`/`crossinline`/`noinline`/`vararg`/`recv_fun`/`nullable`/`suspend_fun` (read
     /// via the accessors below).
     /// `vararg` — `vararg elem: T`. Only `@Metadata` records this: the JVM descriptor shows just the
@@ -146,7 +152,7 @@ mod tests {
     fn published(flags: u64) -> InlineParameterModifier {
         MetaValueParam {
             ty: None,
-            name: "block".to_string(),
+            name: "block",
             flags: MvpFlags::default()
                 .with_has_default(true)
                 .with_inline_modifier(
@@ -181,7 +187,7 @@ mod tests {
             .with_inline_modifier(InlineParameterModifier::Crossinline);
         let parameter = MetaValueParam {
             ty: None,
-            name: "block".to_string(),
+            name: "block",
             flags,
             recv_fun_receiver: None,
         };
@@ -193,5 +199,14 @@ mod tests {
         assert!(parameter.vararg());
         assert!(parameter.no_infer());
         assert!(!parameter.nullable());
+    }
+
+    #[test]
+    fn repeated_parameter_names_share_one_spelling() {
+        let first = parameter_name("other");
+        let second = parameter_name("other");
+        let renamed = parameter_name("index");
+        assert!(std::ptr::eq(first, second));
+        assert!(!std::ptr::eq(first, renamed));
     }
 }

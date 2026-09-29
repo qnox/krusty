@@ -1502,7 +1502,7 @@ impl MetaProp {
                 crate::types::ContextParameterKind::Named => {
                     crate::fir::ResolvedParameterIdentity::ContextValue {
                         ordinal: ordinal as u32,
-                        source_name: parameter.name.as_str().into(),
+                        source_name: parameter.name.into(),
                     }
                 }
                 crate::types::ContextParameterKind::Anonymous => {
@@ -2183,8 +2183,10 @@ fn decode_functions(
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
                             // Param names are plain string-table entries (like the JVM name/desc), not class names.
-                            name: resolve_string(records, d2, p.name_id as usize)
-                                .unwrap_or_default(),
+                            name: value_parameter::parameter_name(
+                                &resolve_string(records, d2, p.name_id as usize)
+                                    .unwrap_or_default(),
+                            ),
                             flags: MvpFlags::default()
                                 .with_has_default(declared.declares_default)
                                 .with_inline_modifier(declared.inline_modifier)
@@ -2224,7 +2226,7 @@ fn decode_functions(
                                 .map(|parameter| {
                                     let mut parameter = decode_parameter(parameter);
                                     if parameter.name == "<unused var>" {
-                                        parameter.name = "_".to_owned();
+                                        parameter.name = value_parameter::parameter_name("_");
                                     }
                                     parameter
                                 })
@@ -2246,7 +2248,7 @@ fn decode_functions(
                                 let ty = ty?;
                                 Some(MetaValueParam {
                                     ty: declared_classifier(ty),
-                                    name: String::new(),
+                                    name: value_parameter::parameter_name(""),
                                     flags: MvpFlags::default()
                                         .with_nullable(ty.is_nullable())
                                         .with_has_type_facts(true),
@@ -2295,7 +2297,7 @@ fn decode_functions(
                             value_params
                                 .iter()
                                 .map(|parameter| (
-                                    parameter.name.as_str(),
+                                    parameter.name,
                                     parameter.ty.map(TypeName::render),
                                     parameter.recv_fun(),
                                     parameter.recv_fun_receiver.map(TypeName::render),
@@ -2313,7 +2315,7 @@ fn decode_functions(
                             value_params
                                 .iter()
                                 .map(|parameter| (
-                                    parameter.name.as_str(),
+                                    parameter.name,
                                     parameter.ty.map(TypeName::render),
                                     parameter.recv_fun(),
                                     parameter.recv_fun_receiver.map(TypeName::render),
