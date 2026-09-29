@@ -3915,6 +3915,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   singleton bound as receiver instead of an invoke. Tests:
   `tests/classpath_object_member_extension_import_e2e.rs`.
 
+- **A public package or extension property whose JVM getter is private is the same inline body.**
+  `@InlineOnly` keeps the Kotlin declaration public and emits the getter as a private static method
+  that exists only to be spliced (`Path.pathString`, `Instant.isDistantPast`). The package-facade
+  property provider publishes that declaration when metadata visibility is public, marks the getter
+  `MustInline`, and leaves a non-public declaration with no compiler realization unpublished. A
+  compiler intrinsic such as `coroutineContext` is still the checker's realization; its private
+  throwing getter is not a callable fallback. A public getter stays an ordinary call. Test:
+  `tests/inline_only_extension_property_e2e.rs`.
+
 - **A VALUE CLASS passed to a classpath TOP-LEVEL function resolves against its DECLARED type, not its
   erasure.** `taggedOnly(Tag("x"))` was `unresolved function`; `spend(budget = …)` was `argument type
   mismatch: actual type is 'lib.Budget', but 'Long' was expected`. A `@JvmInline value class` erases to
