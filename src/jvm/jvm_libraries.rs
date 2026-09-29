@@ -6652,6 +6652,50 @@ mod tests {
     }
 
     #[test]
+    fn array_list_size_symbol_is_the_public_method_not_the_private_field() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ));
+        let resolver = crate::symbol_resolver::SymbolResolver::new(&libraries);
+        let receiver = Ty::obj_args("java/util/ArrayList", &[Ty::String]);
+        let read = resolver
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                "size",
+                &[],
+                &[],
+            )
+            .and_then(crate::symbol_resolver::Symbol::property)
+            .expect("ArrayList.size is a property read");
+        assert_eq!(read.member.name, "size");
+        assert_eq!(read.member.descriptor, "()I", "{read:?}");
+        assert!(
+            read.member
+                .owner
+                .is_some_and(|owner| owner.matches("java/util/ArrayList")),
+            "{read:?}"
+        );
+        assert!(
+            resolver
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    "size",
+                    &[],
+                    &[],
+                )
+                .and_then(crate::symbol_resolver::Symbol::property_setter)
+                .is_none(),
+            "the private size field must not publish a setter beside size()"
+        );
+    }
+
+    #[test]
     fn stdlib_boolean_classifier_exposes_comparable_member() {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;

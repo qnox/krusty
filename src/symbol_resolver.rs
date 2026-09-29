@@ -5037,11 +5037,9 @@ fn resolved_member_from_info(
 }
 
 fn member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
-    callables
-        .properties()
-        .iter()
-        .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
-        .min_by_key(|property| property.receiver_rank)
+    nearest_member_properties(callables)
+        .into_iter()
+        .next()
         .cloned()
 }
 
@@ -5075,21 +5073,33 @@ fn member_property_write_from_declaration(
 }
 
 fn member_property_write_from_callables(callables: &Callables) -> Option<ResolvedPropertySetter> {
-    let rank = callables
+    nearest_member_properties(callables)
+        .into_iter()
+        .find_map(member_property_write_from_declaration)
+}
+
+/// Member properties on the nearest receiver rung. A private Java field published beside a
+/// public method of the same name (`java.util.ArrayList.size`) is not the Kotlin property, so
+/// it is dropped when any non-private declaration shares that rung. A private declaration that
+/// is alone on the nearest rung stays: that is a Kotlin `private` member hiding a farther
+/// public one.
+fn nearest_member_properties(callables: &Callables) -> Vec<&PropertyInfo> {
+    let mut members = callables
         .properties()
         .iter()
         .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
-        .map(|property| property.receiver_rank)
-        .min()?;
-    callables
-        .properties()
+        .collect::<Vec<_>>();
+    let Some(nearest) = members.iter().map(|property| property.receiver_rank).min() else {
+        return Vec::new();
+    };
+    members.retain(|property| property.receiver_rank == nearest);
+    if members
         .iter()
-        .filter(|property| {
-            property.kind == PropKind::Member
-                && property.context_count == 0
-                && property.receiver_rank == rank
-        })
-        .find_map(member_property_write_from_declaration)
+        .any(|property| property.visibility != Visibility::Private)
+    {
+        members.retain(|property| property.visibility != Visibility::Private);
+    }
+    members
 }
 
 fn select_instance_info(
