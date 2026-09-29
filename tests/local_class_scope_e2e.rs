@@ -103,6 +103,32 @@ fn an_anonymous_object_getter_reads_the_enclosing_parameter() {
     assert_eq!(run(SRC).expect("getter reads the parameter"), "OK");
 }
 
+/// kotlinc 2.4.20: `this@Box` inside an anonymous subclass of `Box` is the enclosing instance.
+/// The subclass extends `Box`, so loading the current `this` and casting it is a different object.
+#[test]
+fn an_anonymous_subclass_labeled_this_is_the_enclosing_instance() {
+    const SRC: &str = r#"
+abstract class Box<T> {
+    abstract val owner: Box<T>
+    fun child(): Box<T> = object : Box<T>() {
+        override val owner: Box<T>
+            get() = this@Box
+    }
+}
+fun box(): String {
+    val outer = object : Box<String>() {
+        override val owner: Box<String>
+            get() = this
+    }
+    return if (outer.child().owner === outer) "OK" else "fail"
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("labeled this is the enclosing instance"),
+        "OK"
+    );
+}
+
 /// kotlinc 2.4.20: `objects/flist.kt` prints `OK`. Each `plus` stores its parameter.
 #[test]
 fn functional_list_plus_reads_the_element_parameter() {

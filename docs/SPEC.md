@@ -6704,13 +6704,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own property of the same spelling. `fun f(x: Int) { class C { val x = 2; fun g() = x } }` makes
   `g()` return `f`'s `x`; `val y = x` in that class also reads `f`'s `x`; `object { val head get()
   = head }` inside `fun plus(head: T)` reads the parameter (`objects/flist.kt`). `this.x` is still
-  the property. A block local inside the nested classifier is nearer and wins. A constructor
+  the property. `this@Outer` inside that nested classifier is the enclosing instance, including
+  when the classifier extends `Outer` (`get() = this@FList` loads the captured outer, not the
+  anonymous subclass). A block local inside the nested classifier is nearer and wins. A constructor
   property with no enclosing local still shadows the enclosing class (`class L(val tag: String)`
   inside `Outer.tag` reads `L`'s `tag`). A smart cast of the outer local applies in the nested
   body. Verified against kotlinc 2.4.20. The nested classifier captures the local. An unqualified
   read or assignment uses that capture; `this.name` reads the property's own field.
   Tests: `tests/local_class_scope_e2e.rs`
   (`an_anonymous_object_getter_reads_the_enclosing_parameter`,
+  `an_anonymous_subclass_labeled_this_is_the_enclosing_instance`,
   `a_local_class_member_reads_the_enclosing_parameter`,
   `a_nested_classifier_assignment_writes_the_enclosing_local`,
   `an_outer_smart_cast_applies_inside_a_nested_classifier`).
