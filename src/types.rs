@@ -267,6 +267,12 @@ impl TypeName {
         type_names().jvm_binary_name(self.name_id())
     }
 
+    /// JVM classfile identity of this classifier, retaining the namespace while flattening dotted
+    /// metadata/source nesting in its final segment.
+    pub(crate) fn jvm_binary_identity(self) -> TypeName {
+        TypeName(type_names().jvm_binary_identity(self.name_id()))
+    }
+
     /// JVM classfile spelling for a nested classifier below this identity, without interning it.
     pub(crate) fn jvm_nested_binary_name(self, nested: &str) -> String {
         type_names().jvm_nested_binary_name(self.name_id(), nested)
