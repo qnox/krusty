@@ -386,3 +386,27 @@ fn an_anonymous_object_two_callables_deep_writes_through_the_shared_cell() {
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("AnonSharedCellWriteThrough", SOURCE);
 }
+
+/// An inlined suspend lambda stored on the anonymous object is that object's capture.
+/// `coroutines/unsafeTransform.kt` NPEs when the generated field `block` is left null.
+#[test]
+fn an_inlined_suspend_lambda_capture_is_initialized() {
+    const SOURCE: &str = "import kotlin.coroutines.*\n\
+         interface Flow<T> { suspend fun collect(collector: FlowCollector<T>) }\n\
+         fun interface FlowCollector<T> { suspend fun emit(value: T) }\n\
+         inline fun <T> unsafeFlow(crossinline block: suspend FlowCollector<T>.() -> Unit): Flow<T> {\n\
+             return object : Flow<T> {\n\
+                 override suspend fun collect(collector: FlowCollector<T>) { collector.block() }\n\
+             }\n\
+         }\n\
+         fun builder(c: suspend () -> Unit) {\n\
+             c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+         }\n\
+         fun box(): String {\n\
+             var seen = \"fail\"\n\
+             builder { unsafeFlow<String> { emit(\"OK\") }.collect { seen = it } }\n\
+             return seen\n\
+         }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonInlineSuspendLambdaCapture", SOURCE);
+}
