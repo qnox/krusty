@@ -84,15 +84,7 @@ pub use crate::names::property_getter_name;
 /// A classifier's class id with `$` between nested segments (`app/Outer.Inner` → `app/Outer$Inner`),
 /// read from the name tree. Unlike [`classfile_internal_name`] it maps no built-in.
 pub(super) fn binary_class_name(classifier: TypeName) -> String {
-    match classifier.nested_owner() {
-        Some(owner) => {
-            let segment = classifier
-                .nested_segment_within(owner)
-                .expect("a recorded nested owner must own the classifier segment");
-            format!("{}${segment}", binary_class_name(owner))
-        }
-        None => classifier.render(),
-    }
+    classifier.jvm_binary_name()
 }
 
 /// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
@@ -132,23 +124,16 @@ fn physical_classfile_name_of(internal: TypeName) -> String {
     if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_jvm_class(internal) {
         return intrinsic;
     }
+    if let Some(function) = crate::jvm::function_classifiers::classifier(internal) {
+        if function.is_reflective() {
+            return crate::types::KFUNCTION_INTERNAL.to_owned();
+        }
+        if !function.is_suspend() {
+            return function_interface_internal_name(function.arity());
+        }
+    }
     let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
-    // Numbered and reflective function classifiers erase to a JVM interface that is not in the
-    // builtin identity table. That spelling still comes from the string mapping, once.
-    if mapped == internal && crate::jvm::jvm_class_map::maps_to_distinct_jvm_internal(internal) {
-        return physical_classfile_name(&internal.render());
-    }
-    let segment = mapped.segment_ref();
-    if segment.contains('.') {
-        let rendered = mapped.render();
-        let tail = rendered.rfind('/').map_or(0, |slash| slash + 1);
-        return format!(
-            "{}{}",
-            &rendered[..tail],
-            rendered[tail..].replace('.', "$")
-        );
-    }
-    mapped.render()
+    mapped.jvm_binary_name()
 }
 
 fn physical_classfile_name(internal: &str) -> String {
@@ -525,6 +510,7 @@ mod tests {
             type_descriptor(Ty::obj("kotlin/Function1")),
             "Lkotlin/jvm/functions/Function1;"
         );
+        // Exercise the remembered identity path as well as the initial conversion.
         assert_eq!(
             type_descriptor(Ty::obj("kotlin/Function1")),
             "Lkotlin/jvm/functions/Function1;"
