@@ -952,25 +952,35 @@ fn instance_field_jvm_name(
     }
     let owner = class.fq_name();
     let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
-    let conflicts_with_static = ir.statics.iter().any(|static_field| {
-        static_field.owner_matches(&owner)
-            && static_field.name == field.name
-            && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
-    });
-    if !conflicts_with_static {
+    let base = field.name.as_str();
+    // An earlier field may already have been suffixed, so occupancy is the physical name, not
+    // the source spelling. Two delegated properties of one name (`val prop` and `val String.prop`)
+    // both ask for `prop$delegate`; the later one becomes `prop$delegate$1`.
+    let earlier_has = |candidate: &str| {
+        class
+            .fields
+            .iter()
+            .take(field_index)
+            .any(|other| instance_field_jvm_name(ir, class, other) == candidate)
+    };
+    let conflicts_with_static = |candidate: &str| {
+        ir.statics.iter().enumerate().any(|(index, static_field)| {
+            static_field.owner_matches(&owner)
+                && ir.static_field_jvm_name(index as u32) == candidate
+                && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
+        })
+    };
+    if !conflicts_with_static(base) && !earlier_has(base) {
         return field.name.clone();
     }
     for suffix in 1usize.. {
-        let candidate = format!("{}${suffix}", field.name);
-        let occupied_by_instance = class.fields.iter().any(|other| {
-            other.name == candidate && type_descriptor(jvm_declared_ty(&other.ty)) == descriptor
-        });
-        let occupied_by_static = ir.statics.iter().any(|static_field| {
-            static_field.owner_matches(&owner)
-                && static_field.name == candidate
-                && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
-        });
-        if !occupied_by_instance && !occupied_by_static {
+        let candidate = format!("{base}${suffix}");
+        if !earlier_has(&candidate)
+            && !conflicts_with_static(&candidate)
+            && !class.fields.iter().any(|other| {
+                other.name == candidate && type_descriptor(jvm_declared_ty(&other.ty)) == descriptor
+            })
+        {
             return candidate;
         }
     }

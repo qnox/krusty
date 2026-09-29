@@ -123,7 +123,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             });
         cw.add_field_late_sig(
             acc,
-            &s.name,
+            ir.static_field_jvm_name(static_index),
             &desc,
             signatures.field.as_deref(),
             cv,
@@ -260,6 +260,7 @@ pub(super) fn emit_default_static_accessor(
             cw,
             owner,
             s,
+            ir.static_field_jvm_name(static_index),
             &signatures,
             acc_ann,
             param_assertions && nullability == 1,
@@ -267,6 +268,7 @@ pub(super) fn emit_default_static_accessor(
         return;
     }
     let gname = property_getter_name(&s.name);
+    let field_name = ir.static_field_jvm_name(static_index);
     cw.reserve_method_name(&gname);
     cw.seed_utf8(&format!("(){desc}"));
     // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
@@ -281,7 +283,7 @@ pub(super) fn emit_default_static_accessor(
     if s.line != 0 {
         g.mark_line(s.line);
     }
-    let fref = cw.fieldref(owner, &s.name, &desc);
+    let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
     emit_return(jt, &mut g);
     finish_code_sig::<0x0019>(
@@ -300,6 +302,7 @@ fn emit_default_static_setter(
     cw: &mut ClassWriter,
     owner: &str,
     s: &crate::ir::IrStatic,
+    field_name: &str,
     signatures: &JvmPropertySignatures,
     acc_ann: Option<&str>,
     checks_parameter: bool,
@@ -336,7 +339,7 @@ fn emit_default_static_setter(
         st.mark_line(s.line);
     }
     load(jt, 0, &mut st);
-    let fref = cw.fieldref(owner, &s.name, &desc);
+    let fref = cw.fieldref(owner, field_name, &desc);
     st.putstatic(fref, slot_words(jt) as i32);
     st.ret_void();
     finish_code_sig::<0x0019>(
@@ -645,7 +648,11 @@ impl Emitter<'_> {
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
         // cross-file property-access compilation.
         else if self.static_owner == Some(StaticOwner::Facade) || is_const {
-            let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
+            let fref = self.cw.fieldref(
+                &facade,
+                self.ir.static_field_jvm_name(i),
+                &type_descriptor(jt),
+            );
             code.getstatic(fref, slot_words(jt) as i32);
         } else {
             let m = self.cw.methodref(
@@ -727,7 +734,11 @@ impl Emitter<'_> {
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
         } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
-            let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
+            let fref = self.cw.fieldref(
+                &facade,
+                self.ir.static_field_jvm_name(index),
+                &type_descriptor(jt),
+            );
             code.putstatic(fref, slot_words(jt) as i32);
         } else {
             let m = self.cw.methodref(

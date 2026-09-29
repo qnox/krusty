@@ -555,6 +555,8 @@ mod delegated_member_prop_e2e;
 mod delegated_prop_e2e;
 #[path = "delegated_properties_array_e2e.rs"]
 mod delegated_properties_array_e2e;
+#[path = "extension_delegate_fields_e2e.rs"]
+mod extension_delegate_fields_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
 #[path = "dependency_override_signature_e2e.rs"]
