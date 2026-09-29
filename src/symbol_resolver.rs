@@ -7971,10 +7971,17 @@ mod tests {
         }
 
         fn library_value_form(&self, ty: Ty) -> Ty {
-            ty.obj_internal()
-                .and_then(|n| crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&n.render()))
-                .map(Ty::obj)
-                .unwrap_or(ty)
+            let Some(internal) = ty.obj_internal() else {
+                return ty;
+            };
+            // A primitive classifier keeps its semantic identity. Boxing is a separate lookup.
+            if ty.scalar_value_repr().is_some() {
+                return ty;
+            }
+            match crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal(internal) {
+                Some(jvm) if !internal.matches(jvm) => Ty::obj(jvm),
+                _ => ty,
+            }
         }
     }
 

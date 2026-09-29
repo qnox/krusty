@@ -171,9 +171,10 @@ fn meta_ids() -> &'static MetaNameIds {
         ]
         .into_iter()
         .filter_map(|name| {
+            let id = tn(name);
             Some((
-                tn(name),
-                tn(crate::jvm::jvm_class_map::kotlin_prim_to_wrapper(name)?),
+                id,
+                crate::jvm::jvm_class_map::wrapper_type_name(Ty::obj_name(id))?,
             ))
         })
         .collect();
@@ -3810,8 +3811,7 @@ impl Classpath {
     /// JVM storage for an already-resolved Kotlin singleton classifier. FIR/common IR carry only
     /// the singleton declaration; classfile layout decides how this backend materializes its value.
     pub(crate) fn singleton_storage(&self, classifier: TypeName) -> Option<(TypeName, String)> {
-        if let Some(owner) = super::jvm_class_map::intrinsic_companion_to_jvm(&classifier.render())
-        {
+        if let Some(owner) = super::jvm_class_map::intrinsic_companion_jvm_class(classifier) {
             return Some((type_name(&owner), "INSTANCE".to_string()));
         }
         const PUBLIC_STATIC_FINAL: u16 = 0x0001 | 0x0008 | 0x0010;
