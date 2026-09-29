@@ -2039,18 +2039,18 @@ impl Classpath {
     /// A complete catalog already records that entry, so the check does not render the classifier
     /// or open its class bytes. An incomplete catalog still reads the entry to confirm ownership.
     pub fn grants_internal_access(&self, internal: TypeName) -> bool {
-        let internal = super::jvm_class_map::to_jvm_type_name(internal);
-        if self.stub_overlay.borrow().contains_key(&internal) {
+        let spelling = crate::jvm::names::classfile_internal_name_of(internal);
+        if self.stub_overlay_contains_classifier(internal) {
             return false;
         }
         let tree = self.package_tree();
-        if let Some(index) = tree.first_class_jar(internal) {
+        if let Some(index) = tree.first_jar_for_spelling(spelling) {
             return self.friend_entries.get(index).copied().unwrap_or(false);
         }
         if tree.catalog_complete() {
             return false;
         }
-        self.physical_class_entry(crate::jvm::names::classfile_internal_name_of(internal))
+        self.physical_class_entry(spelling)
             .and_then(|(index, _)| self.friend_entries.get(index))
             .copied()
             .unwrap_or(false)
@@ -3734,27 +3734,22 @@ impl Classpath {
         })
     }
 
-    /// Existence of an already-interned classifier. A complete catalog answers by identity. An
-    /// incomplete catalog, and a metadata-only function name whose JVM class differs from that
-    /// identity, still need the textual probe.
+    /// Existence of an already-interned classifier. A complete catalog answers from the physical
+    /// classfile spelling without promoting a miss into the global name tree. An incomplete catalog
+    /// still probes the corresponding classfile bytes.
     pub(super) fn class_exists_name(&self, internal: TypeName) -> bool {
-        let mapped = super::jvm_class_map::to_jvm_type_name(internal);
-        let needs_textual_erasure =
-            super::jvm_class_map::maps_to_distinct_jvm_internal(internal) && mapped == internal;
-        if needs_textual_erasure {
-            return self.class_exists(crate::jvm::names::classfile_internal_name_of(internal));
-        }
-        if self.stub_overlay.borrow().contains_key(&mapped) {
+        let spelling = crate::jvm::names::classfile_internal_name_of(internal);
+        if self.stub_overlay_contains_classifier(internal) {
             return true;
         }
         let tree = self.package_tree();
-        if !tree.jars_for_class_name(mapped).is_empty() {
+        if tree.first_jar_for_spelling(spelling).is_some() {
             return true;
         }
         if tree.incomplete_entries.is_empty() {
             return false;
         }
-        self.class_exists(crate::jvm::names::classfile_internal_name_of(mapped))
+        self.class_exists(spelling)
     }
 
     fn class_entry_indices(&self, tree: &PackageTree, internal: &str) -> Vec<usize> {
@@ -4003,11 +3998,11 @@ impl Classpath {
     /// Return the jar containing `internal`, if its first classpath definition is in a jar.
     /// A complete catalog answers from the classfile spelling, so the class bytes are not read.
     pub fn owning_jar(&self, internal: &str) -> Option<PathBuf> {
-        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
-        if self.stub_overlay.borrow().contains_key(&internal_id) {
+        let classifier = type_name(internal);
+        let spelling = crate::jvm::names::classfile_internal_name_of(classifier);
+        if self.stub_overlay_contains_classifier(classifier) {
             return None;
         }
-        let spelling = crate::jvm::names::classfile_internal_name_of(internal_id);
         let tree = self.package_tree();
         let index = if let Some(index) = tree.first_jar_for_spelling(spelling) {
             index
@@ -4020,6 +4015,29 @@ impl Classpath {
             Entry::Jar(path) => Some(path.clone()),
             Entry::Dir(_) | Entry::Jimage(_) | Entry::CtSym { .. } => None,
         }
+    }
+
+    fn stub_overlay_contains_classifier(&self, classifier: TypeName) -> bool {
+        let physical = super::jvm_class_map::to_jvm_classfile_type_name(classifier);
+        let overlay = self.stub_overlay.borrow();
+        if overlay.contains_key(&physical) {
+            return true;
+        }
+
+        // Metadata can retain source-facing dots between nested classifier segments while the
+        // parsed overlay records the physical `$` spelling. Probe that sibling directly in the
+        // interned name tree instead of rendering and round-tripping through a textual lookup.
+        let segment = physical.segment_ref();
+        if !segment.contains('.') {
+            return false;
+        }
+        let binary_segment = segment.replace('.', "$");
+        physical
+            .parent()
+            .and_then(|namespace| {
+                crate::types::existing_type_name_child(namespace, &binary_segment)
+            })
+            .is_some_and(|binary| overlay.contains_key(&binary))
     }
 
     /// The class or builtins jar whose attached sources declare `internal`.
@@ -5078,13 +5096,6 @@ impl PackageTree {
             return Vec::new();
         };
         self.jars_for_class_id(class)
-    }
-
-    /// The first classpath entry that declares `internal`, in the same shadowing order as
-    /// [`Self::jars_for_class_name`].
-    fn first_class_jar(&self, internal: TypeName) -> Option<JarId> {
-        let class = crate::types::existing_type_name_in(&self.names, internal)?;
-        self.first_jar_for_id(class)
     }
 
     /// The first classpath entry whose class file is stored as `internal`. The spelling is the
@@ -6381,6 +6392,7 @@ mod fq_tests {
             &[
                 ("kotlin/jvm/functions/Function1.class", b"not-a-class"),
                 ("java/lang/String.class", b"not-a-class"),
+                ("probe/owner6044/Outer$Inner.class", b"not-a-class"),
             ],
         );
         let classpath = Classpath::new(vec![jar.clone()]);
@@ -6390,6 +6402,14 @@ mod fq_tests {
         );
         assert_eq!(
             classpath.owning_jar("kotlin/String").as_deref(),
+            Some(jar.as_path())
+        );
+        let nested = crate::types::type_name_child(type_name("probe/owner6044"), "Outer.Inner");
+        assert!(classpath.class_exists_name(nested));
+        assert_eq!(
+            classpath
+                .owning_jar("probe/owner6044/Outer.Inner")
+                .as_deref(),
             Some(jar.as_path())
         );
         assert!(classpath.owning_jar("kotlin/NoSuch").is_none());
@@ -8193,6 +8213,24 @@ mod fq_tests {
             !cp.has_package(TypeName::ROOT, "p"),
             "package gone after clear"
         );
+    }
+
+    #[test]
+    fn stub_overlay_matches_a_nested_classifier_without_a_spelling_round_trip() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[(
+                "Outer.java".into(),
+                "package p; public class Outer { public static class Inner {} }".into(),
+            )],
+            crate::jvm::java_stub::StubMode::Lenient,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stub");
+        let cp = Classpath::new(vec![]);
+        cp.set_stub_overlay(stubs);
+
+        assert!(cp.stub_overlay_contains_classifier(type_name("p/Outer.Inner")));
+        assert!(!cp.stub_overlay_contains_classifier(type_name("p/Outer.Missing")));
     }
 
     #[test]
