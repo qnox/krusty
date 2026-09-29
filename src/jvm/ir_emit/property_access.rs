@@ -117,7 +117,7 @@ impl Emitter<'_> {
             } => {
                 let jt = ty_from_field_descriptor(&descriptor);
                 let lateinit = self.is_lateinit_field(owner, &name);
-                let owner = owner.render();
+                let owner = property_realization_owner(owner);
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
                     code.getstatic(fref, slot_words(jt) as i32);
@@ -147,7 +147,7 @@ impl Emitter<'_> {
                 is_static,
                 is_interface,
             } => {
-                let owner = owner.render();
+                let owner = property_realization_owner(owner);
                 // A `void` accessor (a `Unit` property) leaves NOTHING on the stack — `descriptor_ret_words`
                 // is the authority on that, since `ty_from_descriptor_ret` maps `V` to a 1-word `Unit` for
                 // type flow. Nothing is left, so there is nothing to bridge.
@@ -183,7 +183,7 @@ impl Emitter<'_> {
             } => {
                 // The bridge's arguments are already on the stack: the receiver when it takes one,
                 // and nothing when the field is a named object's static.
-                let owner = owner.render();
+                let owner = property_realization_owner(owner);
                 let words = descriptor_ret_words(&descriptor);
                 let (parameters, _) = crate::jvm::names::parse_method_descriptor(&descriptor)
                     .expect("a planned property access bridge has a valid JVM descriptor");
@@ -257,5 +257,30 @@ impl Emitter<'_> {
             // narrowing to one would `checkcast` to a class the value is not an instance of.
             self.narrow_on_stack(physical, *ty, code);
         }
+    }
+}
+
+/// The classfile owner of one property realization. Emission repeats the same classifiers, so this
+/// borrows the remembered spelling instead of walking the name tree on every read.
+fn property_realization_owner(owner: crate::types::TypeName) -> &'static str {
+    owner.rendered()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::property_realization_owner;
+    use crate::types::type_name;
+
+    #[test]
+    fn a_property_owner_reuses_its_rendered_spelling() {
+        let nested = type_name("sample/prop6044/Outer").nested_child("Inner");
+        assert_eq!(
+            property_realization_owner(nested),
+            "sample/prop6044/Outer$Inner"
+        );
+        assert!(std::ptr::eq(
+            property_realization_owner(nested),
+            nested.rendered()
+        ));
     }
 }
