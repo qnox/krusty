@@ -13,6 +13,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# One run per pull request. `edited` and `synchronize` share `github.ref`, so a title change or a
+# new push replaces the queued run instead of leaving another copy waiting on a runner. Master
+# pushes keep a group per commit, for the same reason as the ci workflow.
+concurrency:
+  group: attribution-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   attribution:
     runs-on: ubuntu-latest
