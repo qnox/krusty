@@ -10432,6 +10432,7 @@ impl<'a> Emitter<'a> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
+                        let owner_identity = *owner;
                         let owner = owner.render();
                         let name = name.clone();
                         let ptys = jvm_tys(param_tys);
@@ -10465,6 +10466,10 @@ impl<'a> Emitter<'a> {
                             return;
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
+                        let member_target = self.ir.jvm_member_targets.get(&e).copied();
+                        let private_bridge = member_target.is_some_and(|function| {
+                            self.reaches_through_bridge(owner_identity, function)
+                        });
                         if let Some(bridge) = bridge {
                             let mut bridge_params =
                                 Vec::with_capacity(bridge.bridge_parameters.len() + 1);
@@ -10477,6 +10482,25 @@ impl<'a> Emitter<'a> {
                                 &bridge_name,
                                 &bridge_descriptor,
                             );
+                            self.mark_call_start(e, code);
+                            code.invokestatic(method, aw + 1, physical_call_result_words(ret));
+                        } else if private_bridge {
+                            // A private member-extension accessor is an instance method. Another
+                            // class calls `access$<name>(Owner, …)`, which `invokespecial`s it.
+                            let mut bridge_params = Vec::with_capacity(ptys.len() + 1);
+                            bridge_params.push(Ty::obj(&owner));
+                            bridge_params.extend(ptys.iter().copied());
+                            let bridge_descriptor = method_descriptor(&bridge_params, ret);
+                            let bridge_name = format!("access${name}");
+                            let method = if interface {
+                                self.cw.interface_methodref(
+                                    &owner,
+                                    &bridge_name,
+                                    &bridge_descriptor,
+                                )
+                            } else {
+                                self.cw.methodref(&owner, &bridge_name, &bridge_descriptor)
+                            };
                             self.mark_call_start(e, code);
                             code.invokestatic(method, aw + 1, physical_call_result_words(ret));
                         } else if interface {
