@@ -2890,8 +2890,8 @@ impl Classpath {
                 };
                 out.push(ExtCandidateRecord {
                     owner,
-                    name: m.name.clone(),
-                    descriptor: m.descriptor.clone(),
+                    name: m.name.to_owned(),
+                    descriptor: m.descriptor.to_owned(),
                     ret_desc,
                     signature: m.signature.clone(),
                     public: root_public && m.is_public(),
@@ -4481,8 +4481,8 @@ impl Classpath {
                     // non-public inline implementation can only be spliced from the class that actually
                     // declares its bytecode, so retain the current superclass/part as its owner.
                     owner: if public { root } else { cn },
-                    name: m.name.clone(),
-                    descriptor: m.descriptor.clone(),
+                    name: m.name.to_owned(),
+                    descriptor: m.descriptor.to_owned(),
                     ret_desc,
                     signature: m.signature.clone(),
                     public,
@@ -5646,8 +5646,8 @@ fn companion_owner_field_access(
     })?;
     Some(super::inline::PropertyAccess::Field {
         owner: outer,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
+        name: field.name.to_owned(),
+        descriptor: field.descriptor.to_owned(),
         is_static: true,
     })
 }
@@ -5701,8 +5701,8 @@ fn class_property_write_access(
     let owner = ci.this_class;
     let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
         owner,
-        name: method.name.clone(),
-        descriptor: method.descriptor.clone(),
+        name: method.name.to_owned(),
+        descriptor: method.descriptor.to_owned(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
     };
@@ -5758,8 +5758,8 @@ fn class_property_write_access(
     })?;
     Some(PropertyAccess::Field {
         owner,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
+        name: field.name.to_owned(),
+        descriptor: field.descriptor.to_owned(),
         is_static: field.access & super::classreader::ACC_STATIC != 0,
     })
 }
@@ -5776,8 +5776,8 @@ fn class_property_read_access(
     let owner = ci.this_class;
     let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
         owner,
-        name: method.name.clone(),
-        descriptor: method.descriptor.clone(),
+        name: method.name.to_owned(),
+        descriptor: method.descriptor.to_owned(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
     };
@@ -5835,8 +5835,8 @@ fn class_property_read_access(
         .find(|f| f.name == property && f.access & super::classreader::ACC_PUBLIC != 0)?;
     Some(PropertyAccess::Field {
         owner,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
+        name: field.name.to_owned(),
+        descriptor: field.descriptor.to_owned(),
         is_static: field.access & super::classreader::ACC_STATIC != 0,
     })
 }

@@ -83,8 +83,8 @@ fn collect_class_bytes(
         .filter(|method| method.is_static() && !method.name.starts_with('<'))
         .map(|method| {
             (
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
                 method.signature.clone(),
                 method.is_public(),
             )

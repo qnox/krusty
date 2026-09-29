@@ -180,8 +180,8 @@ fn public_method_shape(
         .filter(|method| method.is_public())
         .map(|method| {
             (
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
                 method.access,
             )
         })
@@ -789,7 +789,7 @@ fn disable_keeps_property_first_member_order() {
         class
             .methods
             .iter()
-            .map(|method| (method.name.clone(), method.descriptor.clone()))
+            .map(|method| (method.name.to_owned(), method.descriptor.to_owned()))
             .collect()
     };
     assert_eq!(

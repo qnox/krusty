@@ -635,7 +635,7 @@ impl JvmLibraries {
             if Ty::obj_name(internal).scalar_value_repr().is_none() {
                 for field in &class.fields {
                     if field.access & 0x0008 == 0 {
-                        push(field.name.clone());
+                        push(field.name.to_owned());
                     }
                 }
             }
@@ -1283,7 +1283,7 @@ impl JvmLibraries {
             .filter_map(|f| {
                 let ty = ty(f)?;
                 let value = Self::library_const(f.const_value.as_ref()?);
-                Some((f.name.clone(), LibraryConst { ty, value }))
+                Some((f.name.to_owned(), LibraryConst { ty, value }))
             })
             .collect()
     }
@@ -1340,7 +1340,7 @@ impl JvmLibraries {
                 .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets
-                .get(&f.name)
+                .get(f.name)
                 .map(|&ret| kotlin_type_name_to_ty(ret))
         })
     }
@@ -1378,9 +1378,7 @@ impl JvmLibraries {
                     .map(|ty| (property.name.as_str(), kotlin_type_name_to_ty(ty)))
             })
             .collect();
-        Self::const_fields(&ci.fields, |field| {
-            declared.get(field.name.as_str()).copied()
-        })
+        Self::const_fields(&ci.fields, |field| declared.get(field.name).copied())
     }
 
     fn builtin_members_for_type_name(&self, internal: TypeName) -> Vec<LibraryMember> {
@@ -1737,7 +1735,7 @@ impl JvmLibraries {
                         .collect::<Vec<_>>()
                 });
                 let mut member =
-                    LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                    LibraryMember::new(m.name.to_owned(), params, ret, m.descriptor.to_owned());
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(
                         "member_slots",
@@ -2271,7 +2269,7 @@ impl JvmLibraries {
                         )
                         .then(|| {
                             (
-                                f.name.clone(),
+                                f.name.to_owned(),
                                 crate::types::type_name_nested_child(internal_name, &f.name),
                             )
                         })
@@ -2418,7 +2416,7 @@ impl JvmLibraries {
                         .then(|| {
                             Box::new(crate::libraries::ConstructorCallRealization {
                                 owner: internal_name,
-                                descriptor: method.descriptor.clone(),
+                                descriptor: method.descriptor.to_owned(),
                             })
                         })
                     });
@@ -2438,7 +2436,7 @@ impl JvmLibraries {
                             Box::new(crate::libraries::DefaultCallRealization {
                                 owner: internal_name,
                                 name: "<init>".to_string(),
-                                descriptor: method.descriptor.clone(),
+                                descriptor: method.descriptor.to_owned(),
                                 declaration_owner: internal_name,
                                 real_params: params[real_start..real_end].to_vec(),
                                 mask_count: if has_defaults { mask_count } else { 0 },
@@ -2580,7 +2578,7 @@ impl JvmLibraries {
                         f.access & ACC_STATIC != 0
                             && super::names::descriptor_is_classifier(&f.descriptor, internal_name)
                     })
-                    .map(|f| f.name.clone())
+                    .map(|f| f.name.to_owned())
                     .collect()
             } else {
                 Vec::new()
@@ -2645,7 +2643,7 @@ impl JvmLibraries {
                 .fields
                 .iter()
                 .filter(|field| field.access & ACC_STATIC != 0)
-                .map(|field| field.name.clone())
+                .map(|field| field.name.to_owned())
                 .collect();
             let inheritance = crate::libraries::ClassifierInheritance {
                 is_abstract: ci.is_abstract() || ci.is_interface(),
@@ -3309,7 +3307,7 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
                 }
                 Some(_) | None => erased,
             };
-            (ty != Ty::Error).then(|| (method.name.clone(), ty, method.has_annotation_default))
+            (ty != Ty::Error).then(|| (method.name.to_owned(), ty, method.has_annotation_default))
         })
         .collect::<Option<Vec<_>>>()?;
     let value_index = elements.iter().position(|(name, _, _)| name == "value");
@@ -3405,7 +3403,7 @@ fn interface_holder_method(
                 &method.descriptor,
             )
     })?;
-    Some((holder, method.descriptor.clone()))
+    Some((holder, method.descriptor.to_owned()))
 }
 
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
@@ -4092,11 +4090,11 @@ impl JvmLibraries {
                 };
                 let mut getter = LibraryCallable::library(
                     cn,
-                    field.name.clone(),
+                    field.name,
                     Vec::new(),
                     field_ty,
                     erased_ty,
-                    field.descriptor.clone(),
+                    field.descriptor,
                 );
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
@@ -4105,11 +4103,11 @@ impl JvmLibraries {
                 let setter = (field.access & 0x0010 == 0).then(|| {
                     let mut setter = LibraryCallable::library(
                         cn,
-                        field.name.clone(),
+                        field.name,
                         vec![erased_ty],
                         Ty::Unit,
                         Ty::Unit,
-                        field.descriptor.clone(),
+                        field.descriptor,
                     );
                     setter.params = vec![field_ty];
                     setter.external_identity = Some(self.cp.intern_external_callable(
@@ -4928,7 +4926,7 @@ impl JvmLibraries {
                     .methods
                     .iter()
                     .filter(|method| method.name == bridge_name)
-                    .map(|method| method.descriptor.as_str())
+                    .map(|method| method.descriptor)
                     .collect::<Vec<_>>(),
             );
             if let Some(realization) = class.methods.iter().find_map(|method| {
@@ -4959,7 +4957,7 @@ impl JvmLibraries {
                 Some(crate::libraries::DefaultCallRealization {
                     owner: callable.owner,
                     name: bridge_name.clone(),
-                    descriptor: method.descriptor.clone(),
+                    descriptor: method.descriptor.to_owned(),
                     declaration_owner: current,
                     real_params: callable.physical_params.clone(),
                     mask_count,
@@ -5037,7 +5035,7 @@ impl JvmLibraries {
                     Some(crate::libraries::DefaultCallRealization {
                         owner: class_name,
                         name: bridge_name.clone(),
-                        descriptor: method.descriptor.clone(),
+                        descriptor: method.descriptor.to_owned(),
                         declaration_owner: class_name,
                         real_params: real_params.clone(),
                         mask_count,

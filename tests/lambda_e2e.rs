@@ -98,7 +98,7 @@ fun box(): String {
             .methods
             .iter()
             .filter(|method| method.name.contains("$lambda$"))
-            .map(|method| method.name.as_str())
+            .map(|method| method.name)
             .collect::<Vec<_>>();
         names.sort_unstable();
         assert_eq!(names, expected, "{class_name} synthetic lambda methods");
@@ -160,7 +160,7 @@ fun box(): String {
         .methods
         .iter()
         .filter(|method| method.name.contains("$lambda$"))
-        .map(|method| method.name.as_str())
+        .map(|method| method.name)
         .collect::<Vec<_>>();
     names.sort_unstable();
     assert_eq!(

@@ -60,11 +60,11 @@ fn method_signatures(bytes: &[u8], methods: &[&str]) -> Vec<(String, String, Opt
     class
         .methods
         .iter()
-        .filter(|method| methods.contains(&method.name.as_str()))
+        .filter(|method| methods.contains(&method.name))
         .map(|method| {
             (
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
                 method.signature.clone(),
             )
         })

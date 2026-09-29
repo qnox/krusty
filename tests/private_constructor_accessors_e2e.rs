@@ -68,7 +68,7 @@ fn constructors(bytes: &[u8]) -> Vec<(String, String, u16)> {
         .methods
         .into_iter()
         .filter(|method| method.name == "<init>")
-        .map(|method| (method.name, method.descriptor, method.access))
+        .map(|method| (method.name.to_owned(), method.descriptor.to_owned(), method.access))
         .collect()
 }
 

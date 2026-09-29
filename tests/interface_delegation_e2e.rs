@@ -176,7 +176,7 @@ fn forwarder_order() -> (Vec<String>, Vec<u8>) {
         .methods
         .iter()
         .filter(|m| m.name == "foo" || m.name == "bar")
-        .map(|m| m.name.clone())
+        .map(|m| m.name.to_owned())
         .collect();
     (order, bytes.clone())
 }
@@ -242,7 +242,7 @@ fun box(): String = DelegatedImpl(Impl()).first + DelegatedImpl(Impl()).middle()
     let order = info
         .methods
         .iter()
-        .filter(|method| matches!(method.name.as_str(), "getFirst" | "middle" | "getLast"))
+        .filter(|method| matches!(method.name, "getFirst" | "middle" | "getLast"))
         .map(|method| method.name.clone())
         .collect::<Vec<_>>();
     assert_eq!(order, ["getFirst", "middle", "getLast"]);
@@ -254,7 +254,7 @@ fun box(): String = DelegatedImpl(Impl()).first + DelegatedImpl(Impl()).middle()
         let reference_order = info
             .methods
             .iter()
-            .filter(|method| matches!(method.name.as_str(), "getFirst" | "middle" | "getLast"))
+            .filter(|method| matches!(method.name, "getFirst" | "middle" | "getLast"))
             .map(|method| method.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(

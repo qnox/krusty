@@ -281,7 +281,7 @@ fn value_class_body_property_round_trips() {
         .expect("the record describes the property");
     assert_eq!(
         described.getter.as_ref().map(|g| g.name.as_str()),
-        Some(mangled.as_str()),
+        Some(mangled),
         "the record must name the accessor the class file defines, not the plain convention",
     );
     expect_roundtrip_ok(

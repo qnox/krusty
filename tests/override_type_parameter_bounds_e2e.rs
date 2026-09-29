@@ -62,8 +62,8 @@ fn method_surface(bytes: &[u8]) -> Vec<(String, String, u16)> {
         .iter()
         .map(|method| {
             (
-                method.name.clone(),
-                method.descriptor.clone(),
+                method.name.to_owned(),
+                method.descriptor.to_owned(),
                 method.access,
             )
         })

@@ -1272,7 +1272,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == name)
-                .map(|field| field.descriptor.as_str())
+                .map(|field| field.descriptor)
         };
 
         assert_eq!(field("value"), Some("Ljava/lang/Number;"));
@@ -1665,7 +1665,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == name)
-                .map(|field| field.descriptor.as_str())
+                .map(|field| field.descriptor)
         };
         assert_eq!(field("number"), Some("Ljava/lang/Number;"));
         assert_eq!(field("numbers"), Some("[Ljava/lang/Number;"));
@@ -1673,7 +1673,7 @@ mod tests {
             class
                 .methods_named(name)
                 .into_iter()
-                .map(|method| method.descriptor.as_str())
+                .map(|method| method.descriptor)
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -1788,7 +1788,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == "outer")
-                .map(|field| field.descriptor.as_str()),
+                .map(|field| field.descriptor),
             Some("Ljava/lang/Number;")
         );
         assert_eq!(
@@ -1796,7 +1796,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == "inner")
-                .map(|field| field.descriptor.as_str()),
+                .map(|field| field.descriptor),
             Some("Ljava/lang/Number;")
         );
         assert!(inner
@@ -1811,7 +1811,7 @@ mod tests {
             deep.fields
                 .iter()
                 .find(|field| field.name == "value")
-                .map(|field| field.descriptor.as_str()),
+                .map(|field| field.descriptor),
             Some("Ljava/lang/CharSequence;")
         );
     }
