@@ -130,6 +130,69 @@ fn rebound_conditional_results_run() {
 }
 
 #[test]
+fn a_sibling_collection_instantiates_an_unbound_result_through_its_supertype() {
+    const SRC: &str = "fun <T> grow(start: Collection<T>, preserveOrder: Boolean, f: (T) -> Collection<T>): Collection<T> {\n\
+            if (start.isEmpty()) return start\n\
+            val result = if (preserveOrder) LinkedHashSet(start) else HashSet(start)\n\
+            var elementsToCheck = result\n\
+            var oldSize = 0\n\
+            while (result.size > oldSize) {\n\
+                oldSize = result.size\n\
+                val toAdd = if (preserveOrder) linkedSetOf() else hashSetOf<T>()\n\
+                elementsToCheck.forEach { toAdd.addAll(f(it)) }\n\
+                result.addAll(toAdd)\n\
+                elementsToCheck = toAdd\n\
+            }\n\
+            return result\n\
+        }\n\
+        fun <T> either(flag: Boolean): MutableCollection<T> =\n\
+            if (flag) arrayListOf<T>() else linkedSetOf()\n\
+        fun <T> reversed(flag: Boolean): MutableCollection<T> =\n\
+            if (flag) linkedSetOf() else arrayListOf<T>()\n\
+        fun <T> picked(which: Int): MutableCollection<T> = when (which) {\n\
+            0 -> arrayListOf()\n\
+            1 -> linkedSetOf()\n\
+            else -> hashSetOf<T>()\n\
+        }\n\
+        fun box(): String {\n\
+            val grown = grow(listOf(\"a\"), false) { value -> if (value == \"a\") listOf(\"b\") else emptyList() }\n\
+            val ordered = grow(listOf(1), true) { value -> if (value == 1) listOf(2) else emptyList() }\n\
+            val forward = either<String>(true)\n\
+            forward.add(\"c\")\n\
+            val backward = reversed<Int>(false)\n\
+            backward.add(3)\n\
+            val chosen = picked<String>(1)\n\
+            chosen.add(\"d\")\n\
+            val ok = grown.contains(\"a\") && grown.contains(\"b\") && grown.size == 2 &&\n\
+                ordered.contains(1) && ordered.contains(2) && ordered.size == 2 &&\n\
+                forward.contains(\"c\") && backward.contains(3) && chosen.contains(\"d\")\n\
+            return if (ok) \"OK\" else \"FAIL\"\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(SRC, "SiblingCollectionSupertype");
+}
+
+#[test]
+fn an_unrelated_sibling_still_cannot_instantiate_a_collection() {
+    const IF_SRC: &str = "fun box(flag: Boolean) {\n\
+            val mixed = if (flag) linkedSetOf() else 1\n\
+        }\n";
+    assert_diagnostics(
+        IF_SRC,
+        &["cannot infer type for type parameter 'T'. Specify it explicitly."],
+    );
+    const BOTH_SRC: &str = "fun box(flag: Boolean) {\n\
+            val mixed = if (flag) linkedSetOf() else hashSetOf()\n\
+        }\n";
+    assert_diagnostics(
+        BOTH_SRC,
+        &[
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+        ],
+    );
+}
+
+#[test]
 fn truly_unbound_call_still_cannot_infer() {
     const SRC: &str = "fun box(): String {\n\
         val x = Result.failure(RuntimeException(\"z\"))\n\

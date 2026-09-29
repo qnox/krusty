@@ -169,32 +169,21 @@ impl Checker<'_> {
         let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
             return current;
         };
-        let infer = |expected| {
-            crate::symbol_resolver::infer_generic_return_bindings(
-                &signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-        };
-        // The sibling may be MORE specific than the generic result classifier: a
-        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
-        // supertype. Project the sibling to the selected call's result classifier before giving up;
-        // this is ordinary subtype information, not collection-specific approximation.
-        let expectation = if infer(sibling).is_some() {
-            sibling
-        } else {
+        // Equal constructors, a subtype result (`linkedSetOf()` beside `hashSetOf<T>()`), a more
+        // specific sibling (`emptyList()` beside `mutableListOf("a")`), or a shared generic
+        // supertype (`linkedSetOf()` beside `arrayListOf<T>()`). The expectation is a face of the
+        // sibling, not a collection-specific approximation.
+        let expectation = {
             let source = self.fed_source();
-            let Some(applied) = crate::assignable::applied_supertype(
-                &crate::symbol_resolver::SourceOracle(&source),
+            let Some(expectation) = crate::symbol_resolver::generic_return_expectation_from_sibling(
+                &source,
+                &signature,
                 sibling,
-                signature.ret,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
             ) else {
                 return current;
             };
-            if infer(applied).is_none() {
-                return current;
-            }
-            applied
+            expectation
         };
         crate::trace_compiler!(
             "expected_call",

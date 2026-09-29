@@ -66419,7 +66419,6 @@ impl<'a> Checker<'a> {
             let subj_ty = subject.map(|s| self.expr(scope, s));
             struct ArmResult {
                 body: ExprId,
-                span: Span,
                 ty: Ty,
                 fallthrough_casts: Vec<(NarrowPath, Ty)>,
                 fallthrough_declined: Vec<(String, Ty)>,
@@ -66556,7 +66555,6 @@ impl<'a> Checker<'a> {
                 }
                 arm_results.push(ArmResult {
                     body: arm.body,
-                    span: self.span(arm.body),
                     ty: bt,
                     fallthrough_casts: incoming_fallthrough_casts,
                     fallthrough_declined: incoming_fallthrough_declined,
@@ -66629,10 +66627,19 @@ impl<'a> Checker<'a> {
             for record in &arm_results {
                 self.report_unbound_conditional_branch(scope, record.body);
             }
-            // Preserve source order when joining arm types.
+            // Preserve source order when joining arm types. A declared expectation stands in for
+            // an intersection `Ty` does not synthesize, the same way an `if` does: `ArrayList<T>`
+            // and `LinkedHashSet<T>` meet at `MutableCollection<T>` when that is the expected type.
             let result = arm_results.iter().fold(None, |result: Option<Ty>, record| {
                 Some(match result {
-                    Some(r) => self.join(r, record.ty, record.span),
+                    Some(r) => conditional_branch::join_types(
+                        self,
+                        scope,
+                        expected,
+                        r,
+                        record.ty,
+                        record.body,
+                    ),
                     None => record.ty,
                 })
             });
