@@ -53,6 +53,7 @@ mod discarding;
 mod enclosure;
 mod enum_entry_subclass;
 mod enum_metadata;
+mod field_read;
 mod field_visibility;
 mod field_write;
 mod frame_map;
@@ -9052,7 +9053,7 @@ impl<'a> Emitter<'a> {
                 .and_then(|i| class.fields.get(i as usize))
                 .map_or(declared.ty, |f| f.ty);
             let d = type_descriptor(jvm_declared_ty(&ty));
-            return Some(static_accessors::member_property_field_bridge(
+            return Some(static_accessors::member_property_access_bridge(
                 self.ir, class, owner, declared, &d, false,
             ));
         }
@@ -9196,7 +9197,7 @@ impl<'a> Emitter<'a> {
                 .and_then(|i| class.fields.get(i as usize))
                 .map_or(declared.ty, |f| f.ty);
             let d = type_descriptor(jvm_declared_ty(&ty));
-            return Some(static_accessors::member_property_field_bridge(
+            return Some(static_accessors::member_property_access_bridge(
                 self.ir, class, owner, declared, &d, true,
             ));
         }
@@ -9443,45 +9444,7 @@ impl<'a> Emitter<'a> {
                 receiver,
                 class,
                 index,
-            } => {
-                let c = &self.ir.classes[*class as usize];
-                let source_name = c.fields[*index as usize].name.clone();
-                let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
-                let fty = c.fields[*index as usize].ty;
-                let jt = jvm_declared_ty(&fty);
-                let owner = c.fq_name();
-                let is_lateinit = c.fields[*index as usize].is_lateinit();
-                if static_storage(self.ir, c) {
-                    // A static-storage object field: no instance operand. The receiver is `this`
-                    // (or the INSTANCE read) — evaluate it only if it could have effects.
-                    if !matches!(self.ir.expr(*receiver), crate::ir::IrExpr::GetValue(_)) {
-                        self.emit_value(*receiver, code);
-                        code.pop();
-                    }
-                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                    code.getstatic(fref, slot_words(jt) as i32);
-                } else {
-                    self.emit_value(*receiver, code);
-                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                    code.getfield(fref, slot_words(jt) as i32);
-                }
-                // A `lateinit var` read throws `UninitializedPropertyAccessException` while the field is
-                // still null (kotlinc inserts this at every access): `dup; ifnonnull L; ldc name;
-                // invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`.
-                if is_lateinit {
-                    code.dup();
-                    let lbl = code.new_label();
-                    code.ifnonnull(lbl);
-                    code.push_string(&source_name, self.cw);
-                    let m = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "throwUninitializedPropertyAccessException",
-                        "(Ljava/lang/String;)V",
-                    );
-                    code.invokestatic(m, 1, 0);
-                    self.bind(lbl, code);
-                }
-            }
+            } => self.emit_get_field(*receiver, *class, *index, code),
             IrExpr::LateinitInitialized {
                 receiver,
                 class,

@@ -8,10 +8,13 @@
 //! `access$set<X>$p` for a property's field — and every use from another class calls it instead.
 //! A nested class, a callable-reference carrier and a lambda class are all such other classes.
 //! A private member property's field is reached the same way. A class declares
-//! `access$get<X>$p(<owner>)` and `access$set<X>$p(<owner>, value)`. A named object's backing
-//! field is itself static, so its bridge is `access$get<X>$p()` / `access$set<X>$p(value)` and
-//! reads or writes that field with `getstatic` / `putstatic`. A declared accessor stays an
-//! instance method, and its bridge still takes the object.
+//! `access$get<X>$p(<owner>)` and `access$set<X>$p(<owner>, value)` for the uses that need them.
+//! A named object's backing field is itself static, so its bridge is `access$get<X>$p()` /
+//! `access$set<X>$p(value)` and reads or writes that field with `getstatic` / `putstatic`. A
+//! `field` use inside a declared accessor is that same field access when it is lowered into
+//! another class: the accessor reads or writes the field and does not call the accessor that
+//! contains the use. A declared accessor stays an instance method, and its bridge still takes
+//! the object.
 //!
 //! The owner appends its accessors after every declared and lifted member, ahead of `<clinit>`, in
 //! the order the file first uses them. [`plan`] finds those uses once per emission pass; each use
@@ -21,7 +24,10 @@
 
 use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
-use crate::jvm::private_static_access::{bridged_getter, bridged_setter, StaticOwner};
+use crate::jvm::private_static_access::{
+    bridged_getter, bridged_setter, declared_backing_getter, declared_backing_setter,
+    member_property_accessor_name, StaticOwner,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -37,10 +43,18 @@ pub(super) enum StaticAccessor {
     /// `access$<name>(<receiver>, …)`, calling a protected member of a class in another package:
     /// an index into the plan's protected accessors.
     Protected(u32),
-    /// `access$get<X>$p`, reading private member property `property` of class `class`.
+    /// `access$get<X>(<owner>)`, calling the private source-declared getter of member property
+    /// `property` of class `class`.
     MemberGetter { class: u32, property: u32 },
-    /// `access$set<X>$p`, writing private member property `property` of `class`.
+    /// `access$set<X>(<owner>, value)`, calling the private source-declared setter of member
+    /// property `property` of `class`.
     MemberSetter { class: u32, property: u32 },
+    /// `access$get<X>$p(<owner>)` that reads the backing field, including when the property
+    /// declares a getter. A [`Self::MemberGetter`] of that property calls the getter instead.
+    FieldGetter { class: u32, property: u32 },
+    /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
+    /// property declares a setter.
+    FieldSetter { class: u32, property: u32 },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -334,12 +348,20 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
         {
             let owner = StaticOwner::Class(ir.classes[*declaring as usize].fq_name);
             let (declaring, property) = (*declaring, *property);
+            let declared = &ir.classes[declaring as usize].properties[property as usize];
             uses.push(Use {
                 line: 0,
                 owner,
-                accessor: StaticAccessor::MemberGetter {
-                    class: declaring,
-                    property,
+                accessor: if declared.getter.is_some() {
+                    StaticAccessor::MemberGetter {
+                        class: declaring,
+                        property,
+                    }
+                } else {
+                    StaticAccessor::FieldGetter {
+                        class: declaring,
+                        property,
+                    }
                 },
             });
             if class
@@ -350,9 +372,16 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
                 uses.push(Use {
                     line: 0,
                     owner,
-                    accessor: StaticAccessor::MemberSetter {
-                        class: declaring,
-                        property,
+                    accessor: if declared.setter.is_some() {
+                        StaticAccessor::MemberSetter {
+                            class: declaring,
+                            property,
+                        }
+                    } else {
+                        StaticAccessor::FieldSetter {
+                            class: declaring,
+                            property,
+                        }
                     },
                 });
             }
@@ -447,7 +476,9 @@ impl Walk<'_> {
                 StaticAccessor::Getter(_)
                 | StaticAccessor::Setter(_)
                 | StaticAccessor::MemberGetter { .. }
-                | StaticAccessor::MemberSetter { .. } => context != owner,
+                | StaticAccessor::MemberSetter { .. }
+                | StaticAccessor::FieldGetter { .. }
+                | StaticAccessor::FieldSetter { .. } => context != owner,
                 StaticAccessor::Protected(_) => true,
             };
             if needed {
@@ -477,9 +508,17 @@ impl Walk<'_> {
                 StaticAccessor::Function(*function),
             )),
             IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
+                .or_else(|| declared_backing_getter(self.ir, *index))
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index))),
             IrExpr::SetStatic { index, .. } => bridged_setter(self.ir, *index)
+                .or_else(|| declared_backing_setter(self.ir, *index))
                 .map(|storage| (storage.owner, StaticAccessor::Setter(*index))),
+            IrExpr::GetField { class, index, .. } => {
+                self.backing_field_accessor(*class, *index, false)
+            }
+            IrExpr::SetField { class, index, .. } => {
+                self.backing_field_accessor(*class, *index, true)
+            }
             IrExpr::PropertyRead { .. } => self.private_member_property(expression, true),
             IrExpr::PropertyWrite { .. } => self.private_member_property(expression, false),
             _ => None,
@@ -513,15 +552,40 @@ impl Walk<'_> {
         if !declared.needs_access_bridge || declared.backing_field.is_none() {
             return None;
         }
-        let accessor = if read {
-            if declared.getter.is_some() {
-                return None;
-            }
-            StaticAccessor::MemberGetter { class, property }
-        } else {
-            StaticAccessor::MemberSetter { class, property }
+        let accessor = match (read, declared.getter.is_some(), declared.setter.is_some()) {
+            (true, true, _) => return None,
+            (true, false, _) => StaticAccessor::FieldGetter { class, property },
+            (false, _, true) => StaticAccessor::MemberSetter { class, property },
+            (false, _, false) => StaticAccessor::FieldSetter { class, property },
         };
         Some((StaticOwner::Class(owner.fq_name), accessor))
+    }
+
+    /// The field accessor a `field` read or write uses when the backing field is private and the
+    /// use is lowered as a direct field operation. The accessor always touches the field: a
+    /// declared getter or setter is what contains the use, so calling it would re-enter it.
+    fn backing_field_accessor(
+        &self,
+        class: u32,
+        field: u32,
+        write: bool,
+    ) -> Option<(StaticOwner, StaticAccessor)> {
+        let class_decl = self.ir.classes.get(class as usize)?;
+        let field_decl = class_decl.fields.get(field as usize)?;
+        if !field_decl.is_private() || super::static_storage(self.ir, class_decl) {
+            return None;
+        }
+        let property = class_decl
+            .properties
+            .iter()
+            .position(|property| property.backing_field == Some(field))?
+            as u32;
+        let accessor = if write {
+            StaticAccessor::FieldSetter { class, property }
+        } else {
+            StaticAccessor::FieldGetter { class, property }
+        };
+        Some((StaticOwner::Class(class_decl.fq_name), accessor))
     }
 }
 
@@ -559,6 +623,12 @@ pub(super) fn emit(
             StaticAccessor::MemberSetter { class, property } => {
                 accessor.member_setter(class, property, cw)
             }
+            StaticAccessor::FieldGetter { class, property } => {
+                accessor.field_getter(class, property, cw)
+            }
+            StaticAccessor::FieldSetter { class, property } => {
+                accessor.field_setter(class, property, cw)
+            }
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
                 let owner = bridge.owner.render();
@@ -573,6 +643,85 @@ pub(super) fn emit(
     }
 }
 
+/// JVM shape of `access$get<X>$p` / `access$set<X>$p` that reads or writes a backing field
+/// directly. The call site and the accessor body share it, so the descriptor cannot drift.
+struct FieldAccessorShape {
+    name: String,
+    descriptor: String,
+    internal: String,
+    field_name: String,
+    field_descriptor: String,
+    field_ty: Ty,
+    words: u16,
+}
+
+fn field_accessor_shape(
+    ir: &IrFile,
+    class: u32,
+    property: u32,
+    write: bool,
+) -> Option<FieldAccessorShape> {
+    let owner = ir.classes.get(class as usize)?;
+    let property = owner.properties.get(property as usize)?;
+    let field = owner.fields.get(property.backing_field? as usize)?;
+    let internal = owner.fq_name.render();
+    let field_ty = jvm_declared_ty(&field.ty);
+    let field_descriptor = type_descriptor(field_ty);
+    let name = if write {
+        member_property_accessor_name(&property_setter_name(&property.name), false)
+    } else {
+        member_property_accessor_name(&property_getter_name(&property.name), false)
+    };
+    let descriptor = if write {
+        format!("(L{internal};{field_descriptor})V")
+    } else {
+        format!("(L{internal};){field_descriptor}")
+    };
+    Some(FieldAccessorShape {
+        name,
+        descriptor,
+        internal,
+        field_name: instance_field_jvm_name(ir, owner, field),
+        field_descriptor,
+        field_ty,
+        words: slot_words(field_ty),
+    })
+}
+
+/// The `invokestatic` of a private backing field's accessor, when `reader` is not the field's
+/// class. `None` keeps the direct `getfield` / `putfield`.
+pub(super) fn cross_class_backing_field_method(
+    cw: &mut ClassWriter,
+    ir: &IrFile,
+    facade: &str,
+    reader: Option<StaticOwner>,
+    class: u32,
+    field: u32,
+    write: bool,
+) -> Option<u16> {
+    let class_decl = ir.classes.get(class as usize)?;
+    if reader == Some(StaticOwner::Class(class_decl.fq_name)) {
+        return None;
+    }
+    let field_decl = class_decl.fields.get(field as usize)?;
+    if !field_decl.is_private() || super::static_storage(ir, class_decl) {
+        return None;
+    }
+    let property = class_decl
+        .properties
+        .iter()
+        .position(|property| property.backing_field == Some(field))? as u32;
+    let access = field_accessor_shape(ir, class, property, write)?;
+    Some(static_methodref(
+        cw,
+        ir,
+        facade,
+        StaticOwner::Class(class_decl.fq_name),
+        &access.name,
+        &access.descriptor,
+    ))
+}
+
 /// The accessors one static owner declares.
 struct Accessor<'a> {
     ir: &'a IrFile,
@@ -582,10 +731,11 @@ struct Accessor<'a> {
     flags: u16,
 }
 
-/// The field bridge another class uses for private member property `property`. A named object's
-/// plain backing field is static, so the bridge takes no instance. A declared accessor, and every
-/// instance field, still receives the owner.
-pub(super) fn member_property_field_bridge(
+/// The bridge another class uses for private member property `property`. A source-declared
+/// accessor is `access$getX` / `access$setX` and carries that accessor's JVM type; a plain field
+/// is `access$getX$p` / `access$setX$p`. A named object's plain backing field is static, so its
+/// bridge takes no instance. A declared accessor, and every instance field, still receives the owner.
+pub(super) fn member_property_access_bridge(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     owner: &str,
@@ -599,16 +749,26 @@ pub(super) fn member_property_field_bridge(
         property.setter.is_some()
     };
     let static_field = !declared_accessor && super::static_storage(ir, class);
+    let exposed = property
+        .backing_field
+        .and_then(|index| class.fields.get(index as usize))
+        .map(|field| type_descriptor(declared_property_accessor_jvm(ir, property, field)))
+        .unwrap_or_else(|| value.to_string());
+    let carried = if declared_accessor {
+        exposed.as_str()
+    } else {
+        value
+    };
     let descriptor = if read {
         if static_field {
-            format!("(){value}")
+            format!("(){exposed}")
         } else {
-            format!("(L{owner};){value}")
+            format!("(L{owner};){carried}")
         }
     } else if static_field {
-        format!("({value})V")
+        format!("({exposed})V")
     } else {
-        format!("(L{owner};{value})V")
+        format!("(L{owner};{carried})V")
     };
     let accessor = if read {
         property_getter_name(&property.name)
@@ -623,7 +783,7 @@ pub(super) fn member_property_field_bridge(
         .map(|_| property.name.clone());
     crate::jvm::inline::PropertyAccess::AccessBridge {
         owner: owner.to_string(),
-        name: format!("access${accessor}$p"),
+        name: member_property_accessor_name(&accessor, declared_accessor),
         descriptor,
         takes_receiver: !static_field,
         inline_uninitialized_guard,
@@ -631,7 +791,7 @@ pub(super) fn member_property_field_bridge(
 }
 
 impl Accessor<'_> {
-    /// `access$get<X>$p`: read the private property's field, or call its declared getter.
+    /// `access$get<X>`: call the private property's source-declared getter.
     fn member_getter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
         let ir = self.ir;
         let owner = &ir.classes[class as usize];
@@ -641,41 +801,18 @@ impl Accessor<'_> {
             .expect("a bridged member property has a backing field")
             as usize];
         let internal = owner.fq_name.render();
-        let field_ty = jvm_declared_ty(&field.ty);
-        let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
-        let name = format!("access${}$p", property_getter_name(&property.name));
-        if property.getter.is_none() && super::static_storage(ir, owner) {
-            let descriptor = format!("(){}", type_descriptor(ty));
-            let mut code = CodeBuilder::new(0);
-            code.mark_line(self.declaration_line);
-            let physical = instance_field_jvm_name(ir, owner, field);
-            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
-            code.getstatic(field_ref, slot_words(field_ty) as i32);
-            emit_backing_field_read_adaptation(ir, cw, &mut code, property, field_ty, ty);
-            emit_return(ty, &mut code);
-            code.ensure_locals(0);
-            code.link();
-            cw.add_method(self.flags, &name, &descriptor, &code);
-            return;
-        }
+        let name = member_property_accessor_name(&property_getter_name(&property.name), true);
         let descriptor = format!("(L{internal};){}", type_descriptor(ty));
         let mut code = CodeBuilder::new(1);
         code.mark_line(self.declaration_line);
         code.aload(0);
-        match property.getter.map(|getter| &ir.functions[getter as usize]) {
-            Some(getter) => {
-                let method =
-                    cw.methodref(&internal, &getter.name, &ir_method_desc(&[], &getter.ret));
-                code.invokevirtual(method, 0, slot_words(ty) as i32);
-            }
-            None => {
-                let physical = instance_field_jvm_name(ir, owner, field);
-                let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
-                code.getfield(field_ref, slot_words(field_ty) as i32);
-                emit_backing_field_read_adaptation(ir, cw, &mut code, property, field_ty, ty);
-            }
-        }
+        let getter = &ir.functions[property
+            .getter
+            .expect("a member getter bridge calls a declared getter")
+            as usize];
+        let method = cw.methodref(&internal, &getter.name, &ir_method_desc(&[], &getter.ret));
+        code.invokevirtual(method, 0, slot_words(ty) as i32);
         emit_return(ty, &mut code);
         code.ensure_locals(1);
         code.link();
@@ -688,7 +825,7 @@ impl Accessor<'_> {
         );
     }
 
-    /// `access$set<X>$p`: write the private property's field, or call its declared setter.
+    /// `access$set<X>`: call the private property's source-declared setter.
     fn member_setter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
         let ir = self.ir;
         let owner = &ir.classes[class as usize];
@@ -698,52 +835,21 @@ impl Accessor<'_> {
             .expect("a bridged member property has a backing field")
             as usize];
         let internal = owner.fq_name.render();
-        let field_ty = jvm_declared_ty(&field.ty);
-        let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
-        let name = format!("access${}$p", property_setter_name(&property.name));
-        if property.setter.is_none() && super::static_storage(ir, owner) {
-            let descriptor = format!("({})V", type_descriptor(ty));
-            let words = slot_words(ty);
-            let mut code = CodeBuilder::new(words);
-            code.mark_line(self.declaration_line);
-            load(ty, 0, &mut code);
-            emit_backing_field_write_adaptation(ir, cw, &mut code, property, ty, field_ty);
-            let physical = instance_field_jvm_name(ir, owner, field);
-            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
-            code.putstatic(field_ref, slot_words(field_ty) as i32);
-            code.ret_void();
-            code.ensure_locals(words);
-            code.link();
-            cw.add_method(self.flags, &name, &descriptor, &code);
-            cw.set_method_debug(
-                &name,
-                &descriptor,
-                None,
-                &[("<set-?>".to_string(), type_descriptor(ty), 0)],
-            );
-            return;
-        }
+        let name = member_property_accessor_name(&property_setter_name(&property.name), true);
         let descriptor = format!("(L{internal};{})V", type_descriptor(ty));
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(1 + words);
         code.mark_line(self.declaration_line);
         code.aload(0);
         load(ty, 1, &mut code);
-        match property.setter.map(|setter| &ir.functions[setter as usize]) {
-            Some(setter) => {
-                let setter_descriptor =
-                    method_descriptor(&[jvm_declared_ty(&setter.params[0])], Ty::Unit);
-                let method = cw.methodref(&internal, &setter.name, &setter_descriptor);
-                code.invokevirtual(method, words as i32, 0);
-            }
-            None => {
-                emit_backing_field_write_adaptation(ir, cw, &mut code, property, ty, field_ty);
-                let physical = instance_field_jvm_name(ir, owner, field);
-                let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
-                code.putfield(field_ref, slot_words(field_ty) as i32);
-            }
-        }
+        let setter = &ir.functions[property
+            .setter
+            .expect("a member setter bridge calls a declared setter")
+            as usize];
+        let setter_descriptor = method_descriptor(&[jvm_declared_ty(&setter.params[0])], Ty::Unit);
+        let method = cw.methodref(&internal, &setter.name, &setter_descriptor);
+        code.invokevirtual(method, words as i32, 0);
         code.ret_void();
         code.ensure_locals(1 + words);
         code.link();
@@ -757,6 +863,135 @@ impl Accessor<'_> {
                 ("<set-?>".to_string(), type_descriptor(ty), 1),
             ],
         );
+    }
+
+    /// `access$get<X>$p`: read the backing field. The property's getter is what contains a nested
+    /// `field` use, so this accessor must not call it. A named object's plain field is static:
+    /// its bridge takes no receiver and uses `getstatic`.
+    fn field_getter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
+        if self.emit_static_plain_field(class, property, false, cw) {
+            return;
+        }
+        let access = field_accessor_shape(self.ir, class, property, false)
+            .expect("a planned field getter must retain its backing field");
+        let mut code = CodeBuilder::new(1);
+        code.mark_line(self.declaration_line);
+        code.aload(0);
+        let field_ref = cw.fieldref(
+            &access.internal,
+            &access.field_name,
+            &access.field_descriptor,
+        );
+        code.getfield(field_ref, access.words as i32);
+        emit_return(access.field_ty, &mut code);
+        code.ensure_locals(1);
+        code.link();
+        cw.add_method(self.flags, &access.name, &access.descriptor, &code);
+        cw.set_method_debug(
+            &access.name,
+            &access.descriptor,
+            None,
+            &[("$this".to_string(), format!("L{};", access.internal), 0)],
+        );
+    }
+
+    /// `access$set<X>$p`: write the backing field, without calling a declared setter. A named
+    /// object's plain field is static: its bridge takes no receiver and uses `putstatic`.
+    fn field_setter(&self, class: u32, property: u32, cw: &mut ClassWriter) {
+        if self.emit_static_plain_field(class, property, true, cw) {
+            return;
+        }
+        let access = field_accessor_shape(self.ir, class, property, true)
+            .expect("a planned field setter must retain its backing field");
+        let mut code = CodeBuilder::new(1 + access.words);
+        code.mark_line(self.declaration_line);
+        code.aload(0);
+        load(access.field_ty, 1, &mut code);
+        let field_ref = cw.fieldref(
+            &access.internal,
+            &access.field_name,
+            &access.field_descriptor,
+        );
+        code.putfield(field_ref, access.words as i32);
+        code.ret_void();
+        code.ensure_locals(1 + access.words);
+        code.link();
+        cw.add_method(self.flags, &access.name, &access.descriptor, &code);
+        cw.set_method_debug(
+            &access.name,
+            &access.descriptor,
+            None,
+            &[
+                ("$this".to_string(), format!("L{};", access.internal), 0),
+                ("<set-?>".to_string(), access.field_descriptor, 1),
+            ],
+        );
+    }
+
+    /// Receiverless `getstatic` / `putstatic` bridge for a named object's private backing field.
+    /// A declared accessor is an instance method and stays on [`Self::member_getter`] /
+    /// [`Self::member_setter`]. Returns whether this property took the static path.
+    fn emit_static_plain_field(
+        &self,
+        class: u32,
+        property: u32,
+        write: bool,
+        cw: &mut ClassWriter,
+    ) -> bool {
+        let ir = self.ir;
+        let owner = &ir.classes[class as usize];
+        let property = &owner.properties[property as usize];
+        let declared = if write {
+            property.setter.is_some()
+        } else {
+            property.getter.is_some()
+        };
+        if declared || !super::static_storage(ir, owner) {
+            return false;
+        }
+        let field = &owner.fields[property
+            .backing_field
+            .expect("a bridged member property has a backing field")
+            as usize];
+        let internal = owner.fq_name.render();
+        let field_ty = jvm_declared_ty(&field.ty);
+        let field_descriptor = type_descriptor(field_ty);
+        let ty = declared_property_accessor_jvm(ir, property, field);
+        let physical = instance_field_jvm_name(ir, owner, field);
+        if write {
+            let name = format!("access${}$p", property_setter_name(&property.name));
+            let descriptor = format!("({})V", type_descriptor(ty));
+            let words = slot_words(ty);
+            let mut code = CodeBuilder::new(words);
+            code.mark_line(self.declaration_line);
+            load(ty, 0, &mut code);
+            emit_backing_field_write_adaptation(ir, cw, &mut code, property, ty, field_ty);
+            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+            code.putstatic(field_ref, slot_words(field_ty) as i32);
+            code.ret_void();
+            code.ensure_locals(words);
+            code.link();
+            cw.add_method(self.flags, &name, &descriptor, &code);
+            cw.set_method_debug(
+                &name,
+                &descriptor,
+                None,
+                &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+            );
+        } else {
+            let name = format!("access${}$p", property_getter_name(&property.name));
+            let descriptor = format!("(){}", type_descriptor(ty));
+            let mut code = CodeBuilder::new(0);
+            code.mark_line(self.declaration_line);
+            let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
+            code.getstatic(field_ref, slot_words(field_ty) as i32);
+            emit_backing_field_read_adaptation(ir, cw, &mut code, property, field_ty, ty);
+            emit_return(ty, &mut code);
+            code.ensure_locals(0);
+            code.link();
+            cw.add_method(self.flags, &name, &descriptor, &code);
+        }
+        true
     }
 
     fn getter(&self, index: u32, cw: &mut ClassWriter) {
