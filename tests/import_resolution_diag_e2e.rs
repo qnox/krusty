@@ -107,6 +107,30 @@ fn a_used_bad_import_reports_both_the_import_and_the_use() {
 }
 
 #[test]
+fn an_unresolved_import_keeps_the_rest_of_the_file_scope() {
+    // One missing import is that import's diagnostic. Explicit imports written beside it, and
+    // the default imports, stay in scope: `File`, `List`, and an extension receiver
+    // `CharSequence` are not unresolved.
+    let diags = diagnostics(
+        "import com.missing.Foo\n\
+         import java.io.File\n\
+         fun read(file: File): Int = file.name.length\n\
+         fun count(values: List<String>): Int = values.size\n\
+         fun CharSequence.echo(): String = this.toString()\n",
+    );
+    assert_eq!(diags, vec!["unresolved reference 'missing'."]);
+}
+
+#[test]
+fn an_unresolved_star_import_keeps_default_imports() {
+    let diags = diagnostics(
+        "import com.missing.*\n\
+         fun count(values: List<String>): Int = values.size\n",
+    );
+    assert_eq!(diags, vec!["unresolved reference 'missing'."]);
+}
+
+#[test]
 fn valid_imports_are_silent() {
     let diags = diagnostics(
         "import java.util.ArrayList\n\

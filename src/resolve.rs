@@ -625,7 +625,16 @@ impl Checker<'_> {
             }
         }
         for (span, message) in reports {
-            self.diags.error(span, message);
+            // Body checking re-enters a file once per declaration group. An import diagnostic is a
+            // file fact, so a later group must not report the same segment again.
+            let already_reported = self.diags.diags.iter().any(|diagnostic| {
+                diagnostic.file == self.file_index
+                    && diagnostic.span == span
+                    && diagnostic.msg == message
+            });
+            if !already_reported {
+                self.diags.error(span, message);
+            }
         }
     }
 }
