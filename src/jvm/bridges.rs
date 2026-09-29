@@ -317,11 +317,18 @@ fn superclass_method_bridges(
                 continue;
             }
         }
-        if ir.classes[cid].bridges.iter().any(|bridge| {
+        if let Some(existing) = ir.classes[cid].bridges.iter_mut().find(|bridge| {
             bridge.name == bridge_name
                 && bridge.erased_params == base_params
                 && bridge.erased_ret == base_ret
         }) {
+            // Several resolved override edges erase to one physical bridge. The nearest
+            // declaration (`AbstractCollection.contains`) need not be the collection member that
+            // carries the type-safe role; a farther edge (`Collection.contains`) does. The role
+            // is already on that edge, so the bridge keeps it.
+            if existing.collection_barrier.is_none() {
+                existing.collection_barrier = edge.collection_barrier;
+            }
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);

@@ -277,9 +277,15 @@ fn emit_bridge(
         }
         code.aload(parameter_slot);
         // A primitive parameter's JVM type is the scalar. `instanceof` names its boxed wrapper
-        // (`Int` → `java/lang/Integer`); the unbox below still goes through `Number`.
-        let concrete =
-            barrier_instanceof_name(b.concrete_params[barrier.parameter], cp[barrier.parameter]);
+        // (`Int` → `java/lang/Integer`); the unbox below still goes through `Number`. A value-class
+        // parameter arrives as that class's box. The unbox adapter names the box; the carrier's
+        // wrapper (`Integer`) is a different class and would reject a real key.
+        let concrete = adapter
+            .and_then(|plan| plan.parameter(barrier.parameter))
+            .map(|value_class| value_class.owner.render())
+            .unwrap_or_else(|| {
+                barrier_instanceof_name(b.concrete_params[barrier.parameter], cp[barrier.parameter])
+            });
         let concrete_class = cw.class_ref(&concrete);
         code.instance_of(concrete_class);
         code.ifne(dispatch);

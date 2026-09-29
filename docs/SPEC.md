@@ -8853,6 +8853,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Test: `tests/collection_special_member_stub_e2e.rs`
   (`primitive_collection_bridges_reject_null_and_foreign_wrappers`).
 
+- **A value-class collection parameter rejects a value that is not its box.** `get` on
+  `Map<Wrapper, String>` (`value class Wrapper(val id: Int)`) erases to `get(Object)Object`. The
+  bridge tests `instanceof Wrapper`, returns `null` when that fails, and unboxes with `unbox-impl`
+  before the mangled member. The test names the value class, not the carrier's wrapper
+  (`java/lang/Integer`): a stored key is a `Wrapper`, and testing `Integer` makes the lookup miss.
+  The value-class unbox plan recorded for that parameter is what names the box.
+  Test: `tests/collection_special_member_stub_e2e.rs`
+  (`value_class_map_delegation_accepts_its_own_key`). Corpus:
+  `inlineClasses/interfaceDelegation/kt38337.kt`, `kt38337Generic.kt`.
+
+- **A collection bridge keeps the collection member's role when an intermediate also declares it.**
+  `class MySet<E : Map.Entry<K, V>> : AbstractSet<E>` overrides `contains(element: E)`.
+  `AbstractCollection.contains` and `Collection.contains` erase to the same `contains(Object)Boolean`
+  bridge. The bridge carries `Collection.contains`'s false-on-foreign-type role, tests
+  `instanceof java/util/Map$Entry`, and returns `false` for a foreign object. A bare checkcast to
+  `Map.Entry` throws `ClassCastException` instead.
+  Test: `tests/collection_special_member_stub_e2e.rs`
+  (`abstract_set_contains_rejects_a_foreign_entry`). Corpus:
+  `builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt`.
+
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
   `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
   `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.

@@ -309,3 +309,57 @@ fun box(): String {
 "#;
     assert_eq!(run(SRC).expect("primitive collection bridges"), "OK");
 }
+
+/// `E : Map.Entry` still erases `contains` to `Object`. A foreign instance returns false; the
+/// bridge does not checkcast to `Map.Entry` and throw.
+#[test]
+fn abstract_set_contains_rejects_a_foreign_entry() {
+    const SRC: &str = r#"
+class MySet<K, V, E : Map.Entry<K, V>> : AbstractSet<E>() {
+    override fun contains(element: E): Boolean = element.key !== null
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = false
+    override fun containsAll(elements: Collection<E>): Boolean = false
+    override fun iterator(): Iterator<E> = emptyList<E>().iterator()
+}
+
+fun box(): String {
+    val values = MySet<Int, Int, Map.Entry<Int, Int>>()
+    val found = (object {}).let { values.contains(it as Any?) }
+    return if (found) "NOT OK" else "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("AbstractSet contains barrier"), "OK");
+}
+
+/// A delegated `Map<Wrapper, String>` stores boxed `Wrapper` keys. `get` must accept that box and
+/// reject a foreign wrapper with null.
+#[test]
+fn value_class_map_delegation_accepts_its_own_key() {
+    const SRC: &str = r#"
+@JvmInline
+value class Wrapper(val id: Int)
+
+@JvmInline
+value class GenericWrapper<T : Int>(val id: T)
+
+class DMap(private val map: Map<Wrapper, String>) : Map<Wrapper, String> by map
+
+class GenericDMap(private val map: Map<GenericWrapper<Int>, String>) :
+    Map<GenericWrapper<Int>, String> by map
+
+fun box(): String {
+    val values = DMap(mutableMapOf(Wrapper(42) to "OK"))
+    if (values[Wrapper(42)] != "OK") return "miss"
+    val erased = values as Map<Any?, String>
+    if (erased[1] != null) return "foreign"
+
+    val generic = GenericDMap(mutableMapOf(GenericWrapper(42) to "OK"))
+    if (generic[GenericWrapper(42)] != "OK") return "generic miss"
+    val genericErased = generic as Map<Any?, String>
+    if (genericErased[1] != null) return "generic foreign"
+    return "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("value-class map delegation"), "OK");
+}
