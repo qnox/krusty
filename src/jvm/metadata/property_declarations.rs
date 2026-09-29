@@ -274,7 +274,7 @@ pub(super) fn decode_properties(
             )
             .map(|(name, ty)| MetaValueParam {
                 ty: declared_classifier(ty),
-                name,
+                name: super::value_parameter::parameter_name(&name),
                 flags: MvpFlags::default()
                     .with_nullable(ty.is_nullable())
                     .with_has_type_facts(true),

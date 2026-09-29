@@ -74,7 +74,7 @@ pub(super) fn merge_metadata_const(
         context_param_names: metadata
             .context_params
             .iter()
-            .map(|parameter| parameter.name.clone())
+            .map(|parameter| parameter.name.to_owned())
             .collect(),
         context_parameter_identities: metadata.context_parameter_identities(),
         getter,
