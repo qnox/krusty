@@ -5063,6 +5063,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   sides and is not unboxed. A parameter declared as the wrapper itself still passes `null` for an
   omitted slot. Test: `tests/primitive_bound_default_e2e.rs`.
 
+- **An inherited interface default comes from the leftmost supertype.** When several overridden
+  functions declare a default for the same parameter, a direct clash is rejected, but a default
+  reached through an intermediate classifier is still callable (`interface A2 : A` beside `B`,
+  `KT-36188`). The call uses the `$default` of the declaration found first in a left-to-right
+  depth-first walk of the receiver's supertypes, so `class Impl : A2, B` calls `A.foo$default`
+  even though `B.foo` is the nearer declaration, and `class Impl : B, A2` calls `B.foo$default`.
+  Tests: `inherited_interface_default_e2e`.
+
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/
   `componentN` typed as `Any` (breaking destructuring + arithmetic). `SymbolSource::infer_constructor_type_args`

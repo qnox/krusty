@@ -73,9 +73,6 @@ coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
 defaultArguments/convention/incWithDefaultInGetter.kt
-defaultArguments/function/kt36188.kt
-defaultArguments/function/kt36188_2.kt
-defaultArguments/kt48391.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/extensionDelegatesWithSameNames.kt
 delegatedProperty/getDelegateWithoutReflection.kt
