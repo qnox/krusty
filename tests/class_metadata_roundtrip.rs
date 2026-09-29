@@ -176,7 +176,7 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
         .find(|function| function.jvm_name == "equals")
         .expect("synthesized equals metadata");
 
-    assert_eq!(equals.equality_bound, Some(owner));
+    assert_eq!(equals.equality_bound(), Some(owner));
 }
 
 #[test]
