@@ -206,16 +206,6 @@ impl ProductionSignatureSemantics<'_> {
         let mut receiver = <Self as crate::fir::SignatureSemantics>::select_value(
             self, scope, root, origin, None, demand,
         )?;
-        if let Some(segment) = segments.next() {
-            if let Some(entries) = self.prioritized_enum_entries_on_qualifier(scope, root, segment)
-            {
-                receiver = crate::fir::ResolvedTy::new(entries).map_err(|_| Self::failure())?;
-            } else {
-                receiver = <Self as crate::fir::SignatureSemantics>::select_member(
-                    self, scope, segment, origin, receiver, None, demand,
-                )?;
-            }
-        }
         for segment in segments {
             receiver = <Self as crate::fir::SignatureSemantics>::select_member(
                 self, scope, segment, origin, receiver, None, demand,
@@ -1473,6 +1463,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.implicit_receivers(scope),
         );
         if spelling.contains('.') {
+            // Bind the root once through the value tower. If it exists, every later segment is a
+            // member of that semantic receiver; never reinterpret the root spelling as a package
+            // or classifier when a later lookup fails.
+            if let Some(receiver) =
+                self.qualified_value_receiver(scope, spelling, origin, demand)?
+            {
+                return Ok(receiver);
+            }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 if qualifier
                     .strip_prefix("this@")

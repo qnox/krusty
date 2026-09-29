@@ -184,3 +184,13 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "enum_entries_shadowed_root");
 }
+
+#[test]
+fn an_inferred_parameter_root_named_like_the_enum_is_not_reinterpreted() {
+    const SRC: &str = "\
+enum class Mode { A; companion object }\n\
+class Holder(val entries: String)\n\
+fun read(Mode: Holder) = Mode.entries\n\
+fun box(): String = read(Holder(\"OK\"))\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_entries_shadowed_parameter_root");
+}
