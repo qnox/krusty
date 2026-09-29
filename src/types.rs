@@ -324,7 +324,7 @@ impl TypeName {
         if let Some(found) = CACHE.with(|cache| cache.borrow().get(&self).copied()) {
             return found;
         }
-        let spelled = intern_text(&self.render());
+        let spelled = intern(&self.render());
         CACHE.with(|cache| cache.borrow_mut().insert(self, spelled));
         spelled
     }
