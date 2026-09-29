@@ -103,6 +103,7 @@ fn lower_function_override_plans(
             implementation_owner: edge.implementation_owner,
             overridden: edge.overridden,
             overridden_owner: edge.overridden_owner,
+            collection_barrier: edge.collection_barrier,
             overridden_is_interface: edge.overridden_is_interface,
             name: edge.name.to_string(),
             declared_parameters: edge.declared_parameters.iter().map(|ty| ty.get()).collect(),

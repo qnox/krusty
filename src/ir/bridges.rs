@@ -4,7 +4,7 @@
 //! ends. Everything a target needs to decide those adaptations lives here, beside the declaration
 //! it adapts, rather than in the file arena that merely holds them.
 
-use super::Ty;
+use super::{Ty, TypeName};
 use crate::fir::ResolvedParameterIdentity;
 
 /// One parameter of a bridge, described by the OVERRIDDEN declaration the bridge's signature comes
@@ -35,6 +35,12 @@ pub struct Bridge {
     /// Exact same-module function this bridge delegates to. Backend realization uses this stable
     /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
     pub target_function: Option<u32>,
+    /// Semantic owner of the exact declaration this bridge overrides. Generated adapters that do
+    /// not come from an override edge leave this absent. A backend may attach ABI policy to this
+    /// identity without recovering the declaration from `name`.
+    pub overridden_owner: Option<TypeName>,
+    /// Provider-normalized collection ABI role of the exact overridden declaration.
+    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
     /// The parameters visible on this bridge, one per erased parameter. These are frozen before a
     /// representation pass can prepend carrier/receiver parameters to the delegated target.
     pub parameters: Vec<BridgeParameter>,

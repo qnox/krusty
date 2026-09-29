@@ -8361,6 +8361,7 @@ mod tests {
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
+            collection_barrier: None,
             inline_body_plan: None,
             plugin_expression: None,
             params: vec![Ty::Int],

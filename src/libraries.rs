@@ -225,6 +225,16 @@ pub enum SemanticCallRole {
     KotlinAnyToString,
 }
 
+/// Neutral result required by the JVM's type-safe collection protocol for one exact declaration.
+/// A JVM declaration provider assigns this role while the decoded Kotlin builtin identity and its
+/// physical realization are still together; later phases carry it without recognizing a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionBarrierOutcome {
+    False,
+    NotFound,
+    Null,
+}
+
 /// One member (constructor, member function/property accessor, or companion member) of a library
 /// type, in Kotlin terms. `descriptor` is an opaque backend token (a JVM method descriptor) the
 /// matching emitter consumes verbatim — the front end matches on `params`/`ret`, never parsing it.
@@ -911,6 +921,7 @@ impl LibraryCallable {
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
+            collection_barrier: None,
             plugin_expression: None,
             inline_body_plan: None,
             physical_params: params.clone(),
@@ -1030,6 +1041,8 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// JVM collection barrier role of this exact decoded builtin declaration.
+    pub collection_barrier: Option<CollectionBarrierOutcome>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
     /// Structural expansion decoded from this exact declaration's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,

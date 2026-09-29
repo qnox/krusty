@@ -231,3 +231,135 @@ fun box(): String {
 "#;
     assert_eq!(run(SRC).expect("List collection barriers"), "OK");
 }
+
+/// `containsValue(Int)` and `indexOf(Int)` erase to `Object`. Null and a foreign wrapper return
+/// the neutral result; an `Integer` is unboxed and delegated.
+#[test]
+fn primitive_collection_bridges_reject_null_and_foreign_wrappers() {
+    const SRC: &str = r#"
+private object IntValues : Map<String, Int> {
+    override val size: Int get() = 1
+    override val entries: Set<Map.Entry<String, Int>> get() = emptySet()
+    override val keys: Set<String> get() = emptySet()
+    override val values: Collection<Int> get() = emptyList()
+    override fun containsKey(key: String): Boolean = false
+    override fun containsValue(value: Int): Boolean = true
+    override fun get(key: String): Int? = null
+    override fun isEmpty(): Boolean = false
+}
+
+private object Ints : List<Int> {
+    override val size: Int get() = 1
+    override fun isEmpty(): Boolean = false
+    override fun iterator(): Iterator<Int> = throw UnsupportedOperationException()
+    override fun contains(element: Int): Boolean = true
+    override fun containsAll(elements: Collection<Int>): Boolean = false
+    override fun get(index: Int): Int = 3
+    override fun indexOf(element: Int): Int = if (element == 3) 0 else -2
+    override fun lastIndexOf(element: Int): Int = if (element == 3) 0 else -2
+    override fun listIterator(): ListIterator<Int> = throw UnsupportedOperationException()
+    override fun listIterator(index: Int): ListIterator<Int> = throw UnsupportedOperationException()
+    override fun subList(fromIndex: Int, toIndex: Int): List<Int> = emptyList()
+}
+
+private object IntBag : MutableCollection<Int> {
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = true
+    override fun iterator(): MutableIterator<Int> = throw UnsupportedOperationException()
+    override fun contains(element: Int): Boolean = false
+    override fun containsAll(elements: Collection<Int>): Boolean = false
+    override fun add(element: Int): Boolean = element == 3
+    override fun addAll(elements: Collection<Int>): Boolean = false
+    override fun clear() {}
+    override fun remove(element: Int): Boolean = false
+    override fun removeAll(elements: Collection<Int>): Boolean = false
+    override fun retainAll(elements: Collection<Int>): Boolean = false
+}
+
+fun box(): String {
+    val values = IntValues as Map<Any?, Any?>
+    if (values.containsValue(null)) return "value null"
+    if (values.containsValue("x")) return "value type"
+    if (!values.containsValue(3)) return "value int"
+    if (!values.containsValue(4)) return "value other int"
+
+    val ints = Ints as List<Any?>
+    if (ints.contains(null)) return "contains null"
+    if (ints.contains("x")) return "contains type"
+    if (!ints.contains(3)) return "contains int"
+    if (ints.indexOf(null) != -1) return "index null"
+    if (ints.indexOf("x") != -1) return "index type"
+    if (ints.indexOf(4) != -2) return "index other int"
+    if (ints.indexOf(3) != 0) return "index int"
+    if (ints.lastIndexOf(null) != -1) return "last null"
+    if (ints.lastIndexOf(3) != 0) return "last int"
+
+    val bag = IntBag as MutableCollection<Any?>
+    try {
+        bag.add(null)
+        return "add null did not fail"
+    } catch (_: NullPointerException) {}
+    try {
+        bag.add("x")
+        return "add foreign wrapper did not fail"
+    } catch (_: ClassCastException) {}
+    if (!bag.add(3)) return "add int"
+    return "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("primitive collection bridges"), "OK");
+}
+
+/// `E : Map.Entry` still erases `contains` to `Object`. A foreign instance returns false; the
+/// bridge does not checkcast to `Map.Entry` and throw.
+#[test]
+fn abstract_set_contains_rejects_a_foreign_entry() {
+    const SRC: &str = r#"
+class MySet<K, V, E : Map.Entry<K, V>> : AbstractSet<E>() {
+    override fun contains(element: E): Boolean = element.key !== null
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = false
+    override fun containsAll(elements: Collection<E>): Boolean = false
+    override fun iterator(): Iterator<E> = emptyList<E>().iterator()
+}
+
+fun box(): String {
+    val values = MySet<Int, Int, Map.Entry<Int, Int>>()
+    val found = (object {}).let { values.contains(it as Any?) }
+    return if (found) "NOT OK" else "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("AbstractSet contains barrier"), "OK");
+}
+
+/// A delegated `Map<Wrapper, String>` stores boxed `Wrapper` keys. `get` must accept that box and
+/// reject a foreign wrapper with null.
+#[test]
+fn value_class_map_delegation_accepts_its_own_key() {
+    const SRC: &str = r#"
+@JvmInline
+value class Wrapper(val id: Int)
+
+@JvmInline
+value class GenericWrapper<T : Int>(val id: T)
+
+class DMap(private val map: Map<Wrapper, String>) : Map<Wrapper, String> by map
+
+class GenericDMap(private val map: Map<GenericWrapper<Int>, String>) :
+    Map<GenericWrapper<Int>, String> by map
+
+fun box(): String {
+    val values = DMap(mutableMapOf(Wrapper(42) to "OK"))
+    if (values[Wrapper(42)] != "OK") return "miss"
+    val erased = values as Map<Any?, String>
+    if (erased[1] != null) return "foreign"
+
+    val generic = GenericDMap(mutableMapOf(GenericWrapper(42) to "OK"))
+    if (generic[GenericWrapper(42)] != "OK") return "generic miss"
+    val genericErased = generic as Map<Any?, String>
+    if (genericErased[1] != null) return "generic foreign"
+    return "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("value-class map delegation"), "OK");
+}

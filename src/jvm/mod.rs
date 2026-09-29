@@ -16,6 +16,7 @@ pub(crate) mod class_node;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;
+mod collection_barriers;
 mod common_metadata;
 pub mod companion;
 pub mod compilation_inputs;

@@ -39,6 +39,7 @@ pub struct IrFunctionOverride {
     pub implementation_owner: TypeName,
     pub overridden: crate::fir::ResolvedFunctionOverrideTarget,
     pub overridden_owner: TypeName,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
     pub overridden_is_interface: bool,
     pub name: String,
     /// The overridden declaration's own parameters and result, before the implementing class's

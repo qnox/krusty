@@ -444,6 +444,7 @@ fn delegated_function_declaration(
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,
+        collection_barrier: function.callable.collection_barrier,
         parameter_identities,
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,

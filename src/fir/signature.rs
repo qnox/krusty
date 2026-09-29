@@ -1826,6 +1826,7 @@ pub struct ResolvedDelegatedTypeParameter {
 pub struct ResolvedDelegatedFunctionDeclaration {
     pub target: super::ResolvedFunctionOverrideTarget,
     pub owner: TypeName,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
