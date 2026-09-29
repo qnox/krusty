@@ -6,7 +6,7 @@
 //! physical zero; common lowering never rewrites a semantic type to encode either decision.
 
 use super::*;
-use crate::ir::ExprId;
+use crate::ir::{ExprId, IrExpr};
 
 fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
     let declared = ir
@@ -20,11 +20,16 @@ fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
+    initializer: ExprId,
     slot: Ty,
     code: &mut CodeBuilder,
     classes: &mut ClassWriter,
 ) -> bool {
-    if !ir.deferred_local_types.contains_key(&declaration) {
+    // Only the parser's synthetic default is replaced. A captured deferred local's holder
+    // (`RefNew`) is real storage: substituting `null` makes the later `element` write throw.
+    if !ir.deferred_local_types.contains_key(&declaration)
+        || !matches!(ir.expr(initializer), IrExpr::Const(_))
+    {
         return false;
     }
     push_zero(slot, code, classes);
@@ -79,11 +84,12 @@ impl Emitter<'_> {
         }
 
         let slot = if let Some(initializer) = initializer {
-            let source = if emit_deferred_zero(self.ir, declaration, slot_ty, code, self.cw) {
-                slot_ty
-            } else {
-                self.emit_consumed_operand(initializer, code)
-            };
+            let source =
+                if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
+                    slot_ty
+                } else {
+                    self.emit_consumed_operand(initializer, code)
+                };
             let semantic = self
                 .ir
                 .logical_types

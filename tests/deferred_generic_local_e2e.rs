@@ -125,6 +125,22 @@ fn an_uninitialized_primitive_bound_local_stays_unboxed_like_kotlinc() {
 }
 
 #[test]
+fn a_deferred_local_captured_by_a_closure_is_assigned() {
+    const SOURCE: &str = "fun box(): String {\n\
+        var a: Int\n\
+        a = 12\n\
+        fun readA(): Int = a\n\
+        val x: Int\n\
+        run { x = 7 }\n\
+        if (readA() != 12) return \"fail fun\"\n\
+        if (x != 7) return \"fail lambda\"\n\
+        return \"OK\"\n\
+    }\n\
+    fun run(block: () -> Unit) { block() }\n";
+    common::expect_box_ok_with_stdlib(SOURCE, "DeferredCapturedLocal");
+}
+
+#[test]
 fn an_uninitialized_generic_local_runs() {
     common::expect_box_ok_with_stdlib(UNBOUNDED, "DeferredGenericLocal");
     common::expect_box_ok_with_stdlib(PRIMITIVE_BOUND, "DeferredPrimitiveBoundLocal");

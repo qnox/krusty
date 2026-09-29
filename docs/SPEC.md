@@ -9587,10 +9587,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with `checkcast Number; intValue`. Retargeting the local itself to `int` unboxes the `null` and
   throws. A primitive bound (`R : Int`) is already that primitive, so the zero becomes `iconst_0`
   and the slot stays unboxed. A local that is initialized at the declaration (`val result: R =
-  block()`) specializes to the type argument, including a primitive slot. kotlinc also writes
+  block()`) specializes to the type argument, including a primitive slot. An explicitly typed
+  `when` subject (`when (val value: T = …)`) is initialized the same way. A captured deferred
+  local still allocates its holder; only the parser's synthetic constant is replaced by the
+  physical zero, so a later write of `element` is not a store into `null`. kotlinc also writes
   `$i$f$` and `$i$a$` inline-depth markers around that sequence; they occupy slots but are not
   the local's representation. Test:
-  `tests/deferred_generic_local_e2e.rs`. Corpus: `codegen/box/boxingOptimization/kt48394.kt`.
+  `tests/deferred_generic_local_e2e.rs`. Corpus: `codegen/box/boxingOptimization/kt48394.kt`,
+  `contracts/runLambdaForVal.kt`, `instructions/swap/swapRefToSharedVarInt.kt`.
 
 - **The inline expansion's argument slotting honors the trailing-lambda rule.** A syntactic
   trailing lambda binds the LAST parameter; omitted middles take their default expressions
