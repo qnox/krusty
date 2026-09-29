@@ -554,6 +554,26 @@ impl NameTree {
         out
     }
 
+    /// Render a classifier for a JVM classfile constant, translating source/metadata dots only in
+    /// the classifier's final segment into JVM nested-class separators. Keeping the split here
+    /// prevents backend callers from rendering an identity and then rediscovering its name-tree
+    /// structure with string scans.
+    pub(crate) fn jvm_binary_name(&self, id: NameId) -> String {
+        if id == Self::ROOT {
+            return String::new();
+        }
+        let node = self.node(id);
+        let parent = node.parent.expect("non-root name node has a parent");
+        let mut out = self.render(parent);
+        if node.sep != 0 {
+            out.push(node.sep as char);
+        }
+        for ch in node.segment.chars() {
+            out.push(if ch == '.' { '$' } else { ch });
+        }
+        out
+    }
+
     pub fn starts_with(&self, id: NameId, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
@@ -1020,6 +1040,12 @@ mod tests {
             names.jvm_nested_parts(external_nested),
             Some(("external/Outer".to_string(), "Inner".to_string()))
         );
+        let metadata_nested = names.insert("metadata/Outer.Middle.Inner");
+        assert_eq!(
+            names.jvm_binary_name(metadata_nested),
+            "metadata/Outer$Middle$Inner"
+        );
+        assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
 
         let late_nested = names.insert("late/Outer$Inner");
         assert_eq!(names.nested_owner(late_nested), None);
