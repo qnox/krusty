@@ -325,6 +325,10 @@ pub(super) fn finalize_properties(
     merge_class_initialization(ir, initialization)?;
     realize_backing_field_operations(index, ir, &realizations)?;
     ir.local_property_layouts.extend(realizations);
+    // Accessor functions exist now, and checked reads still carry the call site's type arguments.
+    // Splice `inline` accessors before a backend turns the read into a call and drops those
+    // arguments: a reified `T::class` in the accessor is the call site's class.
+    super::inlining::splice_inline_property_accessors(index, ir)?;
     Ok(())
 }
 

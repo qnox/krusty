@@ -8,8 +8,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fir::{
-    CallableId, FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation,
-    FirTypeParameterRef, FirTypeSubstitution, ResolvedTy,
+    CallableId, DeclarationFlags, DeclarationId, DeclarationKind, FirPropertyReferenceTarget,
+    FirPropertyTarget, FirReferenceAdaptation, FirTypeParameterRef, FirTypeSubstitution,
+    PropertyId, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
     Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst,
@@ -1569,6 +1570,620 @@ fn tail_statement_block_chain(
         }
         current = last;
     }
+}
+
+/// Splice same-file `inline` property accessors at their checked reads and writes.
+///
+/// Accessor functions are materialized only after every body has been lowered, so a property read
+/// cannot be expanded while the read itself is lowered. By the time this runs, the accessor body
+/// exists and the read still carries the checker’s type arguments. Cloning that body here gives a
+/// reified `T::class` the call site’s class. The accessor declaration itself stays, erased, for
+/// callers that do not inline it.
+pub(super) fn splice_inline_property_accessors(
+    index: &ResolvedModuleIndex,
+    ir: &mut crate::ir::IrFile,
+) -> Result<(), super::FirFileLoweringFailure> {
+    record_inline_property_accessors(index, ir);
+    let mut next_temporary = fresh_value_base(ir);
+    let sites = (0..ir.exprs.len())
+        .map(|raw| raw as ExprId)
+        .filter(|&site| property_access(ir, site).is_some())
+        .collect::<Vec<_>>();
+    let mut stack = HashSet::new();
+    for site in sites {
+        splice_property_access(index, ir, site, &mut next_temporary, &mut stack)?;
+    }
+    Ok(())
+}
+
+fn record_inline_property_accessors(index: &ResolvedModuleIndex, ir: &mut crate::ir::IrFile) {
+    let accessors = ir
+        .local_property_layouts
+        .iter()
+        .filter_map(|(property, layout)| {
+            let declaration = ir.checked_properties.get(property)?.declaration;
+            Some((declaration, layout.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (declaration, layout) in accessors {
+        for (sibling, function) in accessor_functions(&layout) {
+            if accessor_is_inline(index, declaration, sibling) {
+                record_inline_accessor(ir, function);
+            }
+        }
+    }
+}
+
+fn record_inline_accessor(ir: &mut crate::ir::IrFile, function: crate::ir::FunId) {
+    ir.inline_fns.insert(function);
+    let static_accessor = ir
+        .functions
+        .get(function as usize)
+        .is_some_and(|function| function.is_static && function.dispatch_receiver.is_none());
+    if static_accessor {
+        ir.top_level_inline_functions.insert(function);
+    }
+}
+
+fn accessor_is_inline(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    sibling: u32,
+) -> bool {
+    index
+        .owned_declaration(declaration, DeclarationKind::Accessor, sibling)
+        .and_then(|accessor| index.declaration_header(accessor))
+        .is_some_and(|header| header.flags.has(DeclarationFlags::INLINE))
+}
+
+fn accessor_functions(layout: &crate::ir::IrLocalPropertyLayout) -> Vec<(u32, crate::ir::FunId)> {
+    let (getter, setter) = match layout {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+        | crate::ir::IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+        | crate::ir::IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+            (Some(*getter), *setter)
+        }
+    };
+    getter
+        .map(|function| (0, function))
+        .into_iter()
+        .chain(setter.map(|function| (1, function)))
+        .collect()
+}
+
+struct PropertyAccess {
+    target: PropertyId,
+    dispatch_receiver: Option<ExprId>,
+    extension_receiver: Option<ExprId>,
+    context_arguments: Vec<ExprId>,
+    /// `Some` for a write: the value being stored.
+    value: Option<ExprId>,
+    substitutions: Vec<IrCheckedSubstitution>,
+}
+
+fn property_access(ir: &crate::ir::IrFile, site: ExprId) -> Option<PropertyAccess> {
+    match ir.expr(site).clone() {
+        IrExpr::Checked(IrCheckedOperation::PropertyRead {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            substitutions,
+        }) => Some(PropertyAccess {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value: None,
+            substitutions,
+        }),
+        IrExpr::Checked(IrCheckedOperation::PropertyWrite {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value,
+            substitutions,
+        }) => Some(PropertyAccess {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value: Some(value),
+            substitutions,
+        }),
+        _ => None,
+    }
+}
+
+fn splice_property_access(
+    index: &ResolvedModuleIndex,
+    ir: &mut crate::ir::IrFile,
+    site: ExprId,
+    next_temporary: &mut u32,
+    stack: &mut HashSet<crate::ir::FunId>,
+) -> Result<(), super::FirFileLoweringFailure> {
+    let Some(access) = property_access(ir, site) else {
+        return Ok(());
+    };
+    let Some(function) = inline_accessor(index, ir, &access) else {
+        return Ok(());
+    };
+    if !stack.insert(function) {
+        return Ok(());
+    }
+    let nested = expand_inline_accessor(index, ir, site, &access, function, next_temporary)?;
+    for nested in nested {
+        splice_property_access(index, ir, nested, next_temporary, stack)?;
+    }
+    stack.remove(&function);
+    Ok(())
+}
+
+fn inline_accessor(
+    index: &ResolvedModuleIndex,
+    ir: &crate::ir::IrFile,
+    access: &PropertyAccess,
+) -> Option<crate::ir::FunId> {
+    let layout = ir.local_property_layouts.get(&access.target)?;
+    let declaration = ir.checked_properties.get(&access.target)?.declaration;
+    let sibling = u32::from(access.value.is_some());
+    if !accessor_is_inline(index, declaration, sibling) {
+        return None;
+    }
+    accessor_functions(layout)
+        .into_iter()
+        .find(|(candidate, _)| *candidate == sibling)
+        .map(|(_, function)| function)
+}
+
+/// Clone the accessor, bind its parameters to this use, and replace `site` in place.
+///
+/// Returns property accesses that the clone introduced, so a nested inline accessor is expanded
+/// with this use’s substitutions already applied.
+fn expand_inline_accessor(
+    index: &ResolvedModuleIndex,
+    ir: &mut crate::ir::IrFile,
+    site: ExprId,
+    access: &PropertyAccess,
+    function: crate::ir::FunId,
+    next_temporary: &mut u32,
+) -> Result<Vec<ExprId>, super::FirFileLoweringFailure> {
+    let Some(inner) = accessor_inner_body(ir, function, access.value.is_some()) else {
+        return Ok(Vec::new());
+    };
+    let Some(operands) = access_operands(ir, access) else {
+        return Ok(Vec::new());
+    };
+    let has_dispatch = ir
+        .functions
+        .get(function as usize)
+        .is_some_and(|function| function.dispatch_receiver.is_some());
+    let parameter_count = u32::try_from(operands.len())
+        .map_err(|_| super::FirFileLoweringFailure::ValueIdentityOverflow)?;
+    let declared = ir
+        .functions
+        .get(function as usize)
+        .map(|function| function.params.len() + usize::from(has_dispatch))
+        .unwrap_or(usize::MAX);
+    if declared != operands.len() {
+        return Ok(Vec::new());
+    }
+    let (bindings, reified_bindings) = substitution_bindings(index, &access.substitutions);
+    let operand_types = ir.functions[function as usize]
+        .dispatch_receiver
+        .map(Ty::obj_name)
+        .into_iter()
+        .chain(ir.functions[function as usize].params.iter().copied())
+        .map(|ty| ty_subst_keep_unbound(ty, &bindings))
+        .collect::<Vec<_>>();
+    let read = crate::ir::read_values(ir, inner);
+    for (ordinal, operand) in operands.iter().enumerate() {
+        if !read.contains(&(ordinal as u32)) {
+            ir.mark_unread_inline_operand(*operand);
+        }
+    }
+    let identities = ir
+        .function_parameter_identities(function)
+        .map(<[_]>::to_vec);
+    let mut operand_slots = Vec::with_capacity(operands.len());
+    let mut declarations = Vec::with_capacity(operands.len());
+    for (ordinal, (operand, ty)) in operands.into_iter().zip(operand_types).enumerate() {
+        let slot = allocate_temporary(next_temporary)?;
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: slot,
+            ty: stored_value_ty(ty),
+            init: Some(operand),
+            named: true,
+        });
+        ir.call_operand_bindings.insert(declaration);
+        if let Some((name, role)) = operand_debug(&identities, has_dispatch, ordinal) {
+            if let Some(name) = name {
+                ir.value_names.insert(declaration, name);
+            }
+            ir.set_debug_local_provenance(
+                declaration,
+                IrDebugLocalProvenance::inline_value(role, 1),
+            );
+        }
+        declarations.push(declaration);
+        operand_slots.push(Some(slot));
+    }
+
+    let protected = protected_lambda_bodies(ir, inner);
+    let (cloned_root, cloned) = crate::ir::clone_expression_dag(ir, inner);
+    let highest_local = cloned
+        .values()
+        .filter(|copy| !protected.contains(*copy))
+        .filter_map(|copy| value_indices(ir.expr(*copy)).into_iter().max())
+        .filter(|index| *index >= parameter_count)
+        .max();
+    let local_count = highest_local
+        .map(|highest| highest + 1 - parameter_count)
+        .unwrap_or(0);
+    let local_base = *next_temporary;
+    *next_temporary = local_base
+        .checked_add(local_count)
+        .ok_or(super::FirFileLoweringFailure::ValueIdentityOverflow)?;
+
+    let mut copies = cloned
+        .iter()
+        .map(|(&source, &copy)| (source, copy))
+        .collect::<Vec<_>>();
+    copies.sort_by_key(|&(_, copy)| copy);
+    let mut returns = Vec::new();
+    for &(source, copy) in &copies {
+        ir.mark_inline_copy(copy);
+        specialize_expression_facts(ir, copy, &bindings);
+        let Some(expression) = ir.exprs.get_mut(copy as usize) else {
+            return Ok(Vec::new());
+        };
+        specialize_types(expression, &bindings);
+        if let Some(expression) = ir.exprs.get_mut(copy as usize) {
+            specialize_dependency_substitutions(expression, &reified_bindings);
+        }
+        if protected.contains(&source) {
+            continue;
+        }
+        if rebase_values(
+            ir.exprs.get_mut(copy as usize).unwrap(),
+            parameter_count,
+            &operand_slots,
+            local_base,
+        )
+        .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        if let IrExpr::Return(value) = ir.expr(copy).clone() {
+            returns.push((copy, value));
+            ir.checked_return_depths.remove(&copy);
+        }
+    }
+
+    let result_ty = ty_subst_keep_unbound(ir.functions[function as usize].ret, &bindings);
+    let setter = access.value.is_some();
+    let produced =
+        finish_accessor_expansion(ir, cloned_root, &returns, result_ty, setter, next_temporary)?;
+    let mut statements = declarations;
+    let value = match produced {
+        ExpandedAccessor::Value(value) => value,
+        ExpandedAccessor::Statement(statement) => {
+            statements.push(statement);
+            ir.add_expr(IrExpr::UnitInstance)
+        }
+    };
+    ir.exprs[site as usize] = IrExpr::Block {
+        stmts: statements,
+        value: Some(value),
+    };
+    ir.inline_regions.insert(site);
+    crate::trace_compiler!(
+        "lower",
+        "spliced inline property accessor function={function} at {site} bindings={bindings:?}"
+    );
+    let nested = cloned
+        .values()
+        .copied()
+        .filter(|&copy| property_access(ir, copy).is_some())
+        .collect();
+    Ok(nested)
+}
+
+enum ExpandedAccessor {
+    /// The accessor’s value, already the expansion’s result.
+    Value(ExprId),
+    /// A setter body, or a multi-return expansion whose value is read after it runs.
+    Statement(ExprId),
+}
+
+fn finish_accessor_expansion(
+    ir: &mut crate::ir::IrFile,
+    cloned_root: ExprId,
+    returns: &[(ExprId, Option<ExprId>)],
+    result_ty: Ty,
+    setter: bool,
+    next_temporary: &mut u32,
+) -> Result<ExpandedAccessor, super::FirFileLoweringFailure> {
+    if returns.is_empty() {
+        return Ok(if setter {
+            ExpandedAccessor::Statement(cloned_root)
+        } else {
+            ExpandedAccessor::Value(cloned_root)
+        });
+    }
+    if let [(tail, value)] = *returns {
+        if tail == cloned_root {
+            let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+            return Ok(ExpandedAccessor::Value(produced));
+        }
+        if produce_sole_tail_return(ir, cloned_root, tail, value) {
+            return Ok(if setter {
+                ExpandedAccessor::Statement(cloned_root)
+            } else {
+                ExpandedAccessor::Value(cloned_root)
+            });
+        }
+    }
+    let result_slot = (result_ty != Ty::Unit)
+        .then(|| allocate_temporary(next_temporary))
+        .transpose()?;
+    let label = format!("$fir_inline_prop${cloned_root}");
+    for &(copy, value) in returns {
+        let exit = ir.add_expr(IrExpr::Break {
+            label: Some(label.clone()),
+        });
+        ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
+            let assign = ir.add_expr(IrExpr::SetValue { var: slot, value });
+            IrExpr::Block {
+                stmts: vec![assign, exit],
+                value: None,
+            }
+        } else {
+            IrExpr::Block {
+                stmts: vec![exit],
+                value: None,
+            }
+        };
+    }
+    let mut statements = Vec::new();
+    if let Some(slot) = result_slot {
+        let initial = ir.add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
+        statements.push(ir.add_expr(IrExpr::Variable {
+            index: slot,
+            ty: stored_value_ty(result_ty),
+            init: Some(initial),
+            named: false,
+        }));
+    }
+    let fallthrough = ir.add_expr(IrExpr::Break {
+        label: Some(label.clone()),
+    });
+    let loop_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![cloned_root, fallthrough],
+        value: None,
+    });
+    let condition = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    statements.push(ir.add_expr(IrExpr::While {
+        cond: condition,
+        body: loop_body,
+        update: None,
+        post_test: false,
+        label: Some(label),
+    }));
+    if let Some(slot) = result_slot {
+        statements.push(ir.add_expr(IrExpr::GetValue(slot)));
+    }
+    let block = ir.add_expr(IrExpr::Block {
+        stmts: statements,
+        value: None,
+    });
+    Ok(if setter || result_slot.is_none() {
+        ExpandedAccessor::Statement(block)
+    } else {
+        // The loop stored the result; the last statement reads it back as the block above has no
+        // value. Promote that read.
+        let IrExpr::Block { mut stmts, .. } = ir.expr(block).clone() else {
+            return Ok(ExpandedAccessor::Statement(block));
+        };
+        let value = stmts.pop();
+        ir.exprs[block as usize] = IrExpr::Block { stmts, value };
+        ExpandedAccessor::Value(block)
+    })
+}
+
+fn allocate_temporary(next_temporary: &mut u32) -> Result<u32, super::FirFileLoweringFailure> {
+    let slot = *next_temporary;
+    *next_temporary = next_temporary
+        .checked_add(1)
+        .ok_or(super::FirFileLoweringFailure::ValueIdentityOverflow)?;
+    Ok(slot)
+}
+
+fn operand_debug(
+    identities: &Option<Vec<crate::ir::IrParameterIdentity>>,
+    has_dispatch: bool,
+    ordinal: usize,
+) -> Option<(Option<String>, IrInlineLocalRole)> {
+    if ordinal == 0 && has_dispatch {
+        return Some((None, IrInlineLocalRole::DispatchReceiver));
+    }
+    let identity_index = ordinal - usize::from(has_dispatch);
+    let identity = identities.as_ref()?.get(identity_index)?;
+    let role = match identity.role {
+        crate::ir::IrParameterRole::ExtensionReceiver => IrInlineLocalRole::ExtensionReceiver,
+        _ => IrInlineLocalRole::Value,
+    };
+    Some((identity.source_name.clone(), role))
+}
+
+fn substitution_bindings(
+    index: &ResolvedModuleIndex,
+    substitutions: &[IrCheckedSubstitution],
+) -> (HashMap<String, Ty>, HashMap<String, Ty>) {
+    let bindings = substitutions
+        .iter()
+        .filter_map(|substitution| match substitution.parameter {
+            FirTypeParameterRef::Module(parameter) => index
+                .type_parameter_semantic_name(parameter)
+                .map(|name| (name.to_owned(), substitution.value)),
+            FirTypeParameterRef::External { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let reified_bindings = substitutions
+        .iter()
+        .filter_map(|substitution| match substitution.parameter {
+            FirTypeParameterRef::Module(parameter) => index
+                .type_parameter_header(parameter)
+                .filter(|header| header.flags.is_reified())
+                .and_then(|_| index.type_parameter_semantic_name(parameter))
+                .map(|name| (name.to_owned(), substitution.value)),
+            FirTypeParameterRef::External { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
+    (bindings, reified_bindings)
+}
+
+/// The body `add_accessor_function` wrapped. Getters are `return <body>`; setters are `<body>`
+/// followed by a valueless return. The wrapper return belongs to the accessor method, not to the
+/// expression a splice produces.
+fn accessor_inner_body(
+    ir: &crate::ir::IrFile,
+    function: crate::ir::FunId,
+    setter: bool,
+) -> Option<ExprId> {
+    let body = ir.functions.get(function as usize)?.body?;
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return None;
+    };
+    if setter {
+        let &[inner, returned] = stmts.as_slice() else {
+            return None;
+        };
+        matches!(ir.expr(returned), IrExpr::Return(None)).then_some(inner)
+    } else {
+        let &[returned] = stmts.as_slice() else {
+            return None;
+        };
+        match ir.expr(returned) {
+            IrExpr::Return(Some(inner)) => Some(*inner),
+            _ => None,
+        }
+    }
+}
+
+fn access_operands(ir: &crate::ir::IrFile, access: &PropertyAccess) -> Option<Vec<ExprId>> {
+    let layout = ir.local_property_layouts.get(&access.target)?;
+    let mut operands = Vec::new();
+    match layout {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { .. } => {
+            if access.dispatch_receiver.is_some()
+                || access.extension_receiver.is_some()
+                || !access.context_arguments.is_empty()
+            {
+                return None;
+            }
+        }
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            receiver,
+            context_parameters,
+            ..
+        } => {
+            if access.context_arguments.len() != context_parameters.len() {
+                return None;
+            }
+            operands.extend(access.context_arguments.iter().copied());
+            match (
+                receiver.is_some(),
+                access.dispatch_receiver,
+                access.extension_receiver,
+            ) {
+                (false, None, None) => {}
+                (true, None, Some(receiver)) => operands.push(receiver),
+                _ => return None,
+            }
+        }
+        crate::ir::IrLocalPropertyLayout::MemberExtension {
+            context_parameters, ..
+        } => {
+            if access.context_arguments.len() != context_parameters.len() {
+                return None;
+            }
+            operands.push(access.dispatch_receiver?);
+            operands.extend(access.context_arguments.iter().copied());
+            operands.push(access.extension_receiver?);
+        }
+        crate::ir::IrLocalPropertyLayout::Member {
+            context_parameters, ..
+        } => {
+            if access.extension_receiver.is_some()
+                || access.context_arguments.len() != context_parameters.len()
+            {
+                return None;
+            }
+            operands.push(access.dispatch_receiver?);
+            operands.extend(access.context_arguments.iter().copied());
+        }
+    }
+    if let Some(value) = access.value {
+        operands.push(value);
+    }
+    Some(operands)
+}
+
+fn protected_lambda_bodies(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
+    let mut protected = HashSet::new();
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } = ir.expr(expression)
+        {
+            pending.extend(captures.iter().copied());
+            if let Some(body) = inline_body {
+                mark_subtree(ir, *body, &mut protected);
+            }
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    protected
+}
+
+/// One past every value index a lowered body may already occupy.
+///
+/// Each function numbers its own parameters from zero, including parameters the body never reads,
+/// so the next free index has to clear both the highest index written in the arena and the highest
+/// parameter slot reserved for a function or constructor.
+fn fresh_value_base(ir: &crate::ir::IrFile) -> u32 {
+    let mut max_index = 0u32;
+    let see = |max_index: &mut u32, index: u32| *max_index = (*max_index).max(index);
+    for function in &ir.functions {
+        let count = function.params.len() + usize::from(function.dispatch_receiver.is_some());
+        if count > 0 {
+            see(&mut max_index, (count - 1) as u32);
+        }
+    }
+    for class in &ir.classes {
+        see(&mut max_index, class.ctor_param_count);
+        for constructor in &class.secondary_ctors {
+            let count = constructor.prefix_params.len() + constructor.params.len();
+            see(&mut max_index, u32::try_from(count).unwrap_or(u32::MAX));
+        }
+    }
+    for expression in &ir.exprs {
+        for index in value_indices(expression) {
+            see(&mut max_index, index);
+        }
+    }
+    max_index.saturating_add(1)
 }
 
 #[cfg(test)]
