@@ -34673,14 +34673,14 @@ fun use() {
         let source =
             "open class Base { companion object { protected const val secret: Int = 1 } }\n\
             class Derived : Base() { fun read(): Int = secret }";
-        err_contains(source, "unresolved reference 'secret'");
+        ok(source);
 
         let errors = check_with_detected_features(&format!(
-            "// LANGUAGE: +AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
+            "// LANGUAGE: -AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
         ));
         assert!(
-            errors.is_empty(),
-            "the enabled property-access rule should resolve the superclass companion declaration: {errors:?}"
+            errors.iter().any(|error| error.contains("unresolved reference 'secret'")),
+            "disabling the property-access rule should hide the superclass companion declaration: {errors:?}"
         );
     }
 
