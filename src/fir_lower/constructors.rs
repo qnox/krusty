@@ -114,6 +114,106 @@ pub(super) fn classifier_type_parameter_ordinal(
     unreachable!("the packed type-parameter ordinal space is finite")
 }
 
+/// Where a superclass capture prefix value comes from when the subclass's `super(…)` does not
+/// spell it.
+#[derive(Clone, Copy)]
+enum SuperCaptureSupply {
+    /// The subclass stores the same closure identity and receives it as its own prefix parameter.
+    /// The `u32` is that parameter's field index; the constructor slot is one past it.
+    PrefixParameter(u32),
+    /// The subclass is an inner class and the value lives on the enclosing instance, which is
+    /// already a constructor parameter.
+    EnclosingField(EnclosingFieldRead),
+}
+
+#[derive(Clone, Copy)]
+struct EnclosingFieldRead {
+    /// Constructor slot of the enclosing instance (`this` is slot 0).
+    slot: u32,
+    /// Class that stores the capture.
+    class: crate::ir::ClassId,
+    /// Field index of the capture on `class`.
+    field: u32,
+}
+
+/// The constructor parameter that carries an inner class's enclosing instance: its value slot
+/// (`this` is slot 0) and the type of that instance.
+///
+/// Captures are spliced in front of that parameter, so its field index is not its slot. The
+/// parameter is the unnamed, non-capture constructor argument the inner-class lowering inserted;
+/// a capture has a capture record, and a source parameter has a name.
+fn enclosing_instance_parameter(class: &crate::ir::IrClass) -> Option<(u32, crate::types::Ty)> {
+    if !class.is_inner_class {
+        return None;
+    }
+    let (index, argument) = class.ctor_args.iter().enumerate().find(|(_, argument)| {
+        argument.name.is_none()
+            && argument.capture.is_none()
+            && argument.context_kind == crate::types::ContextParameterKind::None
+            && argument.is_field
+    })?;
+    let slot = u32::try_from(index).ok()?.checked_add(1)?;
+    Some((slot, argument.ty))
+}
+
+fn constructor_capture_at(
+    class: &crate::ir::IrClass,
+    field: u32,
+) -> Option<&crate::ir::IrConstructorCapture> {
+    class.ctor_args.iter().find_map(|argument| {
+        (argument.field_index == Some(field))
+            .then_some(argument.capture.as_ref())
+            .flatten()
+    })
+}
+
+/// A superclass capture the inner subclass does not itself hold, read from the enclosing instance.
+///
+/// The enclosing local class often captured the same receiver on its own, so the closure identity
+/// stored for its field names that class, not the superclass field. Receiver captures still
+/// describe the same source receiver. Lexical values are not joined this way: two shadowed locals
+/// can share a spelling, and only the closure identity says which one a field holds.
+fn enclosing_superclass_capture(
+    ir: &IrFile,
+    class: usize,
+    parent: crate::ir::ClassId,
+    field: u32,
+    identity: crate::fir::ClassCaptureIdentity,
+) -> Option<EnclosingFieldRead> {
+    let (slot, outer_ty) = enclosing_instance_parameter(&ir.classes[class])?;
+    let outer = outer_ty
+        .obj_internal()
+        .and_then(|name| ir.class_id_by_name(name))?;
+    if let Some(field) = (0..ir.classes[outer as usize].fields.len()).find_map(|index| {
+        let candidate = u32::try_from(index).ok()?;
+        (ir.class_capture_identities.get(&(outer, candidate)) == Some(&identity))
+            .then_some(candidate)
+    }) {
+        return Some(EnclosingFieldRead {
+            slot,
+            class: outer,
+            field,
+        });
+    }
+    let wanted = constructor_capture_at(&ir.classes[parent as usize], field)?.clone();
+    // A receiver-less capture is a lexical value. Shadowed locals share a spelling, so only the
+    // closure identity — already missed above — may join them.
+    wanted.receiver.as_ref()?;
+    let field = ir.classes[outer as usize]
+        .ctor_args
+        .iter()
+        .find_map(|argument| {
+            (argument.capture.as_ref() == Some(&wanted))
+                .then_some(argument.field_index)
+                .flatten()
+        })?;
+    Some(EnclosingFieldRead {
+        slot,
+        class: outer,
+        field,
+    })
+}
+
 /// A local class whose SUPERCLASS is a local class with captures passes them on.
 ///
 /// A capturing local class takes its captures as synthetic PREFIX parameters of its constructor,
@@ -125,6 +225,14 @@ pub(super) fn classifier_type_parameter_ordinal(
 /// The subclass carries the same captures, because selection records the superclass's as its own
 /// (`resolve::local_capture_dependencies`). Each forwarded field retains the superclass capture's
 /// stable semantic coordinate, so lowering never joins two constructor prefixes by field spelling.
+///
+/// An inner class is the exception. Its enclosing local class may already store the same receiver
+/// — every local class in an extension or receiver lambda captures that receiver — while the inner
+/// constructor's only prefix parameter is the enclosing instance. The super call then reads the
+/// field from that parameter. The uninitialized inner instance cannot be the receiver of
+/// `getfield`, and giving the inner constructor its own copy of the capture would be a different
+/// calling convention. A capture the subclass does hold is still forwarded from its own prefix
+/// parameter; the field read fills only an identity that parameter list does not have.
 ///
 /// Only a call that is short by exactly the parent's prefix is filled, whether it reaches the
 /// primary constructor or a secondary one. Anything else is a shape this does not understand and
@@ -207,39 +315,62 @@ pub(super) fn finalize_local_superclass_captures(
             continue;
         };
         let own_prefix = ir.classes[class].constructor_prefix_count as usize;
-        let mut slots = Vec::with_capacity(wanted.len());
-        for (identity, _) in &wanted {
-            let Some(slot) = (0..own_prefix).position(|field| {
-                u32::try_from(field)
-                    .ok()
-                    .and_then(|field| ir.class_capture_identities.get(&(class as u32, field)))
-                    == Some(identity)
-            }) else {
+        let mut supplies = Vec::with_capacity(wanted.len());
+        for (field, (identity, _)) in wanted.iter().enumerate() {
+            let own = (0..own_prefix).position(|candidate| {
+                u32::try_from(candidate).ok().and_then(|candidate| {
+                    ir.class_capture_identities.get(&(class as u32, candidate))
+                }) == Some(identity)
+            });
+            if let Some(slot) = own.and_then(|slot| u32::try_from(slot).ok()) {
+                supplies.push(SuperCaptureSupply::PrefixParameter(slot));
+                continue;
+            }
+            let Ok(field) = u32::try_from(field) else {
                 break;
             };
-            let Ok(slot) = u32::try_from(slot) else {
+            let Some(read) = enclosing_superclass_capture(ir, class, parent, field, *identity)
+            else {
                 break;
             };
-            slots.push(slot);
+            supplies.push(SuperCaptureSupply::EnclosingField(read));
         }
-        if slots.len() != wanted.len() {
+        if supplies.len() != wanted.len() {
             continue;
         }
         // Slot 0 of a constructor body is `this`, so a prefix parameter is one past its index —
-        // the same address `constructor_capture_parameter` reads one by.
-        let shared_parameters = slots
+        // the same address `constructor_capture_parameter` reads one by. An enclosing-instance
+        // read names that parameter directly: captures spliced ahead of `this$0` make its field
+        // index and its parameter slot diverge.
+        let shared_parameters = supplies
             .iter()
             .enumerate()
-            .filter_map(|(parameter, &slot)| {
+            .filter_map(|(parameter, supply)| {
+                let (owner, field) = match *supply {
+                    SuperCaptureSupply::PrefixParameter(slot) => (class as u32, slot),
+                    SuperCaptureSupply::EnclosingField(read) => (read.class, read.field),
+                };
                 ir.shared_class_capture_fields
-                    .get(&(class as u32, slot))
+                    .get(&(owner, field))
                     .copied()
                     .map(|element| (parameter as u32, element))
             })
             .collect::<Vec<_>>();
-        let arguments: Vec<crate::ir::ExprId> = slots
+        let arguments: Vec<crate::ir::ExprId> = supplies
             .into_iter()
-            .map(|slot| ir.add_expr(IrExpr::GetValue(slot + 1)))
+            .map(|supply| match supply {
+                SuperCaptureSupply::PrefixParameter(slot) => {
+                    ir.add_expr(IrExpr::GetValue(slot + 1))
+                }
+                SuperCaptureSupply::EnclosingField(read) => {
+                    let receiver = ir.add_expr(IrExpr::GetValue(read.slot));
+                    ir.add_expr(IrExpr::GetField {
+                        receiver,
+                        class: read.class,
+                        index: read.field,
+                    })
+                }
+            })
             .collect();
         let parameters: Vec<crate::types::Ty> = wanted.into_iter().map(|(_, ty)| ty).collect();
         for (parameter, element) in shared_parameters {

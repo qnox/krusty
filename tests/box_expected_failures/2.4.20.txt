@@ -164,7 +164,6 @@ innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
-localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/localClassInInitializer.kt
 localClasses/localClassInParameterInitializer.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
