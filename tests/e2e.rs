@@ -661,6 +661,8 @@ mod enum_entry_deferred_val_e2e;
 mod enum_entry_named_arg_e2e;
 #[path = "enum_entry_property_e2e.rs"]
 mod enum_entry_property_e2e;
+#[path = "enum_entry_self_instance_e2e.rs"]
+mod enum_entry_self_instance_e2e;
 #[path = "enum_equality_e2e.rs"]
 mod enum_equality_e2e;
 #[path = "enum_generic_interface_e2e.rs"]
