@@ -87,3 +87,42 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("two non-const defaults"), "OK");
 }
+
+#[test]
+fn omitted_vararg_with_a_declared_default_uses_that_array() {
+    // A vararg that declares a default is not the implicit empty pack. Omitting it sets the
+    // parameter's mask bit so `$default` evaluates the array. A supplied element still packs.
+    const SRC: &str = "fun pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
+    var sum = 0\n\
+    for (value in arr) sum += value\n\
+    return sum\n\
+}\n\
+fun box(): String {\n\
+    val omitted = pack()\n\
+    val given = pack(42)\n\
+    return if (omitted == 3 && given == 42) \"OK\" else \"omitted=$omitted given=$given\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("vararg default omitted"), "OK");
+}
+
+#[test]
+fn omitted_constructor_vararg_with_a_declared_default_uses_that_array() {
+    // Same rule at a constructor: `C()` masks the vararg so `<init>$default` builds
+    // `intArrayOf(1, 2)`. `C(42)` packs the element and leaves the mask clear. A secondary
+    // constructor that delegates with `this()` takes the same omitted default.
+    const SRC: &str = "class C(vararg val xs: Int = intArrayOf(1, 2)) {\n\
+    constructor(flag: Boolean) : this()\n\
+    fun sum(): Int {\n\
+        var total = 0\n\
+        for (value in xs) total += value\n\
+        return total\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    val omitted = C().sum()\n\
+    val given = C(42).sum()\n\
+    val delegated = C(true).sum()\n\
+    return if (omitted == 3 && given == 42 && delegated == 3) \"OK\" else \"omitted=$omitted given=$given delegated=$delegated\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("constructor vararg default omitted"), "OK");
+}

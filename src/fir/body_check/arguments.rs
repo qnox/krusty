@@ -214,13 +214,12 @@ impl BodyFirChecker<'_> {
             )?);
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
-            checked.push(FirCallArgument::Vararg {
-                parameter: self.call_parameter_ordinal(expression, parameter, parameter_offset)?,
-                origin: self
-                    .origins
-                    .synthetic(cause, SyntheticOriginKind::VarargArray),
-                elements: Box::new([]),
-            });
+            checked.push(self.omitted_vararg_argument(
+                expression,
+                cause,
+                parameter,
+                parameter_offset,
+            )?);
         }
         for (parameter, slot) in slots.iter().enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {
@@ -785,6 +784,75 @@ impl BodyFirChecker<'_> {
         })
     }
 
+    /// An omitted `vararg` with no declared default is an empty array. A declared default is a
+    /// real omission: the `$default` stub evaluates it, and the mask bit for that parameter is set.
+    fn omitted_vararg_argument(
+        &mut self,
+        expression: ExprId,
+        cause: OriginId,
+        parameter: usize,
+        parameter_offset: usize,
+    ) -> Result<FirCallArgument, BodyCheckFailure> {
+        let ordinal = self.call_parameter_ordinal(expression, parameter, parameter_offset)?;
+        if self.omitted_vararg_declares_default(expression, parameter) {
+            return Ok(FirCallArgument::Default {
+                parameter: ordinal,
+                origin: self
+                    .origins
+                    .synthetic(cause, SyntheticOriginKind::DefaultArgument),
+            });
+        }
+        Ok(FirCallArgument::Vararg {
+            parameter: ordinal,
+            origin: self
+                .origins
+                .synthetic(cause, SyntheticOriginKind::VarargArray),
+            elements: Box::new([]),
+        })
+    }
+
+    fn omitted_vararg_declares_default(&self, expression: ExprId, parameter: usize) -> bool {
+        let Some(selected) = self.info.resolved_calls.get(&expression) else {
+            return false;
+        };
+        match selected {
+            ResolvedCall::TopLevel(call) => call.call_sig.param_has_default(parameter),
+            ResolvedCall::Member(member) => member.member.call_sig.param_has_default(parameter),
+            ResolvedCall::Companion(member) => member.call_sig.param_has_default(parameter),
+            ResolvedCall::LocalFunction(local) => local
+                .sig
+                .param_defaults
+                .get(parameter)
+                .copied()
+                .unwrap_or(false),
+            ResolvedCall::Extension(extension) => {
+                self.declaration_parameter_declares_default(extension.stable_declaration, parameter)
+            }
+            ResolvedCall::MemberExtension {
+                stable_declaration, ..
+            } => self.declaration_parameter_declares_default(*stable_declaration, parameter),
+        }
+    }
+
+    fn declaration_parameter_declares_default(
+        &self,
+        declaration: Option<crate::fir::DeclarationId>,
+        parameter: usize,
+    ) -> bool {
+        let Some(declaration) = declaration else {
+            return false;
+        };
+        let Some(callable) = self.index.callable_for_declaration(declaration) else {
+            return false;
+        };
+        let Ok(ordinal) = u32::try_from(parameter) else {
+            return false;
+        };
+        self.index
+            .callable_parameter(callable.id, ordinal)
+            .is_some_and(|header| header.flags().has_default())
+    }
+
     fn call_parameter_ordinal(
         &self,
         expression: ExprId,
@@ -926,13 +994,12 @@ impl BodyFirChecker<'_> {
             });
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
-            checked.push(FirCallArgument::Vararg {
-                parameter: self.call_parameter_ordinal(expression, parameter, context.len())?,
-                origin: self
-                    .origins
-                    .synthetic(cause, SyntheticOriginKind::VarargArray),
-                elements: Box::new([]),
-            });
+            checked.push(self.omitted_vararg_argument(
+                expression,
+                cause,
+                parameter,
+                context.len(),
+            )?);
         }
         for (parameter, slot) in slots.iter().take(ordinary_count).enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {

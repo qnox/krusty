@@ -50756,7 +50756,11 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                (slot.is_none() && visible_vararg != Some(index))
+                // An omitted vararg with no declared default is an empty array, not a mask bit.
+                // A declared default is a real omission: the constructor `$default` stub evaluates it.
+                let implicit_empty_vararg =
+                    visible_vararg == Some(index) && !contextual.call_sig.param_has_default(index);
+                (slot.is_none() && !implicit_empty_vararg)
                     .then(|| contextual.parameter_indices.get(index).copied())
                     .flatten()
             })
