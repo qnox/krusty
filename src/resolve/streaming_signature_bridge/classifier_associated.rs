@@ -451,9 +451,9 @@ impl ProductionSignatureSemantics<'_> {
 }
 
 /// Receiver-less members of the `Classifier.name(...)` family that are not already published as
-/// associated declarations. A Java static method lives in that family and has no value receiver;
-/// retagging the clone as `TopLevel` lets the receiver-less reference selector keep it. The call
-/// family itself stays `Member`, because this clone is only a signature-selection view.
+/// associated declarations. A Java static method lives in that family and has no value receiver.
+/// Candidates keep their declaration kind; the receiver-less selector consumes the normalized
+/// family directly.
 fn receiverless_classifier_call_candidates(
     resolver: &crate::symbol_resolver::SymbolResolver<'_>,
     classifier: crate::types::TypeName,
@@ -468,17 +468,9 @@ fn receiverless_classifier_call_candidates(
         .filter(|candidate| candidate.semantic_receiver().is_none())
         .filter(|candidate| resolver.non_member_callable_accessible(candidate))
         .filter(|candidate| {
-            !already.iter().any(|existing| {
-                existing.callable.owner == candidate.callable.owner
-                    && existing.callable.name == candidate.callable.name
-                    && existing.callable.descriptor == candidate.callable.descriptor
-                    && existing.semantic_params().as_ref() == candidate.semantic_params().as_ref()
-                    && existing.callable.ret == candidate.callable.ret
-            })
-        })
-        .map(|mut candidate| {
-            candidate.kind = crate::libraries::FnKind::TopLevel;
-            candidate
+            !already
+                .iter()
+                .any(|existing| existing.stable_declaration == candidate.stable_declaration)
         })
         .collect()
 }
