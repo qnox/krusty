@@ -3693,7 +3693,7 @@ impl Classpath {
     /// Existence of an already-interned classifier. A complete catalog answers by identity. An
     /// incomplete catalog, and a metadata-only function name whose JVM class differs from that
     /// identity, still need the textual probe.
-    pub fn class_exists_name(&self, internal: TypeName) -> bool {
+    pub(super) fn class_exists_name(&self, internal: TypeName) -> bool {
         let mapped = super::jvm_class_map::to_jvm_type_name(internal);
         let needs_textual_erasure =
             super::jvm_class_map::maps_to_distinct_jvm_internal(internal) && mapped == internal;

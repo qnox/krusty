@@ -959,19 +959,17 @@ impl JvmLibraries {
                     classifier: candidate,
                 };
                 let classifier = self.classifier_record(candidate)?;
-                if candidate.segment_ref().contains('$') {
-                    if let Some(outer) = candidate.nested_owner() {
-                        let simple = candidate.nested_segment_ref();
-                        if let Some((holder_name, companion_type)) = self
-                            .classifier_record(outer)
-                            .and_then(|outer_type| outer_type.companion_object.clone())
-                        {
-                            // A companion is also an object, but its singleton field belongs to the
-                            // enclosing class. Test that declaration relationship before the ordinary
-                            // object storage shape.
-                            if companion_type == candidate && holder_name == simple {
-                                return Some((candidate, dispatch));
-                            }
+                if let Some(outer) = candidate.nested_owner() {
+                    let simple = candidate.nested_segment_ref();
+                    if let Some((holder_name, companion_type)) = self
+                        .classifier_record(outer)
+                        .and_then(|outer_type| outer_type.companion_object.clone())
+                    {
+                        // A companion is also an object, but its singleton field belongs to the
+                        // enclosing class. Test that declaration relationship before the ordinary
+                        // object storage shape.
+                        if companion_type == candidate && holder_name == simple {
+                            return Some((candidate, dispatch));
                         }
                     }
                 }
@@ -991,7 +989,8 @@ impl JvmLibraries {
             if suffix.is_empty() {
                 suffix = cursor.segment_ref().to_string();
             } else {
-                suffix = format!("{}${}", cursor.segment_ref(), suffix);
+                suffix.insert(0, '$');
+                suffix.insert_str(0, cursor.segment_ref());
             }
             let candidate = crate::types::type_name_nested_child(parent, &suffix);
             if let Some(hit) = singleton(candidate) {
