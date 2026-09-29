@@ -2404,7 +2404,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     relative to zero, so the test is the single-operand `ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge` family.
     `a == b` on `Long` (and therefore on `ULong`, which compares its carriers) is `lcmp; ifne`, **not**
     `lcmp; iconst_0; if_icmpeq`. Same for the `Double` and `Float` pairs (`dcmpg; ifne`, `fcmpg; ifne`),
-    with the NaN-correct variant still chosen per operator (`a > b` is `dcmpl; ifle`). For `!=` on
+    with the NaN-correct variant still chosen per operator (`a > b` is `dcmpl; ifle`). A `ULong`
+    operand that is still typed `ULong` — a literal on the left, `0UL == n!!` — is that same long
+    comparison. Classifying it with the ints emitted `if_icmpne` on two longs (`VerifyError`).
+    Tests: `tests/unsigned_classpath_call_e2e.rs`
+    (`ulong_literal_on_the_left_compares_its_carrier`) and `tests/bytecode_parity_e2e.rs`
+    (`ulong_literal_on_the_left_uses_lcmp`). For `!=` on
     `Double`/`Float` krusty is *shorter* than kotlinc, which materializes `==` and then negates it with a
     second branch pair — an accepted divergence in the same family as the `ixor` one below.
   - The int category fuses the same way against the literal `0`: `a != 0` is `iload_0; ifeq`, never
