@@ -191,6 +191,12 @@ impl Checker<'_> {
     /// interface is required unless `<T>` names one explicitly. The selected callable is rewritten
     /// to the DIRECT supertype owner because `invokespecial` starts resolution there; the declaration
     /// may physically live farther up the hierarchy.
+    ///
+    /// Visibility is judged on the class instance `super` denotes, not on the supertype being
+    /// searched. A protected member stays visible on that subclass instance, including from a
+    /// lambda, while a private Java field on the same rung (`ArrayList.size`) does not hide the
+    /// public method. A write uses the setter's own visibility, so a private setter stays
+    /// unwritable.
     pub(super) fn select_super_property_accessor(
         &self,
         receiver: ImplicitReceiverSelection,
@@ -200,6 +206,7 @@ impl Checker<'_> {
     ) -> Option<ResolvedSuperCall> {
         let current = receiver.ty.obj_internal()?;
         self.resolver().classifier(current)?;
+        let access_receiver = receiver.ty;
         let matches_qualifier =
             |owner: TypeName| qualifier.is_none_or(|qualifier| owner.qualifier_matches(qualifier));
         let select = |applied_owner: Ty, interface: bool| {
@@ -208,20 +215,34 @@ impl Checker<'_> {
                 applied_owner,
                 name,
                 |property| {
+                    let visibility = if setter {
+                        property.setter_visibility
+                    } else {
+                        property.visibility
+                    };
                     (property.context_count == 0).then_some((
                         self.receiver_property_accessible(
-                            property.visibility,
+                            visibility,
                             property.owner,
-                            applied_owner,
+                            access_receiver,
                         ),
                         0,
                     ))
                 },
             )?;
+            let access_visibility = if setter {
+                selected
+                    .property
+                    .as_ref()
+                    .map(|property| property.setter_visibility)
+                    .unwrap_or(selected.visibility)
+            } else {
+                selected.visibility
+            };
             if !self.receiver_property_accessible(
-                selected.visibility,
+                access_visibility,
                 selected.owner,
-                applied_owner,
+                access_receiver,
             ) {
                 return None;
             }

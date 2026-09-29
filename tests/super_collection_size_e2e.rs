@@ -58,3 +58,73 @@ fn array_list_super_size_calls_size() {
     assert_eq!(krusty, reference, "A.getSize");
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn protected_super_property_is_reachable_from_a_subclass_lambda() {
+    const SOURCE: &str = "open class A {\n\
+        var state = \"\"\n\
+        protected open fun method(): String = \"A.method\"\n\
+        protected open var property: String\n\
+            get() = \"A.property\"\n\
+            set(value) { state += \"A.property;\" }\n\
+    }\n\
+    open class B : A() {\n\
+        fun read(): String {\n\
+            val overriddenMethod: () -> String = { method() }\n\
+            val superMethod: () -> String = { super.method() }\n\
+            val overriddenProperty: () -> String = { property }\n\
+            val superProperty: () -> String = { super.property }\n\
+            val overriddenSetter: () -> Unit = { property = \"\" }\n\
+            val superSetter: () -> Unit = { super.property = \"\" }\n\
+            overriddenSetter()\n\
+            superSetter()\n\
+            return overriddenMethod() + \":\" + superMethod() + \":\" + overriddenProperty() + \":\" + superProperty() + \":\" + state\n\
+        }\n\
+    }\n\
+    class C : B() {\n\
+        override fun method() = \"C.method\"\n\
+        override var property: String\n\
+            get() = \"C.property\"\n\
+            set(value) { state += \"C.property;\" }\n\
+    }\n\
+    fun box(): String {\n\
+        val got = C().read()\n\
+        if (got != \"C.method:A.method:C.property:A.property:C.property;A.property;\") return got\n\
+        return \"OK\"\n\
+    }\n";
+    common::expect_box_ok_with_stdlib(SOURCE, "ProtectedSuperLambda");
+}
+
+#[test]
+fn protected_super_property_with_private_setter_is_readable() {
+    const SOURCE: &str = "open class A {\n\
+        protected var vo = \"O\"\n\
+            private set\n\
+        protected var vk = \"\"\n\
+            private set\n\
+        fun fk() = { ->\n\
+            vk = \"K\"\n\
+            vk\n\
+        }\n\
+    }\n\
+    class B : A() {\n\
+        fun test() = { -> super.vo + fk()() }\n\
+    }\n\
+    fun box() = B().test()()\n";
+    common::expect_box_ok_with_stdlib(SOURCE, "ProtectedSuperPrivateSetter");
+}
+
+#[test]
+fn private_super_setter_stays_unwritable() {
+    const SOURCE: &str = "open class A {\n\
+        protected var vo = \"O\"\n\
+            private set\n\
+    }\n\
+    class B : A() {\n\
+        fun write() { super.vo = \"X\" }\n\
+    }\n";
+    assert_eq!(
+        common::front_end_diagnostics(SOURCE, &[], None),
+        vec!["unresolved writable super property 'vo'".to_string()]
+    );
+}
