@@ -888,7 +888,7 @@ pub fn to_kotlin_internal(internal: &str) -> &str {
 
 /// Identity form of [`to_kotlin_internal`]. An already-interned classifier does not render or scan
 /// the erasure table as text. `java/lang/Void` stays itself.
-pub fn to_kotlin_type_name(internal: TypeName) -> TypeName {
+pub(super) fn to_kotlin_type_name(internal: TypeName) -> TypeName {
     builtin_ids()
         .source_to_kotlin
         .get(&internal)
