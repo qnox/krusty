@@ -1390,10 +1390,15 @@ impl Parser<'_> {
                     None
                 };
                 self.skip_plain_newlines_before(TokenKind::Eq);
+                // Record the `=` the same way a statement-level local does. An explicit type
+                // without that span is a deferred declaration (`val x: T` assigned later); a
+                // subject binding always has an initializer.
+                let operator = self.tok().span;
                 self.expect(TokenKind::Eq, "'='");
                 // A `when` subject initializer may start on the next line.
                 self.skip_newlines();
                 let init = self.parse_expr();
+                self.file.value_operator_spans.insert(init.0, operator);
                 self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
                 let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);

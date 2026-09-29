@@ -167,6 +167,7 @@ fn run_backend_passes_after_plugins(
     // that narrows it; erasure and call-result boundaries below rewrite that coercion.
     crate::jvm::result_null_checks::check_before_result_coercion(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
+    crate::jvm::deferred_local_storage::realize(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
