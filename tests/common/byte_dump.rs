@@ -523,17 +523,20 @@ fn store_files(
     let stamp = file_stamp(&path);
     let mut archive = take_archive(&path, &mut cache);
     let module = sanitize(module);
-    let updated = revised_spans(
-        archive
-            .modules
-            .get(&module)
-            .and_then(|entries| entries.get(key))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-        compiler,
-        fingerprint,
-        blob,
-    );
+    // One test can record two fixtures under one key. Keep each fingerprint's spans; replacing
+    // the version slot would drop the earlier fixture and the next run would miss it.
+    let current = archive
+        .modules
+        .get(&module)
+        .and_then(|entries| entries.get(key))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let (mine, rest): (Vec<Span>, Vec<Span>) = current
+        .iter()
+        .copied()
+        .partition(|span| span.channel == compiler.channel && span.fingerprint == fingerprint);
+    let mut updated = revised_spans(&mine, compiler, fingerprint, blob);
+    updated.extend(rest);
     let unchanged = archive
         .modules
         .get(&module)
@@ -1660,6 +1663,51 @@ mod tests {
         assert_eq!(
             normalize_invocation_flag("-jvm-target=17"),
             "-jvm-target=17"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_fingerprints_under_one_key_both_replay() {
+        let root = temp_root("two-fp");
+        let release = version("2.4.20");
+        let first = fingerprint_parts(&[b"first"]);
+        let second = fingerprint_parts(&[b"second"]);
+        store_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain#tree",
+            release,
+            first,
+            &files(b"one"),
+        );
+        store_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain#tree",
+            release,
+            second,
+            &files(b"two"),
+        );
+        assert_eq!(
+            load_files(&root, "mod", "case|Stem|default|plain#tree", release, first)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            load_files(
+                &root,
+                "mod",
+                "case|Stem|default|plain#tree",
+                release,
+                second
+            )
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+            b"two"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
