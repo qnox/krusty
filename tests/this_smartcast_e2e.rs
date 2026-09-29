@@ -41,3 +41,46 @@ fun box(): String {
 "#;
     common::expect_box_ok_with_stdlib(src, "ThisSmartcastMember");
 }
+
+/// Official box `smartCasts/avoidSmartCastToDerivedForPrivate.kt`. The smart cast makes `this` a
+/// `Derived`, which does not inherit `Base.baz`. The call is still `Base`'s private member.
+#[test]
+fn private_member_survives_a_smart_cast_to_a_subclass() {
+    const SRC: &str = "open class Base {\n\
+    fun foo(): String {\n\
+        return when (this) {\n\
+            is Derived -> baz()\n\
+            else -> \"fail 1\"\n\
+        }\n\
+    }\n\
+\n\
+    private fun baz(): String = \"OK\"\n\
+}\n\
+\n\
+class Derived : Base()\n\
+\n\
+fun box(): String {\n\
+    return Derived().foo()\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "Base");
+}
+
+/// A member actually declared on the smart-cast type wins over the private member of the original
+/// class. kotlinc calls `Derived.baz` here.
+#[test]
+fn a_subclass_member_wins_over_a_private_member_after_smart_cast() {
+    const SRC: &str = "open class Base {\n\
+    fun foo(): String {\n\
+        return when (this) {\n\
+            is Derived -> baz()\n\
+            else -> \"fail\"\n\
+        }\n\
+    }\n\
+    private fun baz(): String = \"base\"\n\
+}\n\
+class Derived : Base() {\n\
+    fun baz(): String = \"derived\"\n\
+}\n\
+fun box(): String = if (Derived().foo() == \"derived\") \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(SRC, "Base");
+}

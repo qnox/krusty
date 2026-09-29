@@ -9,6 +9,12 @@ use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, P
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
 
+/// Whether a declaration participates in a subtype's member family. Accessibility is checked at
+/// the use site; private declarations are different because they are not inherited at all.
+pub(crate) fn member_is_inheritable(visibility: crate::types::Visibility) -> bool {
+    visibility != crate::types::Visibility::Private
+}
+
 /// Whether an overriding declaration's value-parameter types match one inherited declaration.
 /// Both sides are compared after replacing their declaration-owned formal identities with the
 /// same canonical coordinates. The subtype-equivalence check preserves flexible/provider types
@@ -352,6 +358,17 @@ pub(crate) fn members_in_hierarchy(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        if depth > 0 {
+            // Private declarations belong only to their declaring classifier. They are not an
+            // inaccessible inherited candidate: omitting them lets the scope tower continue to a
+            // lexical outer receiver that may legally own the same name.
+            current_functions
+                .overloads
+                .retain(|function| member_is_inheritable(function.visibility));
+            current_properties
+                .overloads
+                .retain(|property| member_is_inheritable(property.visibility));
+        }
         crate::trace_compiler!(
             "resolve",
             "member hierarchy name={name} root={receiver:?} rung={depth} current={current:?} functions={:?}",

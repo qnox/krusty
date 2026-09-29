@@ -50,9 +50,9 @@ pub use lambda_call_shape::LambdaCallShape;
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
     declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
-    lexical_enclosing_classifier_names, members_in_hierarchy, normalize_inherited_member_functions,
-    override_input_shapes_match, specialize_member_function, InheritedNestedClassifier,
-    OverrideInputShape,
+    lexical_enclosing_classifier_names, member_is_inheritable, members_in_hierarchy,
+    normalize_inherited_member_functions, override_input_shapes_match, specialize_member_function,
+    InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
@@ -2769,12 +2769,12 @@ impl<'a> SymbolResolver<'a> {
         }
         // Walk normalized property declarations one classifier rung at a time. Providers have already
         // converted any target storage form into PropertyInfo plus opaque accessor identities.
-        let mut queue = std::collections::VecDeque::from([recv]);
+        let mut queue = std::collections::VecDeque::from([(recv, 0u32)]);
         let mut seen = std::collections::HashSet::new();
         let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
         let mut synthetic_fallback: Option<(SelectedMemberProperty, bool)> = None;
         let mut inaccessible_declaration: Option<SelectedMemberProperty> = None;
-        while let Some(current) = queue.pop_front() {
+        while let Some((current, depth)) = queue.pop_front() {
             let Some(internal) = current.kotlin_class_internal() else {
                 continue;
             };
@@ -2791,6 +2791,14 @@ impl<'a> SymbolResolver<'a> {
                     .inherited_accessor_properties(&self.src, current, name)
                     .overloads,
             );
+            if depth > 0 {
+                // A private property is not inherited. Keep a direct private declaration for an
+                // exact accessibility diagnostic, but do not let a supertype's declaration block
+                // a later lexical receiver rung.
+                local_properties
+                    .overloads
+                    .retain(|property| member_is_inheritable(property.visibility));
+            }
             crate::trace_compiler!(
                 "resolve",
                 "member property rung receiver={recv:?} current={current:?} owner={internal} name={name} properties={:?}",
@@ -2883,7 +2891,11 @@ impl<'a> SymbolResolver<'a> {
                     .or(inaccessible_declaration);
             }
             nearer.push((shape, current));
-            queue.extend(direct_supertypes(&self.src, current));
+            queue.extend(
+                direct_supertypes(&self.src, current)
+                    .into_iter()
+                    .map(|supertype| (supertype, depth + 1)),
+            );
         }
         synthetic_fallback
             .filter(|(_, accessible)| *accessible)
@@ -8545,6 +8557,35 @@ mod tests {
             .0;
         assert_eq!(inherited.overloads.len(), 1);
         assert_eq!(inherited.overloads[0].receiver_rank, 2);
+    }
+
+    #[test]
+    fn core_hierarchy_does_not_inherit_a_private_member() {
+        let mut info = top_level_nullable_string_info();
+        info.kind = FnKind::Member;
+        info.receiver = Some(Ty::obj("demo/Base"));
+        info.visibility = crate::types::Visibility::Private;
+        let source = FakeSource {
+            name: "secret",
+            receiver: Some(Ty::obj("demo/Base")),
+            info,
+        };
+
+        assert!(
+            members_in_hierarchy(&source, Ty::obj("demo/Leaf"), "secret")
+                .into_parts()
+                .0
+                .overloads
+                .is_empty()
+        );
+        assert_eq!(
+            members_in_hierarchy(&source, Ty::obj("demo/Base"), "secret")
+                .into_parts()
+                .0
+                .overloads
+                .len(),
+            1
+        );
     }
 
     #[test]
