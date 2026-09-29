@@ -102,7 +102,7 @@ pub fn classfile_internal_name(internal: &str) -> String {
 /// Physical JVM classfile name of an interned classifier. A repeated lookup returns the remembered
 /// spelling and does not render the classifier again. Callers that already hold a [`TypeName`] use
 /// this instead of rendering the name into [`classfile_internal_name`].
-pub fn classfile_internal_name_of(internal: TypeName) -> String {
+pub(super) fn classfile_internal_name_of(internal: TypeName) -> String {
     thread_local! {
         static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
             std::cell::RefCell::default();
@@ -122,18 +122,7 @@ pub fn classfile_internal_name_of(internal: TypeName) -> String {
 }
 
 fn physical_classfile_name_of(internal: TypeName) -> String {
-    if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_jvm_class(internal) {
-        return intrinsic;
-    }
-    if let Some(function) = crate::jvm::function_classifiers::classifier(internal) {
-        if function.is_reflective() {
-            return crate::types::KFUNCTION_INTERNAL.to_owned();
-        }
-        if !function.is_suspend() {
-            return function_interface_internal_name(function.arity());
-        }
-    }
-    let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
+    let mapped = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(internal);
     mapped.jvm_binary_name()
 }
 
@@ -159,8 +148,7 @@ pub(crate) fn descriptor_is_nested_class(descriptor: &str, owner: TypeName, nest
     if let Some(name) = crate::types::existing_type_name(raw) {
         return name.nested_owner() == Some(owner) && name.nested_segment_ref() == nested;
     }
-    let (package, tail) = raw.rsplit_once('/').unwrap_or(("", raw));
-    owner.namespace().matches(package) && nested_class_tail(owner.segment_ref(), nested, tail)
+    owner.nested_child_matches_path(nested, raw)
 }
 
 fn object_descriptor_internal(descriptor: &str) -> Option<&str> {
@@ -193,12 +181,6 @@ pub(crate) fn descriptor_prepends_classifier(
         return name == owner;
     }
     owner.matches(class)
-}
-
-fn nested_class_tail(owner_segment: &str, nested: &str, tail: &str) -> bool {
-    tail.strip_prefix(owner_segment)
-        .and_then(|rest| rest.strip_prefix("$"))
-        .is_some_and(|rest| rest == nested)
 }
 
 fn physical_classfile_name(internal: &str) -> String {
