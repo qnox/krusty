@@ -324,7 +324,7 @@ impl TypeName {
         if let Some(found) = CACHE.with(|cache| cache.borrow().get(&self).copied()) {
             return found;
         }
-        let spelled = intern(&self.render());
+        let spelled: &'static str = Box::leak(self.render().into_boxed_str());
         CACHE.with(|cache| cache.borrow_mut().insert(self, spelled));
         spelled
     }
