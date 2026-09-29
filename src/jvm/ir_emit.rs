@@ -146,6 +146,7 @@ use metadata_policy::{
     finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
+pub(crate) use method_defaults::primitive_bounded_type_parameter;
 use method_defaults::{
     body_has_reified_markers, default_stub_access, default_stub_params, emit_default_stub,
     emit_facade_default_stub, static_default_stub_marker, static_default_stub_params,
@@ -9831,7 +9832,10 @@ impl<'a> Emitter<'a> {
                     // stub: receiver, each provided arg (or a zero placeholder for an omitted one with its
                     // mask bit set), the mask, then a null marker. A nullable-underlying value-class param
                     // is BOXED in the stub signature (matching `emit_default_stub`), so a provided arg is
-                    // `box-impl`d and the placeholder/descriptor use the boxed type.
+                    // `box-impl`d and the placeholder/descriptor use the boxed type. A non-null type
+                    // parameter bounded by a JVM primitive is likewise the JDK wrapper on the stub:
+                    // the placeholder is `valueOf` of the primitive zero, and a supplied primitive is
+                    // boxed the same way.
                     let boxed: HashMap<usize, Ty> = self
                         .ir
                         .default_stub_boxed_params
@@ -9841,7 +9845,7 @@ impl<'a> Emitter<'a> {
                     let stub_param_tys: Vec<Ty> = param_tys
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t))
+                        .map(|(i, t)| method_defaults::stub_parameter_type(self.ir, fid, i, *t))
                         .collect();
                     let args = args.clone();
                     self.emit_value(*receiver, code);
@@ -9866,10 +9870,21 @@ impl<'a> Emitter<'a> {
                                 if let Some(vc) = boxed.get(&i) {
                                     emit_box_impl(self.ir, self.cw, vc, code);
                                 }
+                                method_defaults::emit_primitive_box_if_needed(
+                                    self.cw,
+                                    ir_ty_to_jvm(&self.value_ty(*a)),
+                                    stub_param_tys[i],
+                                    code,
+                                );
                             }
                             None => {
                                 self.mark_dispatch_line(e, code);
-                                push_zero(stub_param_tys[i], code, self.cw);
+                                method_defaults::emit_omitted_default_placeholder(
+                                    self.cw,
+                                    param_tys[i],
+                                    stub_param_tys[i],
+                                    code,
+                                );
                                 let li = i
                                     .checked_sub(recv_offset)
                                     .expect("an extension receiver cannot be omitted");

@@ -231,8 +231,20 @@ pub(super) fn realize_default_arguments(
                 _ => parameter,
             } as usize;
             masks[logical / 32] |= 1i32 << (logical % 32);
-            let placeholder =
-                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)));
+            // A non-null type parameter bounded by a JVM primitive is that primitive on the real
+            // method and the JDK wrapper on `$default`. The omitted slot is the primitive zero;
+            // emission boxes it with `valueOf`, which is what kotlinc writes even though the stub
+            // overwrites the slot when the mask bit is set.
+            let produced = match crate::jvm::ir_emit::primitive_bounded_type_parameter(ty) {
+                Some((primitive, wrapper)) => {
+                    parameters[parameter as usize] = wrapper;
+                    primitive
+                }
+                None => ty,
+            };
+            let placeholder = ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
+                produced,
+            )));
             physical.push(placeholder);
             plan.push(DefaultCallOperand::synthesized(placeholder));
         } else {

@@ -5029,6 +5029,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `toplevel_default_stub_safe` both count every same-name non-member function, so they agree). An omitted
   PRIMITIVE-typed default slot passes the primitive zero (`iconst_0`), not `null` — `zero_placeholder` maps
   a non-nullable boxed-primitive `Obj("kotlin/Int")` (a JVM `int`) to `0`.
+  A non-null type parameter bounded by a JVM primitive (`T : Char`) stays that primitive on the real
+  method and is the JDK wrapper (`java.lang.Character`) on the `$default` stub. An omitted call-site
+  slot is `iconst_0; Character.valueOf`, the stub stores the default expression with the same
+  `valueOf`, and the forward call unboxes with `charValue` (and the corresponding `valueOf` /
+  `xxxValue` pair for the other primitive bounds). A nullable `T?` is already the wrapper on both
+  sides and is not unboxed. A parameter declared as the wrapper itself still passes `null` for an
+  omitted slot. Test: `tests/primitive_bound_default_e2e.rs`.
 
 - **Generic constructor type-argument inference (`Pair(1, 2)` → `Pair<Int, Int>`).** A classpath generic
   class constructed without explicit `<T>` previously erased to the raw type, so `first`/`second`/

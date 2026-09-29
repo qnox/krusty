@@ -1542,6 +1542,8 @@ mod postponed_constructor_applicability_e2e;
 mod postponed_lambda_probe_e2e;
 #[path = "primitive_array_members_e2e.rs"]
 mod primitive_array_members_e2e;
+#[path = "primitive_bound_default_e2e.rs"]
+mod primitive_bound_default_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]
 mod primitive_bound_generic_e2e;
 #[path = "primitive_box_cast_e2e.rs"]
