@@ -15,9 +15,11 @@
 //!
 //! `KRUSTY_RECORD=1` ignores a stored dump, recompiles, and rewrites the archive. A release or RC
 //! with no matching dump fails the test instead of compiling: the archive has to be updated and
-//! committed. A rejected kotlinc run is recorded too, exit code and stderr included, and a later
-//! run replays that rejection. A snapshot, dev, or beta build still compiles, because that version
-//! is not an immutable artifact and never reads or writes the archive. CI does not write dumps.
+//! committed. Every recorded run keeps its exit code and kotlinc diagnostics, whether the build
+//! succeeded or failed, so a later assert replays them. A class dump that has no exit code or
+//! diagnostics fails an assert that needs them. A snapshot, dev, or beta build still compiles,
+//! because that version is not an immutable artifact and never reads or writes the archive. CI
+//! does not write dumps.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
@@ -1007,13 +1009,13 @@ fn record_forced() -> bool {
 }
 
 thread_local! {
-    static LIVE_KOTLINC: Cell<bool> = const { Cell::new(false) };
+    static REQUIRE_DIAGNOSTICS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `body` as a diagnostic comparison. Those calls need kotlinc's stderr, which the class
-/// archive does not store, so they compile even for a release that already has dumps.
-pub fn with_live_kotlinc<T>(body: impl FnOnce() -> T) -> T {
-    LIVE_KOTLINC.with(|flag| {
+/// Run `body` as an assert against kotlinc's exit code and diagnostics. A release dump that has
+/// class files but no recorded status fails instead of compiling or inventing a successful run.
+pub fn with_recorded_diagnostics<T>(body: impl FnOnce() -> T) -> T {
+    REQUIRE_DIAGNOSTICS.with(|flag| {
         let previous = flag.replace(true);
         let value = body();
         flag.set(previous);
@@ -1021,8 +1023,8 @@ pub fn with_live_kotlinc<T>(body: impl FnOnce() -> T) -> T {
     })
 }
 
-fn live_kotlinc() -> bool {
-    LIVE_KOTLINC.with(Cell::get)
+fn diagnostics_required() -> bool {
+    REQUIRE_DIAGNOSTICS.with(Cell::get)
 }
 
 const INVOCATION_MODULE: &str = "_invocations";
@@ -1033,6 +1035,8 @@ const STDERR_ENTRY: &str = "__stderr__";
 pub(crate) struct ReplayedClasses {
     pub(crate) code: i32,
     pub(crate) stderr: String,
+    /// `false` for a class dump recorded before exit codes and diagnostics were stored.
+    pub(crate) status: bool,
     pub(crate) files: BTreeMap<String, Vec<u8>>,
 }
 
@@ -1042,16 +1046,13 @@ struct Invocation {
     label: String,
 }
 
-/// Class files, exit code, and stderr recorded for this `kotlinc` invocation.
+/// Class files, exit code, and diagnostics recorded for this `kotlinc` invocation.
 ///
-/// `Some` must not compile. `None` means the caller compiles: `KRUSTY_RECORD=1`, a live
-/// diagnostic comparison, or a compiler that does not use the archive. A release or RC with no
-/// matching dump panics. A dump written before exit codes were stored replays as a successful
-/// compile with empty stderr.
+/// `Some` must not compile. `None` means the caller compiles: `KRUSTY_RECORD=1`, or a compiler
+/// that does not use the archive. A release or RC with no matching dump panics. Inside
+/// [`with_recorded_diagnostics`], a dump that has class files but no exit code or diagnostics
+/// panics too: an assert must not treat that as a successful empty report.
 pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
-    if live_kotlinc() {
-        return None;
-    }
     let Some(compiler) = compiler_dump_version() else {
         return None;
     };
@@ -1071,7 +1072,14 @@ pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
         compiler,
         invocation.fingerprint,
     ) {
-        return Some(split_replay(files));
+        let replayed = split_replay(files);
+        if diagnostics_required() && !replayed.status {
+            refuse_missing_dump(&format!(
+                "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
+                invocation.label, key
+            ));
+        }
+        return Some(replayed);
     }
     refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
 }
@@ -1082,11 +1090,11 @@ pub fn write_replayed_classes(args: &[String], files: &BTreeMap<String, Vec<u8>>
     write_output(&invocation.out, files);
 }
 
-/// Store the class files, exit code, and stderr produced while `KRUSTY_RECORD=1`. A rejected
-/// compile is stored too, so the next run can replay it. A live diagnostic comparison and a
-/// non-release compiler do not write the archive.
+/// Store the class files, exit code, and diagnostics produced while `KRUSTY_RECORD=1`. A
+/// successful and a rejected compile are both stored, so a later assert can replay either. A
+/// non-release compiler does not write the archive.
 pub fn remember_class_dump(args: &[String], code: i32, stderr: &str) {
-    if live_kotlinc() || !record_forced() || !ci_allows_write() {
+    if !record_forced() || !ci_allows_write() {
         return;
     }
     let Some(compiler) = compiler_dump_version() else {
@@ -1113,6 +1121,7 @@ fn attach_status(files: &mut BTreeMap<String, Vec<u8>>, code: i32, stderr: &str)
 }
 
 fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
+    let status = files.contains_key(EXIT_ENTRY);
     let code = match files.remove(EXIT_ENTRY) {
         Some(bytes) => exit_code(&bytes),
         None => 0,
@@ -1124,6 +1133,7 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
     ReplayedClasses {
         code,
         stderr,
+        status,
         files,
     }
 }
@@ -1718,6 +1728,7 @@ mod tests {
         rejected.insert("pkg/A.class".to_string(), b"class".to_vec());
         attach_status(&mut rejected, 1, "only named arguments");
         let replayed = split_replay(rejected);
+        assert!(replayed.status);
         assert_eq!(replayed.code, 1);
         assert_eq!(replayed.stderr, "only named arguments");
         assert_eq!(replayed.files.get("pkg/A.class").unwrap(), b"class");
@@ -1726,10 +1737,32 @@ mod tests {
 
         let mut plain = BTreeMap::new();
         plain.insert("pkg/A.class".to_string(), b"class".to_vec());
+        attach_status(&mut plain, 0, "");
         let replayed = split_replay(plain);
+        assert!(replayed.status);
         assert_eq!(replayed.code, 0);
         assert_eq!(replayed.stderr, "");
         assert_eq!(replayed.files.get("pkg/A.class").unwrap(), b"class");
+
+        let mut classes_only = BTreeMap::new();
+        classes_only.insert("pkg/A.class".to_string(), b"class".to_vec());
+        let replayed = split_replay(classes_only);
+        assert!(!replayed.status);
+        assert_eq!(replayed.code, 0);
+        assert_eq!(replayed.stderr, "");
+        let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_recorded_diagnostics(|| {
+                if !replayed.status {
+                    refuse_missing_dump(
+                        "sources Main.kt fingerprint abc (class files are recorded, but not the exit code and diagnostics)",
+                    );
+                }
+            });
+        }));
+        let message =
+            panic_message(missing.expect_err("a class dump without diagnostics must fail"));
+        assert!(message.contains("exit code and diagnostics"), "{message}");
+        assert!(message.contains("KRUSTY_RECORD=1"), "{message}");
 
         let root = temp_root("status");
         let out = root.join("out");

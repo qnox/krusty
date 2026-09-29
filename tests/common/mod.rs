@@ -2609,9 +2609,10 @@ impl KotlincServer {
 /// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
 /// `kotlinc`). Overlapping calls use distinct JVMs up to [`server_pool_cap`].
 ///
-/// A release or RC replays class files from `tests/recorded-bytes.zz` and does not compile when
-/// that dump is missing: the test fails and tells you to update the archive with `KRUSTY_RECORD=1`.
-/// [`byte_dump::with_live_kotlinc`] opts out for a comparison that needs kotlinc's stderr.
+/// A release or RC replays class files, the exit code, and kotlinc's diagnostics from
+/// `tests/recorded-bytes.zz`, for a successful build and for a rejected one. A missing dump fails
+/// the test and tells you to update the archive with `KRUSTY_RECORD=1`. An assert that reads the
+/// exit code or diagnostics also fails when the dump has class files but no recorded status.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {
