@@ -242,7 +242,6 @@ specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/explicitSuperCall.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 suspendConversion/suspendConversionNullableCCE.kt

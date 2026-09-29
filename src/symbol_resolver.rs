@@ -4991,6 +4991,20 @@ pub struct SelectedMemberProperty {
     pub property: Option<PropertyInfo>,
 }
 
+impl SelectedMemberProperty {
+    pub(crate) fn read(&self, receiver: Ty) -> Option<ResolvedMember> {
+        self.property
+            .as_ref()
+            .and_then(|property| member_property_read_from_declaration(receiver, property))
+    }
+
+    pub(crate) fn setter(&self) -> Option<ResolvedPropertySetter> {
+        self.property
+            .as_ref()
+            .and_then(member_property_write_from_declaration)
+    }
+}
+
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).

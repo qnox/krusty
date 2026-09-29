@@ -3823,6 +3823,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the package-private declaration is the sole candidate. Tests:
   `map_entry_destructure_e2e::discarded_map_put_does_not_unbox_null`,
   `ir_lower_deep_coverage_e2e::map_index_get_set`.
+  A private Java field follows the same rule for a `super` property: `java.util.ArrayList` stores
+  `size` in a private field and exposes it through public `size()I`, both on the same receiver
+  rung. `super` selection judges visibility on the subclass instance that `super` denotes, not on
+  the supertype being searched, so the private field is not a candidate and `super.size` is
+  `invokespecial java/util/ArrayList.size()I`. That same receiver keeps a protected superclass
+  property visible, including from a lambda, and a write uses the setter's own visibility, so a
+  private setter stays unwritable. Tests:
+  `super_collection_size_e2e::array_list_super_size_calls_size`,
+  `super_collection_size_e2e::protected_super_property_is_reachable_from_a_subclass_lambda`,
+  `super_collection_size_e2e::protected_super_property_with_private_setter_is_readable`,
+  `super_collection_size_e2e::private_super_setter_stays_unwritable`.
 
 - **A package-private static FIELD of a public Java class follows the same rule.** The classpath
   `static_field_name` decoder retains package-private static fields (only `private` is dropped) and
