@@ -627,13 +627,12 @@ impl Checker<'_> {
         for (span, message) in reports {
             // Body checking re-enters a file once per declaration group. An import diagnostic is a
             // file fact, so a later group must not report the same segment again.
+            let identity = crate::diag::DiagnosticIdentity::ImportResolution { reference: span };
             let already_reported = self.diags.diags.iter().any(|diagnostic| {
-                diagnostic.file == self.file_index
-                    && diagnostic.span == span
-                    && diagnostic.msg == message
+                diagnostic.file == self.file_index && diagnostic.identity == Some(identity)
             });
             if !already_reported {
-                self.diags.error(span, message);
+                self.diags.error_with_identity(span, identity, message);
             }
         }
     }
