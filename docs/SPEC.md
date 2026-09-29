@@ -2378,6 +2378,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member taking a callable reference (`HashMap.merge("a", 2, Int::plus)`) now selects in Pass 1
   instead of declining. Test: `tests/test_set_parser_gaps_e2e.rs`
   (`an_int_literal_selects_a_long_parameter_beside_a_defaulted_one`).
+- **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
+  static method, and any other classifier callable with no value receiver, is named by
+  `Classifier::member` the same way `Classifier.member(...)` names it. Pass 1 sees that family only
+  when an expected function type can choose among the overloads
+  (`List<String>.map(System::getProperty)` and `names.firstNotNullOfOrNull(System::getProperty)`
+  select `getProperty(String)`;
+  `Integer::parseInt` under `(String) -> Int` selects the one-argument overload). Without that
+  expected function type the reference stays unresolved rather than picking one overload. An unbound
+  instance reference (`String::length`) is unchanged: it still takes the dispatch receiver from the
+  expected function's first parameter. Test:
+  `java_static_callable_reference_e2e::inferred_java_static_callable_reference_selects_by_expected_function`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

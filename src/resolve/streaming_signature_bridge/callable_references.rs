@@ -8,8 +8,8 @@ use super::*;
 
 impl ProductionSignatureSemantics<'_> {
     /// Select, against the expected function type, the receiver-less function a callable reference
-    /// names among `candidates` (top-level functions, or an open static scope's associated ones),
-    /// each with its finalized signature. More than one distinct applicable shape is a failure.
+    /// names among a caller-collected receiver-less candidate family, each with its finalized
+    /// signature. More than one distinct applicable shape is a failure.
     pub(super) fn select_receiverless_function_reference(
         &self,
         scope: crate::fir::SignatureScope,
@@ -20,6 +20,26 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let selected =
+            self.applicable_receiverless_reference_types(scope, candidates, expected, demand)?;
+        let [selected] = selected.as_slice() else {
+            return Err(Self::failure());
+        };
+        crate::fir::ResolvedTy::new(*selected).map_err(|_| Self::failure())
+    }
+
+    /// Function types of the receiver-less candidates applicable to `expected`, one entry per
+    /// distinct shape. Zero and several are both results; the caller decides which is an error.
+    pub(super) fn applicable_receiverless_reference_types(
+        &self,
+        scope: crate::fir::SignatureScope,
+        candidates: Vec<crate::libraries::FunctionInfo>,
+        expected: &'static crate::types::FnSig,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<Vec<Ty>, crate::fir::DiagnosticId> {
         let mut candidates_with_finalized_signatures = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
             let signature = match self.demanded_source_signature(
@@ -56,10 +76,6 @@ impl ProductionSignatureSemantics<'_> {
         let context = crate::assignable::TyCtx::new();
         let selected = candidates_with_finalized_signatures
             .into_iter()
-            .filter(|candidate| {
-                candidate.kind == crate::libraries::FnKind::TopLevel
-                    || candidate.callable.singleton_dispatch.is_some()
-            })
             .filter(|candidate| !candidate.callable.suspend || expected.suspend)
             .filter_map(|mut candidate| {
                 let specialized = super::super::callable_reference_selection::specialize_candidate(
@@ -119,16 +135,12 @@ impl ProductionSignatureSemantics<'_> {
                 ))
             })
             .collect::<Vec<_>>();
-        let selected = selected.into_iter().fold(Vec::new(), |mut unique, ty| {
+        Ok(selected.into_iter().fold(Vec::new(), |mut unique, ty| {
             if !unique.contains(&ty) {
                 unique.push(ty);
             }
             unique
-        });
-        let [selected] = selected.as_slice() else {
-            return Err(Self::failure());
-        };
-        crate::fir::ResolvedTy::new(*selected).map_err(|_| Self::failure())
+        }))
     }
 
     pub(super) fn applied_source_alias_expansion(

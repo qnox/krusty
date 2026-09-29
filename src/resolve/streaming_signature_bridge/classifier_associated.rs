@@ -1,9 +1,11 @@
 //! Compact signature solving for classifier-associated declarations: `companion { … }` block
-//! members and written `companion fun/val C.name`.
+//! members, written `companion fun/val C.name`, and the receiver-less callables a classifier
+//! exposes as `Classifier.name(...)` (a Java static method, an implicit enum `values`).
 //!
-//! These consume the provider queries the checker uses (`SymbolResolver::classifier_associated_*`
-//! and `static_scope_associated_*`) and select a function with the ordinary receiver-less
-//! top-level selector, so the compact path and Pass 2 agree on which declaration a call names.
+//! These consume the provider queries the checker uses (`SymbolResolver::classifier_associated_*`,
+//! `static_scope_associated_*`, and `classifier_call_candidates`) and select a function with the
+//! ordinary receiver-less top-level selector, so the compact path and Pass 2 agree on which
+//! declaration a reference names.
 
 use super::*;
 
@@ -264,9 +266,11 @@ impl ProductionSignatureSemantics<'_> {
         self.select_associated_reference(scope, functions, properties, expected, demand)
     }
 
-    /// `C::name` naming `classifier`'s own associated declaration. Qualified and open-static
-    /// references use one selector so compact return inference cannot turn an overloaded function
-    /// family into a missing member merely because the classifier has no same-named property.
+    /// `C::name` naming `classifier`'s own associated declaration, or a receiver-less callable from
+    /// the same family as `C.name(...)` when an expected function type can select it. Qualified and
+    /// open-static references use one selector so compact return inference cannot turn an
+    /// overloaded function family into a missing member merely because the classifier has no
+    /// same-named property.
     pub(super) fn select_qualified_associated_reference(
         &self,
         scope: crate::fir::SignatureScope,
@@ -274,14 +278,43 @@ impl ProductionSignatureSemantics<'_> {
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut Demand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let (functions, properties) = self
+        let expected_fun = match expected.map(|expected| expected.get().non_null()) {
+            Some(Ty::Fun(expected)) => Some(expected),
+            _ => None,
+        };
+        let (functions, statics, properties) = self
             .with_resolver(scope, |resolver| {
+                let functions = resolver.classifier_associated_callables(classifier, spelling);
+                let statics = expected_fun
+                    .map(|_| {
+                        receiverless_classifier_call_candidates(
+                            resolver, classifier, spelling, &functions,
+                        )
+                    })
+                    .unwrap_or_default();
                 Some((
-                    resolver.classifier_associated_callables(classifier, spelling),
+                    functions,
+                    statics,
                     resolver.classifier_associated_properties(classifier, spelling),
                 ))
             })
             .unwrap_or_default();
+        if let Some(expected_fun) = expected_fun.filter(|_| !statics.is_empty()) {
+            let mut candidates = functions.clone();
+            candidates.extend(statics);
+            match self
+                .applicable_receiverless_reference_types(scope, candidates, expected_fun, demand)?
+                .as_slice()
+            {
+                [selected] => {
+                    return crate::fir::ResolvedTy::new(*selected)
+                        .map(Some)
+                        .map_err(|_| Self::failure());
+                }
+                [] => {}
+                [_, _, ..] => return Err(Self::failure()),
+            }
+        }
         self.select_associated_reference(scope, functions, properties, expected, demand)
     }
 
@@ -415,4 +448,29 @@ impl ProductionSignatureSemantics<'_> {
             .map(Some)
             .map_err(|_| Self::failure())
     }
+}
+
+/// Receiver-less members of the `Classifier.name(...)` family that are not already published as
+/// associated declarations. A Java static method lives in that family and has no value receiver.
+/// Candidates keep their declaration kind; the receiver-less selector consumes the normalized
+/// family directly.
+fn receiverless_classifier_call_candidates(
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    classifier: crate::types::TypeName,
+    spelling: &str,
+    already: &[crate::libraries::FunctionInfo],
+) -> Vec<crate::libraries::FunctionInfo> {
+    let Some((_, candidates)) = resolver.classifier_call_candidates(classifier, spelling) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.semantic_receiver().is_none())
+        .filter(|candidate| resolver.non_member_callable_accessible(candidate))
+        .filter(|candidate| {
+            !already
+                .iter()
+                .any(|existing| existing.stable_declaration == candidate.stable_declaration)
+        })
+        .collect()
 }
