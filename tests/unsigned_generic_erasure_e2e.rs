@@ -309,7 +309,7 @@ fn unsigned_inlined_map_argument_unboxes_before_a_carrier_call() {
              if (t1 != listOf(\"none\", \"one\", \"many\", \"M1\")) return \"UInt\"\n\
              val t2 = listOf(0UL, 1UL, 4UL, M2).map { testULong(it) }\n\
              if (t2 != listOf(\"none\", \"one\", \"many\", \"M2\")) return \"ULong\"\n\
-             \"OK\"\n\
+             return \"OK\"\n\
          }\n",
         "UnsignedWhenByMap",
     );
