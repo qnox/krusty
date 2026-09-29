@@ -30,6 +30,7 @@ use scope::ScopeKind;
 use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, NarrowPath, Ns};
 
 mod abstract_obligations;
+mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
@@ -13235,6 +13236,10 @@ struct ScopedProperty {
     owner_storage_ty: Option<Ty>,
     is_var: bool,
     owner: TypeName,
+    /// Exact implicit-receiver rung whose member family contributed this property. A property
+    /// inherited by the current subclass and the same declaration reached through an enclosing
+    /// base-typed receiver have the same owner and type but different runtime identities.
+    dispatch_receiver_identity: Option<(usize, usize)>,
     class_storage: Option<u32>,
     enum_entry_property: Option<u32>,
     source_member: Option<crate::libraries::SourceMember>,
@@ -14130,10 +14135,22 @@ impl<'a> Checker<'a> {
             // active checker. Retry only the inherited MEMBER facet through that semantic edge;
             // extension rungs remain selected against the original receiver below.
             for supertype in self.body_local_supertypes(receiver) {
-                if let Ok(Some(selection @ PropertyReadSelection::Member(_))) =
-                    self.select_property_read(scope, supertype, name)
-                {
-                    return Ok(Some(selection));
+                if let Ok(Some(selection)) = self.select_property_read(scope, supertype, name) {
+                    let private = match &selection {
+                        PropertyReadSelection::Member(member) => {
+                            member.access.is_some_and(|(visibility, _)| {
+                                !crate::symbol_resolver::member_is_inheritable(visibility)
+                            })
+                        }
+                        PropertyReadSelection::MemberExtension(_)
+                        | PropertyReadSelection::Extension(_) => false,
+                    };
+                    if private {
+                        continue;
+                    }
+                    if matches!(selection, PropertyReadSelection::Member(_)) {
+                        return Ok(Some(selection));
+                    }
                 }
             }
             match self.member_extension_property(scope, receiver, name) {
@@ -14464,13 +14481,21 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         name: &str,
     ) -> Option<&CheckedLocalProperty> {
-        std::iter::once(receiver.non_null())
-            .chain(self.body_local_supertypes(receiver))
-            .filter_map(Ty::kotlin_class_internal)
-            .find_map(|owner| {
-                self.checked_local_properties
-                    .get(&(owner, name.to_string()))
+        std::iter::once((receiver.non_null(), false))
+            .chain(
+                self.body_local_supertypes(receiver)
+                    .into_iter()
+                    .map(|supertype| (supertype, true)),
+            )
+            .filter_map(|(candidate, inherited)| {
+                let owner = candidate.kotlin_class_internal()?;
+                let property = self
+                    .checked_local_properties
+                    .get(&(owner, name.to_string()))?;
+                (!inherited || crate::symbol_resolver::member_is_inheritable(property.visibility))
+                    .then_some(property)
             })
+            .next()
     }
 
     fn remove_checked_source_member_result(
@@ -15105,7 +15130,23 @@ impl<'a> Checker<'a> {
                 ))
                 .collect::<Vec<_>>(),
         );
-        let (member_receiver, member_overloads, _) = self.body_local_member_overload_rung(rt, name);
+        let (member_receiver, mut member_overloads, _) =
+            self.body_local_member_overload_rung(rt, name);
+        if let Some(receiver) = tower_rung
+            .receiver
+            .filter(|receiver| receiver.declared_ty != rt)
+        {
+            for candidate in self.private_members_hidden_by_smart_cast(receiver.declared_ty, name) {
+                let already_present = member_overloads.iter().any(|existing| {
+                    existing.callable.owner == candidate.callable.owner
+                        && existing.callable.name == candidate.callable.name
+                        && existing.callable.descriptor == candidate.callable.descriptor
+                });
+                if !already_present {
+                    member_overloads.push(candidate);
+                }
+            }
+        }
         let mut extension_overloads = callables
             .functions()
             .iter()
@@ -17365,6 +17406,12 @@ impl<'a> Checker<'a> {
         if members.is_empty() {
             for supertype in self.body_local_supertypes(receiver) {
                 let inherited = module_members(supertype);
+                let inherited = inherited
+                    .into_iter()
+                    .filter(|member| {
+                        crate::symbol_resolver::member_is_inheritable(member.visibility)
+                    })
+                    .collect::<Vec<_>>();
                 if !inherited.is_empty() {
                     member_receiver = supertype;
                     members = inherited;
@@ -49014,6 +49061,7 @@ impl<'a> Checker<'a> {
             is_var,
             owner,
             None,
+            None,
         );
     }
 
@@ -49039,6 +49087,7 @@ impl<'a> Checker<'a> {
             is_var,
             owner,
             Some(sibling),
+            None,
         );
     }
 
@@ -49050,21 +49099,30 @@ impl<'a> Checker<'a> {
         is_var: bool,
         owner: TypeName,
         enum_entry_property: Option<u32>,
+        selected_receiver_identity: Option<(usize, usize)>,
     ) {
         let implicit_receivers = self.implicit_receivers(scope);
-        let receiver_identity = enum_entry_property
-            .and_then(|_| owner.nested_owner())
-            .and_then(|enum_owner| {
-                implicit_receivers.iter().copied().find(|receiver| {
-                    receiver.extension_receiver.is_none()
-                        && receiver.ty.obj_internal() == Some(enum_owner)
-                })
+        let receiver_identity = selected_receiver_identity
+            .or_else(|| {
+                enum_entry_property
+                    .and_then(|_| owner.nested_owner())
+                    .and_then(|enum_owner| {
+                        implicit_receivers.iter().copied().find(|receiver| {
+                            receiver.extension_receiver.is_none()
+                                && receiver.ty.obj_internal() == Some(enum_owner)
+                        })
+                    })
+                    .map(|receiver| receiver.identity)
             })
             .or_else(|| {
-                implicit_receivers.iter().copied().find(|receiver| {
-                    receiver.extension_receiver.is_none()
-                        && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
-                })
+                implicit_receivers
+                    .iter()
+                    .copied()
+                    .find(|receiver| {
+                        receiver.extension_receiver.is_none()
+                            && self.receiver_is_assignable(receiver.ty, Ty::obj_name(owner))
+                    })
+                    .map(|receiver| receiver.identity)
             })
             // Some declaration-only class scopes are built before the enclosing `inner` receiver
             // labels are installed. They still need the binding for header/initializer checking;
@@ -49075,8 +49133,8 @@ impl<'a> Checker<'a> {
                     .iter()
                     .copied()
                     .find(|receiver| receiver.extension_receiver.is_none())
+                    .map(|receiver| receiver.identity)
             })
-            .map(|receiver| receiver.identity)
             .expect("a dispatch property is declared only inside its classifier receiver scope");
         self.declare_with_origin(
             scope,
@@ -49150,6 +49208,7 @@ impl<'a> Checker<'a> {
             is_var,
             property.owner,
             property.enum_entry_property,
+            property.dispatch_receiver_identity,
         );
     }
 
@@ -49492,6 +49551,7 @@ impl<'a> Checker<'a> {
                 owner_storage_ty: None,
                 is_var: property.is_var,
                 owner: entry_owner,
+                dispatch_receiver_identity: None,
                 class_storage: None,
                 enum_entry_property: Some(field as u32),
                 source_member: None,
@@ -49702,6 +49762,8 @@ impl<'a> Checker<'a> {
             checker: &Checker<'_>,
             source: &dyn SymbolSource,
             applied: Ty,
+            dispatch_receiver_identity: Option<(usize, usize)>,
+            inherited: bool,
             seen: &mut std::collections::HashSet<TypeName>,
             properties: &mut Vec<ScopedProperty>,
         ) {
@@ -49728,7 +49790,15 @@ impl<'a> Checker<'a> {
                 && checker.resolved_body_local_supertypes.contains_key(&owner);
             if deferred_body_local {
                 for parent in checker.body_local_supertypes(applied) {
-                    collect(checker, source, parent, seen, properties);
+                    collect(
+                        checker,
+                        source,
+                        parent,
+                        dispatch_receiver_identity,
+                        true,
+                        seen,
+                        properties,
+                    );
                 }
                 return;
             }
@@ -49746,13 +49816,23 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>(),
             );
             for parent in crate::symbol_resolver::direct_supertypes(source, applied) {
-                collect(checker, source, parent, seen, properties);
+                collect(
+                    checker,
+                    source,
+                    parent,
+                    dispatch_receiver_identity,
+                    true,
+                    seen,
+                    properties,
+                );
             }
             let bindings = crate::symbol_resolver::classifier_bindings(&classifier, applied);
             for callables in classifier.declared_callables.values() {
                 for property in callables.properties().iter().filter(|property| {
                     property.kind == crate::libraries::PropKind::Member
                         && property.context_count == 0
+                        && (!inherited
+                            || crate::symbol_resolver::member_is_inheritable(property.visibility))
                         && checker.member_accessible(property.visibility, property.owner)
                 }) {
                     let ty = crate::symbol_resolver::specialize_signature_output_type(
@@ -49798,6 +49878,7 @@ impl<'a> Checker<'a> {
                         owner_storage_ty,
                         is_var: property.setter.is_some(),
                         owner: property.owner,
+                        dispatch_receiver_identity,
                         class_storage: None,
                         enum_entry_property: None,
                         source_member: property.source_member,
@@ -49814,16 +49895,20 @@ impl<'a> Checker<'a> {
         }
 
         let mut properties = Vec::new();
-        let applied = self
-            .implicit_receiver_types(scope)
+        let selected_receiver = self
+            .implicit_receivers(scope)
             .into_iter()
-            .find(|receiver| receiver.obj_internal() == Some(owner))
+            .find(|receiver| receiver.ty.obj_internal() == Some(owner));
+        let applied = selected_receiver
+            .map(|receiver| receiver.ty)
             .unwrap_or_else(|| Ty::obj_name(owner));
         let source = self.fed_source();
         collect(
             self,
             &source,
             applied,
+            selected_receiver.map(|receiver| receiver.identity),
+            false,
             &mut std::collections::HashSet::new(),
             &mut properties,
         );
@@ -56822,6 +56907,11 @@ impl<'a> Checker<'a> {
                             owner_storage_ty: None,
                             is_var: property.is_var,
                             owner,
+                            dispatch_receiver_identity: self
+                                .implicit_receivers(property_scope)
+                                .into_iter()
+                                .find(|receiver| receiver.ty.obj_internal() == Some(owner))
+                                .map(|receiver| receiver.identity),
                             class_storage: None,
                             enum_entry_property: None,
                             source_member: Some(source_member),
@@ -57458,6 +57548,7 @@ impl<'a> Checker<'a> {
                             owner_storage_ty: None,
                             is_var: bp.is_var,
                             owner,
+                            dispatch_receiver_identity: None,
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
                             source_member: None,
@@ -74422,113 +74513,6 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         Ty::obj_args_name(internal, &arguments)
-    }
-
-    /// Whether a member of `owner` with visibility `vis` is accessible from the CURRENT site (the class
-    /// being checked, `scope.this_ty()`), by Kotlin's rules. `internal` is accessible only when its
-    /// declaring classifier belongs to this compilation module; dependency providers retain those
-    /// declarations so this check can produce an accessibility diagnostic instead of unresolved.
-    /// `private` reaches the declaring class and classes lexically nested inside it (an inner/nested
-    /// class or the companion, whose JVM internal name is `<owner>$…`), plus — in the other direction
-    /// — a class whose own COMPANION declares the member, since a companion's members are in the
-    /// containing class's scope. `protected` reaches those plus any subclass of `owner`. At a
-    /// top-level site (no enclosing class) a non-public member is inaccessible.
-    /// Java package-private declarations are accessible from their declaring package.
-    fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
-        if self.visibility_access_suppressed() {
-            return true;
-        }
-        match vis {
-            Visibility::Public => true,
-            Visibility::Internal => {
-                let module_owned = match self.resolved_index {
-                    // The finalized module index contains only this compilation module. A
-                    // dependency-source fallback is deliberately exposed through the semantic
-                    // provider instead, so mere resolver visibility cannot grant `internal`
-                    // access across that module boundary.
-                    Some(index) => index.classifier_declaration(owner).is_some(),
-                    // The legacy whole-source checker has no stable index; its module symbol
-                    // table remains the only way to identify a same-compilation owner.
-                    None => self
-                        .module
-                        .legacy_symbols()
-                        .is_some_and(|symbols| symbols.class_by_type_name(owner).is_some()),
-                };
-                let friend = self.libraries.internal_accessible(owner);
-                module_owned || friend
-            }
-            Visibility::PackagePrivate => {
-                let declared = owner.package();
-                self.source_package_name().matches(&declared)
-            }
-            Visibility::Private | Visibility::Protected => {
-                // Access is LEXICAL, so the ENCLOSING chain is walked, not the receiver chain: a
-                // NESTED (non-`inner`) class has no outer receiver at all, yet it sits inside its
-                // outer class's body and Kotlin lets it reach that class's private members — including
-                // its companion's. Reading the receiver labels alone reported `C.create()` from
-                // `class C { companion object { private fun create() … }; class ZZZ { … } }` as
-                // inaccessible, which kotlinc compiles.
-                self.access_context_class_names()
-                    .into_iter()
-                    .any(|enclosing| {
-                        // Reaching DOWN from an enclosing class is the COMPANION's privilege alone:
-                        // its members belong to the containing class's scope. A sibling nested
-                        // class's private member is not in that scope — kotlinc rejects `C.ZZZ`
-                        // reading `C.Inner`'s private member, and the companion reading it too — so
-                        // this arm names the companion instead of admitting every nested owner.
-                        let companion_of_enclosing =
-                            self.resolver().classifier(enclosing).and_then(|class| {
-                                class.companion_object.as_ref().map(|(_, owner)| *owner)
-                            }) == Some(owner);
-                        let nested_in_owner =
-                            std::iter::successors(enclosing.nested_owner(), |current| {
-                                current.nested_owner()
-                            })
-                            .any(|ancestor| ancestor == owner);
-                        enclosing == owner
-                            || nested_in_owner
-                            || companion_of_enclosing
-                            // Protected access uses the federated subtype relation so dependency
-                            // superclasses participate in the same check as source classes.
-                            || (vis == Visibility::Protected
-                                && (self.obj_name_is_subtype(enclosing, owner)
-                                    || self
-                                        .resolver()
-                                        .classifier(enclosing)
-                                        .and_then(|class| {
-                                            class
-                                                .companion_object
-                                                .as_ref()
-                                                .map(|(_, owner)| *owner)
-                                        })
-                                        .is_some_and(|companion| {
-                                            self.obj_name_is_subtype(companion, owner)
-                                        })))
-                    })
-            }
-        }
-    }
-
-    fn receiver_member_accessible(&self, vis: Visibility, owner: TypeName, receiver: Ty) -> bool {
-        if !self.member_accessible(vis, owner) {
-            return false;
-        }
-        vis != Visibility::Protected
-            || self
-                .lexical_source_class_names()
-                .into_iter()
-                .flat_map(|enclosing| {
-                    std::iter::once(enclosing).chain(
-                        self.resolver().classifier(enclosing).and_then(|class| {
-                            class.companion_object.as_ref().map(|(_, owner)| *owner)
-                        }),
-                    )
-                })
-                .any(|access_classifier| {
-                    (access_classifier == owner
-                        || self.obj_name_is_subtype(access_classifier, owner))
-                        && self.receiver_is_assignable(receiver, Ty::obj_name(access_classifier))
-                })
     }
 
     /// Property-only visibility exception controlled by Kotlin's
