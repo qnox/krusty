@@ -141,14 +141,14 @@ fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
 }
 
 #[test]
-fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
+fn canonical_gate_defaults_run_corpus_and_e2e_as_one_process() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
         .join("test-gate-defaults.sh");
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -164,7 +164,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 120, 4, 22]);
+    assert_eq!(values, [120, 900, 900, 1]);
 }
 
 #[cfg(unix)]
@@ -199,7 +199,7 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
-        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/4\n"
+        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/1\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
     fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
@@ -231,6 +231,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_SHARDS", "4")
         .output()
         .expect("run reporting conformance fixture");
 
@@ -276,6 +277,7 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_SHARDS", "4")
         .output()
         .expect("run failing-shard conformance fixture");
 
@@ -548,4 +550,177 @@ fn run_tests_wires_target_hygiene_before_building() {
         prune < first_build,
         "prune must run before the first cargo build"
     );
+}
+
+#[test]
+fn plain_gate_runs_e2e_as_one_process() {
+    let script = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("run-tests.sh"))
+        .expect("read run-tests.sh");
+    assert!(
+        !script.contains("KRUSTY_E2E_SHARDS"),
+        "the plain gate must not partition e2e"
+    );
+    assert!(
+        script.contains("e2e threads="),
+        "e2e must run as one process sized to the host"
+    );
+}
+
+#[test]
+fn overlapping_callers_hold_distinct_servers_up_to_the_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::Duration;
+
+    let pool = super::ServerPool::<usize>::new();
+    let next_id = AtomicUsize::new(0);
+    let active = AtomicUsize::new(0);
+    let max_active = AtomicUsize::new(0);
+    let seen = Mutex::new(Vec::new());
+    thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                pool.with_server(
+                    2,
+                    || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+                    |id| {
+                        let now = active.fetch_add(1, Ordering::AcqRel) + 1;
+                        max_active.fetch_max(now, Ordering::Relaxed);
+                        seen.lock().unwrap_or_else(|err| err.into_inner()).push(*id);
+                        thread::sleep(Duration::from_millis(80));
+                        active.fetch_sub(1, Ordering::AcqRel);
+                    },
+                )
+                .expect("cap allows a server");
+            });
+        }
+    });
+    let seen = seen.lock().unwrap_or_else(|err| err.into_inner());
+    let mut ids = seen.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids,
+        vec![0, 1],
+        "both servers must run, not a queue on the first"
+    );
+    assert_eq!(max_active.load(Ordering::Relaxed), 2);
+    assert_eq!(next_id.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_finished_server_is_reused_instead_of_growing_the_pool() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pool = super::ServerPool::new();
+    let next_id = AtomicUsize::new(0);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        pool.with_server(
+            2,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |id| seen.push(*id),
+        )
+        .expect("server");
+    }
+    assert_eq!(seen, vec![0, 0, 0, 0]);
+    assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn one_classpath_spreads_overlapping_box_calls_across_the_lane() {
+    let mut pool = super::BoxRunnerPool::new();
+    let mut created = 0u64;
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let claim = pool
+            .acquire(
+                "stdlib",
+                4,
+                |_| true,
+                || {
+                    created += 1;
+                    Some(created)
+                },
+            )
+            .expect("lane");
+        held.push(claim);
+    }
+    let mut runners = held.iter().map(|claim| claim.runner).collect::<Vec<_>>();
+    runners.sort_unstable();
+    runners.dedup();
+    assert_eq!(runners, vec![1, 2, 3, 4]);
+    let extra = pool
+        .acquire(
+            "stdlib",
+            4,
+            |_| true,
+            || {
+                created += 1;
+                Some(created)
+            },
+        )
+        .expect("shared lane");
+    assert!(held.iter().any(|claim| claim.runner == extra.runner));
+    assert_eq!(created, 4);
+}
+
+#[test]
+fn an_idle_box_lane_is_reused() {
+    let mut pool = super::BoxRunnerPool::new();
+    let mut created = 0u64;
+    let first = pool
+        .acquire(
+            "stdlib",
+            4,
+            |_| true,
+            || {
+                created += 1;
+                Some(created)
+            },
+        )
+        .expect("first runner");
+    pool.release("stdlib", first.id);
+    let second = pool
+        .acquire(
+            "stdlib",
+            4,
+            |_| true,
+            || {
+                created += 1;
+                Some(created)
+            },
+        )
+        .expect("reused runner");
+    assert_eq!(second.runner, first.runner);
+    assert_eq!(created, 1);
+}
+
+#[test]
+fn a_second_classpath_takes_an_idle_box_lane() {
+    let mut pool = super::BoxRunnerPool::new();
+    let mut created = 0u64;
+    let spawn = |pool: &mut super::BoxRunnerPool<u64>, cp: &str, created: &mut u64| {
+        pool.acquire(
+            cp,
+            2,
+            |_| true,
+            || {
+                *created += 1;
+                Some(*created)
+            },
+        )
+        .expect("runner")
+    };
+    let busy = spawn(&mut pool, "stdlib", &mut created);
+    let idle = spawn(&mut pool, "stdlib", &mut created);
+    pool.release("stdlib", idle.id);
+    let other = spawn(&mut pool, "reflect", &mut created);
+    assert_ne!(other.runner, busy.runner);
+    assert_ne!(other.runner, idle.runner);
+    assert_eq!(created, 3);
+    let shared = spawn(&mut pool, "stdlib", &mut created);
+    assert_eq!(shared.runner, busy.runner);
+    assert_eq!(created, 3);
 }

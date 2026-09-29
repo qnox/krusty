@@ -255,6 +255,22 @@ run_label() {
 }
 export -f run_label
 
+# TIMINGS and FAILED are appended by every concurrent run of the small-binary pool. A short
+# O_APPEND write is not atomic on every host the gate runs on, so take a mkdir lock. The critical
+# section is one line; a leftover lock dies with the temporary log directory.
+append_exclusive() {
+  local file="$1" line="$2" lockdir="${1}.lock"
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    sleep 0.01
+  done
+  if ! printf '%s\n' "$line" >>"$file"; then
+    rmdir "$lockdir"
+    return 1
+  fi
+  rmdir "$lockdir"
+}
+export -f append_exclusive
+
 run_one() {
   local b="${2%%::*}" extra="" name slug status=0
   local explicit_label="${3:-}" expected_tests="${4:-}" description
@@ -268,9 +284,9 @@ run_one() {
   if [ -n "$slug" ]; then name="$name@$slug"; fi
   # The slug is lossy (`--test-threads=N` stripped, punctuation folded), so a future split whose
   # passes differ only along a dropped axis would collide and silently resurrect the overwrite bug
-  # this naming exists to prevent. Disambiguate instead. Only same-binary splits can collide, and
-  # those are scheduled sequentially from the main shell, so no locking is needed: every run in the
-  # concurrent xargs pool has a distinct binary basename and an empty slug.
+  # this naming exists to prevent. Disambiguate instead. Concurrent callers must not share a slug:
+  # the existence check below is not safe across processes. The xargs pool only runs distinct
+  # binaries (empty slug).
   local uniq="$name" n=1
   while [ -e "$1/$uniq.log" ]; do
     n=$((n + 1))
@@ -302,14 +318,14 @@ run_one() {
     elif [ -n "$extra" ]; then
       description="$description [$extra]"
     fi
-    printf '%s\t%s\n' "$name" "$description" >>"$1/FAILED"
+    append_exclusive "$1/FAILED" "$(printf '%s\t%s' "$name" "$description")"
     if [ "$status" -eq 124 ]; then
-      printf '%s\t%s\n' "$name" "$description" >>"$1/TIMED_OUT"
+      append_exclusive "$1/TIMED_OUT" "$(printf '%s\t%s' "$name" "$description")"
     fi
   fi
   end="$(epoch_ms)"
   ms=$((end - start))
-  printf '%08d %s\n' "$ms" "$name" >>"$1/TIMINGS"
+  append_exclusive "$1/TIMINGS" "$(printf '%08d %s' "$ms" "$name")"
 }
 export -f run_one
 
@@ -320,26 +336,34 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 # The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
 # conformance test in a fresh process. This still executes the full conformance binary's test set; it
 # just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
-# Pass 1 is a single #[test] that parallelizes internally (rayon). Partition its sorted corpus across
-# fresh processes so every process receives the same 120-second deadline as the rest of the gate;
-# each shard retains the conformance floor and the stable modulo partition covers every case once.
-# Pass 2 is ~40 independent JVM-backed tests, so give it real threads (bounded: each can hold a
-# kotlinc-server or runner JVM, so `ncpu` capped at 4 keeps the JVM count sane on big hosts).
-conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
+# Pass 1 is a single #[test] that parallelizes internally (rayon) across every CPU. The plain gate
+# runs that corpus as one process. `KRUSTY_CONFORMANCE_SHARDS` above 1 partitions the sorted corpus
+# when one process cannot hold it; each piece still uses one libtest thread because rayon owns the
+# cores.
+# Pass 2 is ~40 independent JVM-backed tests. Give it one libtest thread per CPU. The server pool
+# is the same width, so those threads do not queue on a single kotlinc or javac JVM.
+conf_threads="$ncpu"
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
   conformance_shards="$KRUSTY_CONFORMANCE_SHARDS"
   libtest_require_positive_shard_count \
     "$conformance_shards" "run-tests.sh: KRUSTY_CONFORMANCE_SHARDS"
-  for ((shard = 0; shard < conformance_shards; shard++)); do
-    label="box-shard-$((shard + 1))-of-$conformance_shards"
-    echo "run-tests.sh: conformance $label" >&2
-    KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
-      KRUSTY_CONFORMANCE_SHARD_COUNT="$conformance_shards" \
-      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+  if [ "$conformance_shards" -eq 1 ]; then
+    echo "run-tests.sh: conformance corpus" >&2
+    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
       run_one \
-        "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
-  done
+        "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "corpus"
+  else
+    for ((shard = 0; shard < conformance_shards; shard++)); do
+      label="box-shard-$((shard + 1))-of-$conformance_shards"
+      echo "run-tests.sh: conformance $label" >&2
+      KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
+        KRUSTY_CONFORMANCE_SHARD_COUNT="$conformance_shards" \
+        KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+        run_one \
+          "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
+    done
+  fi
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
     run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
 fi
@@ -354,47 +378,17 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary joins ~4,000 formerly-separate e2e tests, many of which drive the real kotlinc plus
-# a persistent JVM box runner. Run it DEDICATED and SEQUENTIALLY — after conformance, before the
-# small-binary pool — with `--test-threads=$ncpu` so its tests parallelize INTERNALLY across all cores,
-# and size the per-process box-runner pool to match so `ncpu` in-flight `box()` calls don't queue on too
-# few runners. The whole binary can exceed the five-minute per-process ceiling on smaller hosts, so
-# greedily balance whole top-level test modules into bounded shards. Each shard skips the other modules
-# and must report exactly its planned test count; a lossy libtest skip filter therefore fails visibly
-# instead of silently reducing coverage. Running the shards alone (outside the `-P jobs` fan-out) keeps
-# them from over-subscribing while they own the cores.
+# The e2e binary drives kotlinc plus persistent JVM box runners. Run it once, after conformance and
+# before the small-binary pool, with one libtest thread per CPU. The kotlinc/javap server pool and
+# the box-runner lane default to that same width, so in-flight calls use every core. Splitting the
+# binary into processes restarts those JVMs and the compiler classpath for every piece.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
-pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  e2e_shards="$KRUSTY_E2E_SHARDS"
-  libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
-  e2e_listing="$logdir/e2e-tests.list"
-  e2e_plan="$logdir/e2e-shards.plan"
-  e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
-  libtest_write_shard_plan \
-    "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
-  for ((shard = 0; shard < e2e_shards; shard++)); do
-    skip_args=()
-    skip_file="$logdir/e2e-shard-$shard.skips"
-    expected_tests="$(libtest_shard_expected_tests "$e2e_plan" "$shard")"
-    if [ "$expected_tests" -eq 0 ]; then
-      echo "run-tests.sh: e2e shard $((shard + 1))/$e2e_shards was assigned no tests" >&2
-      exit 1
-    fi
-    if ! libtest_shard_skip_patterns \
-      "$e2e_plan" "$e2e_listing" "$shard" >"$skip_file"; then
-      echo "run-tests.sh: could not build safe filters for e2e shard $((shard + 1))/$e2e_shards" >&2
-      exit 1
-    fi
-    while IFS= read -r pattern; do
-      skip_args+=(--skip "$pattern")
-    done <"$skip_file"
-    label="shard-$((shard + 1))-of-$e2e_shards"
-    echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
-    KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
-      KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-        "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
-  done
+  pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
+  echo "run-tests.sh: e2e threads=$ncpu box-runners=$pool" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_E2E_TIMEOUT_SECONDS" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
+      "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.

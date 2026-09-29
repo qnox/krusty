@@ -83,9 +83,9 @@ argument, member, initializer, or assignment location is a test failure.
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
-corpus, then everything else), then runs twenty-two balanced whole-module shards of the internally
-parallel e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS`
-overrides the shard count.
+corpus, then everything else), then runs the e2e binary once with one test thread per CPU, then runs
+the remaining small test binaries in parallel. `KRUSTY_CONFORMANCE_SHARDS` above 1 partitions the
+corpus when one process cannot hold it.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -94,9 +94,9 @@ filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the t
 `--test-threads=<count>` arguments do not change identity. Because slugging is deliberately lossy,
 `run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
 earlier run. The failure report reads the exact invocation's log, and the timing table lists each
-invocation separately because each is a separate process with its own wall time. E2e shard logs use
-the explicit labels `shard-1-of-22`, and so on; every shard's reported selected-test count must equal
-the planner's count, so filtering cannot silently reduce coverage.
+invocation separately because each is a separate process with its own wall time. The plain e2e run
+is one process, so it has one log. A conformance override with more than one shard labels those logs
+`box-shard-1-of-N`.
 
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
@@ -271,8 +271,9 @@ Performance-relevant harness state:
   (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
   `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
   per lib entry — the convergence inventory for making byte equality the assertion.
-- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
-  to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+- Persistent JVM pools (kotlinc compiler servers, JavaRunner, and box runners for one classpath)
+  default to one JVM per host CPU. `KRUSTY_SERVER_POOL=<n>` and `KRUSTY_BOX_RUNNER_POOL=<n>` override
+  that width (for example `1` on a memory-tight host).
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
   static state is fresh per `box()` call and runner JVMs are shared across tests.
 
@@ -280,12 +281,10 @@ Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
-- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for each
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 900-second deadline for each
   full-suite or focused conformance pass.
-- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
-  each full-suite e2e shard.
-- `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
-  run.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 900-second deadline for the e2e binary.
+- `KRUSTY_CONFORMANCE_SHARDS=<count>` partitions the box corpus. The plain gate uses `1`.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
