@@ -55,9 +55,11 @@ pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
 
 use std::cell::UnsafeCell;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NameId(pub(crate) u32);
@@ -66,7 +68,9 @@ pub struct NameId(pub(crate) u32);
 struct NameNode {
     parent: Option<NameId>,
     sep: u8,
-    segment: std::sync::Arc<str>,
+    /// Shared spelling. Equal segments in every tree point at one leaked copy, so cloning a
+    /// package tree copies the pointer and does not retain another `Arc` header plus the bytes.
+    segment: &'static str,
     /// Exact classifier owner supplied by [`NameTree::nested_child_of`], encoded as `id + 1` (zero
     /// means the node was not created through an explicit nested relation). Kept separate from the
     /// textual cache below: a flattened spelling such as `Outer$$serializer` is ambiguous, while the
@@ -81,12 +85,38 @@ struct NameNode {
 
 const NO_NESTED_OWNER: u32 = u32::MAX;
 
+/// One process-wide copy of each name-tree segment. Trees keep a pointer, not an `Arc<str>`, so a
+/// repeated segment (`Companion`, a shared package) and a cloned package tree do not allocate the
+/// spelling again.
+fn intern_segment(segment: &str) -> &'static str {
+    if segment.is_empty() {
+        return "";
+    }
+    const SHARDS: usize = 64;
+    static CACHE: OnceLock<[RwLock<HashSet<&'static str, FxBuildHasher>>; SHARDS]> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::array::from_fn(|_| RwLock::new(HashSet::default())));
+    let mut hasher = FxHasher::default();
+    segment.hash(&mut hasher);
+    let shard = &cache[hasher.finish() as usize % SHARDS];
+    if let Some(existing) = shard.read().unwrap().get(segment).copied() {
+        return existing;
+    }
+    let mut values = shard.write().unwrap();
+    if let Some(existing) = values.get(segment).copied() {
+        return existing;
+    }
+    let stored = Box::leak(segment.to_owned().into_boxed_str());
+    values.insert(stored);
+    stored
+}
+
 impl Clone for NameNode {
     fn clone(&self) -> Self {
         Self {
             parent: self.parent,
             sep: self.sep,
-            segment: self.segment.clone(),
+            segment: self.segment,
             exact_nested_owner: AtomicU32::new(self.exact_nested_owner.load(Ordering::Relaxed)),
             nested_owner: AtomicU32::new(self.nested_owner.load(Ordering::Relaxed)),
         }
@@ -340,7 +370,7 @@ impl Default for NameTree {
         arena.push(NameNode {
             parent: None,
             sep: 0,
-            segment: std::sync::Arc::from(""),
+            segment: "",
             exact_nested_owner: AtomicU32::new(0),
             nested_owner: AtomicU32::new(0),
         });
@@ -904,8 +934,8 @@ impl NameTree {
         self.node(id).parent
     }
 
-    pub fn segment(&self, id: NameId) -> &str {
-        &self.node(id).segment
+    pub fn segment(&self, id: NameId) -> &'static str {
+        self.node(id).segment
     }
 
     #[cfg(test)]
@@ -958,7 +988,7 @@ impl NameTree {
             w.tables.push(grown);
             table = unsafe { &*self.current.load(Ordering::Relaxed) };
         }
-        let segment: std::sync::Arc<str> = std::sync::Arc::from(segment);
+        let segment = intern_segment(segment);
         let id = self.arena.push(NameNode {
             parent: Some(parent),
             sep,
@@ -1021,6 +1051,18 @@ impl NameTree {
 mod tests {
     use super::{NameTree, NO_NESTED_OWNER};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn repeated_segments_share_one_spelling() {
+        let first = NameTree::default();
+        let second = NameTree::default();
+        let left = first.insert("kotlin/collections/List");
+        let right = second.insert("java/util/List");
+        assert!(std::ptr::eq(first.segment(left), second.segment(right)));
+        let cloned = first.clone();
+        assert!(std::ptr::eq(first.segment(left), cloned.segment(left)));
+        assert_eq!(cloned.render(left), "kotlin/collections/List");
+    }
 
     #[test]
     fn compares_paths_without_rendering() {
