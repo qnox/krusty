@@ -856,19 +856,21 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
 /// [`to_jvm_type_name`], this also covers function-classifier families and intrinsic companions,
 /// whose physical names are computed from semantic facts rather than the fixed erasure table.
 pub(super) fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
-    if let Some(intrinsic) = intrinsic_companion_jvm_class(internal) {
-        return crate::types::type_name(&intrinsic);
-    }
-    if let Some(function) = super::function_classifiers::classifier(internal) {
+    let physical = if let Some(intrinsic) = intrinsic_companion_jvm_class(internal) {
+        crate::types::type_name(&intrinsic)
+    } else if let Some(function) = super::function_classifiers::classifier(internal) {
         if function.is_reflective() {
-            return crate::types::type_name(crate::types::KFUNCTION_INTERNAL);
-        }
-        if !function.is_suspend() {
+            crate::types::type_name(crate::types::KFUNCTION_INTERNAL)
+        } else if !function.is_suspend() {
             let runtime = super::names::function_interface_internal_name(function.arity());
-            return crate::types::type_name(&runtime);
+            crate::types::type_name(&runtime)
+        } else {
+            to_jvm_type_name(internal)
         }
-    }
-    to_jvm_type_name(internal)
+    } else {
+        to_jvm_type_name(internal)
+    };
+    physical.jvm_binary_identity()
 }
 
 /// Whether [`to_jvm_internal`] would rewrite this classifier. Classpath loading asks once per
@@ -1038,7 +1040,7 @@ mod tests {
                 "kotlin/Int.Companion",
                 "kotlin/jvm/internal/IntCompanionObject",
             ),
-            ("sample/Outer.Inner", "sample/Outer.Inner"),
+            ("sample/Outer.Inner", "sample/Outer$Inner"),
         ];
         for (semantic, physical) in cases {
             assert_eq!(

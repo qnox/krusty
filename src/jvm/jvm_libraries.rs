@@ -3388,21 +3388,15 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     ))
 }
 
-/// Whether this already-normalized object classifier has the same identity in the classfile
-/// hierarchy. Function classifiers and intrinsic companions have a distinct JVM realization and
-/// retain the descriptor path below; ordinary and mapped object classifiers compare by identity.
-fn object_rank_uses_identity(name: TypeName) -> bool {
-    !super::jvm_class_map::maps_to_distinct_jvm_internal(name)
-        && super::jvm_class_map::intrinsic_companion_jvm_class(name).is_none()
-}
-
 /// Rung of `want` in `receiver`'s superclass-then-interface closure. The walk matches
-/// [`supertype_descriptors`] for an object classifier without building descriptor strings.
+/// JVM library identities after the provider boundary has normalized semantic classifiers to their
+/// physical declaration identities. No descriptor or classfile spelling participates in ranking.
 fn object_supertype_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option<u32> {
     let Ty::Obj(start, _) = receiver else {
         return None;
     };
-    let start = super::jvm_class_map::to_jvm_type_name(start);
+    let start = super::jvm_class_map::to_jvm_classfile_type_name(start);
+    let want = super::jvm_class_map::to_jvm_classfile_type_name(want);
     let mut seen = std::collections::HashSet::new();
     let mut pending = std::collections::VecDeque::new();
     pending.push_back(start);
@@ -3424,41 +3418,6 @@ fn object_supertype_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option
     }
     let object = type_name("java/lang/Object");
     (want == object && !seen.contains(&object)).then_some(index)
-}
-
-/// Rung of `want` when its descriptor spelling differs from the classifier identity (`Function1`,
-/// a dotted tail, an intrinsic companion). The walk follows the same supertypes as
-/// [`object_supertype_rank`] and compares interned classfile spellings, so it does not build
-/// descriptor strings.
-fn object_classfile_rank(cp: &Classpath, receiver: Ty, want: TypeName) -> Option<u32> {
-    let Ty::Obj(start, _) = receiver else {
-        return None;
-    };
-    let start = super::jvm_class_map::to_jvm_type_name(start);
-    let want_spelling = crate::jvm::names::classfile_internal_name_of(want);
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = std::collections::VecDeque::new();
-    pending.push_back(start);
-    let mut index = 0u32;
-    while let Some(name) = pending.pop_front() {
-        if !seen.insert(name) {
-            continue;
-        }
-        if crate::jvm::names::classfile_internal_name_of(name) == want_spelling {
-            return Some(index);
-        }
-        index += 1;
-        if let Some(class) = cp.find_name(name) {
-            pending.extend(class.interfaces.iter_ids());
-            if let Some(superclass) = class.super_class {
-                pending.push_back(superclass);
-            }
-        }
-    }
-    let object = type_name("java/lang/Object");
-    (want_spelling == crate::jvm::names::classfile_internal_name_of(object)
-        && !seen.contains(&object))
-    .then_some(index)
 }
 
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
@@ -5611,20 +5570,14 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         }
         // Index the extension's declared receiver into the receiver's most-specific-first MRO — the same
         // supertype/widening order the classpath extension lookup ranks by (`Int → Number → Comparable →
-        // Any`, `List → Collection → Iterable`). An object classifier compares by its JVM identity when
-        // that identity is the descriptor spelling, and by the interned classfile spelling otherwise
-        // (`kotlin/jvm/functions/Function1`, `Outer$Inner`). Arrays and scalars still match descriptors
+        // Any`, `List → Collection → Iterable`). Object classifiers are normalized once to the JVM
+        // provider's declaration identities; arrays and scalars still match descriptors
         // (`[Ljava/lang/String;`, `I`).
         let form =
             <Self as crate::libraries::SemanticPlatform>::library_value_form(self, decl_recv);
         let rank = match form {
             Ty::Obj(want, _) if !recv.is_array() && matches!(recv, Ty::Obj(_, _)) => {
-                let rank = if object_rank_uses_identity(want) {
-                    object_supertype_rank(&self.cp, recv, want)
-                } else {
-                    object_classfile_rank(&self.cp, recv, want)
-                };
-                rank.or_else(|| {
+                object_supertype_rank(&self.cp, recv, want).or_else(|| {
                     // A universal receiver (`<T> T.let`, erased to `Any`/`Object`) applies to every
                     // receiver at the lowest precedence when the MRO does not list the implicit root.
                     want.matches("java/lang/Object").then_some(u32::MAX - 1)
