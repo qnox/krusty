@@ -289,10 +289,4 @@ impl super::TypeInfo {
     pub fn when_is_exhaustive(&self, expression: ExprId) -> bool {
         self.exhaustive_whens.contains(&expression)
     }
-
-    /// Numeric type a `when` subject has for one equality condition, after earlier arms' failed
-    /// type tests. Absent when the comparison uses the subject's declared type.
-    pub fn when_subject_comparison_type(&self, condition: ExprId) -> Option<Ty> {
-        self.when_subject_comparison_types.get(&condition).copied()
-    }
 }
