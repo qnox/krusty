@@ -331,10 +331,10 @@ pub fn type_descriptor(ty: Ty) -> String {
 /// Whether `left` and `right` emit the same JVM descriptor.
 ///
 /// `type_descriptor` builds that spelling for the class file. A comparison only needs the shape:
-/// primitive tags, the interned classfile name, or one array dimension. Equal types return before
-/// any of that work.
+/// primitive tags, the interned classfile name, or one array dimension. Equal determined types
+/// return before any of that work; an undetermined type still trips the emission invariant.
 pub(crate) fn same_type_descriptor(left: Ty, right: Ty) -> bool {
-    left == right || descriptor_shapes_match(left, right)
+    (left == right && !left.mentions_pending()) || descriptor_shapes_match(left, right)
 }
 
 enum DescriptorShape {
@@ -834,5 +834,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "a not-determined type reached a JVM descriptor")]
+    fn descriptor_equality_does_not_accept_an_undetermined_type() {
+        same_type_descriptor(Ty::Pending, Ty::Pending);
     }
 }
