@@ -11249,6 +11249,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for the lowering contract. Corpus: eight of the eleven red cases under
   `closures/captureInSuperConstructorCall`, plus `super/kt4173_2.kt`.
 
+- **An inner class's super-constructor lambda reads an outer local from the enclosing instance,
+  not from `this`.** `class Local { inner class Inner(k: String) : Base({ o + k }) }` stores `o`
+  on `Local`, and `Inner`'s constructor receives that instance as its enclosing-instance parameter
+  before `this` exists. The lambda used to capture `Inner`'s uninitialized `this` and read
+  `this.this$0.$o`, which the JVM verifier rejects (`uninitializedThis` is not assignable to `Inner`).
+  The same prefix rule now walks the checked enclosing-instance path from the constructor
+  parameter: the lambda's receiver capture carries that path, lowering realizes the outer instance
+  at the construction site, and the field is read from that instance. A direct use in the argument
+  (`Base(o + k)`, no lambda) takes the same walk as an `EnclosingReceiver`. A capture of the class
+  being constructed still uses the synthetic prefix parameter; only an outer owner's field takes
+  this path.
+  Tests: `tests/super_argument_capture_e2e.rs::a_lambda_in_an_inner_super_constructor_reads_the_outer_local_capture`,
+  `::a_lambda_in_an_inner_super_constructor_reads_only_the_outer_local`,
+  `::a_nested_lambda_in_an_inner_super_constructor_reads_the_outer_local`,
+  `::an_inner_super_constructor_argument_reads_the_outer_local_directly`, and
+  `::a_lambda_two_inner_classes_out_reads_the_local_capture`, plus
+  `fir::body_check::local_class_tests::inner_super_argument_lambda_reads_the_outer_capture_off_the_enclosing_instance`.
+  Corpus: `closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt`
+  and `…/localCapturedInLambdaInInnerClassInLocalClass.kt`.
+
 - **A destructuring `for` loop's own variable is a compiler-generated container** (kotlinc's
   `isVisibleInLVT`). `for ((a, b) in xs)` binds one element variable that only the prepended
   `val (a, b) = …` reads. The parser records the loop (`File::destructured_loops`); checked FIR marks

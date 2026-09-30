@@ -152,6 +152,75 @@ fn a_lambda_in_a_constructor_default_reads_a_captured_local() {
 }
 
 #[test]
+fn a_lambda_in_an_inner_super_constructor_reads_the_outer_local_capture() {
+    // The capture lives on the OUTER local class. The inner constructor's `this` is still
+    // uninitialized, so the lambda must take the outer instance's field (and the constructor
+    // parameter) rather than `this`.
+    run_ok(
+        "InnerSuperLambdaOuterCapture",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val o = \"O\"\n\
+         class Local {\n\
+         inner class Inner(k: String) : Base({ o + k }) }\n\
+         return Local().Inner(\"K\").fn() }\n",
+    );
+}
+
+#[test]
+fn a_lambda_in_an_inner_super_constructor_reads_only_the_outer_local() {
+    run_ok(
+        "InnerSuperLambdaLocalOnly",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val ok = \"OK\"\n\
+         class Local {\n\
+         inner class Inner : Base({ ok }) }\n\
+         return Local().Inner().fn() }\n",
+    );
+}
+
+#[test]
+fn a_nested_lambda_in_an_inner_super_constructor_reads_the_outer_local() {
+    run_ok(
+        "InnerSuperNestedLambda",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val ok = \"OK\"\n\
+         class Local {\n\
+         inner class Inner : Base({ { ok }() }) }\n\
+         return Local().Inner().fn() }\n",
+    );
+}
+
+#[test]
+fn an_inner_super_constructor_argument_reads_the_outer_local_directly() {
+    run_ok(
+        "InnerSuperDirectOuterCapture",
+        "open class Base(val text: String)\n\
+         fun box(): String {\n\
+         val o = \"O\"\n\
+         class Local {\n\
+         inner class Inner(k: String) : Base(o + k) }\n\
+         return Local().Inner(\"K\").text }\n",
+    );
+}
+
+#[test]
+fn a_lambda_two_inner_classes_out_reads_the_local_capture() {
+    run_ok(
+        "InnerSuperTwoHops",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val ok = \"OK\"\n\
+         class Local {\n\
+         inner class Mid {\n\
+         inner class Inner : Base({ ok }) } }\n\
+         return Local().Mid().Inner().fn() }\n",
+    );
+}
+
+#[test]
 fn a_lambda_in_a_super_constructor_argument_calls_an_enclosing_local_function() {
     run_ok(
         "LocalFunInSuperArgument",
