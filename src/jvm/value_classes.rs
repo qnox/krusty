@@ -21,6 +21,7 @@ mod bridge_returns;
 mod call_arguments;
 mod call_result_boundaries;
 mod call_results;
+mod constructor_arguments;
 mod constructor_bodies;
 mod declaration_inventory;
 mod default_calls;
@@ -115,22 +116,6 @@ fn is_value_class_internal(internal: TypeName, under: &Under) -> bool {
 /// underlying. Keyed on the getter's IDENTITY (owning class + method slot), not its name, so a
 /// coincidentally-named boxing override does not collide.
 type FieldGetters = HashMap<(u32, u32), Ty>;
-
-fn supplied_constructor_parameters<'a>(
-    parameters: &'a [Ty],
-    defaults: &'a [u32],
-    prefix_count: u32,
-) -> impl Iterator<Item = &'a Ty> {
-    let prefix_count = prefix_count as usize;
-    parameters
-        .iter()
-        .enumerate()
-        .filter_map(move |(parameter, ty)| {
-            (parameter < prefix_count
-                || !defaults.contains(&u32::try_from(parameter - prefix_count).ok()?))
-            .then_some(ty)
-        })
-}
 
 #[must_use]
 /// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
@@ -1477,9 +1462,7 @@ pub(crate) fn lower_value_classes(
         if !c.is_value
             && !c.is_object
             && !c.is_interface
-            && hidden_constructors::selecting_slots(c)
-                .zip(&c.ctor_args)
-                .any(|(selects, a)| selects && is_vc_ty(&a.ty))
+            && hidden_constructors::primary_has_value_class(c, &is_vc_ty)
         {
             // Capture the DECLARED ctor param types before the erase below rewrites them — the
             // class metadata constructor record must name the value classes.
@@ -1668,28 +1651,8 @@ pub(crate) fn lower_value_classes(
     // selected constructor may still be private behind its marker accessor. Its recorded generated
     // declaration identity decides that ABI; no owner-wide parameter scan is involved.
     let mut value_class_parameter_constructions = serialization_constructor_accessor_calls;
-    let selecting_primary_slots: HashMap<TypeName, Vec<bool>> = ir
-        .classes
-        .iter()
-        .map(|class| {
-            (
-                class.fq_name,
-                hidden_constructors::selecting_slots(class).collect(),
-            )
-        })
-        .collect();
-    let primary_constructions: HashSet<ExprId> = ir
-        .exprs
-        .iter()
-        .enumerate()
-        .filter_map(|(expression, _)| {
-            let expression = expression as ExprId;
-            ir.construction_targets
-                .get(&expression)
-                .is_none_or(|target| target.primary())
-                .then_some(expression)
-        })
-        .collect();
+    let primary_constructor_selection =
+        hidden_constructors::PrimaryConstructorSelection::record(ir);
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
@@ -1730,16 +1693,12 @@ pub(crate) fn lower_value_classes(
                 // A value class's own construction is `constructor-impl`, not the hidden-marker ABI
                 // used by an ordinary class whose selected constructor declares a value-class
                 // parameter.
-                let declared = selecting_primary_slots.get(internal).filter(|slots| {
-                    slots.len() == ps.len() && primary_constructions.contains(&(i as ExprId))
-                });
-                let hides = match declared {
-                    Some(slots) => ps
-                        .iter()
-                        .zip(slots)
-                        .any(|(parameter, &declared)| declared && is_vc_ty(parameter)),
-                    None => ps.iter().any(is_vc_ty),
-                };
+                let hides = primary_constructor_selection.hides_value_class(
+                    i as ExprId,
+                    *internal,
+                    ps,
+                    &is_vc_ty,
+                );
                 if !is_value_class_internal(*internal, &under) && hides {
                     value_class_parameter_constructions.push(i as ExprId);
                 }
@@ -1952,11 +1911,9 @@ pub(crate) fn lower_value_classes(
                 }
                 _ => ctor_params.as_deref().unwrap_or(&[]),
             };
-            for (&argument, parameter) in args.iter().zip(supplied_constructor_parameters(
-                params,
-                defaults,
-                *default_prefix_count,
-            )) {
+            for (&argument, parameter) in args.iter().zip(
+                constructor_arguments::supplied_parameters(params, defaults, *default_prefix_count),
+            ) {
                 let Target::UnboxedX(value_class) = target(parameter, &under) else {
                     continue;
                 };
@@ -3287,7 +3244,7 @@ pub(crate) fn lower_value_classes(
                             _ => ctor_params.as_deref().unwrap_or(&[]),
                         };
                         args.iter()
-                            .zip(supplied_constructor_parameters(
+                            .zip(constructor_arguments::supplied_parameters(
                                 targets,
                                 defaults,
                                 *default_prefix_count,
