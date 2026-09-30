@@ -29,6 +29,26 @@ fun box(): String = if (quux() == Unit) \"OK\" else \"fail\"\n";
 }
 
 #[test]
+fn safe_assignment_returns_unit_when_the_receiver_is_null() {
+    const SRC: &str = "fun foo(f: () -> Unit, returnIfOk: String): String {\n\
+    val string = f().toString()\n\
+    return if (string == \"kotlin.Unit\") returnIfOk else \"FAIL: $string;\"\n\
+}\n\
+class Wrapper(var s: String)\n\
+fun box(): String {\n\
+    val w: Wrapper? = Wrapper(\"Test\")\n\
+    val lambda = { w?.s = \"X\" }\n\
+    val w2: Wrapper? = null\n\
+    val lambda2 = { w2?.s = \"X\" }\n\
+    return foo(lambda, \"O\") + foo(lambda2, \"K\")\n\
+}\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "safe assignment is Unit"),
+        "OK"
+    );
+}
+
+#[test]
 fn unit_data_class_component() {
     const SRC: &str = "data class Holder(val u: Unit)\n\
 fun box(): String {\n\

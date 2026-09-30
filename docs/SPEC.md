@@ -1862,6 +1862,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Unit.INSTANCE` it returns) to the literal's closing `}` line, as for a `Unit` function. A lambda
   that returns a value marks nothing for the return: it stays on the value's own line, not the
   closing `}` of the body block around it (`tests/lambda_implicit_return_lines_e2e.rs`).
+- **A consumed `Unit` function value materializes `kotlin.Unit`.** `FunctionN.invoke` returns
+  `Object` for every result, including `Unit`; Kotlin discards that erased word, then materializes
+  `Unit.INSTANCE` when a reference consumer needs the language-level value. Thus `f().toString()`
+  invokes `toString` on the singleton and produces `kotlin.Unit`. A safe assignment is `Unit`
+  when the receiver is null and when it is not, so `{ w?.s = "X" }` has type `() -> Unit`.
+  Test: `tests/unit_value_e2e.rs::safe_assignment_returns_unit_when_the_receiver_is_null`.
+  Corpus: `unit/kt56723.kt`.
 - **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
   established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
   that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
