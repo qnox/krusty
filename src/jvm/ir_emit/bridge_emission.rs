@@ -265,7 +265,7 @@ fn emit_bridge(
         emit_interface_entry_checks(ir, b, &ep, cw, &mut code);
     }
     let body_pc = u16::try_from(code.bytes.len()).expect("parameter checks fit a method");
-    if let Some(barrier) = crate::jvm::collection_barriers::bridge_barrier(b) {
+    if let Some(barrier) = b.barrier_plan {
         let dispatch = code.new_label();
         let parameter_slot = 1 + ep[..barrier.parameter]
             .iter()

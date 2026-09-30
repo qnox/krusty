@@ -1568,9 +1568,7 @@ mod tests {
         let mut offenders = Vec::new();
         visit(&root.join("src/fir_lower"), &mut |path, text| {
             for (line, source) in text.lines().enumerate() {
-                if source.contains("type_safe_barrier")
-                    && !source.contains("type_safe_barrier: false")
-                {
+                if source.contains("barrier_plan") && !source.contains("barrier_plan: None") {
                     offenders.push(format!("{}:{}: {source}", path.display(), line + 1));
                 }
             }

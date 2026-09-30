@@ -225,7 +225,6 @@ sam/topLevelConversions.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt
 specialBuiltins/bridgeNotEmptyMap.kt
-specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/notEmptyListAny.kt

@@ -1,19 +1,12 @@
 //! JVM type-safe collection barriers selected from resolved override edges.
 //!
-//! Common IR retains the overridden declaration identity and semantic signature. This pass chooses
-//! the JVM's neutral-result guards once; emission consumes the resulting bridge bit without
-//! searching a hierarchy or interpreting a method spelling.
+//! Common IR retains the overridden declaration identity and semantic signature. This pass records
+//! one plan per bridge; emission writes that plan and does not select it again.
 
-use crate::ir::{Bridge, BridgeKind, IrFile};
+use crate::ir::{Bridge, BridgeKind, CollectionBarrierPlan, IrFile};
 use crate::types::Ty;
 
 pub(crate) use crate::libraries::CollectionBarrierOutcome as BarrierOutcome;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BridgeBarrier {
-    pub(crate) parameter: usize,
-    pub(crate) outcome: BarrierOutcome,
-}
 
 fn valid_result(outcome: BarrierOutcome, erased: Ty, concrete: Ty) -> bool {
     match outcome {
@@ -23,7 +16,7 @@ fn valid_result(outcome: BarrierOutcome, erased: Ty, concrete: Ty) -> bool {
     }
 }
 
-fn bridge_semantics(bridge: &Bridge) -> Option<BridgeBarrier> {
+fn bridge_semantics(bridge: &Bridge) -> Option<CollectionBarrierPlan> {
     if bridge.kind != BridgeKind::Function {
         return None;
     }
@@ -36,12 +29,14 @@ fn bridge_semantics(bridge: &Bridge) -> Option<BridgeBarrier> {
         && bridge.concrete_params.len() == 1
         && bridge.erased_params[parameter].is_erased_top()
         && narrow_parameter(bridge.concrete_params[parameter]))
-    .then_some(BridgeBarrier { parameter, outcome })
+    .then_some(CollectionBarrierPlan { parameter, outcome })
 }
 
-/// A collection parameter that is narrower than the erased `Object` slot.
+/// A collection parameter that is narrower than the erased `Object` slot. `Nothing` occupies the
+/// `java/lang/Void` slot even though it has no inhabitable reference value.
 fn narrow_parameter(ty: Ty) -> bool {
-    signed_jvm_primitive(ty) || (ty.is_reference() && !ty.is_erased_top())
+    !ty.is_erased_top()
+        && (signed_jvm_primitive(ty) || ty.is_reference() || ty.non_null() == Ty::Nothing)
 }
 
 fn signed_jvm_primitive(ty: Ty) -> bool {
@@ -51,18 +46,11 @@ fn signed_jvm_primitive(ty: Ty) -> bool {
     )
 }
 
-pub(crate) fn bridge_barrier(bridge: &Bridge) -> Option<BridgeBarrier> {
-    bridge
-        .type_safe_barrier
-        .then(|| bridge_semantics(bridge))
-        .flatten()
-}
-
 pub(crate) fn select(ir: &mut IrFile) {
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
             let barrier = bridge_semantics(bridge);
-            bridge.type_safe_barrier = barrier.is_some();
+            bridge.barrier_plan = barrier;
             crate::trace_compiler!(
                 "lower",
                 "collection bridge class={} name={} overridden_owner={:?} barrier={:?}",
@@ -98,7 +86,7 @@ mod tests {
             concrete_params: vec![param],
             concrete_ret,
             target_ret: None,
-            type_safe_barrier: false,
+            barrier_plan: None,
             special: false,
             target_name: None,
         }
@@ -134,13 +122,16 @@ mod tests {
                 .is_none()
         );
         assert!(bridge_semantics(&bridge(None, Ty::Int, boolean, boolean)).is_none());
-        assert!(bridge_semantics(&bridge(
-            Some(BarrierOutcome::NotFound),
-            Ty::Nothing,
-            Ty::Int,
-            Ty::Int,
-        ))
-        .is_none());
+        assert_eq!(
+            bridge_semantics(&bridge(
+                Some(BarrierOutcome::NotFound),
+                Ty::Nothing,
+                Ty::Int,
+                Ty::Int,
+            ))
+            .map(|barrier| (barrier.parameter, barrier.outcome)),
+            Some((0, BarrierOutcome::NotFound))
+        );
         assert_eq!(
             bridge_semantics(&bridge(Some(BarrierOutcome::Null), Ty::Int, any, string,))
                 .map(|barrier| barrier.outcome),
