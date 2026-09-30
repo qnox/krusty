@@ -1,6 +1,6 @@
 //! Applied classifier hierarchy and receiver projection.
 
-use super::{ty_subst_applied_arguments, ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds};
+use super::{ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -176,44 +176,45 @@ pub(super) fn direct_supertypes_from_classifier(
     classifier: &crate::libraries::LibraryType,
     ty: Ty,
 ) -> Vec<Ty> {
-    let bindings = classifier
-        .type_params
-        .iter()
-        .cloned()
-        .zip(
-            ty.type_args()
-                .iter()
-                .copied()
-                .chain(std::iter::repeat_with(|| Ty::obj("kotlin/Any"))),
-        )
-        .collect::<std::collections::HashMap<_, _>>();
     if classifier.supertype_templates.is_empty() {
-        classifier.supertypes.iter_ids().map(Ty::obj_name).collect()
-    } else {
-        let applied = classifier
-            .supertype_templates
-            .iter()
-            // A local/anonymous classifier's supertype may mention type variables owned by its
-            // enclosing declaration. Apply only this classifier's arguments; erasing every other
-            // symbolic variable loses the lexical type (`object : Converter<Box<T>, T>` became
-            // `Converter<Box<Any>, Any>` during the hierarchy walk).
-            // `ty_subst_applied_arguments`, not `ty_subst_keep_unbound`: `ty`'s arguments were
-            // already validated against this classifier's bounds when the type was FORMED, so
-            // re-narrowing them here only loses information. It lost nullability in particular —
-            // a Java class's type parameters carry a non-null upper bound (a Java type variable
-            // has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
-            // template produced `Map<String, Any>` and every member reached through the supertype
-            // then rejected a nullable argument.
-            .map(|supertype| ty_subst_applied_arguments(*supertype, &bindings))
-            .collect::<Vec<_>>();
-        crate::trace_compiler!(
-            "supertype",
-            "direct supertypes ty={ty:?} formals={:?} templates={:?} bindings={bindings:?} applied={applied:?}",
-            classifier.type_params,
-            classifier.supertype_templates,
-        );
-        applied
+        return classifier.supertypes.iter_ids().map(Ty::obj_name).collect();
     }
+    // Formals are a handful of declaration names. Scanning them keeps the applied argument and
+    // leaves an unbound lexical variable alone, without cloning those names into a map on every
+    // hierarchy step.
+    let formals = classifier.type_params();
+    let arguments = ty.type_args();
+    let any = Ty::obj_name(crate::types::wk::any());
+    let applied = classifier
+        .supertype_templates
+        .iter()
+        // A local/anonymous classifier's supertype may mention type variables owned by its
+        // enclosing declaration. Apply only this classifier's arguments; erasing every other
+        // symbolic variable loses the lexical type (`object : Converter<Box<T>, T>` became
+        // `Converter<Box<Any>, Any>` during the hierarchy walk).
+        // Applied arguments were already validated against this classifier's bounds when the type
+        // was FORMED, so re-narrowing them here only loses information. It lost nullability in
+        // particular — a Java class's type parameters carry a non-null upper bound (a Java type
+        // variable has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
+        // template produced `Map<String, Any>` and every member reached through the supertype then
+        // rejected a nullable argument.
+        .map(|supertype| {
+            crate::types::ty_subst_applied_lookup(*supertype, |name| {
+                formals
+                    .iter()
+                    .position(|formal| formal == name)
+                    .map(|index| arguments.get(index).copied().unwrap_or(any))
+            })
+        })
+        .collect::<Vec<_>>();
+    crate::trace_compiler!(
+        "supertype",
+        "direct supertypes ty={ty:?} formals={:?} args={:?} templates={:?} applied={applied:?}",
+        classifier.type_params,
+        arguments,
+        classifier.supertype_templates,
+    );
+    applied
 }
 
 /// The nearest companion instance contributed by a classifier receiver tower. Kotlin constructor
@@ -248,6 +249,67 @@ pub(crate) fn classifier_companion_instance(
         queue.extend(direct_supertypes(source, current));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::direct_supertypes_from_classifier;
+    use crate::libraries::LibraryType;
+    use crate::types::{Ty, TypeParameters};
+
+    #[test]
+    fn a_classifier_without_templates_projects_its_supertype_names() {
+        let mut classifier = LibraryType::declaration_header();
+        classifier.supertypes = vec!["kotlin/Any".to_string()].into();
+        classifier.type_parameters =
+            TypeParameters::invariant(vec!["T".to_string()], vec![vec![Ty::obj("kotlin/Any")]]);
+        let applied = Ty::obj_args("sample/Box", &[Ty::String]);
+
+        assert_eq!(
+            direct_supertypes_from_classifier(&classifier, applied),
+            vec![Ty::obj("kotlin/Any")]
+        );
+    }
+
+    #[test]
+    fn an_applied_nullable_argument_survives_supertype_projection() {
+        let any = Ty::obj("kotlin/Any");
+        let mut classifier = LibraryType::declaration_header();
+        classifier.type_parameters = TypeParameters::invariant(
+            vec!["K".to_string(), "V".to_string()],
+            vec![vec![any], vec![any]],
+        );
+        classifier.supertype_templates = vec![Ty::obj_args(
+            "java/util/Map",
+            &[Ty::ty_param("K", any), Ty::ty_param("V", any)],
+        )];
+        let applied = Ty::obj_args("java/util/HashMap", &[Ty::String, Ty::nullable(any)]);
+
+        assert_eq!(
+            direct_supertypes_from_classifier(&classifier, applied),
+            vec![Ty::obj_args(
+                "java/util/Map",
+                &[Ty::String, Ty::nullable(any)]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_missing_type_argument_projects_as_any() {
+        let any = Ty::obj("kotlin/Any");
+        let mut classifier = LibraryType::declaration_header();
+        classifier.type_parameters =
+            TypeParameters::invariant(vec!["T".to_string()], vec![vec![any]]);
+        classifier.supertype_templates = vec![Ty::obj_args(
+            "kotlin/collections/List",
+            &[Ty::ty_param("T", any)],
+        )];
+
+        assert_eq!(
+            direct_supertypes_from_classifier(&classifier, Ty::obj("sample/Raw")),
+            vec![Ty::obj_args("kotlin/collections/List", &[any])]
+        );
+    }
 }
 
 /// Value receiver denoted by a classifier in expression/call position. An object denotes itself; a
