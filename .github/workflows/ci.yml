@@ -259,11 +259,23 @@ jobs:
             target/cache/box-corpus/${{ needs.versions.outputs.max }}
             target/cache/ser-corpus/${{ needs.versions.outputs.max }}
           key: kotlin-${{ needs.versions.outputs.max }}-${{ hashFiles('kotlin-versions') }}
+      # Same archive the ci job restores. This job only reads it and may compile a missing
+      # entry live; it does not publish the cache.
+      - name: restore recorded kotlinc bytes
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-${{ needs.versions.outputs.max }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-bytes-${{ needs.versions.outputs.max }}-
       - name: download conformance test binary
         uses: actions/download-artifact@v8
         with:
           name: conformance-bin
       - name: run conformance regressions
+        env:
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
