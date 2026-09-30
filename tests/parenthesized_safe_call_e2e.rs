@@ -22,7 +22,7 @@ fn a_parenthesized_safe_call_selects_the_nullable_operator() {
          var marks = 0\n\
          fun member(name: String) { result = \"$name: member\" }\n\
          fun extension(name: String) { result = \"$name: extension\" }\n\
-         fun mark(n: Int): Int { marks += 1; n }\n\
+         fun mark(n: Int): Int { marks += 1; return n }\n\
          fun checkResult(s: String) {\n\
          \x20   if (s != result) throw RuntimeException(\"fail: $s, but $result\")\n\
          }\n\

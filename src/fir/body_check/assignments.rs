@@ -12,6 +12,11 @@ impl BodyFirChecker<'_> {
     ) -> Result<FirStatementId, BodyCheckFailure> {
         let safe_receiver = match self.file.stmt(statement) {
             Stmt::AssignSafeIndex { receiver, .. } => Some(*receiver),
+            Stmt::AssignMember {
+                receiver,
+                safe: true,
+                ..
+            } => Some(*receiver),
             _ => None,
         };
         let (receiver_source, argument_source) = match self.file.stmt(statement) {

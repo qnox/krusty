@@ -25260,7 +25260,12 @@ impl<'a> Checker<'a> {
         safe: bool,
     ) {
         // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        if self.try_in_place_assignment(scope, s, value) {
+        // A safe member update selects that operator on the non-null member.
+        if safe {
+            if self.try_safe_member_in_place_assignment(scope, s, receiver, value) {
+                return;
+            }
+        } else if self.try_in_place_assignment(scope, s, value) {
             return;
         }
         // `super.prop = value` is a setter call on the current receiver, not an assignment through a

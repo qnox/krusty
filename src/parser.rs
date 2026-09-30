@@ -5411,14 +5411,19 @@ impl<'a> Parser<'a> {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_unlabelled_expr();
+                            // The compound operator applies to the non-null member, inside the
+                            // safe-call guard. A safe-call lhs would select the nullable extension.
+                            let name_span = self.file.exact_member_name_spans.get(&e.0).copied();
                             let lhs = self.file.add_expr(
-                                Expr::SafeCall {
+                                Expr::Member {
                                     receiver,
                                     name: name.clone(),
-                                    args: None,
                                 },
                                 target_span,
                             );
+                            if let Some(name_span) = name_span {
+                                self.file.exact_member_name_spans.insert(lhs.0, name_span);
+                            }
                             let value = self.file.add_expr(
                                 Expr::Binary {
                                     op,

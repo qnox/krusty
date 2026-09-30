@@ -161,6 +161,21 @@ impl Checker<'_> {
         self.set(expression, Ty::nullable(resolution.result_ty))
     }
 
+    pub(super) fn try_safe_member_in_place_assignment(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        receiver: ExprId,
+        value: ExprId,
+    ) -> bool {
+        let receiver_ty = self.expr(scope, receiver);
+        if receiver_ty == Ty::Error {
+            return false;
+        }
+        let selector_scope = self.open_safe_selector_scope(scope, receiver, receiver_ty);
+        self.try_in_place_assignment(&selector_scope, statement, value)
+    }
+
     pub(super) fn stmt_assign_safe_index(
         &mut self,
         scope: &CheckerScope<'_>,
