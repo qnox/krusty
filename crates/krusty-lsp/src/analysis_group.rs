@@ -114,7 +114,7 @@ pub(super) fn project_group_fingerprint(
     for (index, (uri, source)) in documents.iter().enumerate() {
         if group.contains_document(index) {
             uri.hash(&mut fingerprint);
-            source.hash(&mut fingerprint);
+            krusty_lsp::open_document_digest::text_hash(uri, source).hash(&mut fingerprint);
         }
     }
     for (uri, source) in &group.support_documents {

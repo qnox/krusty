@@ -2198,6 +2198,74 @@ fn fail_project_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty_lsp::AnalysisBackend;
+
+    #[test]
+    fn inline_backend_reuses_an_unchanged_group_and_misses_a_reopen() {
+        krusty_lsp::open_document_digest::reset_digest_probe();
+        struct Probe;
+        impl krusty_lsp::Analysis for Probe {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<krusty_lsp::DocumentAnalysis> {
+                sources
+                    .iter()
+                    .map(|_| krusty_lsp::DocumentAnalysis::empty())
+                    .collect()
+            }
+
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> krusty_lsp::IndexOutcome {
+                krusty_lsp::IndexOutcome::default()
+            }
+
+            fn analyze_open_documents(
+                &mut self,
+                documents: &[(&str, &str)],
+                _open_uris: &[&str],
+            ) -> (Vec<krusty_lsp::DocumentAnalysis>, Vec<(String, String)>) {
+                let group = ProjectAnalysisGroup {
+                    module_index: None,
+                    document_indices: (0..documents.len()).collect(),
+                    support_documents: Vec::new(),
+                    inferred_support_count: 0,
+                    java_sources: Vec::new(),
+                    navigation_file_remaps: Vec::new(),
+                };
+                let _fingerprint = project_group_fingerprint(documents, &group);
+                let sources = documents
+                    .iter()
+                    .map(|(_, source)| *source)
+                    .collect::<Vec<_>>();
+                (self.analyze(&sources), Vec::new())
+            }
+        }
+
+        let text = "x".repeat(64 * 1024);
+        let job = |body: &str, lifetime: u64| krusty_lsp::AnalysisJob {
+            documents: vec![("file:///a.kt".into(), body.to_string(), 1, lifetime)],
+            open_uris: vec!["file:///a.kt".into()],
+        };
+        let mut backend = krusty_lsp::InlineBackend::new(Probe);
+        assert!(backend.submit(job(&text, 1)).is_some());
+        let hashed = krusty_lsp::open_document_digest::hashed_bytes();
+        assert_eq!(krusty_lsp::open_document_digest::digest_calls(), 1);
+        assert!(backend.submit(job(&text, 1)).is_some());
+        assert_eq!(
+            krusty_lsp::open_document_digest::digest_calls(),
+            1,
+            "an unchanged open document is not hashed again"
+        );
+        assert_eq!(krusty_lsp::open_document_digest::hashed_bytes(), hashed);
+        let reopened = "y".repeat(text.len());
+        assert!(backend.submit(job(&reopened, 2)).is_some());
+        assert_eq!(
+            krusty_lsp::open_document_digest::digest_calls(),
+            2,
+            "close and reopen misses the previous lifetime"
+        );
+        assert_eq!(
+            krusty_lsp::open_document_digest::hashed_bytes(),
+            hashed + reopened.len()
+        );
+    }
 
     #[test]
     fn parity_scratch_is_unique_and_removed_on_drop() {

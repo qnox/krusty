@@ -569,23 +569,7 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
 
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
         debug_assert!(self.0.analysis_ready());
-        let docs: Vec<(&str, &str)> = job
-            .documents
-            .iter()
-            .map(|(u, t, _)| (u.as_str(), t.as_str()))
-            .collect();
-        let open: Vec<&str> = job.open_uris.iter().map(String::as_str).collect();
-        let (analyses, support_documents) = self.0.analyze_open_documents(&docs, &open);
-        Some(AnalysisBatch {
-            analyzed: job
-                .documents
-                .iter()
-                .map(|(u, _, v)| (u.clone(), *v))
-                .collect(),
-            analyses,
-            support_documents,
-            pending: self.0.analysis_pending(),
-        })
+        Some(job.run(&mut self.0))
     }
 
     fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
@@ -873,6 +857,8 @@ struct OpenDocument {
     /// Filled on the first position query for `text` and dropped when `text` changes.
     lines: RefCell<Option<LineIndex>>,
     version: i64,
+    /// One open, from `didOpen` until `didClose`. A reopen is a new lifetime.
+    lifetime: u64,
     diagnostics: DiagnosticIndex,
     hover: HoverIndex,
     completion: CompletionIndex,
@@ -898,6 +884,7 @@ impl OpenDocument {
             text,
             lines: RefCell::new(None),
             version,
+            lifetime: crate::open_document_digest::next_document_lifetime(),
             diagnostics,
             hover: HoverIndex::default(),
             completion: CompletionIndex::default(),
@@ -1231,7 +1218,12 @@ where
             .into_iter()
             .map(|uri| {
                 let open = &self.documents[uri];
-                (uri.to_owned(), open.text.clone(), open.version)
+                (
+                    uri.to_owned(),
+                    open.text.clone(),
+                    open.version,
+                    open.lifetime,
+                )
             })
             .collect();
         let open_uris = self.documents.keys().cloned().collect();
@@ -5379,7 +5371,7 @@ mod tests {
 
         engine.submit(EngineCommand::SetWorkspaceRoot(None));
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
         engine.submit(EngineCommand::ProjectChange {
@@ -5437,7 +5429,7 @@ mod tests {
         let (events, incoming) = sync_channel(INPUT_QUEUE_CAPACITY);
         let engine = AnalysisEngine::spawn(analysis, events);
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1)],
+            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1, 0)],
             open_uris: vec!["file:///blocked.kt".into()],
         }));
         entered_rx
@@ -7432,6 +7424,61 @@ mod tests {
             .dispatch_pending_analysis()
             .expect("fresh job re-dispatches after discard");
         assert_eq!(fresh_job.documents[0].1, "new");
+        assert_ne!(
+            in_flight_job.documents[0].3, fresh_job.documents[0].3,
+            "reopen assigns a new document lifetime"
+        );
+
+        struct GroupHash;
+        impl Analysis for GroupHash {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analyze_open_documents(
+                &mut self,
+                documents: &[(&str, &str)],
+                _open_uris: &[&str],
+            ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+                let hashes = documents
+                    .iter()
+                    .map(|(uri, text)| crate::open_document_digest::text_hash(uri, text))
+                    .collect::<Vec<_>>();
+                assert_eq!(hashes.len(), documents.len());
+                let sources = documents.iter().map(|(_, text)| *text).collect::<Vec<_>>();
+                (self.analyze(&sources), Vec::new())
+            }
+        }
+        crate::open_document_digest::reset_digest_probe();
+        let mut backend = InlineBackend::new(GroupHash);
+        let replay = AnalysisJob {
+            documents: fresh_job.documents.clone(),
+            open_uris: fresh_job.open_uris.clone(),
+        };
+        backend
+            .submit(in_flight_job)
+            .expect("inline analysis installs the in-flight lifetime");
+        assert_eq!(crate::open_document_digest::digest_calls(), 1);
+        backend
+            .submit(fresh_job)
+            .expect("inline analysis installs the reopened lifetime");
+        assert_eq!(
+            crate::open_document_digest::digest_calls(),
+            2,
+            "the reopened document misses the previous lifetime's hash"
+        );
+        backend
+            .submit(replay)
+            .expect("the same reopened job can be analyzed again");
+        assert_eq!(
+            crate::open_document_digest::digest_calls(),
+            2,
+            "an unchanged reopen reuses the hash installed for its lifetime"
+        );
         let fresh_batch = AnalysisBatch {
             analyzed: vec![("file:///a.kt".into(), 1)],
             analyses: vec![with_diagnostic()],
@@ -7842,7 +7889,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         let batch = backend.submit(crate::server::engine::AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         });
         let batch = batch.expect("inline backend is synchronous");
