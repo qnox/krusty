@@ -94,7 +94,7 @@ pub(super) fn materialize(
                 concrete_params: parameters,
                 concrete_ret: result,
                 target_ret: None,
-                type_safe_barrier: false,
+                barrier_plan: None,
                 special: false,
                 target_name: None,
             });

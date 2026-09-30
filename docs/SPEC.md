@@ -9146,6 +9146,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Test: `tests/collection_special_member_stub_e2e.rs`
   (`abstract_set_contains_rejects_a_foreign_entry`). Corpus:
   `builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt`.
+- **A collection bridge over `Nothing` returns the operation's neutral result.** `List<E>.contains`,
+  `indexOf`, `lastIndexOf`, and `Map.containsValue` erase their element to `Object`, while an
+  override written on `Nothing` takes `java/lang/Void`. The JVM records one plan for that bridge —
+  the erased parameter and the neutral result — and emission writes that plan. The bridge tests
+  `instanceof Void` and, on a miss, returns `false` or `-1` without calling the override. `null` is
+  not a `Void`, so it misses too. `List<Nothing?>` is the nullable parameter: `null` is dispatched
+  into the override, and a non-null foreign value still takes the neutral result. `Nothing` is
+  uninhabited and therefore not a nullable reference; the barrier still applies, because the JVM
+  parameter is the narrower `Void` class. A plain
+  `checkcast` to `Void` throws `ClassCastException` for every real argument
+  (`specialBuiltins/emptyList.kt`). `containsValue` uses the same barrier as `contains`. Tests:
+  `tests/collection_special_member_stub_e2e.rs`
+  (`nothing_list_bridges_report_absence_instead_of_casting_to_void`,
+  `nothing_map_contains_value_reports_absence`,
+  `nullable_nothing_list_admits_null_and_rejects_a_foreign_value`).
 
 - **A nullable use of a bounded type parameter is `@Nullable` and unguarded.** `var c: T?` and a
   constructor parameter `p: T?` admit null even when `T : Number` or `T : Any`. The field, the

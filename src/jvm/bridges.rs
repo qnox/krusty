@@ -360,7 +360,7 @@ fn superclass_method_bridges(
             concrete_params,
             concrete_ret,
             target_ret: None,
-            type_safe_barrier: false,
+            barrier_plan: None,
             special,
             target_name,
         });
@@ -505,7 +505,7 @@ fn push_member_extension_accessor_bridges(
         concrete_params: vec![implementation_receiver],
         concrete_ret,
         target_ret: None,
-        type_safe_barrier: false,
+        barrier_plan: None,
         special: false,
         target_name: None,
     };
@@ -570,7 +570,7 @@ fn push_property_bridge(
             concrete_params: vec![],
             concrete_ret: edge.implementation_type,
             target_ret: None,
-            type_safe_barrier: false,
+            barrier_plan: None,
             special,
             target_name,
         });
@@ -599,7 +599,7 @@ fn push_property_bridge(
             concrete_params: vec![edge.implementation_type],
             concrete_ret: Ty::Unit,
             target_ret: None,
-            type_safe_barrier: false,
+            barrier_plan: None,
             special: false,
             target_name: None,
         });
