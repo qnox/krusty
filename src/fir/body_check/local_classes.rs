@@ -400,46 +400,18 @@ impl BodyFirChecker<'_> {
         Ok(binding)
     }
 
-    fn captured_class_storage_receiver(
-        &mut self,
-        binding: ClassCaptureBinding,
-        origin: OriginId,
-    ) -> Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure> {
-        let Some(source) = binding.receiver_source else {
-            return Ok(None);
-        };
-        let current = self
-            .current_storage_owner()
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
-        let semantic_classifier = self
-            .index
-            .classifier_header(current)
-            .or_else(|| self.index.enclosing_classifier(current))
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
-        let receiver_ty = ResolvedTy::new(Ty::obj_name(semantic_classifier.classifier))
-            .map_err(|error| self.failure(None, BodyCheckFailureKind::UnpublishableType(error)))?;
-        self.body
-            .add_implicit_receiver_capture(FirImplicitReceiverCapture {
-                origin,
-                enclosing_depth: source.enclosing_depth,
-                current: source.current,
-                depth: source.depth,
-                path: Box::new([]),
-                ty: receiver_ty,
-            });
-        let receiver = self.body.add_expr(FirExpr {
-            origin,
-            ty: receiver_ty,
-            kind: FirExprKind::CapturedImplicitReceiver {
-                enclosing_depth: source.enclosing_depth,
-                current: source.current,
-                depth: source.depth,
-                path: Box::new([]),
-            },
-        });
+    /// Inner classifiers from `current` out to `owner`, not including `owner`.
+    ///
+    /// Empty means the field already lives on `current`. Each element is one enclosing-instance
+    /// edge, the same shape an `EnclosingReceiver` path publishes.
+    fn enclosing_capture_walk(
+        &self,
+        current: DeclarationId,
+        owner: DeclarationId,
+    ) -> Result<Box<[DeclarationId]>, BodyCheckFailure> {
         let mut classifier = current;
         let mut path = Vec::new();
-        while classifier != binding.owner {
+        while classifier != owner {
             path.push(classifier);
             classifier = self
                 .index
@@ -456,7 +428,93 @@ impl BodyFirChecker<'_> {
                 })
                 .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
         }
-        Ok(Some((receiver, path.into_boxed_slice())))
+        Ok(path.into_boxed_slice())
+    }
+
+    fn instance_type_of(&self, declaration: DeclarationId) -> Result<ResolvedTy, BodyCheckFailure> {
+        let semantic = self
+            .index
+            .classifier_header(declaration)
+            .or_else(|| self.index.enclosing_classifier(declaration))
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
+        ResolvedTy::new(Ty::obj_name(semantic.classifier))
+            .map_err(|error| self.failure(None, BodyCheckFailureKind::UnpublishableType(error)))
+    }
+
+    fn captured_class_storage_receiver(
+        &mut self,
+        binding: ClassCaptureBinding,
+        origin: OriginId,
+    ) -> Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure> {
+        let Some(source) = binding.receiver_source else {
+            return Ok(None);
+        };
+        let current = self
+            .current_storage_owner()
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let walk = self.enclosing_capture_walk(current, binding.owner)?;
+        // The instance under construction does not exist in a constructor prefix, so an outer
+        // capture cannot be read off `this`. The walk is the enclosing-instance path already
+        // sitting in a constructor parameter; the lambda captures that owner instance and reads
+        // the field from it. Capturing `this` and walking `this$0` instead feeds `invokedynamic`
+        // an `uninitializedThis`.
+        let prefix_outer = self.constructor_prefix_capture_access && !walk.is_empty();
+        let receiver_owner = if prefix_outer { binding.owner } else { current };
+        let receiver_ty = self.instance_type_of(receiver_owner)?;
+        let capture_path: Box<[DeclarationId]> = if prefix_outer {
+            walk.clone()
+        } else {
+            Box::new([])
+        };
+        let storage_path = if prefix_outer { Box::new([]) } else { walk };
+        self.body
+            .add_implicit_receiver_capture(FirImplicitReceiverCapture {
+                origin,
+                enclosing_depth: source.enclosing_depth,
+                current: source.current,
+                depth: source.depth,
+                path: capture_path.clone(),
+                ty: receiver_ty,
+            });
+        let receiver = self.body.add_expr(FirExpr {
+            origin,
+            ty: receiver_ty,
+            kind: FirExprKind::CapturedImplicitReceiver {
+                enclosing_depth: source.enclosing_depth,
+                current: source.current,
+                depth: source.depth,
+                path: capture_path,
+            },
+        });
+        Ok(Some((receiver, storage_path)))
+    }
+
+    /// Read an outer class's capture from the constructor's enclosing-instance parameter.
+    ///
+    /// Used when the read is in the constructor body itself, so there is no lambda capture to
+    /// hang the path on. A lambda takes the same walk through
+    /// [`Self::captured_class_storage_receiver`].
+    fn prefix_outer_storage_receiver(
+        &mut self,
+        binding: ClassCaptureBinding,
+        origin: OriginId,
+    ) -> Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure> {
+        if !self.constructor_prefix_capture_access || binding.enclosing_depth == 0 {
+            return Ok(None);
+        }
+        let Some(current) = self.current_storage_owner() else {
+            return Ok(None);
+        };
+        let walk = self.enclosing_capture_walk(current, binding.owner)?;
+        if walk.is_empty() {
+            return Ok(None);
+        }
+        let receiver = self.body.add_expr(FirExpr {
+            origin,
+            ty: self.instance_type_of(binding.owner)?,
+            kind: FirExprKind::EnclosingReceiver { path: walk },
+        });
+        Ok(Some((receiver, Box::new([]))))
     }
 
     /// Exact dispatch receiver frame that owns `owner` and is visible to this local callable.
@@ -627,6 +685,15 @@ impl BodyFirChecker<'_> {
                 shared_cell: binding.shared_cell,
             });
         }
+        if let Some((receiver, path)) = self.prefix_outer_storage_receiver(binding, origin)? {
+            return Ok(FirExprKind::CapturedClassStorageRead {
+                owner: binding.owner,
+                receiver,
+                path,
+                field: binding.field,
+                shared_cell: binding.shared_cell,
+            });
+        }
         Ok(if binding.enclosing_depth != 0 {
             FirExprKind::EnclosingClassStorageRead {
                 owner: binding.owner,
@@ -666,6 +733,17 @@ impl BodyFirChecker<'_> {
             });
         }
         if let Some((receiver, path)) = self.captured_class_storage_receiver(binding, origin)? {
+            return Ok(FirExprKind::CapturedClassStorageSharedWrite {
+                owner: binding.owner,
+                receiver,
+                path,
+                field: binding.field,
+                element: binding.ty,
+                value,
+                conversion,
+            });
+        }
+        if let Some((receiver, path)) = self.prefix_outer_storage_receiver(binding, origin)? {
             return Ok(FirExprKind::CapturedClassStorageSharedWrite {
                 owner: binding.owner,
                 receiver,
