@@ -41,6 +41,18 @@ fn return_only_call_in_a_lambda_uses_the_expected_type() {
 }
 
 #[test]
+fn a_statement_before_the_lambda_result_does_not_fail_signature_inference() {
+    let src = "import kotlin.coroutines.*\n\
+        import kotlin.coroutines.intrinsics.*\n\
+        suspend fun suspendHere() = suspendCoroutineUninterceptedOrReturn {\n\
+        \x20   it.resume(Unit)\n\
+        \x20   COROUTINE_SUSPENDED\n\
+        }\n\
+        fun box(): String = \"OK\"\n";
+    common::assert_accepted_like_kotlinc(src);
+}
+
+#[test]
 fn conditional_constructor_in_a_lambda_uses_the_expected_type() {
     let src = "fun <T> pick(value: T, default: () -> T): T = default()\n\
         fun load(seed: ArrayList<String>) =\n\

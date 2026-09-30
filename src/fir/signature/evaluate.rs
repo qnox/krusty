@@ -660,8 +660,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 )
                 .map(|result| result.and_then(|result| semantics.make_nullable(result))),
                 SigExpr::Sequence { effects, result } => Some((|| {
+                    // Statements are effects. A signature-time failure there is not fatal:
+                    // `it.resume(Unit)` inside `suspendCoroutineUninterceptedOrReturn` is not
+                    // applicable until the continuation's type variable is solved, and the body
+                    // check reports it. Only the result is inferred under the expected return.
                     for effect in graph.operands(effects).iter().copied() {
-                        evaluate_expression(semantics, effect, graph, demand, memo, computing)?;
+                        let _ =
+                            evaluate_expression(semantics, effect, graph, demand, memo, computing);
                     }
                     evaluate_expression_with_expected(
                         semantics, result, expected, graph, demand, memo, computing,

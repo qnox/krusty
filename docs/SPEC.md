@@ -2152,8 +2152,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`HashMap<Any?, Any?>`) and then failed the subtype check against `MutableMap<K, V>` with no
   source diagnostic — the module reported `internal error: module signatures were not finalized`.
   The result expression, including each branch of a conditional, is now evaluated under that
-  return type. `Unit` stays a coercion, and an open type parameter is not yet a concrete
-  expectation. A library constructor that is not in the frontend class table — `java.util.HashMap`'s
+  return type. Statements before the result stay signature effects: a failure while a type
+  variable is still open does not reject the signature, matching ordinary signature evaluation,
+  and the body check reports it once the call is solved. Treating those statements as fatal
+  rejected `it.resume(Unit)` in `suspendCoroutineUninterceptedOrReturn`. `Unit` stays a coercion,
+  and an open type parameter is not yet a concrete expectation. A library constructor that is not in the frontend class table — `java.util.HashMap`'s
   empty constructor has no `generic_sig`; `K` and `V` belong to the classifier — still takes those
   arguments from the expected type instead of keeping the default bounds. This is the
   companion-object shape in `PerformanceCounter.getCallStack`. Test:
