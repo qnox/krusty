@@ -25492,7 +25492,14 @@ impl<'a> Checker<'a> {
                     target_span,
                 );
             }
-            let value_ty = self.expr_expected(scope, value, property.ty);
+            let value_ty = self.safe_member_assignment_value(
+                scope,
+                safe,
+                receiver,
+                receiver_ty,
+                value,
+                Some(property.ty),
+            );
             self.expect_assignable(
                 property.ty,
                 value_ty,
@@ -25577,10 +25584,14 @@ impl<'a> Checker<'a> {
                     .ok()
                     .and_then(|property| property.as_ref().map(|property| property.ty))
             });
-        let vt = match assignment_expected {
-            Some(expected) => self.expr_expected(scope, value, expected),
-            None => self.expr(scope, value),
-        };
+        let vt = self.safe_member_assignment_value(
+            scope,
+            safe,
+            receiver,
+            receiver_ty,
+            value,
+            assignment_expected,
+        );
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
         if let Some((owner, lty, is_var, setter_visibility, stable_declaration)) =
@@ -37126,6 +37137,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
         prepared_index_receiver: None,
+        prepared_member_read: None,
         resolved_inc_dec: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
         resolved_destructure_components: HashMap::new(),
@@ -39818,6 +39830,8 @@ struct Checker<'a> {
     /// Receiver type already selected for a safe-index member. Index resolution consumes it
     /// instead of re-checking that member against the still-nullable source receiver.
     prepared_index_receiver: Option<(ExprId, Ty)>,
+    /// Member read already selected on the non-null receiver of a safe compound assignment.
+    prepared_member_read: Option<(ExprId, Ty)>,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
@@ -66273,6 +66287,11 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: String,
     ) -> Ty {
+        if let Some((prepared, ty)) = self.prepared_member_read {
+            if prepared == e {
+                return self.set(e, ty);
+            }
+        }
         let t = {
             // `super.prop` / `super<I>.prop` is a non-virtual accessor call on the current `this`.
             // Resolve it before treating `super` as an expression: it is a dispatch qualifier, never a

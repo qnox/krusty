@@ -172,8 +172,85 @@ impl Checker<'_> {
         if receiver_ty == Ty::Error {
             return false;
         }
+        self.with_prepared_safe_member_operand(
+            scope,
+            receiver,
+            receiver_ty,
+            value,
+            |checker, selector| checker.try_in_place_assignment(selector, statement, value),
+        )
+    }
+
+    /// Type the value of `receiver?.name = value`, including a compound `name op rhs`.
+    ///
+    /// The read inside a compound update is a plain member of the same receiver. Checked in the
+    /// outer scope, that receiver is still nullable and the update is rejected. The selector
+    /// scope has already proved it non-null, and the member type is published before the operand
+    /// is checked so the read does not repeat that nullable lookup.
+    pub(super) fn safe_member_assignment_value(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        safe: bool,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        value: ExprId,
+        expected: Option<Ty>,
+    ) -> Ty {
+        let typecheck = |checker: &mut Self, scope: &CheckerScope<'_>| match expected {
+            Some(expected) => checker.expr_expected(scope, value, expected),
+            None => checker.expr(scope, value),
+        };
+        if !safe {
+            return typecheck(self, scope);
+        }
+        self.with_prepared_safe_member_operand(scope, receiver, receiver_ty, value, typecheck)
+    }
+
+    fn with_prepared_safe_member_operand<T>(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        value: ExprId,
+        body: impl FnOnce(&mut Self, &CheckerScope<'_>) -> T,
+    ) -> T {
         let selector_scope = self.open_safe_selector_scope(scope, receiver, receiver_ty);
-        self.try_in_place_assignment(&selector_scope, statement, value)
+        let saved = self.prepared_member_read;
+        if let Some((operand, operand_ty)) =
+            self.safe_member_operand(&selector_scope, receiver, receiver_ty, value)
+        {
+            self.prepared_member_read = Some((operand, operand_ty));
+        }
+        let result = body(self, &selector_scope);
+        self.prepared_member_read = saved;
+        result
+    }
+
+    /// The non-null member read inside `receiver?.name op= rhs`, when `value` is that compound.
+    fn safe_member_operand(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        value: ExprId,
+    ) -> Option<(ExprId, Ty)> {
+        let Expr::Binary { lhs, .. } = self.file.expr(value).clone() else {
+            return None;
+        };
+        let Expr::Member {
+            receiver: read_receiver,
+            name,
+        } = self.file.expr(lhs).clone()
+        else {
+            return None;
+        };
+        if read_receiver != receiver {
+            return None;
+        }
+        let safe_receiver = receiver_ty.non_null().definitely_non_null();
+        let member_ty = self.check_member(scope, safe_receiver, &name, self.span(lhs), Some(lhs));
+        self.set(lhs, member_ty);
+        Some((lhs, member_ty))
     }
 
     pub(super) fn stmt_assign_safe_index(

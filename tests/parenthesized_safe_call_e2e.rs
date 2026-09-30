@@ -106,3 +106,22 @@ fn a_parenthesized_safe_call_selects_the_nullable_operator() {
          }\n",
     );
 }
+
+#[test]
+fn a_safe_member_plus_updates_the_non_null_property() {
+    agrees_with_kotlinc(
+        "SafeMemberPlus",
+        "class A(var value: Int)\n\
+         operator fun A?.plus(other: A): A = A((this?.value ?: 0) + other.value)\n\
+         class B(var a: A)\n\
+         fun box(): String {\n\
+         \x20   var present: B? = B(A(11))\n\
+         \x20   present?.a += A(31)\n\
+         \x20   if (present?.a?.value != 42) return \"FAIL ${present?.a?.value}\"\n\
+         \x20   var absent: B? = null\n\
+         \x20   absent?.a += A(1)\n\
+         \x20   if (absent != null) return \"FAIL null\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+    );
+}
