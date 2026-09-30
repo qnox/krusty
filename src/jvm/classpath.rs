@@ -4047,8 +4047,19 @@ impl Classpath {
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
-        let internal_id = type_name(internal);
-        let key = (internal_id, name.to_string(), descriptor.to_string());
+        self.method_code_name(type_name(internal), name, descriptor)
+    }
+
+    /// [`Self::method_code`] for a classifier that is already interned. The body cache and the
+    /// multifile superclass walk stay on that identity; a classfile spelling is built only when an
+    /// uncached entry has to read bytes.
+    pub(super) fn method_code_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<MethodCode> {
+        let key = (internal, name.to_string(), descriptor.to_string());
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
             if let Some(hit) = self.bodies.borrow_mut().get(&key) {
@@ -4061,16 +4072,21 @@ impl Classpath {
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let mut cur = self.find(internal).and_then(|ci| ci.super_class());
-            while let Some(s) = cur {
-                if s == "java/lang/Object" {
+            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
+            let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
+            while let Some(superclass) = cur {
+                if superclass.matches("java/lang/Object") {
                     break;
                 }
-                if let Some(mc) = self.own_method_code(&s, name, descriptor, catalog_complete) {
-                    code = Some(mc);
+                if let Some(body) =
+                    self.own_method_code(superclass, name, descriptor, catalog_complete)
+                {
+                    code = Some(body);
                     break;
                 }
-                cur = self.find(&s).and_then(|ci| ci.super_class());
+                cur = self
+                    .find_name(superclass)
+                    .and_then(|class| class.super_class);
             }
         }
         if catalog_complete {
@@ -4085,14 +4101,14 @@ impl Classpath {
     /// Overlay classes bypass the global cache (they are per-request, in-memory, and have no entry).
     fn own_method_code(
         &self,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         descriptor: &str,
         catalog_complete: bool,
     ) -> Option<MethodCode> {
-        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
+        let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         let read_once = || {
-            self.class_bytes(internal)
+            self.class_bytes(&internal.render())
                 .and_then(|bytes| ClassBodies::parse(std::sync::Arc::new(bytes)))
                 .and_then(|class| class.method_code(name, descriptor))
         };
@@ -5376,7 +5392,7 @@ fn finish_package_tree(tree: &mut PackageTree) {
 /// it when the owner actually declares a matching public static field (non-final for a write).
 fn companion_owner_field_access(
     classpath: &Classpath,
-    owner: &str,
+    owner: TypeName,
     property: &str,
     writable: bool,
 ) -> Option<super::inline::PropertyAccess> {
@@ -5386,7 +5402,7 @@ fn companion_owner_field_access(
     // conventional accessor name when the signature is omitted, so `MetaProp::getter` presence
     // alone cannot discriminate). An arbitrary `$`-named owner, a Java nested class, or a property
     // whose accessor really exists never reaches the outer-field probe.
-    let companion = classpath.find_name(type_name(owner))?;
+    let companion = classpath.find_name(owner)?;
     let declared = super::metadata::class_properties(&companion)
         .iter()
         .find(|p| p.name == property && !p.is_extension)?;
@@ -5404,8 +5420,13 @@ fn companion_owner_field_access(
     if accessor_realized {
         return None;
     }
-    let (outer, _) = owner.rsplit_once('$')?;
-    let ci = classpath.find_name(type_name(outer))?;
+    // A `@JvmField` companion property is stored on the enclosing class. Only a `$` nesting is that
+    // layout; a dotted builtin such as `Map.Entry` is not a companion field owner.
+    if !owner.segment_ref().contains('$') {
+        return None;
+    }
+    let outer = owner.nested_owner()?;
+    let ci = classpath.find_name(outer)?;
     let field = ci.fields.iter().find(|f| {
         f.name == property
             && f.access & super::classreader::ACC_PUBLIC != 0
@@ -5413,7 +5434,7 @@ fn companion_owner_field_access(
             && (!writable || f.access & 0x0010 == 0) // a write needs a non-final field
     })?;
     Some(super::inline::PropertyAccess::Field {
-        owner: outer.to_string(),
+        owner: outer,
         name: field.name.clone(),
         descriptor: field.descriptor.clone(),
         is_static: true,
@@ -5436,13 +5457,13 @@ fn ordinary_builtin_property_jvm_name(owner: TypeName, property: &str) -> String
 /// here prevents the two operations from drifting as new classpath shapes are added.
 fn inherited_property_access(
     classpath: &Classpath,
-    owner: &str,
+    owner: TypeName,
     property: &str,
     declared_access: fn(&ClassInfo, &str) -> Option<super::inline::PropertyAccess>,
 ) -> Option<super::inline::PropertyAccess> {
     let mut queue = std::collections::VecDeque::new();
     let mut seen = std::collections::HashSet::new();
-    queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
+    queue.push_back(super::jvm_class_map::to_jvm_type_name(owner));
     while let Some(current) = queue.pop_front() {
         if !seen.insert(current) {
             continue;
@@ -5466,9 +5487,9 @@ fn class_property_write_access(
     property: &str,
 ) -> Option<super::inline::PropertyAccess> {
     use super::inline::PropertyAccess;
-    let owner = ci.this_class().to_string();
+    let owner = ci.this_class;
     let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner: owner.clone(),
+        owner,
         name: method.name.clone(),
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
@@ -5541,9 +5562,9 @@ fn class_property_read_access(
     property: &str,
 ) -> Option<super::inline::PropertyAccess> {
     use super::inline::PropertyAccess;
-    let owner = ci.this_class().to_string();
+    let owner = ci.this_class;
     let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner: owner.clone(),
+        owner,
         name: method.name.clone(),
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
@@ -7229,10 +7250,14 @@ mod fq_tests {
             .method_code("shared/Pool", "first", "()I")
             .expect("first body");
         let second = classpath
-            .method_code("shared/Pool", "second", "()I")
+            .method_code_name(type_name("shared/Pool"), "second", "()I")
             .expect("second body");
+        let second_again = classpath
+            .method_code("shared/Pool", "second", "()I")
+            .expect("string lookup agrees with the classifier key");
         assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
         assert_ne!(first.code, second.code);
+        assert_eq!(second.code, second_again.code);
 
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove temp dir");

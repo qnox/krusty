@@ -16,12 +16,10 @@ impl Classpath {
     /// `.kotlin_builtins`; only the exact accessor handle comes from target policy.
     pub(super) fn builtin_property_read_access(
         &self,
-        owner: &str,
+        owner: TypeName,
         property: &str,
     ) -> Option<super::super::inline::PropertyAccess> {
-        let jvm_owner_id =
-            super::super::jvm_class_map::to_jvm_type_name(crate::types::type_name(owner));
-        let jvm_owner = jvm_owner_id.render();
+        let jvm_owner_id = super::super::jvm_class_map::to_jvm_type_name(owner);
         let kotlin = super::super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner_id)
             .unwrap_or(jvm_owner_id);
         let mut pending = std::collections::VecDeque::from([kotlin]);
@@ -54,7 +52,7 @@ impl Classpath {
                 return Some(super::super::inline::PropertyAccess::Accessor {
                     // Dispatch stays on the mapped form of the resolved receiver owner. The decoded
                     // declaration supplies only the accessor and its own erased descriptor.
-                    owner: jvm_owner.clone(),
+                    owner: jvm_owner_id,
                     name,
                     descriptor,
                     is_static: false,

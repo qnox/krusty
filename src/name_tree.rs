@@ -554,6 +554,36 @@ impl NameTree {
         out
     }
 
+    /// Render a classifier for a JVM classfile constant, translating source/metadata dots only in
+    /// the classifier's final segment into JVM nested-class separators. Keeping the split here
+    /// prevents backend callers from rendering an identity and then rediscovering its name-tree
+    /// structure with string scans.
+    pub(crate) fn jvm_binary_name(&self, id: NameId) -> String {
+        if id == Self::ROOT {
+            return String::new();
+        }
+        let node = self.node(id);
+        if !node.segment.contains('.') {
+            return self.render(id);
+        }
+
+        let mut out = match node.parent {
+            Some(parent) if parent != Self::ROOT => {
+                let mut prefix = self.render(parent);
+                prefix.push(node.sep as char);
+                prefix
+            }
+            _ => String::new(),
+        };
+        out.reserve(node.segment.len());
+        out.extend(
+            node.segment
+                .chars()
+                .map(|ch| if ch == '.' { '$' } else { ch }),
+        );
+        out
+    }
+
     pub fn starts_with(&self, id: NameId, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
@@ -1020,6 +1050,17 @@ mod tests {
             names.jvm_nested_parts(external_nested),
             Some(("external/Outer".to_string(), "Inner".to_string()))
         );
+        let metadata_nested = names.insert("metadata/Outer.Middle.Inner");
+        assert_eq!(
+            names.jvm_binary_name(metadata_nested),
+            "metadata/Outer$Middle$Inner"
+        );
+        let metadata_child = names.nested_child_of(metadata_nested, "Generated");
+        assert_eq!(
+            names.jvm_binary_name(metadata_child),
+            "metadata/Outer$Middle$Inner$Generated"
+        );
+        assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
 
         let late_nested = names.insert("late/Outer$Inner");
         assert_eq!(names.nested_owner(late_nested), None);

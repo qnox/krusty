@@ -20,7 +20,7 @@ pub(super) enum ModuleRealizationTarget {
 fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<PropertyAccess> {
     let (owner, is_static) = jvm_field_storage(property, stems)?;
     Some(PropertyAccess::Field {
-        owner: owner.render(),
+        owner,
         name: property.name.clone(),
         descriptor: crate::jvm::names::type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(
             &property.ty,

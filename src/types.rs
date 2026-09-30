@@ -261,6 +261,12 @@ impl TypeName {
         type_names().jvm_nested_parts(self.name_id())
     }
 
+    /// JVM classfile spelling of this classifier identity. Source/metadata nesting separators are
+    /// converted by the name tree; semantic callers should retain the identity instead.
+    pub(crate) fn jvm_binary_name(self) -> String {
+        type_names().jvm_binary_name(self.name_id())
+    }
+
     /// Lexicographic path ordering for deterministic internal traversal without boundary rendering.
     pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
         type_names().path_cmp(self.name_id(), other.name_id())
@@ -2716,6 +2722,22 @@ mod tests {
             Some(Ty::Int)
         );
         assert_eq!(Ty::range_counter_type_for(Ty::Int, Ty::UInt), None);
+    }
+
+    #[test]
+    fn declaring_package_is_the_namespace_identity() {
+        let nested = type_name("kotlin/collections/Map$Entry");
+        let sibling = type_name("kotlin/collections/List");
+        let other = type_name("java/util/Map$Entry");
+        let root = type_name("RootClass");
+        assert_eq!(nested.namespace(), sibling.namespace());
+        assert_eq!(nested.namespace().render(), nested.package());
+        assert!(sibling.package_matches(&nested.package()));
+        assert_ne!(nested.namespace(), other.namespace());
+        assert!(!other.package_matches(&nested.package()));
+        assert_eq!(root.namespace(), TypeName::ROOT);
+        assert_eq!(root.package(), "");
+        assert!(TypeName::ROOT.matches(&root.package()));
     }
 
     #[test]

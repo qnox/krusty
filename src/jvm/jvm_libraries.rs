@@ -3239,11 +3239,14 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "Z" => Ty::Boolean,
         "C" => Ty::Char,
         "V" => Ty::Unit,
-        s if s == type_descriptor(Ty::String) => Ty::String,
         s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
-            Ty::obj(to_kotlin_internal(raw_internal))
+            if let Some(name) = crate::types::existing_type_name(raw_internal) {
+                Ty::obj_name(super::jvm_class_map::to_kotlin_type_name(name))
+            } else {
+                Ty::obj(to_kotlin_internal(raw_internal))
+            }
         }
         _ => Ty::Error,
     }
@@ -5058,10 +5061,10 @@ impl JvmLibraries {
                         |_| m.name.as_str(),
                     );
                     if scope_name == name {
-                        let cn_rendered = cn.render();
                         crate::trace_compiler!(
                             "resolve",
-                            "member declaration {cn_rendered}.{} desc={} sig={:?}",
+                            "member declaration {}.{} desc={} sig={:?}",
+                            cn.render(),
                             m.name,
                             m.descriptor,
                             m.signature
@@ -5955,7 +5958,7 @@ mod tests {
         collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
         java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
         parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig,
+        parse_method_gsig, suspend_return_from_gsig,
     };
     use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
@@ -6906,6 +6909,36 @@ mod tests {
     fn descriptor_void_and_java_void_are_distinct() {
         assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::obj("java/lang/Void"));
         assert_eq!(desc_to_ty("V"), Ty::Unit);
+        assert_eq!(desc_to_ty("Ljava/lang/String;"), Ty::String);
+        assert_eq!(desc_to_ty("Ljava/lang/Object;"), Ty::obj("kotlin/Any"));
+        assert_eq!(
+            desc_to_ty("Ljava/util/List;"),
+            Ty::obj("kotlin/collections/List")
+        );
+        assert_eq!(
+            desc_to_ty("Ldemo/NotYetInterned;"),
+            Ty::obj("demo/NotYetInterned")
+        );
+    }
+
+    #[test]
+    fn suspend_generic_signature_keeps_a_canonical_unit_return() {
+        let signature = crate::libraries::GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: vec![Ty::obj_args(
+                "kotlin/coroutines/Continuation",
+                &[Ty::obj("kotlin/Unit")],
+            )],
+            ret: Ty::obj("java/lang/Object"),
+            return_policy: GenericReturnPolicy::Exact,
+        };
+
+        assert_eq!(
+            suspend_return_from_gsig(&signature, &std::collections::HashMap::new()),
+            Some(Ty::Unit)
+        );
     }
 
     #[test]
