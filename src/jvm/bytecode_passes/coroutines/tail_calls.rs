@@ -63,7 +63,7 @@ impl TcoValue {
             TcoValue::Long => BasicValue::Long,
             TcoValue::Double => BasicValue::Double,
             TcoValue::Reference | TcoValue::FromSuspensionPoint => {
-                BasicValue::Reference("Ljava/lang/Object;".to_string())
+                BasicValue::reference("Ljava/lang/Object;")
             }
         }
     }

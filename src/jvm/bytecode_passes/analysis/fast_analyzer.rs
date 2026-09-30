@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(at_handler.locals, vec![BasicValue::Int]);
         assert_eq!(
             at_handler.stack,
-            vec![BasicValue::Reference("Ljava/lang/Throwable;".to_string())]
+            vec![BasicValue::reference("Ljava/lang/Throwable;")]
         );
     }
 }
