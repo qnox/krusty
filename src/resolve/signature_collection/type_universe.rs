@@ -262,14 +262,9 @@ pub(in crate::resolve) fn source_type_universe(
                     class_names.insert(c.name.clone(), internal.clone());
                 }
             }
-            let package = file.package.as_deref().unwrap_or("").replace('.', "/");
+            let package = source_package_ids[i];
             for (alias, _) in &file.type_aliases {
-                let qualified = if package.is_empty() {
-                    alias.clone()
-                } else {
-                    format!("{package}/{alias}")
-                };
-                user_aliases.insert(type_name(&qualified));
+                user_aliases.insert(crate::types::type_name_child(package, alias));
             }
         }
     }
@@ -316,13 +311,11 @@ pub(in crate::resolve) fn source_type_universe(
                     },
                 )
                 .collect::<Vec<_>>();
-            let kotlin_defaults = KOTLIN_DEFAULT_IMPORT_PACKAGES
-                .iter()
-                .map(|package| type_name(&package.replace('.', "/")))
-                .collect();
+            let kotlin_defaults = super::super::source_package::kotlin_default_packages().to_vec();
             let platform_defaults = platform_default_imports
                 .iter()
-                .map(|package| type_name(&package.replace('.', "/")))
+                .copied()
+                .map(|package| super::super::source_package::identity(Some(package)))
                 .collect();
             let levels = [vec![own], explicit_star, kotlin_defaults, platform_defaults];
             let mut file_imports = HashMap::new();
@@ -406,11 +399,13 @@ pub(in crate::resolve) fn source_type_universe(
                 // consulted in precedence order rather than flattened. Whether the template APPLIES
                 // is decided at the use site, against the classifier that actually resolved.
                 let expansion = if let Some(path) = imap.get(&source_name) {
-                    Some(crate::types::type_name(&path.replace('.', "/")))
+                    Some(crate::types::type_name(path))
                         .and_then(|identity| libraries.type_alias_expansion(identity))
                 } else if source_name.contains('.') {
-                    Some(crate::types::type_name(&source_name.replace('.', "/")))
-                        .and_then(|identity| libraries.type_alias_expansion(identity))
+                    Some(super::super::source_package::identity(Some(
+                        source_name.as_str(),
+                    )))
+                    .and_then(|identity| libraries.type_alias_expansion(identity))
                 } else {
                     // Alias metadata follows the SAME winning classifier level. A higher-precedence
                     // class/source alias is final even when it has no classpath expansion; never skip
@@ -518,14 +513,9 @@ pub(in crate::resolve) fn source_type_universe(
         // with a CLASSIFIER target, so a function-type alias (`typealias Handler<T> = (T) -> String`,
         // whose target has no class name) is absent from it — and it abbreviates like any other.
         let package = &source_packages[file_index];
-        let internal = package.replace('.', "/");
+        let package_name = source_package_ids[file_index];
         for (alias, _, _) in &file_type_aliases[file_index] {
-            let qualified = if internal.is_empty() {
-                alias.clone()
-            } else {
-                format!("{internal}/{alias}")
-            };
-            let identity = crate::types::type_name(&qualified);
+            let identity = crate::types::type_name_child(package_name, alias);
             source_alias_identities.push((alias.clone(), identity));
             // A use site may spell the alias fully qualified (`app.Cargo`); kotlinc abbreviates it
             // identically, so the dotted spelling resolves to the same declaration.

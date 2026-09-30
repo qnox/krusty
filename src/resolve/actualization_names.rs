@@ -150,14 +150,12 @@ fn resolver_inputs<'a>(
                 })
                 .collect();
             let own_package = headers.sources.get(source_id)?.package;
-            let kotlin_defaults = KOTLIN_DEFAULT_IMPORT_PACKAGES
-                .iter()
-                .map(|package| crate::types::type_name(&package.replace('.', "/")))
-                .collect();
+            let kotlin_defaults = super::source_package::kotlin_default_packages().to_vec();
             let platform_defaults = platform
                 .platform_default_import_packages()
                 .iter()
-                .map(|package| crate::types::type_name(&package.replace('.', "/")))
+                .copied()
+                .map(|package| super::source_package::identity(Some(package)))
                 .collect();
             Some(
                 crate::symbol_resolver::FunctionImportScope::new(

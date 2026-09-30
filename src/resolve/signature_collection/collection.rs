@@ -4281,7 +4281,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         // Alias chains are structurally expanded first; the remaining classifier spellings then bind
         // through this declaration file's ordinary imports and class table.
         let package_source = &source_packages[file_index];
-        let package = package_source.replace('.', "/");
+        let package = source_package_ids[file_index];
         let mut visible_aliases = Vec::new();
         // Qualified spellings are absolute and independent of import precedence.
         for (declaration_file_index, declaration_package) in source_packages.iter().enumerate() {
@@ -4322,17 +4322,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             .filter(|import| !import.wildcard)
         {
             let spelling = &import.visible_name;
-            let internal_path = import.path.replace('.', "/");
-            for (declaration_file_index, declaration_package) in source_packages.iter().enumerate()
+            let imported = super::super::source_package::identity(Some(import.path.as_str()));
+            for (declaration_file_index, &declaration_package) in
+                source_package_ids.iter().enumerate()
             {
-                let declaration_package = declaration_package.replace('.', "/");
                 for (name, formals, target) in &file_type_aliases[declaration_file_index] {
-                    let qualified = if declaration_package.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{declaration_package}/{name}")
-                    };
-                    if qualified == internal_path {
+                    if crate::types::type_name_child(declaration_package, name) == imported {
                         visible_aliases.push((spelling.clone(), formals.clone(), target.clone()));
                     }
                 }
@@ -4350,12 +4345,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             ) else {
                 continue;
             };
-            let fqn = if package.is_empty() {
-                alias.clone()
-            } else {
-                format!("{package}/{alias}")
-            };
-            let identity = type_name(&fqn);
+            let identity = crate::types::type_name_child(package, alias);
             if let Some(target) = expansion.kotlin_class_internal() {
                 table.source_alias_fqns.insert(identity, target);
             }
@@ -4451,12 +4441,11 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 ) else {
                     continue;
                 };
-                let owner = class.name.replace('.', "/");
-                let identity = type_name(&if package.is_empty() {
-                    format!("{owner}/{}", alias.name)
-                } else {
-                    format!("{package}/{owner}/{}", alias.name)
-                });
+                let owner = class
+                    .name
+                    .split('.')
+                    .fold(package, crate::types::type_name_child);
+                let identity = crate::types::type_name_child(owner, &alias.name);
                 if let Some(target) = expansion.kotlin_class_internal() {
                     table.source_alias_fqns.insert(identity, target);
                 }
