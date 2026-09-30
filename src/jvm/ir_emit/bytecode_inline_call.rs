@@ -30,6 +30,10 @@ const ACC_STATIC: u16 = 0x0008;
 /// kotlinc's `IrDeclaration.isInlineOnly`: the `@InlineOnly` annotation, which the class file
 /// records by making the method private. A public reified function is still mandatory to splice
 /// and keeps the lines and locals an `@InlineOnly` body drops.
+///
+/// A multifile facade (`MapsKt`, `StringsKt`) does not declare the method. The call names the
+/// facade; the private method, and the body, live on the part the facade extends. Privacy is the
+/// defining class's bit, the same class [`MethodBodies::body`] reads.
 pub(super) fn declaration_is_inline_only(
     bodies: &dyn crate::jvm::inline::MethodBodies,
     owner: &str,
@@ -37,7 +41,16 @@ pub(super) fn declaration_is_inline_only(
     descriptor: &str,
     inline: crate::libraries::InlineKind,
 ) -> bool {
-    inline.must_inline() && bodies.member_is_private(owner, name, descriptor)
+    if !inline.must_inline() {
+        return false;
+    }
+    if bodies.member_is_private(owner, name, descriptor) {
+        return true;
+    }
+    bodies.body(owner, name, descriptor).is_some_and(|code| {
+        code.defining_class != owner
+            && bodies.member_is_private(&code.defining_class, name, descriptor)
+    })
 }
 
 /// The clean failure of a reified inline body whose call shape only the byte splice handles: only
@@ -1158,5 +1171,87 @@ mod tests {
             check_byte_splice_body("truncated", "()V", &truncated),
             Err(UNREADABLE_INLINE_BODY)
         );
+    }
+
+    /// A facade names the call. The body, and the private bit, belong to the part class.
+    struct FacadePart {
+        part: &'static str,
+        part_is_private: bool,
+    }
+
+    impl crate::jvm::inline::MethodBodies for FacadePart {
+        fn body(&self, owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            let mut code = body(vec![0xb1]);
+            code.defining_class = if owner == "kotlin/collections/MapsKt" {
+                self.part.to_string()
+            } else {
+                owner.to_string()
+            };
+            Some(code)
+        }
+
+        fn member_is_private(&self, owner: &str, _name: &str, _descriptor: &str) -> bool {
+            owner == self.part && self.part_is_private
+        }
+    }
+
+    #[test]
+    fn a_private_part_method_behind_a_facade_is_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "set",
+            "(Ljava/util/Map;Ljava/lang/Object;Ljava/lang/Object;)V",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn a_public_reified_method_on_its_owner_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/sequences/SequencesKt",
+            "filterIsInstance",
+            "(Lkotlin/sequences/Sequence;)Lkotlin/sequences/Sequence;",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn a_public_part_method_behind_a_facade_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: false,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "emptyMap",
+            "()Ljava/util/Map;",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn an_optional_inline_method_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "set",
+            "(Ljava/util/Map;Ljava/lang/Object;Ljava/lang/Object;)V",
+            crate::libraries::InlineKind::CanInline,
+        ));
     }
 }

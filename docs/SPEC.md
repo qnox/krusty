@@ -4041,6 +4041,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as `filterIsInstance` keeps the callee's lines, `$i$f$` marker, and source map, and stores an
   argument that already lives in a local. Only a method the class file marks private — the
   bytecode shape of `@InlineOnly` — drops that debug information and reads such a local in place.
+  A multifile call names the public facade (`MapsKt.set`); the private bit is on the part class
+  the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
 - **A named argument binds by LABEL, including when it skips a defaulted parameter.** A classpath call
