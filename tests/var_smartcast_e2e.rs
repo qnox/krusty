@@ -16,6 +16,18 @@ fn assert_diagnostics(actual: Vec<String>, expected: &[&str]) {
     assert_eq!(actual.as_slice(), expected);
 }
 
+/// Run the same `box()` source under kotlinc and require both compilers to return `OK`.
+fn same_box(stem: &str, src: &str) {
+    common::expect_box_same_as_kotlinc(src, stem);
+}
+
+/// Reject the same source under both compilers and compare file, line, column, message, count,
+/// and order.
+fn same_rejection(tag: &str, src: &str) {
+    let result = common::compiler_diagnostics(&[("Main.kt", src)], &[]);
+    common::expect_identical_rejection(&result, tag);
+}
+
 #[test]
 fn var_null_check_smart_casts_in_branch() {
     const SRC: &str = "fun f(x: String?): Int {\n\
@@ -325,6 +337,7 @@ fun box(): String = if (f(null) == 1 && f(Box(4)) == 4) \"OK\" else \"FAIL\"\n";
         run(SRC).expect("null-branch assignment smart-casts after if"),
         "OK"
     );
+    same_box("null_branch_assignment", SRC);
 }
 
 #[test]
@@ -340,6 +353,7 @@ fun box(): String = if (f(true) == 1 && f(false) == 2) \"OK\" else \"FAIL\"\n";
         run(SRC).expect("both-branch assignment smart-casts after if"),
         "OK"
     );
+    same_box("both_branch_assignments", SRC);
 }
 
 #[test]
@@ -354,6 +368,7 @@ fun f(c: Boolean, x: Box?): Int {\n\
         diags(SRC),
         &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
     );
+    same_rejection("one_sided_assignment", SRC);
 }
 
 #[test]
@@ -368,6 +383,7 @@ fun f(c: Boolean): Int {\n\
         diags(SRC),
         &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
     );
+    same_rejection("null_write_on_one_edge", SRC);
 }
 
 #[test]
@@ -383,6 +399,7 @@ fun f(x: Box?): Int {\n\
 }\n\
 fun box(): String = if (f(null) == 2 && f(Box(5)) == 5) \"OK\" else \"FAIL\"\n";
     assert_eq!(run(SRC).expect("when edges agree after the when"), "OK");
+    same_box("when_edges_agree", SRC);
 }
 
 #[test]
@@ -402,6 +419,7 @@ fun box(): String = if (f(false, null) == 5 && f(true, null) == -1) \"OK\" else 
         run(SRC).expect("else edge keeps the assignment the then edge skipped"),
         "OK"
     );
+    same_box("else_edge_keeps_assignment", SRC);
 }
 
 #[test]
@@ -451,6 +469,7 @@ fun box(): String = if (f(\"ab\") == 2) \"OK\" else \"FAIL\"\n";
         run(SRC).expect("Nothing branch is not part of the join"),
         "OK"
     );
+    same_box("nothing_branch", SRC);
 }
 
 #[test]
