@@ -148,6 +148,34 @@ fun box(): String {
 }
 
 #[test]
+fn shadowed_super_argument_uses_the_resolved_binding() {
+    let source = r#"
+open class Base(val value: String)
+fun box(): String {
+    val ok = "OUTER"
+    class Holder(val ok: String) {
+        fun make(): String {
+            val anon = object : Base(ok) {}
+            return anon.value
+        }
+    }
+    fun nested(): String {
+        val ok = "INNER"
+        val stayed = object : Base(ok) {}
+        val forwarded = object : Base(ok + "!") {}
+        val casted = object : Base(ok as String) {}
+        return stayed.value + forwarded.value + casted.value
+    }
+    return Holder("PARAM").make() + nested() + ok
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "ShadowedSuperArgument"),
+        Some("OUTERINNERINNER!INNEROUTER".to_string())
+    );
+}
+
+#[test]
 fn constructor_properties_and_anonymous_super_arguments_match_kotlinc() {
     assert_identical(
         "CtorInit",

@@ -16,6 +16,7 @@
 //! by read and write discovery on purpose: a body form left out of it records immutable or missing
 //! storage, and checked FIR is then unable to represent the source capture at all.
 
+use super::scope::PathRoot;
 use super::*;
 
 /// What the checker knows about a binding when it decides how a capture of it is represented.
@@ -724,15 +725,13 @@ impl Checker<'_> {
         }
         captured.sort();
         if anonymous_object {
-            let lexical = captured
-                .iter()
-                .map(String::as_str)
-                .collect::<std::collections::HashSet<_>>();
+            let capturable = self.capturable_lexical_identities(scope);
             for argument in &cl.base_args {
-                if self.anonymous_super_argument_stays(*argument, &lexical) {
-                    continue;
+                if self.anonymous_super_argument_disposition(*argument, &capturable)
+                    == AnonymousSuperDisposition::Forward
+                {
+                    result.forwarded_super_arguments.push(*argument);
                 }
-                result.forwarded_super_arguments.push(*argument);
             }
         }
         for name in captured {
@@ -779,36 +778,53 @@ impl Checker<'_> {
         result
     }
 
-    /// A super-constructor argument stays in the anonymous constructor when this walk already
-    /// recorded its bare name as a lexical capture, or when checking has accepted it as a
-    /// compile-time constant. A missing type or `Ty::Error` is not a constant, so the argument
-    /// is evaluated at the construction site instead.
-    fn anonymous_super_argument_stays(
+    /// Flow identities of the lexical values an anonymous constructor can read. A narrowing shadow
+    /// keeps the identity of the value it narrows; a same-spelled declaration does not.
+    fn capturable_lexical_identities(
+        &self,
+        scope: &CheckerScope<'_>,
+    ) -> std::collections::HashSet<u32> {
+        let mut identities = std::collections::HashSet::new();
+        scope.visit_bindings(Ns::Value, |_name, binding| {
+            let Some(local) = binding.value() else {
+                return;
+            };
+            if matches!(
+                local.origin,
+                ReceiverFnValueOrigin::Local
+                    | ReceiverFnValueOrigin::ClassStorage(_)
+                    | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
+            ) {
+                identities.insert(local.flow_identity);
+            }
+        });
+        identities
+    }
+
+    /// Whether an anonymous super-constructor argument stays in that constructor.
+    ///
+    /// A cast or `!!` peels to the value that was checked. That value stays when its resolved
+    /// flow identity is one of the capturable bindings, or when checking has already accepted it
+    /// as a compile-time constant. A missing type or `Ty::Error` is not a forward: the frontend
+    /// error stands, and the argument is not rewritten into a constructor parameter.
+    fn anonymous_super_argument_disposition(
         &self,
         argument: ExprId,
-        lexical: &std::collections::HashSet<&str>,
-    ) -> bool {
-        if let Some(observed) = anonymous_super_argument_constructor_use(self.file, argument) {
-            if let Expr::Name(name) = self.file.expr(observed) {
-                if lexical.contains(name.as_str()) {
-                    return true;
-                }
-            }
-        }
-        let mut core = argument;
-        loop {
-            match self.file.expr(core) {
-                Expr::As { operand, .. } | Expr::NotNull { operand } => core = *operand,
-                _ => break,
-            }
-        }
+        capturable: &std::collections::HashSet<u32>,
+    ) -> AnonymousSuperDisposition {
+        let core = peel_super_type_operators(self.file, argument);
         let Some(ty) = self.expr_types.get(core.0 as usize).copied() else {
-            return false;
+            return AnonymousSuperDisposition::Unresolved;
         };
         if ty == Ty::Error || ty.mentions_error() {
-            return false;
+            return AnonymousSuperDisposition::Unresolved;
         }
-        checked_constant_expression(
+        if let Some(PathRoot::Value(identity)) = self.read_flow_roots.get(&core) {
+            if capturable.contains(identity) {
+                return AnonymousSuperDisposition::Stay;
+            }
+        }
+        if checked_constant_expression(
             CheckedConstantExpression {
                 file: self.file,
                 expression_types: &self.expr_types,
@@ -820,6 +836,24 @@ impl Checker<'_> {
             ty,
         )
         .is_some()
+        {
+            AnonymousSuperDisposition::Stay
+        } else {
+            AnonymousSuperDisposition::Forward
+        }
+    }
+
+    /// A missing or error type on a typed anonymous super argument is a frontend error. An error
+    /// already reported for this file, including a silent one pinned to the expression, stands.
+    fn report_unresolved_anonymous_super_argument(&mut self, argument: ExprId) {
+        let core = peel_super_type_operators(self.file, argument);
+        if self.silent_error_exprs.contains(&core) || self.diags.has_errors() {
+            return;
+        }
+        self.diags.error(
+            self.span(argument),
+            "anonymous super argument has no resolved type",
+        );
     }
 
     /// Publish super-constructor arguments of an expression-position anonymous object after its
@@ -831,30 +865,16 @@ impl Checker<'_> {
         declaration: DeclId,
         arguments: &[ExprId],
     ) {
-        let mut lexical = std::collections::HashSet::new();
-        scope.visit_bindings(Ns::Value, |name, binding| {
-            let Some(local) = binding.value() else {
-                return;
-            };
-            if matches!(
-                local.origin,
-                ReceiverFnValueOrigin::Local
-                    | ReceiverFnValueOrigin::ClassStorage(_)
-                    | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
-            ) {
-                lexical.insert(name.to_string());
-            }
-        });
-        let lexical = lexical
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
+        let capturable = self.capturable_lexical_identities(scope);
         let mut forwarded = Vec::new();
         for argument in arguments {
-            if self.anonymous_super_argument_stays(*argument, &lexical) {
-                continue;
+            match self.anonymous_super_argument_disposition(*argument, &capturable) {
+                AnonymousSuperDisposition::Forward => forwarded.push(*argument),
+                AnonymousSuperDisposition::Stay => {}
+                AnonymousSuperDisposition::Unresolved => {
+                    self.report_unresolved_anonymous_super_argument(*argument);
+                }
             }
-            forwarded.push(*argument);
         }
         if forwarded.is_empty() {
             self.discovered_anonymous_super_forwards
@@ -862,6 +882,24 @@ impl Checker<'_> {
         } else {
             self.discovered_anonymous_super_forwards
                 .insert(declaration, forwarded);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnonymousSuperDisposition {
+    Stay,
+    Forward,
+    Unresolved,
+}
+
+/// The expression a cast or not-null assertion wraps. The anonymous constructor keeps that
+/// operator and reads the core value through it.
+fn peel_super_type_operators(file: &File, mut expression: ExprId) -> ExprId {
+    loop {
+        match file.expr(expression) {
+            Expr::As { operand, .. } | Expr::NotNull { operand } => expression = *operand,
+            _ => return expression,
         }
     }
 }

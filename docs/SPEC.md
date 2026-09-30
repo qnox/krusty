@@ -11299,7 +11299,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
   Base(side())`, `object : Base(initialCapacity, loadFactor, true)`). The resolver publishes
-  those argument identities while the lexical bindings still exist. Checked FIR records each one
+  that choice from the flow identity of the binding the argument resolved to, while those
+  bindings are still in scope. Equal source spellings do not alias: an inner local is not the
+  outer local it shadows, and a constructor property is not an enclosing local of the same
+  spelling. A missing or error type is a frontend error and is not forwarded. Checked FIR records each one
   as `ForwardedSuperArgument` naming the selected superclass parameter; lowering binds that
   record to the synthetic constructor parameter and does not rewrite any other expression, so a
   null is never a stand-in for a missing value. A non-anonymous constructor, including a local
@@ -11321,7 +11324,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DELEGATION (`Function.flags` bits 6-7 = 2), public and open, in addition to the bytecode
   forwarder. It is not a source callable of the class; the override edge's implementation
   function is its identity. A forwarded property stays a `Property` record.
-  Tests: `tests/constructor_initialization_order_e2e.rs` and
+  Tests: `tests/constructor_initialization_order_e2e.rs`, including
+  `shadowed_super_argument_uses_the_resolved_binding`, and
   `fir::body_check::local_class_tests::anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument`.
 - **A checked `Nothing` value carries its completion contract into common IR.** Non-null `Nothing`
   is semantically divergent, but a target can still have to realize a physical fallthrough path.
