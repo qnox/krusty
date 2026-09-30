@@ -299,21 +299,42 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .map_err(|_| semantics.missing_signature_diagnostic(contextual_declaration))?;
             let contextual_count = expected.context_count.min(scoped_inputs.len());
             let contextual_receivers = &scoped_inputs[..contextual_count];
+            let expected_result = ResolvedTy::new(expected.ret)
+                .map_err(|_| semantics.missing_signature_diagnostic(contextual_declaration))?;
             semantics.enter_contextual_function(
                 contextual_declaration,
                 &scoped_inputs,
                 contextual_receivers,
                 contextual_receiver,
             );
-            let evaluated_result =
-                evaluate_expression(semantics, result, graph, demand, memo, computing);
+            // The body's calls are inferred against this return. A constructor or return-only
+            // generic (`HashMap()`, `mutableMapOf()`) has no argument evidence; without the
+            // expectation it defaults its type arguments and then fails the subtype check with
+            // no source diagnostic. `Unit` is coercion, not an expected value type, and an open
+            // type parameter is not yet a concrete expectation.
+            let thread_expected =
+                expected_result.get() != Ty::Unit && !expected_result.get().mentions_ty_param();
+            let evaluated_result = if thread_expected {
+                match evaluate_expression_with_expected(
+                    semantics,
+                    result,
+                    expected_result,
+                    graph,
+                    demand,
+                    memo,
+                    computing,
+                ) {
+                    Some(evaluated) => evaluated,
+                    None => evaluate_expression(semantics, result, graph, demand, memo, computing),
+                }
+            } else {
+                evaluate_expression(semantics, result, graph, demand, memo, computing)
+            };
             semantics.exit_contextual_function(
                 contextual_declaration,
                 contextual_count + usize::from(contextual_receiver.is_some()),
             );
             let result = evaluated_result?;
-            let expected_result = ResolvedTy::new(expected.ret)
-                .map_err(|_| semantics.missing_signature_diagnostic(contextual_declaration))?;
             let result = semantics.contextual_function_result(
                 contextual_declaration,
                 result,
@@ -668,6 +689,32 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     });
                     semantics.exit_scoped_receiver(scope.owner);
                     evaluated
+                })()),
+                // Each branch is checked under the same expected type the join itself was given
+                // (`if (c) HashMap() else hashMapOf()` inside `() -> MutableMap<K, V>`). The
+                // sibling fixed point in ordinary evaluation does not see that outer expectation.
+                SigExpr::Join {
+                    operands,
+                    scope,
+                    origin,
+                } => Some((|| {
+                    let operand_expressions = graph.operands(operands).to_vec();
+                    let mut resolved_operands = Vec::with_capacity(operand_expressions.len());
+                    for operand in operand_expressions {
+                        let evaluated = match evaluate_expression_with_expected(
+                            semantics, operand, expected, graph, demand, memo, computing,
+                        ) {
+                            Some(evaluated) => evaluated?,
+                            None => evaluate_expression(
+                                semantics, operand, graph, demand, memo, computing,
+                            )?,
+                        };
+                        resolved_operands.push(evaluated);
+                    }
+                    let scope = graph
+                        .scope(scope)
+                        .expect("a signature join scope must belong to its graph");
+                    semantics.least_upper_bound(scope, origin, &resolved_operands)
                 })()),
                 _ => None,
             }

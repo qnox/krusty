@@ -2144,6 +2144,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the parameter at that slot (and it mentions no open formal), that parameter is the argument's
   expectation and the call is re-evaluated under it before selection. Test:
   `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
+- **A postponed lambda body is checked under the expected return type.** Signature inference
+  materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
+  only after the surrounding call has a function type for that argument (`() -> T` on
+  `fun <T> getOrPut(threadLocal: ThreadLocal<T>, default: () -> T)`). The body used to be typed
+  with no expectation, so the constructor or return-only call defaulted its type arguments
+  (`HashMap<Any?, Any?>`) and then failed the subtype check against `MutableMap<K, V>` with no
+  source diagnostic — the module reported `internal error: module signatures were not finalized`.
+  The result expression, including each branch of a conditional, is now evaluated under that
+  return type. `Unit` stays a coercion, and an open type parameter is not yet a concrete
+  expectation. This is the companion-object shape in `PerformanceCounter.getCallStack`. Test:
+  `tests/contextual_lambda_expected_return_e2e.rs`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
