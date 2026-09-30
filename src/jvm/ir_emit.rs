@@ -97,6 +97,7 @@ mod safe_calls;
 mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
+mod singleton_instance_load;
 mod suspend_lambda_class;
 mod value_class_adapters;
 use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_adapter};
@@ -7254,6 +7255,9 @@ struct Emitter<'a> {
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
     owner: String,
+    /// Whether `owner` is an interface companion. Fixed when the emitter is built; singleton
+    /// loads consult it instead of reclassifying every class on each read.
+    interface_companion_self: bool,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
     /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
@@ -7384,6 +7388,9 @@ impl<'a> Emitter<'a> {
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
+            interface_companion_self: singleton_instance_load::emitted_class_is_interface_companion(
+                ir, owner,
+            ),
             facade: facade.to_string(),
             slots: HashMap::new(),
             temporaries: backend_temporaries::BackendTemporaries::default(),
@@ -8844,45 +8851,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Choose the JVM storage for an already-resolved semantic singleton. Source declarations expose
-    /// their semantic object/companion shape in IR; dependency layout comes from classfile metadata.
-    fn singleton_storage(
-        &self,
-        classifier: crate::types::TypeName,
-    ) -> Option<(crate::types::TypeName, String)> {
-        if let Some(declaration) = self
-            .ir
-            .referenced_module_classifiers
-            .get(&classifier)
-            .copied()
-        {
-            if !declaration.singleton {
-                return None;
-            }
-            return Some(if let Some(owner) = declaration.companion_owner {
-                (owner, classifier.nested_segment_ref().to_owned())
-            } else {
-                (classifier, "INSTANCE".to_string())
-            });
-        }
-        if let Some(class) = self
-            .ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name == classifier && class.is_singleton())
-        {
-            return Some(if class.is_companion {
-                (
-                    classifier.nested_owner()?,
-                    classifier.nested_segment_ref().to_owned(),
-                )
-            } else {
-                (classifier, "INSTANCE".to_string())
-            });
-        }
-        self.bodies.singleton_storage(classifier)
-    }
-
     /// Emit the source receiver according to an already-selected property realization. Instance
     /// accessors/fields consume it; a static realization still evaluates and drops an effectful receiver.
     /// Reads and writes share this exact rule so `side().p` and `side().p = v` cannot diverge.
@@ -8903,9 +8871,12 @@ impl<'a> Emitter<'a> {
         // expression that runs no code, or a singleton/static read of the very owner whose static access
         // initializes it anyway; every other receiver is evaluated and popped.
         let initializes_owner = match self.ir.expr(receiver) {
-            IrExpr::SingletonValue { classifier } => self
-                .singleton_storage(*classifier)
-                .is_some_and(|(owner, _)| owner == access_owner),
+            IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
+                self.ir,
+                *classifier,
+                self.bodies.singleton_storage(*classifier),
+            )
+            .is_some_and(|published| published.owner == access_owner),
             IrExpr::ExternalStaticField { owner, .. }
             | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
             IrExpr::StaticInstance { owner, .. } => self
@@ -10778,22 +10749,41 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let Some((owner, field)) = self.singleton_storage(*classifier) else {
+                let Some(published) = singleton_instance_load::published_singleton(
+                    self.ir,
+                    *classifier,
+                    self.bodies.singleton_storage(*classifier),
+                ) else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
                         classifier.render()
                     ));
                     return;
                 };
+                let (owner, field) = singleton_instance_load::instance_load(
+                    self.interface_companion_self,
+                    *classifier,
+                    &self.owner,
+                    published,
+                );
                 let owner = owner.render();
                 let ty = classifier.render();
                 let f = self.cw.fieldref(&owner, &field, &format!("L{ty};"));
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
-                let owner = crate::jvm::names::classfile_internal_name_of(*owner);
+                let (owner, field) = singleton_instance_load::instance_load(
+                    self.interface_companion_self,
+                    *ty,
+                    &self.owner,
+                    singleton_instance_load::PublishedSingleton {
+                        owner: *owner,
+                        field: field.clone(),
+                    },
+                );
+                let owner = crate::jvm::names::classfile_internal_name_of(owner);
                 let ty = crate::jvm::names::classfile_internal_name_of(*ty);
-                let f = self.cw.fieldref(&owner, field, &format!("L{ty};"));
+                let f = self.cw.fieldref(&owner, &field, &format!("L{ty};"));
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticField {
