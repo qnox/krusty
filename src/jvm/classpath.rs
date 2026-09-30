@@ -12,6 +12,7 @@
 
 mod builtins_validation;
 mod candidate_union;
+mod class_locations;
 mod ct_sym_index;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
@@ -2043,27 +2044,6 @@ impl Classpath {
         }
     }
 
-    /// Whether the first classpath definition of `internal` belongs to a friend entry.
-    /// A complete catalog already records that entry, so the check does not render the classifier
-    /// or open its class bytes. An incomplete catalog still reads the entry to confirm ownership.
-    pub fn grants_internal_access(&self, internal: TypeName) -> bool {
-        let internal = super::jvm_class_map::to_jvm_type_name(internal);
-        if self.stub_overlay.borrow().contains_key(&internal) {
-            return false;
-        }
-        let tree = self.package_tree();
-        if let Some(index) = tree.first_class_jar(internal) {
-            return self.friend_entries.get(index).copied().unwrap_or(false);
-        }
-        if tree.catalog_complete() {
-            return false;
-        }
-        self.physical_class_entry(&internal.render())
-            .and_then(|(index, _)| self.friend_entries.get(index))
-            .copied()
-            .unwrap_or(false)
-    }
-
     /// Materialize indexes needed before source-specific name resolution.
     pub fn prepare_for_source_analysis(&self) {
         self.ensure_jimage_index();
@@ -3726,29 +3706,6 @@ impl Classpath {
         })
     }
 
-    /// Existence of an already-interned classifier. A complete catalog answers by identity. An
-    /// incomplete catalog, and a metadata-only function name whose JVM class differs from that
-    /// identity, still need the textual probe.
-    pub(super) fn class_exists_name(&self, internal: TypeName) -> bool {
-        let mapped = super::jvm_class_map::to_jvm_type_name(internal);
-        let needs_textual_erasure =
-            super::jvm_class_map::maps_to_distinct_jvm_internal(internal) && mapped == internal;
-        if needs_textual_erasure {
-            return self.class_exists(&internal.render());
-        }
-        if self.stub_overlay.borrow().contains_key(&mapped) {
-            return true;
-        }
-        let tree = self.package_tree();
-        if !tree.jars_for_class_name(mapped).is_empty() {
-            return true;
-        }
-        if tree.incomplete_entries.is_empty() {
-            return false;
-        }
-        self.class_exists(&mapped.render())
-    }
-
     fn class_entry_indices(&self, tree: &PackageTree, internal: &str) -> Vec<usize> {
         let mut indices = tree.jars_for_class(internal);
         indices.extend(tree.incomplete_entries.iter().copied());
@@ -3791,7 +3748,7 @@ impl Classpath {
         cache_stat!(l1_class, false);
         // The classfile spelling is a zip/directory key. An L2 hit already holds the parsed class,
         // so the render waits until this entry actually has to read bytes.
-        let mut classfile_name: Option<(String, String)> = None;
+        let mut classfile_name: Option<(&'static str, String)> = None;
         let mut found = None;
         let mut all_cached = true;
         for i in self.class_entry_indices_name(&tree, internal_id) {
@@ -3812,7 +3769,7 @@ impl Classpath {
             }
             all_cached = false;
             if classfile_name.is_none() {
-                let internal = internal_id.render();
+                let internal = crate::jvm::names::classfile_internal_name_of(internal_id);
                 let name = format!("{internal}.class");
                 classfile_name = Some((internal, name));
             }
@@ -3989,19 +3946,6 @@ impl Classpath {
                 .collect::<Vec<_>>();
             self.stub_overlay.borrow_mut().clear();
             self.invalidate_overlay_memos(affected);
-        }
-    }
-
-    /// Return the jar containing `internal`, if its first classpath definition is in a jar.
-    pub fn owning_jar(&self, internal: &str) -> Option<PathBuf> {
-        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
-        if self.stub_overlay.borrow().contains_key(&internal_id) {
-            return None;
-        }
-        let (index, _) = self.physical_class_entry(&internal_id.render())?;
-        match self.entries.get(index)? {
-            Entry::Jar(path) => Some(path.clone()),
-            Entry::Dir(_) | Entry::Jimage(_) | Entry::CtSym { .. } => None,
         }
     }
 
@@ -5029,18 +4973,6 @@ impl PackageTree {
         self.jars_for_class_id(class)
     }
 
-    /// The first classpath entry that declares `internal`, in the same shadowing order as
-    /// [`Self::jars_for_class_name`].
-    fn first_class_jar(&self, internal: TypeName) -> Option<JarId> {
-        let class = crate::types::existing_type_name_in(&self.names, internal)?;
-        let start = self
-            .classes
-            .partition_point(|&(candidate, _)| candidate.0 < class.0);
-        self.classes
-            .get(start)
-            .and_then(|&(candidate, jar)| (candidate == class).then_some(jar))
-    }
-
     pub(super) fn catalog_complete(&self) -> bool {
         self.incomplete_entries.is_empty()
     }
@@ -5753,7 +5685,9 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 
 #[cfg(test)]
 mod fq_tests {
-    use super::test_support::{test_temp_dir, write_test_jar_with_entry};
+    use super::test_support::{
+        test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
+    };
     use super::*;
 
     #[test]
@@ -6282,28 +6216,6 @@ mod fq_tests {
         assert!(cp.cache_report().contains("alias_pkg=1024"));
     }
 
-    #[test]
-    fn owning_jar_returns_the_jar_path_for_a_library_class() {
-        let Some(jar) = test_stdlib_jar() else {
-            return; // toolchain not provisioned
-        };
-        let cp = Classpath::new(vec![jar.clone()]);
-        let owner = cp.owning_jar("kotlin/collections/CollectionsKt");
-        assert_eq!(owner.as_deref(), Some(jar.as_path()));
-        let present = type_name("kotlin/collections/CollectionsKt");
-        let absent = type_name("kotlin/collections/NoSuchKt");
-        assert!(cp.class_exists_name(present));
-        assert!(!cp.class_exists_name(absent));
-        assert_eq!(
-            cp.class_exists("kotlin/String"),
-            cp.class_exists_name(type_name("kotlin/String"))
-        );
-        assert_eq!(
-            cp.class_exists("kotlin/Function1"),
-            cp.class_exists_name(type_name("kotlin/Function1"))
-        );
-    }
-
     fn write_test_jar_entry(path: &Path, name: &str, contents: &[u8]) {
         use std::io::Write;
 
@@ -6322,22 +6234,6 @@ mod fq_tests {
 
     fn write_test_jar(path: &Path, contents: &[u8]) {
         write_test_jar_entry(path, "sample.txt", contents);
-    }
-
-    fn write_test_archive_entries(path: &Path, entries: &[(&str, &[u8])]) {
-        use std::io::Write;
-
-        let file = File::create(path).expect("create test archive");
-        let mut archive = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        for (name, contents) in entries {
-            archive
-                .start_file(*name, options)
-                .expect("start archive entry");
-            archive.write_all(contents).expect("write archive entry");
-        }
-        archive.finish().expect("finish test archive");
     }
 
     #[test]

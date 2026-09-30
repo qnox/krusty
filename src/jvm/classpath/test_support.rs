@@ -22,3 +22,17 @@ pub(super) fn write_test_jar_with_entry(path: &Path, entry_name: &str, bytes: &[
     std::io::Write::write_all(&mut writer, bytes).expect("write entry");
     writer.finish().expect("finish jar");
 }
+
+pub(super) fn write_test_archive_entries(path: &Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).expect("create test archive");
+    let mut archive = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, contents) in entries {
+        archive
+            .start_file(*name, options)
+            .expect("start archive entry");
+        std::io::Write::write_all(&mut archive, contents).expect("write archive entry");
+    }
+    archive.finish().expect("finish test archive");
+}
