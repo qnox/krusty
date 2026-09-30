@@ -38,7 +38,8 @@ default:
 
 # === PR gate: the one command the ci job runs ===
 # Own tests run once under coverage. Conformance is not here: the workflow builds
-# that binary once and runs it for every supported Kotlin version.
+# that binary once, runs the box suite for every supported Kotlin version, and
+# runs every other test in the binary on the latest version.
 ci: lint coverage-gate
 
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
@@ -135,8 +136,9 @@ profile-box FILTER="":
     KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 KRUSTY_BOX_ONLY="{{FILTER}}" ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 
 # Run the whole external/reference conformance binary without coverage instrumentation, against the
-# LATEST supported Kotlin version only. `just ci` does not call this. CI builds the binary once
-# and runs it for every supported version (see .github/workflows/ci.yml). Keep the
+# LATEST supported Kotlin version only. `just ci` does not call this. CI builds the binary once,
+# runs the box suite for every supported version, and runs the other tests on the latest version
+# (see .github/workflows/ci.yml). Keep the
 # memory-heavy Kotlin box corpus test isolated, then run every other conformance test in a fresh
 # process.
 # Pass 2's tests are independent JVM-backed suites; thread them (capped at 4 — each thread can hold
@@ -418,6 +420,14 @@ conformance-run BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}"
+
+# Run every test in a PREBUILT conformance binary except the box corpus. CI calls this on the
+# latest Kotlin version with the binary from `conformance-bin`; the box suite stays on
+# `conformance-run` for every supported version. A sibling `krusty` next to BIN is the CLI.
+conformance-regressions BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
 
 # Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
 # on master; safe to run locally to preview. Color ramps with the conformance percentage.
