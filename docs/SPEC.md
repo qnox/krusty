@@ -11285,10 +11285,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with an empty context-argument list, so its getter call came out one operand short and the backend
   bailed. Both reads (and the pre-existing value-position pair, which had the same hole) now come
   from one builder, `selected_property_read`.
-  Tests: `tests/property_accessor_increment_e2e.rs::a_prefix_increment_reads_the_property_again_and_a_postfix_one_does_not`
-  and `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, both run under
-  the provisioned reference compiler as well. Corpus:
-  `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`, `statics/incInClassObject.kt`.
+  The same re-read applies when the target is a qualified property or an indexed access
+  (`++getA().x`, `++getB()[i, j]`). The receiver and the index operands are evaluated once, then
+  the prefix form calls the getter or `get` again after the write, including as a statement.
+  Postfix still uses the first read. Tests:
+  `tests/property_accessor_increment_e2e.rs::a_prefix_increment_reads_the_property_again_and_a_postfix_one_does_not`,
+  `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, and
+  `::a_prefix_increment_of_a_qualified_or_indexed_access_rereads`, all run under the provisioned
+  reference compiler as well. Corpus: `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`,
+  `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`,
+  `defaultArguments/convention/incWithDefaultInGetter.kt` (the second `get` applies its default).
 - **A shared-cell capture stays one cell however many callables it crosses, and is forwarded BY the
   cell.** `var ok = "fail"; fun mk(): C = object : C { override fun i() = ok }` — the anonymous
   object must see the write `ok = "OK"` that happens after `mk()` returns, so it has to hold the
