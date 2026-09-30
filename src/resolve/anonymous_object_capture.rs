@@ -37,10 +37,12 @@ pub struct AnonymousObjectCapture {
     /// What a captured receiver was in source, which names the capture's field; `None` for a
     /// captured value.
     pub receiver: Option<FirCapturedReceiver>,
-    /// Receiver-tower coordinate this field represents inside the capturing classifier's body.
-    /// This remains explicit when the construction site supplies the value through another local
-    /// classifier's storage field, where `source` alone no longer carries a receiver depth.
-    pub semantic_receiver_depth: Option<u32>,
+    /// Receiver-tower coordinate this capture represented before any enclosing anonymous field
+    /// became its physical source. A forwarded super argument is evaluated outside that enclosing
+    /// constructor and therefore rematerializes this semantic receiver rather than reading the
+    /// field. Keep the complete typed coordinate: depth alone cannot distinguish a class receiver
+    /// from an extension/context receiver, and `current` is independent of its numeric depth.
+    pub semantic_receiver: Option<AnonymousObjectReceiverSource>,
     /// Number of distinct same-named lexical bindings nearer than the selected source at this
     /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
     /// consumes it while the active lexical scopes still exist.
@@ -76,6 +78,20 @@ pub enum AnonymousObjectCaptureSource {
         current: bool,
         depth: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnonymousObjectReceiverSource {
+    EnclosingInstance { current: bool, depth: u32 },
+    ImplicitReceiver { current: bool, depth: u32 },
+}
+
+impl AnonymousObjectReceiverSource {
+    pub(crate) const fn depth(self) -> u32 {
+        match self {
+            Self::EnclosingInstance { depth, .. } | Self::ImplicitReceiver { depth, .. } => depth,
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -135,7 +151,7 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) function_local: bool,
     pub(super) receiver_label: Option<Box<str>>,
     pub(super) receiver: Option<crate::fir::FirCapturedReceiver>,
-    pub(super) semantic_receiver_depth: Option<u32>,
+    pub(super) semantic_receiver: Option<AnonymousObjectReceiverSource>,
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
@@ -271,8 +287,10 @@ pub(super) fn record_anonymous_construction_captures(
             .collect::<Vec<_>>(),
     );
     // Match ordinary name lookup for name-addressed captures: `visit_bindings` is innermost-first,
-    // so retain the first lexical/storage candidate for each spelling. Receiver captures are
-    // coordinate-addressed scope-tower rungs; generated field spellings are not their identities.
+    // so retain the first lexical/storage candidate for each spelling. Direct receiver captures
+    // are coordinate-addressed scope-tower rungs; a receiver already forwarded through class
+    // storage remains name-addressed here even though it also retains its semantic coordinate for
+    // a later super-argument rematerialization.
     let selected = candidates
         .iter()
         .enumerate()
@@ -331,7 +349,7 @@ pub(super) fn record_anonymous_construction_captures(
             source: candidate.source,
             receiver_label: candidate.receiver_label.clone(),
             receiver: candidate.receiver.clone(),
-            semantic_receiver_depth: candidate.semantic_receiver_depth,
+            semantic_receiver: candidate.semantic_receiver,
             lexical_shadow_depth: 0,
             capture_dependency: None,
         })

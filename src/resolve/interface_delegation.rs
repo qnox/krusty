@@ -452,6 +452,22 @@ fn delegated_function_declaration(
     })
 }
 
+fn delegated_forwarder_parameter_identities(
+    overridden: &[crate::fir::ResolvedParameterIdentity],
+) -> Box<[crate::fir::ResolvedParameterIdentity]> {
+    overridden
+        .iter()
+        .map(|identity| match identity {
+            crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+                crate::fir::ResolvedParameterIdentity::InterfaceDelegationValue {
+                    ordinal: *ordinal,
+                }
+            }
+            identity => identity.clone(),
+        })
+        .collect()
+}
+
 /// The applied shape of one delegated accessor: its context parameters, the member-extension
 /// receiver when there is one, then the value a setter takes.
 #[derive(Clone, Copy)]
@@ -750,10 +766,13 @@ fn delegation_members(
             }
             let call = function_call(source, index, interface, function);
             let overridden = delegated_function_declaration(source, index, function)?;
+            let parameter_identities =
+                delegated_forwarder_parameter_identities(&overridden.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {
                     name: function.callable.name.clone().into_boxed_str(),
+                    parameter_identities,
                     type_parameters,
                     overridden,
                     call: call?,
@@ -839,4 +858,24 @@ pub(super) fn resolve_streamed_interface_delegation(
         source,
         members,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_forwarder_owns_unnamed_parameter_provenance() {
+        let identities = delegated_forwarder_parameter_identities(&[
+            crate::fir::ResolvedParameterIdentity::Unnamed { ordinal: 0 },
+            crate::fir::ResolvedParameterIdentity::Source("named".into()),
+        ]);
+        assert_eq!(
+            identities.as_ref(),
+            [
+                crate::fir::ResolvedParameterIdentity::InterfaceDelegationValue { ordinal: 0 },
+                crate::fir::ResolvedParameterIdentity::Source("named".into()),
+            ]
+        );
+    }
 }

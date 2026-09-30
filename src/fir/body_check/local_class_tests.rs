@@ -361,6 +361,54 @@ fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
 }
 
 #[test]
+fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() {
+    let (_, bodies) = checked_streamed_bodies(
+        "open class X(val fn: () -> Unit)\n\
+         open class C(val x: X)\n\
+         class B(var value: Int) {\n\
+             fun update() { object : C(object : X({ value = 3 }) {}) {}.x.fn() }\n\
+         }\n",
+    );
+    let receiver_captures = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::AnonymousObject(object) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                object.captures.iter().find(|capture| {
+                    matches!(
+                        capture.receiver.as_ref(),
+                        Some(crate::fir::FirCapturedReceiver::Enclosing)
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receiver_captures.len(),
+        2,
+        "the nested lambda must retain both live receiver coordinates: {receiver_captures:?}"
+    );
+    assert!(
+        matches!(
+            &receiver_captures[0].source,
+            FirLocalClassCaptureSource::EnclosingReceiver { path } if path.is_empty()
+        ),
+        "the outer anonymous object must retain its live enclosing-receiver coordinate: {receiver_captures:?}"
+    );
+    assert!(
+        matches!(
+            receiver_captures[1].source,
+            FirLocalClassCaptureSource::DispatchReceiver
+        ),
+        "the nested anonymous object must retain B's live dispatch receiver instead of reinterpreting B's field 0: {receiver_captures:?}"
+    );
+}
+
+#[test]
 fn inferred_body_local_member_extension_is_selected_from_its_dispatch_rung() {
     production_frontend_ok(
         "fun box(): String {\n\

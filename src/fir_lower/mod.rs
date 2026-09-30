@@ -128,6 +128,10 @@ pub(super) fn resolved_parameter_identity(
             role: IrParameterRole::Value,
             provenance: IrParameterProvenance::SourceDeclared,
         },
+        Resolved::InterfaceDelegationValue { ordinal } => IrParameterIdentity::generated(
+            IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: *ordinal },
+            None,
+        ),
         Resolved::ContextValue { source_name, .. } => {
             IrParameterIdentity::context_value(source_name.as_ref())
         }

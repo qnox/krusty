@@ -43,7 +43,9 @@ use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
 };
-pub use anonymous_object_capture::{AnonymousObjectCapture, AnonymousObjectCaptureSource};
+pub use anonymous_object_capture::{
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
+};
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
@@ -18545,7 +18547,7 @@ impl<'a> Checker<'a> {
                         function_local,
                         receiver_label: None,
                         receiver: None,
-                        semantic_receiver_depth: None,
+                        semantic_receiver: None,
                         receiver_identity: None,
                     });
                 });
@@ -18575,19 +18577,33 @@ impl<'a> Checker<'a> {
                             .and_then(|owner| self.anonymous_receiver_capture_fields.get(owner))
                             .and_then(|fields| fields.get(&identity))
                             .copied();
+                        let semantic_receiver = if receiver.class_receiver {
+                            AnonymousObjectReceiverSource::EnclosingInstance {
+                                current: receiver.current,
+                                depth,
+                            }
+                        } else {
+                            AnonymousObjectReceiverSource::ImplicitReceiver {
+                                current: receiver.current,
+                                depth,
+                            }
+                        };
                         let source = captured_field.map_or_else(
-                            || {
-                                if receiver.class_receiver {
-                                    AnonymousObjectCaptureSource::EnclosingInstance {
-                                        current: receiver.current,
-                                        depth,
-                                    }
-                                } else {
-                                    AnonymousObjectCaptureSource::ImplicitReceiver {
-                                        current: receiver.current,
-                                        depth,
-                                    }
-                                }
+                            || match semantic_receiver {
+                                AnonymousObjectReceiverSource::EnclosingInstance {
+                                    current,
+                                    depth,
+                                } => AnonymousObjectCaptureSource::EnclosingInstance {
+                                    current,
+                                    depth,
+                                },
+                                AnonymousObjectReceiverSource::ImplicitReceiver {
+                                    current,
+                                    depth,
+                                } => AnonymousObjectCaptureSource::ImplicitReceiver {
+                                    current,
+                                    depth,
+                                },
                             },
                             |field| AnonymousObjectCaptureSource::ClassStorage { field },
                         );
@@ -18605,16 +18621,13 @@ impl<'a> Checker<'a> {
                                 function_local: false,
                                 source,
                                 delegate_storage: None,
-                                receiver: captured_field.is_none().then(|| {
-                                    self.captured_receiver(
-                                        scope,
-                                        identity,
-                                        extension_declaration,
-                                        receiver.class_receiver,
-                                    )
-                                }),
-                                receiver_label: (captured_field.is_none()
-                                    && !receiver.class_receiver)
+                                receiver: Some(self.captured_receiver(
+                                    scope,
+                                    identity,
+                                    extension_declaration,
+                                    receiver.class_receiver,
+                                )),
+                                receiver_label: (!receiver.class_receiver)
                                     .then(|| {
                                         extension_declaration
                                             .and_then(|declaration| {
@@ -18642,7 +18655,7 @@ impl<'a> Checker<'a> {
                                             .map(String::into_boxed_str)
                                     })
                                     .flatten(),
-                                semantic_receiver_depth: depth.checked_add(1),
+                                semantic_receiver: Some(semantic_receiver),
                                 receiver_identity: Some(identity),
                             },
                             identity,
@@ -24475,9 +24488,24 @@ impl<'a> Checker<'a> {
                                 receiver.extension_receiver,
                                 receiver.class_receiver,
                             )),
-                            semantic_receiver_depth: u32::try_from(receiver.receiver_depth)
-                                .ok()
-                                .and_then(|depth| depth.checked_add(1)),
+                            semantic_receiver: Some(
+                                if matches!(
+                                    source,
+                                    AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                                ) {
+                                    AnonymousObjectReceiverSource::EnclosingInstance {
+                                        current: receiver.current,
+                                        depth: u32::try_from(receiver.receiver_depth)
+                                            .expect("too many implicit receiver rungs"),
+                                    }
+                                } else {
+                                    AnonymousObjectReceiverSource::ImplicitReceiver {
+                                        current: receiver.current,
+                                        depth: u32::try_from(receiver.receiver_depth)
+                                            .expect("too many implicit receiver rungs"),
+                                    }
+                                },
+                            ),
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         };
@@ -24525,7 +24553,7 @@ impl<'a> Checker<'a> {
                             source: AnonymousObjectCaptureSource::LexicalValue,
                             receiver_label: None,
                             receiver: None,
-                            semantic_receiver_depth: None,
+                            semantic_receiver: None,
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                         });

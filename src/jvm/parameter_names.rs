@@ -50,6 +50,9 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
+                Some(format!("p{ordinal}"))
+            }
         },
     }
 }
@@ -183,6 +186,17 @@ pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
         }
         IrParameterRole::DestructuredValue => Some(DESTRUCTURED),
         _ => identity.source_name.as_deref(),
+    }
+}
+
+/// Kotlin metadata name for a parameter. Source names remain borrowed; a compiler-generated
+/// delegation parameter is formatted here, at the JVM boundary, from its recorded semantic role.
+pub(super) fn metadata_owned(identity: &IrParameterIdentity) -> Option<String> {
+    match identity.role {
+        IrParameterRole::Generated(IrGeneratedParameterRole::InterfaceDelegationValue {
+            ordinal,
+        }) => Some(format!("p{ordinal}")),
+        _ => metadata(identity).map(str::to_owned),
     }
 }
 
@@ -470,6 +484,9 @@ pub(super) fn resolved_local_variable(
     match identity {
         crate::fir::ResolvedParameterIdentity::Source(name) => Some(name.to_string()),
         crate::fir::ResolvedParameterIdentity::Unnamed { .. } => None,
+        crate::fir::ResolvedParameterIdentity::InterfaceDelegationValue { ordinal } => {
+            Some(format!("p{ordinal}"))
+        }
         crate::fir::ResolvedParameterIdentity::ContextValue { source_name, .. } => {
             Some(source_name.to_string())
         }
@@ -607,6 +624,25 @@ mod tests {
         assert_eq!(local_variable(&generated, "inspect"), None);
         assert_eq!(method_parameter(&generated, "inspect"), None);
         assert_eq!(metadata(&generated), None);
+    }
+
+    #[test]
+    fn interface_delegation_parameter_is_formatted_only_at_the_jvm_boundary() {
+        let generated = IrParameterIdentity::generated(
+            IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: 2 },
+            None,
+        );
+        assert_eq!(generated.source_name, None);
+        assert_eq!(
+            local_variable(&generated, "forward"),
+            Some("p2".to_string())
+        );
+        assert_eq!(
+            method_parameter(&generated, "forward"),
+            Some("p2".to_string())
+        );
+        assert_eq!(metadata(&generated), None);
+        assert_eq!(metadata_owned(&generated), Some("p2".to_string()));
     }
 
     #[test]

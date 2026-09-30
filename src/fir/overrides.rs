@@ -21,6 +21,11 @@ pub enum ResolvedParameterIdentity {
     Unnamed {
         ordinal: u32,
     },
+    /// Value parameter of a compiler-generated `interface by` forwarding declaration. The
+    /// ordinal is semantic producer provenance; a target owns any `pN` spelling.
+    InterfaceDelegationValue {
+        ordinal: u32,
+    },
     ContextValue {
         ordinal: u32,
         source_name: Box<str>,

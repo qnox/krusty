@@ -226,10 +226,9 @@ fn materialize_delegation(
                 );
                 ir.fn_source_names.insert(function, member.name.to_string());
                 let parameter_identities = member
-                    .overridden
                     .parameter_identities
                     .iter()
-                    .map(delegation_parameter_identity)
+                    .map(super::resolved_parameter_identity)
                     .collect::<Vec<_>>();
                 if parameter_identities.len() != params.len() {
                     return Err(FirFileLoweringFailure::MissingClassifier(declaration));
@@ -288,10 +287,7 @@ fn materialize_delegation(
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect(),
-                        implementation_parameter_identities: member
-                            .overridden
-                            .parameter_identities
-                            .to_vec(),
+                        implementation_parameter_identities: member.parameter_identities.to_vec(),
                         overridden_parameter_identities: member
                             .overridden
                             .parameter_identities
@@ -487,24 +483,6 @@ fn materialize_delegation(
     }
     stamp_generated(ir, first_generated);
     Ok(())
-}
-
-/// Parameter identity of a generated `interface by` function.
-///
-/// A Kotlin declaration contributes its source identity unchanged. A Java declaration can expose
-/// no source parameter name; the delegation producer nevertheless creates a Kotlin declaration and
-/// owns kotlinc's stable `p0`, `p1`, … semantic names for that declaration. Publishing those names
-/// here keeps common IR authoritative and prevents metadata or reflection emission from inventing
-/// identities from a JVM descriptor.
-fn delegation_parameter_identity(
-    identity: &crate::fir::ResolvedParameterIdentity,
-) -> crate::ir::IrParameterIdentity {
-    match identity {
-        crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
-            crate::ir::IrParameterIdentity::producer_value(format!("p{ordinal}"))
-        }
-        identity => super::resolved_parameter_identity(identity),
-    }
 }
 
 fn prepend_parameter_initializer(

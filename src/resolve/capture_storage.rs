@@ -706,7 +706,10 @@ impl Checker<'_> {
                     },
                     receiver_label: None,
                     receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
-                    semantic_receiver_depth: Some(1),
+                    semantic_receiver: Some(AnonymousObjectReceiverSource::EnclosingInstance {
+                        current: true,
+                        depth: 0,
+                    }),
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                 }),
@@ -734,7 +737,10 @@ impl Checker<'_> {
                     .filter(|(_, _, is_class)| !*is_class)
                     .map(|(label, _, _)| label.clone().into_boxed_str()),
                 receiver: Some(receiver_name),
-                semantic_receiver_depth: Some(1),
+                semantic_receiver: Some(AnonymousObjectReceiverSource::ImplicitReceiver {
+                    current: true,
+                    depth: 0,
+                }),
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -777,7 +783,7 @@ impl Checker<'_> {
                 source,
                 receiver_label: None,
                 receiver: None,
-                semantic_receiver_depth: None,
+                semantic_receiver: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });

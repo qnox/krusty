@@ -229,7 +229,7 @@ impl Checker<'_> {
                         source: AnonymousObjectCaptureSource::LexicalValue,
                         receiver_label: None,
                         receiver: None,
-                        semantic_receiver_depth: None,
+                        semantic_receiver: None,
                         lexical_shadow_depth,
                         capture_dependency: None,
                     },

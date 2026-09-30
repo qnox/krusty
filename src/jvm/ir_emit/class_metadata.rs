@@ -811,8 +811,7 @@ pub(super) fn build_class_metadata(
                         ) {
                             String::new()
                         } else {
-                            crate::jvm::parameter_names::metadata(identity)
-                                .map(str::to_owned)
+                            crate::jvm::parameter_names::metadata_owned(identity)
                                 .expect("a metadata value parameter carries a semantic name")
                         };
                         (
