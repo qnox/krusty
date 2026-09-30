@@ -163,7 +163,7 @@ Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`
 `compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
 same rule with one class-file archive in `KRUSTY_CLASS_DUMP_DIR`, which defaults to
 `target/cache/class-dumps/`. The archive is a single zlib stream: a text index, then each distinct
-output once. An index entry is an open version range plus a content fingerprint and a blob id:
+output once. A run keeps new dumps in memory and writes that file once, when the process exits. An index entry is an open version range plus a content fingerprint and a blob id:
 `2.4.20..` covers that release and every newer one until a
 later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
 release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint

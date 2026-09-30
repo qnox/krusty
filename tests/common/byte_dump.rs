@@ -11,7 +11,8 @@
 //! not rewrite the dumps. RC tags of one release share `2.4.20-RC..` and do not share the release
 //! range. The bytes live in one zlib archive under the class-dump cache
 //! (`KRUSTY_CLASS_DUMP_DIR`, or `target/cache/class-dumps`), not in the repository. Identical
-//! outputs are stored once inside it, and the whole archive compresses together. A text index in
+//! outputs are stored once inside it. A run keeps new dumps in memory and writes the archive
+//! once, when the process exits. A text index in
 //! that archive records the open range for each dump.
 //!
 //! `KRUSTY_RECORD=1` or `KRUSTY_RECORD_CLASS_DUMPS=1` ignores a stored dump and recompiles. A
@@ -33,7 +34,7 @@
 //! The archive is read at runtime and is not compiled into the test binary.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -520,46 +521,46 @@ fn store_files(
     let path = archive_path(root);
     let parent = path.parent().expect("class-dump directory");
     std::fs::create_dir_all(parent).expect("create class-dump directory");
-    let _lock = lock_directory(parent);
     let mut cache = dump_cache().lock().expect("class-dump cache");
-    let stamp = file_stamp(&path);
-    let mut archive = take_archive(&path, &mut cache);
+    reconcile(&path, &mut cache);
+    let slot = cache.entry(path).or_insert_with(CacheSlot::empty);
     let module = sanitize(module);
     // One test can record two fixtures under one key. Keep each fingerprint's spans; replacing
     // the version slot would drop the earlier fixture and the next run would miss it.
-    let current = archive
-        .modules
-        .get(&module)
-        .and_then(|entries| entries.get(key))
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let (mine, rest): (Vec<Span>, Vec<Span>) = current
-        .iter()
-        .copied()
-        .partition(|span| span.channel == compiler.channel && span.fingerprint == fingerprint);
-    let mut updated = revised_spans(&mine, compiler, fingerprint, blob);
-    updated.extend(rest);
-    let unchanged = archive
-        .modules
-        .get(&module)
-        .and_then(|entries| entries.get(key))
-        == Some(&updated)
-        && archive.blobs.contains_key(&blob);
+    let (updated, unchanged) = {
+        let current = slot
+            .archive
+            .modules
+            .get(&module)
+            .and_then(|entries| entries.get(key))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (mine, rest): (Vec<Span>, Vec<Span>) = current
+            .iter()
+            .copied()
+            .partition(|span| span.channel == compiler.channel && span.fingerprint == fingerprint);
+        let mut updated = revised_spans(&mine, compiler, fingerprint, blob);
+        updated.extend(rest);
+        let unchanged = slot
+            .archive
+            .modules
+            .get(&module)
+            .and_then(|entries| entries.get(key))
+            == Some(&updated)
+            && slot.archive.blobs.contains_key(&blob);
+        (updated, unchanged)
+    };
     if unchanged {
-        if let Some(stamp) = stamp {
-            cache.insert(path, CacheSlot { stamp, archive });
-        }
         return;
     }
-    archive
+    slot.archive
         .modules
-        .entry(module)
+        .entry(module.clone())
         .or_default()
         .insert(key.to_string(), updated);
-    archive.insert_blob(blob, raw);
-    write_atomic(&path, &compress(&archive.body));
-    let stamp = file_stamp(&path).expect("written class-dump archive");
-    cache.insert(path, CacheSlot { stamp, archive });
+    slot.archive.insert_blob(blob, raw);
+    slot.dirty.insert((module, key.to_string()));
+    ensure_flush_at_exit();
 }
 
 fn revised_spans(
@@ -635,6 +636,7 @@ fn merge_spans(
 }
 
 /// One process-wide cache. The archive is decompressed once; later lookups copy one payload.
+/// Stores stay in memory until the process exits, which writes each dirty archive once.
 fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, CacheSlot>>> =
         std::sync::OnceLock::new();
@@ -642,8 +644,21 @@ fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
 }
 
 struct CacheSlot {
-    stamp: Stamp,
+    /// Stamp of the file this memory was reconciled with. `None` when that file does not exist yet.
+    stamp: Option<Stamp>,
     archive: Archive,
+    /// Module/key pairs changed in memory and not yet written.
+    dirty: BTreeSet<(String, String)>,
+}
+
+impl CacheSlot {
+    fn empty() -> Self {
+        Self {
+            stamp: None,
+            archive: Archive::empty(),
+            dirty: BTreeSet::new(),
+        }
+    }
 }
 
 type Stamp = (u64, u32, u64);
@@ -656,9 +671,20 @@ struct Archive {
 }
 
 impl Archive {
+    fn empty() -> Self {
+        Self::from_parts(BTreeMap::new(), BTreeMap::new())
+    }
+
     fn blob(&self, id: u128) -> Option<&[u8]> {
         let range = self.blobs.get(&id)?;
         self.body.get(range.clone())
+    }
+
+    fn owned_blobs(&self) -> BTreeMap<u128, Vec<u8>> {
+        self.blobs
+            .iter()
+            .map(|(id, range)| (*id, self.body[range.clone()].to_vec()))
+            .collect()
     }
 
     fn insert_blob(&mut self, id: u128, raw: Vec<u8>) {
@@ -820,33 +846,160 @@ fn cached_archive<'a>(
     path: &Path,
     cache: &'a mut HashMap<PathBuf, CacheSlot>,
 ) -> Option<&'a Archive> {
-    let stamp = file_stamp(path)?;
-    let current = cache.get(path).is_some_and(|slot| slot.stamp == stamp);
-    if !current {
-        cache.insert(
-            path.to_path_buf(),
-            CacheSlot {
-                stamp,
-                archive: Archive::parse(decompress(&std::fs::read(path).ok()?)),
-            },
-        );
+    reconcile(path, cache);
+    let slot = cache.get(path)?;
+    if slot.stamp.is_none() && slot.dirty.is_empty() {
+        return None;
     }
-    cache.get(path).map(|slot| &slot.archive)
+    Some(&slot.archive)
 }
 
-fn take_archive(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) -> Archive {
-    if let Some(stamp) = file_stamp(path) {
-        if let Some(slot) = cache.remove(path) {
-            if slot.stamp == stamp {
-                return slot.archive;
+/// Pull a file written by another process into memory without dropping dumps this process has not
+/// published yet.
+fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
+    let on_disk = file_stamp(path);
+    let Some(slot) = cache.remove(path) else {
+        if let Some(stamp) = on_disk {
+            if let Some(archive) = read_archive(path) {
+                cache.insert(
+                    path.to_path_buf(),
+                    CacheSlot {
+                        stamp: Some(stamp),
+                        archive,
+                        dirty: BTreeSet::new(),
+                    },
+                );
             }
         }
-        return Archive::parse(decompress(
-            &std::fs::read(path).expect("read class-dump archive"),
-        ));
+        return;
+    };
+    if slot.stamp == on_disk {
+        cache.insert(path.to_path_buf(), slot);
+        return;
     }
-    cache.remove(path);
-    Archive::from_parts(BTreeMap::new(), BTreeMap::new())
+    if slot.dirty.is_empty() {
+        if let Some(stamp) = on_disk {
+            if let Some(archive) = read_archive(path) {
+                cache.insert(
+                    path.to_path_buf(),
+                    CacheSlot {
+                        stamp: Some(stamp),
+                        archive,
+                        dirty: BTreeSet::new(),
+                    },
+                );
+                return;
+            }
+        }
+        cache.insert(path.to_path_buf(), slot);
+        return;
+    }
+    let mut disk = read_archive(path).unwrap_or_else(Archive::empty);
+    merge_dirty(&mut disk, &slot.archive, &slot.dirty);
+    cache.insert(
+        path.to_path_buf(),
+        CacheSlot {
+            stamp: on_disk,
+            archive: disk,
+            dirty: slot.dirty,
+        },
+    );
+}
+
+fn merge_dirty(into: &mut Archive, from: &Archive, dirty: &BTreeSet<(String, String)>) {
+    let mut blobs = into.owned_blobs();
+    for (module, key) in dirty {
+        let Some(spans) = from
+            .modules
+            .get(module)
+            .and_then(|entries| entries.get(key))
+        else {
+            continue;
+        };
+        for span in spans {
+            if let Some(raw) = from.blob(span.blob) {
+                blobs.insert(span.blob, raw.to_vec());
+            }
+        }
+        into.modules
+            .entry(module.clone())
+            .or_default()
+            .insert(key.clone(), spans.clone());
+    }
+    let mut referenced = BTreeSet::new();
+    for entries in into.modules.values() {
+        for spans in entries.values() {
+            for span in spans {
+                referenced.insert(span.blob);
+            }
+        }
+    }
+    blobs.retain(|id, _| referenced.contains(id));
+    let modules = std::mem::take(&mut into.modules);
+    *into = Archive::from_parts(modules, blobs);
+}
+
+fn read_archive(path: &Path) -> Option<Archive> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(Archive::parse(decompress(&bytes)))
+}
+
+/// Write every archive this process has changed. A directory that has already been removed is
+/// skipped, so a test that deletes its scratch root does not recreate it.
+fn flush_dirty_archives() {
+    let paths: Vec<PathBuf> = {
+        let cache = dump_cache().lock().expect("class-dump cache");
+        cache
+            .iter()
+            .filter(|(_, slot)| !slot.dirty.is_empty())
+            .map(|(path, _)| path.clone())
+            .collect()
+    };
+    for path in paths {
+        if let Some(root) = path.parent() {
+            flush_archive(root);
+        }
+    }
+}
+
+fn flush_archive(root: &Path) {
+    let path = archive_path(root);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let mut cache = dump_cache().lock().expect("class-dump cache");
+    if cache.get(&path).is_none_or(|slot| slot.dirty.is_empty()) {
+        return;
+    }
+    if !parent.exists() {
+        cache.remove(&path);
+        return;
+    }
+    let _lock = lock_directory(parent);
+    reconcile(&path, &mut cache);
+    let Some(slot) = cache.get(&path) else {
+        return;
+    };
+    if slot.dirty.is_empty() {
+        return;
+    }
+    let bytes = compress(&slot.archive.body);
+    write_atomic(&path, &bytes);
+    let stamp = file_stamp(&path).expect("written class-dump archive");
+    let slot = cache.get_mut(&path).expect("class-dump slot");
+    slot.stamp = Some(stamp);
+    slot.dirty.clear();
+}
+
+fn ensure_flush_at_exit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::atexit(flush_at_exit);
+    });
+}
+
+extern "C" fn flush_at_exit() {
+    flush_dirty_archives();
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {
@@ -1687,6 +1840,7 @@ mod tests {
             cached_fingerprint,
             &files(b"cached bytes"),
         );
+        flush_archive(&root);
         let archive_before = std::fs::read(archive_path(&root)).expect("partial archive");
         let mut compiles = 0u32;
 
@@ -1885,6 +2039,7 @@ mod tests {
         let replayed = replay_class_dump_with_policy(&args, &root, Some(release), false, true)
             .expect("the existing source replays from the partial cache");
         assert_eq!(replayed.files.get("pkg/A").unwrap(), b"cached class bytes");
+        flush_archive(&root);
         let archive_before = std::fs::read(archive_path(&root)).expect("partial archive");
 
         std::fs::write(&source, "fun added() = 2\n").unwrap();
@@ -2364,6 +2519,115 @@ mod tests {
     }
 
     #[test]
+    fn dumps_stay_in_memory_until_the_process_publishes_the_archive() {
+        let root = temp_root("defer");
+        let release = version("2.4.20");
+        let first = fingerprint_parts(&[b"one"]);
+        let second = fingerprint_parts(&[b"two"]);
+        store_files(
+            &root,
+            "mod",
+            "case|A|default|plain",
+            release,
+            first,
+            &files(b"a"),
+        );
+        store_files(
+            &root,
+            "mod",
+            "case|B|default|plain",
+            release,
+            second,
+            &files(b"b"),
+        );
+        assert!(
+            !archive_path(&root).exists(),
+            "a dump is not written after each store"
+        );
+        assert_eq!(
+            load_files(&root, "mod", "case|A|default|plain", release, first)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            load_files(&root, "mod", "case|B|default|plain", release, second)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"b"
+        );
+        flush_archive(&root);
+        let published = std::fs::read(archive_path(&root)).expect("published archive");
+        store_files(
+            &root,
+            "mod",
+            "case|A|default|plain",
+            release,
+            first,
+            &files(b"a"),
+        );
+        flush_archive(&root);
+        assert_eq!(
+            std::fs::read(archive_path(&root)).expect("unchanged archive"),
+            published,
+            "an unchanged dump does not rewrite the archive"
+        );
+
+        let foreign_root = temp_root("defer-foreign");
+        let foreign = fingerprint_parts(&[b"foreign"]);
+        store_files(
+            &foreign_root,
+            "mod",
+            "case|C|default|plain",
+            release,
+            foreign,
+            &files(b"c"),
+        );
+        flush_archive(&foreign_root);
+        let foreign_bytes = std::fs::read(archive_path(&foreign_root)).expect("foreign archive");
+        store_files(
+            &root,
+            "mod",
+            "case|D|default|plain",
+            release,
+            fingerprint_parts(&[b"local"]),
+            &files(b"d"),
+        );
+        std::fs::write(archive_path(&root), &foreign_bytes).expect("replace archive");
+        flush_archive(&root);
+        assert_eq!(
+            load_files(&root, "mod", "case|C|default|plain", release, foreign)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"c",
+            "a flush keeps entries another process published"
+        );
+        assert_eq!(
+            load_files(
+                &root,
+                "mod",
+                "case|D|default|plain",
+                release,
+                fingerprint_parts(&[b"local"])
+            )
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+            b"d",
+            "a flush keeps dumps this process has not published"
+        );
+        assert!(
+            load_files(&root, "mod", "case|A|default|plain", release, first).is_none(),
+            "a replaced archive does not keep entries this process already published"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&foreign_root);
+    }
+
+    #[test]
     fn the_dump_archive_is_outside_the_repository_inputs() {
         let root = dumps_root();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2372,6 +2636,7 @@ mod tests {
     }
 
     fn disk_index(root: &Path) -> String {
+        flush_archive(root);
         let raw = decompress(&std::fs::read(archive_path(root)).unwrap());
         let end = raw.iter().position(|byte| *byte == 0).unwrap();
         String::from_utf8(raw[..end].to_vec()).unwrap()
