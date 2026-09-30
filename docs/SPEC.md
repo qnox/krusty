@@ -2103,6 +2103,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **An unresolved conditional branch does not discard the other branch's type.** An error
+  type is a subtype of every type, so the common supertype of a real branch and an unresolved
+  one is the real branch: `if (flag) "ok" else Missing.x` is `String`, `if (flag) Missing.x else
+  null` is `Nothing?`, and `if (flag) ConcurrentHashMap<Class<*>, String>() else Missing.create()`
+  keeps the map, including when that `if` is a property initializer (`val cache = if ...`).
+  A later `cache.get(key)` therefore selects the map member, not a same-package
+  generic extension `fun <T> Any.get(key: Any): T` whose `T` cannot be inferred. `when` and `?:`
+  use the same join. Two unresolved branches stay an error type, so they add no mismatch against
+  the expected type. Test:
+  `error_branch_join_e2e::an_unresolved_conditional_branch_keeps_the_other_branch_type`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

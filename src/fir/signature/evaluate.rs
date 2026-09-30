@@ -1264,14 +1264,39 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     } => {
                         let operand_expressions = graph.operands(operands).to_vec();
                         let mut resolved_operands = Vec::new();
+                        // A branch that does not resolve is that branch's own diagnostic. It must
+                        // not discard the join: `val cache = if (c) ConcurrentHashMap() else
+                        // Missing.create()` keeps the map, and `if (c) Missing.x else null` is
+                        // `Nothing?`. ResolvedTy cannot carry an error, so a failed operand is the
+                        // error type of the checker join and is simply absent from the operands
+                        // that do resolve. Every operand is still evaluated, in order, so each
+                        // branch reports itself.
+                        let mut branch_failure = None;
                         for operand in operand_expressions.iter().copied() {
-                            resolved_operands.push(evaluate_expression(
+                            match evaluate_expression(
                                 semantics, operand, graph, demand, memo, computing,
-                            )?);
+                            ) {
+                                Ok(resolved) => resolved_operands.push(resolved),
+                                Err(diagnostic) => {
+                                    branch_failure.get_or_insert(diagnostic);
+                                }
+                            }
                         }
                         let scope = graph
                             .scope(scope)
                             .expect("a signature join scope must belong to its graph");
+                        if let Some(diagnostic) = branch_failure {
+                            if resolved_operands.is_empty() {
+                                return Err(diagnostic);
+                            }
+                            if resolved_operands.len() == 1
+                                && resolved_operands[0].get() == Ty::Null
+                            {
+                                return crate::fir::ResolvedTy::new(Ty::nullable(Ty::Nothing))
+                                    .map_err(|_| diagnostic);
+                            }
+                            return semantics.least_upper_bound(scope, origin, &resolved_operands);
+                        }
                         // Conditional branches constrain return-only generic calls in either source
                         // order. First evaluate every branch freely, then re-evaluate only a branch
                         // whose result is the semantic supertype of its siblings. Supplying that

@@ -36022,11 +36022,30 @@ pub(crate) fn semantic_common_supertype_inner(
     b: Ty,
     visiting: &mut std::collections::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
-    if a == Ty::Error || b == Ty::Error {
-        return Some(Ty::Error);
-    }
     if a == b {
         return Some(a);
+    }
+    // An error type is a subtype of every type and has no inhabitant of its own. The common
+    // supertype of a real branch and an unresolved one is the real branch (`if (c) "ok" else
+    // Missing.x` is `String`; `if (c) map else Missing.create()` keeps `map`'s members). Folding
+    // the error in as the result discarded that type, so a later call was resolved on the error
+    // and could select an unrelated generic extension. Two errors compare equal above and stay an
+    // error, so a join of two unresolved branches does not invent a mismatch against the expected
+    // type. A bare `null` beside an error generalizes to `Nothing?`, the same type `null` has on
+    // its own (`if (c) Missing.x else null`).
+    if a == Ty::Error {
+        return Some(if b == Ty::Null {
+            Ty::nullable(Ty::Nothing)
+        } else {
+            b
+        });
+    }
+    if b == Ty::Error {
+        return Some(if a == Ty::Null {
+            Ty::nullable(Ty::Nothing)
+        } else {
+            a
+        });
     }
     if let (Ty::TyParam(left, _), Ty::TyParam(right, _)) = (a, b) {
         if left == right {
