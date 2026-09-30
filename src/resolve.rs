@@ -69,6 +69,7 @@ mod context_sensitive_resolution;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
+mod definitely_non_null_bindings;
 mod dependency_platform;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
@@ -36007,23 +36008,6 @@ pub(crate) fn definitely_non_null_ty(ty: Ty) -> Ty {
     ty.definitely_non_null()
 }
 
-/// The bound added by `T & Bound` when `expected` is that intersection and `actual` is the same
-/// parameter with the nullable bound the intersection removed. `String` against `T & Any` is not
-/// this relation.
-pub(crate) fn definitely_non_null_intersection_bound(expected: Ty, actual: Ty) -> Option<Ty> {
-    let Ty::TyParam(expected_name, expected_bound) = expected.non_null() else {
-        return None;
-    };
-    let Ty::TyParam(actual_name, actual_bound) = actual.non_null() else {
-        return None;
-    };
-    (expected_name == actual_name
-        && actual_bound.upper_bound_admits_null()
-        && !expected_bound.upper_bound_admits_null()
-        && actual_bound.definitely_non_null() == *expected_bound)
-        .then_some(*expected_bound)
-}
-
 pub(crate) fn semantic_common_supertype_inner(
     source: &dyn SymbolSource,
     oracle: &dyn crate::assignable::TypeOracle,
@@ -44508,17 +44492,11 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
-            crate::symbol_resolver::tighten_definitely_non_null_bindings(
+            self.tighten_definitely_non_null_bindings(
                 &result_signature,
                 &mut bindings,
                 type_args.len(),
-                |actual, bound| {
-                    self.generic_bound_admits_with_flow_intersection(
-                        actual,
-                        bound,
-                        &flow_intersections,
-                    )
-                },
+                &flow_intersections,
             );
             if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
                 &result_signature,
@@ -44679,17 +44657,11 @@ impl<'a> Checker<'a> {
                     &mut bindings,
                     inferred_from_sam,
                 );
-                crate::symbol_resolver::tighten_definitely_non_null_bindings(
+                self.tighten_definitely_non_null_bindings(
                     &result_signature,
                     &mut bindings,
                     type_args.len(),
-                    |actual, bound| {
-                        self.generic_bound_admits_with_flow_intersection(
-                            actual,
-                            bound,
-                            &flow_intersections,
-                        )
-                    },
+                    &flow_intersections,
                 );
                 if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
                     &result_signature,
@@ -61325,7 +61297,7 @@ impl<'a> Checker<'a> {
         // to `Any` as well, but it is not `Any`: the same parameter with a nullable bound is not a
         // value of that intersection.
         if !expected.is_nullable()
-            && definitely_non_null_intersection_bound(expected, actual).is_some()
+            && crate::assignable::definitely_non_null_intersection_bound(expected, actual).is_some()
         {
             self.report_assignability_error(declared_expected, declared_actual, span, ctx);
             return;
@@ -61622,7 +61594,9 @@ impl<'a> Checker<'a> {
         let actual_name = self.diagnostic_type_name(actual, &context);
         // `T` is not a subtype of `T & Any`. An argument is checked against the bound that the
         // intersection adds (`Any`); a result is checked against the intersection itself.
-        if let Some(bound) = definitely_non_null_intersection_bound(expected, actual) {
+        if let Some(bound) =
+            crate::assignable::definitely_non_null_intersection_bound(expected, actual)
+        {
             let bound_name = self.diagnostic_type_name(bound, &context);
             if ctx.ends_with("argument") {
                 expected_name = bound_name;

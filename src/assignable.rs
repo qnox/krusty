@@ -147,6 +147,23 @@ pub fn is_subtype(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
     assignable_inner(cx, oracle, sub, sup)
 }
 
+/// The bound added by `T & Bound` when `expected` is that intersection and `actual` is the same
+/// parameter with the nullable bound the intersection removed. `String` against `T & Any` is not
+/// this relation.
+pub(crate) fn definitely_non_null_intersection_bound(expected: Ty, actual: Ty) -> Option<Ty> {
+    let Ty::TyParam(expected_name, expected_bound) = expected.non_null() else {
+        return None;
+    };
+    let Ty::TyParam(actual_name, actual_bound) = actual.non_null() else {
+        return None;
+    };
+    (expected_name == actual_name
+        && actual_bound.upper_bound_admits_null()
+        && !expected_bound.upper_bound_admits_null()
+        && actual_bound.definitely_non_null() == *expected_bound)
+        .then_some(*expected_bound)
+}
+
 fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
     if sub == sup {
         return true;
@@ -155,16 +172,11 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // may be normalized differently while a generic call is instantiated, so same-named parameters
     // stay one type. The exception is a definitely-non-null intersection: `<T>` (bound `Any?`) is
     // not a subtype of `T & Any`, while `T & Any` remains a subtype of `T`.
-    if let (Ty::TyParam(sub_name, sub_bound), Ty::TyParam(sup_name, sup_bound)) = (sub, sup) {
-        if sub_name == sup_name {
-            if sub_bound.upper_bound_admits_null()
-                && !sup_bound.upper_bound_admits_null()
-                && sub_bound.definitely_non_null() == *sup_bound
-            {
-                return false;
-            }
-            return true;
-        }
+    if definitely_non_null_intersection_bound(sup, sub).is_some() {
+        return false;
+    }
+    if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
+        return true;
     }
     if sub == Ty::Error || sup == Ty::Error {
         return true;
