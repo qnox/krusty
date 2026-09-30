@@ -19,6 +19,10 @@ mod callable_shapes;
 mod candidate_access;
 mod classifier_associated;
 mod classifier_scope;
+
+pub(crate) use classifier_scope::{
+    classifier_candidates_at_import_level, classifier_precedence_levels, ClassifierImportLevel,
+};
 mod declaration_specificity;
 mod generic_inference;
 mod hierarchy_projection;
@@ -92,7 +96,11 @@ impl CallableImport {
 pub(crate) struct FunctionImportScope {
     explicit: std::collections::HashMap<String, CallableImport>,
     ambiguous_explicit: std::collections::HashSet<String>,
+    /// Callable precedence: own package, explicit stars, Kotlin default stars, platform defaults.
     levels: [Vec<TypeName>; 4],
+    /// Classifier precedence. Builtin classifiers outrank explicit stars; see
+    /// [`classifier_scope::classifier_precedence_levels`].
+    classifier_levels: Vec<classifier_scope::ClassifierImportLevel>,
 }
 
 /// Classifier candidates contributed by one star-import precedence level. A star owner may denote
@@ -132,10 +140,12 @@ impl FunctionImportScope {
         explicit: std::collections::HashMap<String, CallableImport>,
         levels: [Vec<TypeName>; 4],
     ) -> Self {
+        let classifier_levels = classifier_scope::classifier_precedence_levels(&levels);
         Self {
             explicit,
             ambiguous_explicit: std::collections::HashSet::new(),
             levels,
+            classifier_levels,
         }
     }
 
@@ -172,6 +182,10 @@ impl FunctionImportScope {
 
     pub(crate) fn levels(&self) -> &[Vec<TypeName>; 4] {
         &self.levels
+    }
+
+    pub(crate) fn classifier_levels(&self) -> &[classifier_scope::ClassifierImportLevel] {
+        &self.classifier_levels
     }
 }
 

@@ -107,6 +107,13 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
+        match self {
+            Self::Direct(source) => source.is_builtin_classifier(internal),
+            Self::Memoized(source) => source.is_builtin_classifier(internal),
+        }
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         match self {
             Self::Direct(source) => source.symbols(namespace, name),

@@ -4849,6 +4849,10 @@ impl JvmLibraries {
 }
 
 impl SymbolSource for JvmLibraries {
+    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
+        self.cp.builtin_classifier_name(internal).is_some()
+    }
+
     /// Both answered by the classpath, which is where this provider interned them.
     fn external_callable(
         &self,

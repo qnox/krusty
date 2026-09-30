@@ -5507,13 +5507,21 @@ pub const KOTLIN_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
     "kotlin.text",
 ];
 
-/// A file's star/implicit import packages (internal form) grouped by kotlinc's descending precedence:
+/// Packages searched for simple default imports. A class found here is a simple import only when
+/// it is a `.kotlin_builtins` classifier (`List`); `ArrayList` and `Pair` stay default stars.
+/// Callable lookup does not use this split.
+pub const KOTLIN_NAMED_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
+    "kotlin",
+    "kotlin.annotation",
+    "kotlin.collections",
+    "kotlin.ranges",
+];
+
+/// A file's star/implicit import packages (internal form) grouped for callable lookup, descending:
 /// L1 the file's own package (same-package), L2 explicit star imports (`import a.b.*`), L3 the Kotlin
 /// default imports, L4 the PLATFORM default imports (`java.lang`, `kotlin.jvm`). Kotlin defaults outrank
 /// platform defaults so a name declared in BOTH (`Comparable`, `Number`, `CharSequence` — in `kotlin.*`
-/// AND `java.lang.*`) binds to the Kotlin one, exactly as kotlinc, rather than looking ambiguous. The
-/// leveled form the spec's name resolution walks — the single source both the signature pass and the
-/// [`Checker`] build their import set from.
+/// AND `java.lang.*`) binds to the Kotlin one, exactly as kotlinc, rather than looking ambiguous.
 fn import_levels(
     file: &File,
     platform_defaults: &[&str],
@@ -5559,7 +5567,7 @@ fn import_levels(
 fn classifier_from_imports<S: SymbolSource + ?Sized>(
     name: &str,
     explicit: &HashMap<String, String>,
-    levels: &[Vec<TypeName>],
+    levels: &[crate::symbol_resolver::ClassifierImportLevel],
     source: &S,
 ) -> InheritedNestedClassifier {
     if let Some(fq) = explicit.get(name) {
@@ -5572,7 +5580,7 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
     }
     for level in levels {
         let hits =
-            crate::symbol_resolver::classifier_candidates_at_scope_level(source, name, level);
+            crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level);
         match hits.len() {
             0 => continue,
             1 => return InheritedNestedClassifier::Found(hits[0]),
@@ -16040,10 +16048,10 @@ impl<'a> Checker<'a> {
         let levels = {
             let source = self.fed_source();
             self.function_import_scope
-                .levels()
+                .classifier_levels()
                 .iter()
                 .map(|level| {
-                    crate::symbol_resolver::classifier_candidates_at_scope_level(
+                    crate::symbol_resolver::classifier_candidates_at_import_level(
                         &source, name, level,
                     )
                     .into_iter()
@@ -27560,8 +27568,8 @@ val result = object { fun value(): String = captured }
             "Thing",
             &HashMap::new(),
             &[
-                vec![crate::types::type_name("callable")],
-                vec![crate::types::type_name("fallback")],
+                vec![crate::types::type_name("callable")].into(),
+                vec![crate::types::type_name("fallback")].into(),
             ],
             &ClassifierImportSource,
         );
@@ -27579,7 +27587,8 @@ val result = object { fun value(): String = captured }
             &[vec![
                 crate::types::type_name("alias_a"),
                 crate::types::type_name("alias_b"),
-            ]],
+            ]
+            .into()],
             &ClassifierImportSource,
         );
         assert_eq!(
@@ -27596,7 +27605,8 @@ val result = object { fun value(): String = captured }
             &[vec![
                 crate::types::type_name("distinct_a"),
                 crate::types::type_name("distinct_b"),
-            ]],
+            ]
+            .into()],
             &ClassifierImportSource,
         );
         assert_eq!(resolved, InheritedNestedClassifier::Ambiguous);
@@ -37028,7 +37038,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
             )
         },
     );
-    let import_levels = function_import_scope.levels().clone();
+    let import_levels = function_import_scope.classifier_levels().to_vec();
     let mut checker = Checker {
         file,
         libraries: syms.libraries(),
@@ -39856,9 +39866,8 @@ struct Checker<'a> {
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
     imports: HashMap<String, String>,
-    /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars, Kotlin
-    /// defaults, platform defaults) — the import set [`Self::imported_type_internal`] resolves against.
-    import_levels: [Vec<TypeName>; 4],
+    /// Classifier import rungs. Callable lookup uses [`Self::function_import_scope`]'s order.
+    import_levels: Vec<crate::symbol_resolver::ClassifierImportLevel>,
     function_import_scope: crate::symbol_resolver::FunctionImportScope,
     /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
@@ -50992,11 +51001,8 @@ impl<'a> Checker<'a> {
                     } else if let Some(classifier) = self.same_package_classifier_name(root_name) {
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some(classifier) =
-                        self.scoped_source_alias_classifier(scope, root_name)
+                        self.alias_ahead_of_imported_classifier(scope, root_name, &source)
                     {
-                        // File/package/import aliases occupy the same levels as ordinary
-                        // classifiers. They are considered only after the higher lexical and
-                        // same-package classifier rungs have declined this spelling.
                         ResolvedQualifier::Classifier(classifier)
                     } else {
                         let imported = classifier_from_imports(
@@ -51572,6 +51578,7 @@ impl<'a> Checker<'a> {
         let source = self.fed_source();
         for level in &self.import_levels {
             let candidates = level
+                .packages
                 .iter()
                 .filter_map(|&package| {
                     classifier_identity(
@@ -51579,6 +51586,7 @@ impl<'a> Checker<'a> {
                         crate::symbol_source::SymbolNamespace::Package(package),
                         name,
                     )
+                    .filter(|&target| !level.builtins_only || source.is_builtin_classifier(target))
                     .map(|target| (package, self.libraries.canonical_source_type_name(target)))
                 })
                 .collect::<Vec<_>>();
@@ -52176,9 +52184,10 @@ impl<'a> Checker<'a> {
         }
         for level in &self.import_levels {
             let mut hit: Option<TypeName> = None;
-            for &package in level {
+            for &package in &level.packages {
                 let Some(candidate) = crate::types::existing_type_name_child(package, name)
                     .filter(|&id| declared(id))
+                    .filter(|&id| !level.builtins_only || self.libraries.is_builtin_classifier(id))
                 else {
                     continue;
                 };

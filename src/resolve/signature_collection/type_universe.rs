@@ -37,6 +37,10 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
         self.libraries.platform_flexible_upper_bound(lower)
     }
 
+    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
+        self.libraries.is_builtin_classifier(internal)
+    }
+
     fn symbols(
         &self,
         namespace: crate::symbol_source::SymbolNamespace,
@@ -302,7 +306,12 @@ pub(in crate::resolve) fn source_type_universe(
                 .iter()
                 .map(|package| type_name(&package.replace('.', "/")))
                 .collect();
-            let levels = [vec![own], explicit_star, kotlin_defaults, platform_defaults];
+            let levels = crate::symbol_resolver::classifier_precedence_levels(&[
+                vec![own],
+                explicit_star,
+                kotlin_defaults,
+                platform_defaults,
+            ]);
             let mut file_imports = HashMap::new();
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
                 HashMap::new();
@@ -397,14 +406,19 @@ pub(in crate::resolve) fn source_type_universe(
                         .iter()
                         .find_map(|level| {
                             let candidates = level
+                                .packages
                                 .iter()
                                 .filter_map(|&package| {
-                                    classifier_identity(
+                                    let target = classifier_identity(
                                         &source,
                                         crate::symbol_source::SymbolNamespace::Package(package),
                                         &source_name,
-                                    )
-                                    .map(|target| (package, target))
+                                    )?;
+                                    if level.builtins_only && !source.is_builtin_classifier(target)
+                                    {
+                                        return None;
+                                    }
+                                    Some((package, target))
                                 })
                                 .collect::<Vec<_>>();
                             if candidates.is_empty() {

@@ -324,6 +324,11 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
+    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
+        self.platform.is_builtin_classifier(internal)
+            || self.source().is_builtin_classifier(internal)
+    }
+
     /// The compiled platform assigns every dependency identity this federation hands out.
     fn external_callable(
         &self,

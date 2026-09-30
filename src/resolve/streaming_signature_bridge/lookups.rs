@@ -543,10 +543,13 @@ impl ProductionSignatureSemantics<'_> {
                 .filter(|&id| expansion(id).is_some())?
         } else {
             let mut found = None;
-            for level in imports.levels() {
-                for &package in level {
+            for level in imports.classifier_levels() {
+                for &package in &level.packages {
                     let Some(candidate) = crate::types::existing_type_name_child(package, spelling)
                         .filter(|&id| expansion(id).is_some())
+                        .filter(|&id| {
+                            !level.builtins_only || self.table.libraries.is_builtin_classifier(id)
+                        })
                     else {
                         continue;
                     };
