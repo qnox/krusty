@@ -152,7 +152,7 @@ impl SerializeBody<'_> {
                 }
                 // The generic inlined shape lives on `$serializer`, so it uses the public getter.
                 let descriptor = ty_descriptor(ctx, ty)?;
-                Some(ir.add_expr(IrExpr::Call {
+                let call = ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
                         owner: serialized_name,
                         name: property_getter_name(name),
@@ -163,7 +163,9 @@ impl SerializeBody<'_> {
                     },
                     dispatch_receiver: Some(receiver),
                     args: vec![],
-                }))
+                });
+                super::bind_synthesized_getter(ir, call, foo_id, field_index as u32);
+                Some(call)
             };
         // Element `i` is written from backing field `field`; they differ after a transient property.
         for (i, &field) in elements.iter().enumerate() {

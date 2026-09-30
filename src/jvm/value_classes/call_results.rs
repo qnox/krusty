@@ -10,16 +10,19 @@ use crate::ir::{Callee, ExprId, IrFile};
 use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
 
-/// The two per-expression type facts lowering hands the representation analysis. They always travel
-/// together, and neither alone can classify a value-class result: `logical` says WHICH value class a
+/// The per-expression type facts lowering hands the representation analysis. They always travel
+/// together, and none alone can classify a value-class result: `logical` says WHICH value class a
 /// coerced read has after substitution, `declared` says whether the callee RETURNS one by declaration
 /// (so the physical result is its erased carrier) rather than merely producing one out of a generic
 /// slot (where it is a box). `List<TokenBox>.get` and `A.create(): A<String>` agree on the
-/// first and differ only on the second.
+/// first and differ only on the second. `property_declarations` is the same split for a property:
+/// a same-file `val result: Result<T>` is declared as that value class and stores its carrier, while
+/// `Box<T>.value` is declared as `T` and, once `T = Result<Boolean>`, occupies an erased slot as a box.
 #[derive(Clone, Copy)]
 pub(super) struct CallTypes<'a> {
     logical: &'a HashMap<u32, Ty>,
     declared: &'a HashMap<u32, Ty>,
+    property_declarations: &'a HashMap<u32, Ty>,
     statics: &'a [crate::ir::IrStatic],
 }
 
@@ -28,8 +31,19 @@ impl<'a> CallTypes<'a> {
         CallTypes {
             logical: &ir.logical_types,
             declared: &ir.call_declared_ret,
+            property_declarations: &ir.property_declaration_types,
             statics: &ir.statics,
         }
+    }
+
+    /// A same-file property declared as value class `X` whose representation is the unboxed
+    /// carrier. An erased `Object` physical stamp on that read is the carrier (`kotlin.Result`),
+    /// not the box a generic type-parameter slot would hold.
+    pub(super) fn unboxed_declared_property(&self, id: u32, under: &Under) -> Option<Ty> {
+        let declared = self.property_declarations.get(&id).copied()?;
+        let classifier = declared.non_null().obj_internal()?;
+        matches!(repr_of_ty(&declared, under), Repr::Unboxed(found) if found == classifier)
+            .then_some(declared)
     }
 
     /// The value class a static's storage was realized over, so `getstatic` yields the CARRIER and

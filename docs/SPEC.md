@@ -7900,6 +7900,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   beyond its descriptor. Tests: `tests/value_class_nothing_override_bridges_e2e.rs` (both classes'
   members in full against kotlinc; the calls through the interface at run time). Corpus:
   `inlineClasses/overrideReturnNothing`.
+- **A property declared as `Result<T>` stores the carrier.** `val result: Result<Boolean>` keeps
+  the success value in an `Object` field. Reading it and calling `getOrNull` passes that carrier
+  to `Result.isFailure-impl`; it is not a `kotlin.Result` box. A property declared as a type
+  parameter stays a box once that parameter is `Result` (`class Box<T>(val value: T)` read as
+  `Box<Result<Boolean>>`). The synthesized accessor's mangled JVM name is a fact of that property.
+  A call is renamed only when it was bound to the accessor; a member extension that shares the
+  property name (`val Boolean.result`) keeps `getResult`. Tests:
+  `tests/result_property_carrier_e2e.rs`. Corpus: `dataClasses/components/kt49812.kt`.
 - **A parameter bounded by a value class is bridged under the supertype's mangled name.** `fun
   foo(i: T?)` with `T : Inlined` erases its parameter to the value class, so its JVM name carries
   the value-class hash (`foo-<hash>(LInlined;)V`) while its generic `Signature` keeps `(TT;)V`:

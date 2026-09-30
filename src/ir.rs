@@ -1830,6 +1830,13 @@ pub(crate) struct IrLiftingEntry {
     pub lifted: bool,
 }
 
+/// A JVM call bound to one synthesized property accessor.
+#[derive(Clone, Copy, Debug)]
+pub struct SynthesizedAccessorCall {
+    pub class: u32,
+    pub property: u32,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2558,6 +2565,11 @@ pub struct IrFile {
     /// no accessor spelling or target descriptor. As with the JVM realization table below, the stable
     /// operation identity survives backend rewrites that move a property node to another arena slot.
     pub property_declaration_types: std::collections::HashMap<u32, Ty>,
+    /// A call expression the JVM serialization plugin bound to one synthesized property
+    /// accessor, by class and property index. The value-class pass renames only these calls
+    /// when it mangles that accessor. Other calls that share a JVM spelling stay bound to
+    /// their own declarations.
+    pub synthesized_accessor_calls: std::collections::HashMap<ExprId, SynthesizedAccessorCall>,
     /// Stable property-operation identity → checker-selected accessor identity and physical return.
     /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
     pub property_selected_accessors: std::collections::HashMap<u32, (String, Ty)>,
