@@ -1,8 +1,11 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod support_splice;
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
@@ -1645,11 +1648,11 @@ impl krusty_lsp::Analysis for WorkerHost {
                         krusty_lsp::MAX_SOURCE_SET_BYTES,
                     )
                     .map(|(sources, inferred_count, java_sources)| {
-                        (sources.to_vec(), inferred_count, java_sources)
+                        (Cow::Borrowed(sources), inferred_count, java_sources)
                     }),
-                _ => Ok((Vec::new(), 0, Vec::new())),
+                _ => Ok((Cow::Owned(Vec::new()), 0, Vec::new())),
             };
-            let (mut group_support, mut inferred_support_count, java_sources) = match loaded {
+            let (disk, inferred_count, java_sources) = match loaded {
                 Ok(loaded) => loaded,
                 Err(message) => {
                     fail_project_group(
@@ -1692,29 +1695,18 @@ impl krusty_lsp::Analysis for WorkerHost {
                 (Vec::new(), Vec::new())
             };
             let (friend_documents, dependency_documents) = visible_open_documents;
-            if !friend_documents.is_empty() {
-                group_support.splice(
-                    inferred_support_count..inferred_support_count,
-                    friend_documents
-                        .iter()
-                        .map(|(_, uri, source)| (uri.clone(), source.clone())),
-                );
-                inferred_support_count += friend_documents.len();
-            }
-            if !dependency_documents.is_empty() {
-                group_support.splice(
-                    inferred_support_count..inferred_support_count,
-                    dependency_documents
-                        .iter()
-                        .map(|(_, uri, source)| (uri.clone(), source.clone())),
-                );
-            }
+            let (group_support, inferred_support_count) = support_splice::spliced_support(
+                disk.as_ref(),
+                inferred_count,
+                &friend_documents,
+                &dependency_documents,
+            );
 
             let group_source_bytes = source_bytes(
                 document_indices
                     .iter()
                     .map(|&index| documents[index].1)
-                    .chain(group_support.iter().map(|(_, source)| source.as_str()))
+                    .chain(group_support.iter().map(|(_, source)| *source))
                     .chain(java_sources.iter().map(String::as_str)),
             );
             let fits_worker =
@@ -1749,7 +1741,6 @@ impl krusty_lsp::Analysis for WorkerHost {
                 java_sources,
                 navigation_file_remaps,
             };
-            let inputs = project_group_inputs(documents, &group);
             let fingerprint = project_group_fingerprint(documents, &group);
             // Resolved before the cache lookup because retention has to happen on both arms: a pass
             // that serves this group from cache still analyzed it, and a dump of one of its files
@@ -1764,6 +1755,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                 )
             });
             if let Some((classpath, language_arguments)) = group_config.as_ref() {
+                let inputs = project_group_inputs(documents, &group);
                 let retained_uris = project_group_uris(documents, &group);
                 let retained_sources = inputs
                     .iter()
@@ -1802,6 +1794,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                         &self.options,
                     )
                 });
+                let inputs = project_group_inputs(documents, &group);
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -2110,10 +2103,10 @@ fn project_group_compiler_config(
     (Some(classpath), language_arguments)
 }
 
-struct ProjectAnalysisGroup {
+struct ProjectAnalysisGroup<'a> {
     module_index: Option<usize>,
     document_indices: Vec<usize>,
-    support_documents: Vec<(String, String)>,
+    support_documents: Vec<(&'a str, &'a str)>,
     inferred_support_count: usize,
     java_sources: Vec<String>,
     navigation_file_remaps: Vec<(u32, u32)>,
@@ -2131,14 +2124,14 @@ fn open_documents_from_modules<'a>(
     visible_indices: &[usize],
     documents: &[(&'a str, &'a str)],
     module_assignments: &[Option<usize>],
-) -> Vec<(usize, String, String)> {
+) -> Vec<(usize, &'a str, &'a str)> {
     documents
         .iter()
         .zip(module_assignments)
         .enumerate()
         .filter_map(|(document_index, ((uri, source), assignment))| {
             if assignment.is_some_and(|index| visible_indices.contains(&index)) {
-                Some((document_index, (*uri).to_string(), (*source).to_string()))
+                Some((document_index, *uri, *source))
             } else {
                 None
             }
@@ -2162,7 +2155,7 @@ fn open_documents_from_modules<'a>(
 /// analysis hot path; only the dev-mode dump path pays for copies.
 fn project_group_slots<'a>(
     documents: &'a [(&'a str, &'a str)],
-    group: &'a ProjectAnalysisGroup,
+    group: &'a ProjectAnalysisGroup<'a>,
 ) -> impl Iterator<Item = (&'a str, krusty::source::SourceInput<'a>)> + 'a {
     documents
         .iter()
@@ -2187,7 +2180,7 @@ fn project_group_slots<'a>(
 
 fn project_group_inputs<'a>(
     documents: &'a [(&'a str, &'a str)],
-    group: &'a ProjectAnalysisGroup,
+    group: &'a ProjectAnalysisGroup<'a>,
 ) -> Vec<krusty::source::SourceInput<'a>> {
     project_group_slots(documents, group)
         .map(|(_, input)| input)
@@ -2195,7 +2188,10 @@ fn project_group_inputs<'a>(
 }
 
 /// Dump URIs parallel to `project_group_inputs`, blank wherever the slot is not dumpable.
-fn project_group_uris(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) -> Vec<String> {
+fn project_group_uris<'a>(
+    documents: &'a [(&'a str, &'a str)],
+    group: &'a ProjectAnalysisGroup<'a>,
+) -> Vec<String> {
     project_group_slots(documents, group)
         .map(|(uri, _)| uri.to_string())
         .collect()
@@ -2203,7 +2199,7 @@ fn project_group_uris(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) 
 
 fn register_canonical_support(
     documents: &[(&str, &str)],
-    group_support: &[(String, String)],
+    group_support: &[(&str, &str)],
     support_documents: &mut Vec<(String, String)>,
     support_indices: &mut HashMap<String, usize>,
     mut remaining_bytes: usize,
@@ -2212,16 +2208,16 @@ fn register_canonical_support(
 ) -> (Vec<(u32, u32)>, usize) {
     let mut added_bytes = 0usize;
     let mut remaps = Vec::with_capacity(group_support.len());
-    for (local_index, (uri, source)) in group_support.iter().enumerate() {
+    for (local_index, &(uri, source)) in group_support.iter().enumerate() {
         let canonical =
-            if let Some(index) = documents.iter().position(|(open_uri, _)| open_uri == uri) {
+            if let Some(index) = documents.iter().position(|(open_uri, _)| *open_uri == uri) {
                 index as u32
             } else if let Some(index) = support_indices.get(uri) {
                 (documents.len() + index) as u32
             } else if remaining_entries > 0 && source.len() <= remaining_bytes {
                 let index = support_documents.len();
-                support_indices.insert(uri.clone(), index);
-                support_documents.push((uri.clone(), source.clone()));
+                support_indices.insert(uri.to_string(), index);
+                support_documents.push((uri.to_string(), source.to_string()));
                 remaining_bytes -= source.len();
                 remaining_entries -= 1;
                 added_bytes += source.len();
@@ -2236,7 +2232,7 @@ fn register_canonical_support(
     (remaps, added_bytes)
 }
 
-fn project_group_fingerprint(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) -> u64 {
+fn project_group_fingerprint(documents: &[(&str, &str)], group: &ProjectAnalysisGroup<'_>) -> u64 {
     let mut fingerprint = DefaultHasher::new();
     documents.len().hash(&mut fingerprint);
     group.module_index.hash(&mut fingerprint);
@@ -2627,21 +2623,15 @@ mod tests {
                 &documents,
                 &assignments,
             ),
-            [(0, dependency_uri.clone(), documents[0].1.to_string())]
+            [(0, dependency_uri.as_str(), documents[0].1)]
         );
 
-        let dependency_support = (
-            "file:///dependency-support.kt".into(),
-            "fun helper() {}".into(),
-        );
-        let consumer_support = (
-            "file:///consumer-support.kt".into(),
-            "fun helper() {}".into(),
-        );
+        let dependency_support = ("file:///dependency-support.kt", "fun helper() {}");
+        let consumer_support = ("file:///consumer-support.kt", "fun helper() {}");
         let dependency_group = ProjectAnalysisGroup {
             module_index: Some(0),
             document_indices: vec![0],
-            support_documents: vec![dependency_support.clone()],
+            support_documents: vec![dependency_support],
             inferred_support_count: 1,
             java_sources: Vec::new(),
             navigation_file_remaps: vec![(3, 3)],
@@ -2649,10 +2639,7 @@ mod tests {
         let consumer_group = ProjectAnalysisGroup {
             module_index: Some(1),
             document_indices: vec![2],
-            support_documents: vec![
-                consumer_support.clone(),
-                (dependency_uri.clone(), documents[0].1.into()),
-            ],
+            support_documents: vec![consumer_support, (dependency_uri.as_str(), documents[0].1)],
             inferred_support_count: 1,
             java_sources: Vec::new(),
             navigation_file_remaps: vec![(3, 4), (4, 0)],
@@ -2663,7 +2650,7 @@ mod tests {
                 .iter()
                 .map(|input| input.text)
                 .collect::<Vec<_>>(),
-            [documents[0].1, "", "", dependency_support.1.as_str()]
+            [documents[0].1, "", "", dependency_support.1]
         );
         let consumer_inputs = project_group_inputs(&documents, &consumer_group);
         assert_eq!(
@@ -2671,13 +2658,7 @@ mod tests {
                 .iter()
                 .map(|input| input.text)
                 .collect::<Vec<_>>(),
-            [
-                "",
-                "",
-                documents[2].1,
-                consumer_support.1.as_str(),
-                documents[0].1
-            ]
+            ["", "", documents[2].1, consumer_support.1, documents[0].1]
         );
         let fingerprint = project_group_fingerprint(&documents, &consumer_group);
         let unrelated_changed = [
@@ -2848,22 +2829,16 @@ mod tests {
             ("file:///first-open.kt", "class First"),
             ("file:///second-open.kt", "class Second"),
         ];
-        let shared = ("file:///shared.kt".to_string(), "class Shared".to_string());
-        let first_support = vec![
-            shared.clone(),
-            (
-                "file:///first-support.kt".into(),
-                "class FirstSupport".into(),
-            ),
-            (documents[0].0.into(), documents[0].1.into()),
+        let shared = ("file:///shared.kt", "class Shared");
+        let first_support = [
+            shared,
+            ("file:///first-support.kt", "class FirstSupport"),
+            documents[0],
         ];
-        let second_support = vec![
-            shared.clone(),
-            (
-                "file:///second-support.kt".into(),
-                "class SecondSupport".into(),
-            ),
-            (documents[0].0.into(), documents[0].1.into()),
+        let second_support = [
+            shared,
+            ("file:///second-support.kt", "class SecondSupport"),
+            documents[0],
         ];
         let mut support_documents = Vec::new();
         let mut support_indices = HashMap::new();
@@ -2891,7 +2866,7 @@ mod tests {
         assert_eq!(
             support_documents
                 .iter()
-                .filter(|(uri, _)| uri == &shared.0)
+                .filter(|(uri, _)| uri == shared.0)
                 .count(),
             1
         );
@@ -2903,10 +2878,10 @@ mod tests {
     #[test]
     fn canonical_support_budget_sheds_navigation_without_failing_analysis() {
         let documents = [("file:///open.kt", "class Open")];
-        let support = vec![
-            ("file:///kept.kt".to_string(), "x".to_string()),
-            ("file:///shed.kt".to_string(), "yy".to_string()),
-            ("file:///also-shed.kt".to_string(), "zzz".to_string()),
+        let support = [
+            ("file:///kept.kt", "x"),
+            ("file:///shed.kt", "yy"),
+            ("file:///also-shed.kt", "zzz"),
         ];
         let mut support_documents = Vec::new();
         let mut support_indices = HashMap::new();
@@ -2923,7 +2898,13 @@ mod tests {
         );
 
         assert_eq!(added_bytes, 1);
-        assert_eq!(support_documents, [support[0].clone()]);
+        assert_eq!(
+            (
+                support_documents[0].0.as_str(),
+                support_documents[0].1.as_str()
+            ),
+            support[0]
+        );
         assert_eq!(remaps, [(1, 1), (2, u32::MAX), (3, u32::MAX - 1)]);
         assert_eq!(next_discarded, u32::MAX - 2);
     }
@@ -2961,7 +2942,7 @@ mod tests {
 
     /// A two-module fixture whose consumer group carries a support tail holding the *open*
     /// dependency file, modelled on `project_analysis_groups_preserve_global_slots`.
-    fn consumer_group_fixture() -> (String, String, ProjectAnalysisGroup) {
+    fn consumer_group_fixture() -> (String, String, ProjectAnalysisGroup<'static>) {
         let dependency_uri = url::Url::from_file_path("/workspace/dependency/src/First.kt")
             .unwrap()
             .to_string();
@@ -2972,12 +2953,9 @@ mod tests {
             module_index: Some(1),
             document_indices: vec![2],
             support_documents: vec![
-                (
-                    "file:///consumer-support.kt".into(),
-                    "fun helper() {}".into(),
-                ),
-                // Spliced in by `open_documents_from_modules`, so it carries the open text verbatim.
-                (dependency_uri.clone(), "fun dependency() {}".into()),
+                ("file:///consumer-support.kt", "fun helper() {}"),
+                // Open dependency text, carried as support rather than a dumpable slot.
+                ("file:///dependency.kt", "fun dependency() {}"),
             ],
             inferred_support_count: 1,
             java_sources: Vec::new(),
