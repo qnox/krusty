@@ -11,7 +11,7 @@
 //!
 //! The arguments were already validated against those bounds when the receiver type was FORMED, so
 //! re-narrowing during a supertype projection can only lose information — which is exactly what
-//! `ty_subst_applied_arguments` exists to avoid, and what the hierarchy walk now uses.
+//! applied-argument substitution exists to avoid, and what the hierarchy walk now uses.
 //!
 //! The axis is the VALUE: the same receiver with a non-null value compiled, and a pure-Kotlin
 //! `MutableMap<String, Any?>` compiled with a nullable one (its formals' bounds are `Any?`, so
