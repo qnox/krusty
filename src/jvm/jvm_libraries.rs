@@ -2254,7 +2254,6 @@ impl JvmLibraries {
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
-                    let internal = internal_name.render();
                     ci.fields.iter().find_map(|f| {
                         // A Kotlin companion-object instance field is always `public static final`, typed as the
                         // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
@@ -2265,9 +2264,17 @@ impl JvmLibraries {
                         if !public_static_final {
                             return None;
                         }
-                        let nested = format!("{internal}${}", f.name);
-                        (f.descriptor == format!("L{nested};"))
-                            .then(|| (f.name.clone(), type_name(&nested)))
+                        super::names::descriptor_is_nested_class(
+                            &f.descriptor,
+                            internal_name,
+                            &f.name,
+                        )
+                        .then(|| {
+                            (
+                                f.name.clone(),
+                                crate::types::type_name_nested_child(internal_name, &f.name),
+                            )
+                        })
                     })
                 })
                 .flatten();
@@ -2567,10 +2574,12 @@ impl JvmLibraries {
             // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
             const ACC_STATIC: u16 = 0x0008;
             let enum_entries: Vec<String> = if ci.access & crate::jvm::classreader::ACC_ENUM != 0 {
-                let enum_entry_descriptor = format!("L{};", internal_name.render());
                 ci.fields
                     .iter()
-                    .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == enum_entry_descriptor)
+                    .filter(|f| {
+                        f.access & ACC_STATIC != 0
+                            && super::names::descriptor_is_classifier(&f.descriptor, internal_name)
+                    })
                     .map(|f| f.name.clone())
                     .collect()
             } else {
@@ -3386,16 +3395,17 @@ fn interface_holder_method(
         return None;
     }
     let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
-    let descriptor = descriptor
-        .strip_prefix('(')
-        .map(|tail| format!("(L{};{tail}", interface.render()))?;
-    cp.find_name(holder)
-        .is_some_and(|class| {
-            class.methods.iter().any(|method| {
-                method.is_static() && method.name == name && method.descriptor == descriptor
-            })
-        })
-        .then_some((holder, descriptor))
+    let class = cp.find_name(holder)?;
+    let method = class.methods.iter().find(|method| {
+        method.is_static()
+            && method.name == name
+            && crate::jvm::names::descriptor_prepends_classifier(
+                descriptor,
+                interface,
+                &method.descriptor,
+            )
+    })?;
+    Some((holder, method.descriptor.clone()))
 }
 
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
