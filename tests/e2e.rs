@@ -2144,6 +2144,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "var_smartcast_e2e.rs"]
 mod var_smartcast_e2e;
+#[path = "vararg_constructor_property_e2e.rs"]
+mod vararg_constructor_property_e2e;
 #[path = "vararg_e2e.rs"]
 mod vararg_e2e;
 #[path = "vararg_element_default_e2e.rs"]
