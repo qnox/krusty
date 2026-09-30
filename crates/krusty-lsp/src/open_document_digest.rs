@@ -38,11 +38,6 @@ pub fn next_document_lifetime() -> u64 {
     NEXT_DOCUMENT_LIFETIME.fetch_add(1, Ordering::Relaxed)
 }
 
-thread_local! {
-    static DIGEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static HASHED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Versions for the open documents of one interactive analysis.
 ///
 /// Dropping the guard clears the versions so a later index of the same URI cannot reuse an open
@@ -117,57 +112,56 @@ pub fn text_hash(uri: &str, text: &str) -> u64 {
 }
 
 fn digest_text(text: &str) -> u64 {
-    DIGEST_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
-    HASHED_BYTES.with(|bytes| bytes.set(bytes.get().saturating_add(text.len())));
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
 }
 
-#[doc(hidden)]
-pub fn digest_calls() -> usize {
-    DIGEST_CALLS.with(|calls| calls.get())
-}
-
-#[doc(hidden)]
-pub fn hashed_bytes() -> usize {
-    HASHED_BYTES.with(|bytes| bytes.get())
-}
-
-#[doc(hidden)]
-pub fn reset_digest_probe() {
-    VERSIONS.with(|versions| versions.borrow_mut().clear());
-    DIGESTS.with(|digests| digests.borrow_mut().clear());
-    DIGEST_CALLS.with(|calls| calls.set(0));
-    HASHED_BYTES.with(|bytes| bytes.set(0));
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{digest_calls, hashed_bytes, reset_digest_probe, text_hash, OpenDocumentVersions};
+    use super::{text_hash, OpenDocumentVersions, DIGESTS, VERSIONS};
+
+    fn reset_cache() {
+        VERSIONS.with(|versions| versions.borrow_mut().clear());
+        DIGESTS.with(|digests| digests.borrow_mut().clear());
+    }
+
+    fn replace_cached_hash(uri: &str, replacement: u64) {
+        DIGESTS.with(|digests| {
+            digests
+                .borrow_mut()
+                .get_mut(uri)
+                .expect("cached digest")
+                .hash = replacement;
+        });
+    }
+
+    fn cache_contains(uri: &str) -> bool {
+        DIGESTS.with(|digests| digests.borrow().contains_key(uri))
+    }
 
     #[test]
     fn an_unchanged_version_reuses_the_text_hash() {
-        reset_digest_probe();
+        reset_cache();
         let _versions = OpenDocumentVersions::install(&[("digest-test:a", 1, 1)]);
         let first = text_hash("digest-test:a", "fun same() {}");
-        let second = text_hash("digest-test:a", "fun same() {}");
-        assert_eq!(first, second);
-        assert_eq!(digest_calls(), 1);
+        let sentinel = first.wrapping_add(1);
+        replace_cached_hash("digest-test:a", sentinel);
+        assert_eq!(text_hash("digest-test:a", "fun same() {}"), sentinel);
         // The editor version is the identity of the text: did_change drops a non-increasing
         // version, so a repeated version is the same buffer and is not hashed again.
-        assert_eq!(text_hash("digest-test:a", "fun edit() {}"), first);
-        assert_eq!(digest_calls(), 1);
+        assert_eq!(text_hash("digest-test:a", "fun edit() {}"), sentinel);
     }
 
     #[test]
     fn a_new_version_or_length_hashes_again() {
-        reset_digest_probe();
+        reset_cache();
         let first = {
             let _versions = OpenDocumentVersions::install(&[("digest-test:a", 1, 1)]);
             text_hash("digest-test:a", "fun v1() {}")
         };
-        assert_eq!(digest_calls(), 1);
+        let sentinel = first.wrapping_add(1);
+        replace_cached_hash("digest-test:a", sentinel);
         let second = {
             let _versions = OpenDocumentVersions::install(&[("digest-test:a", 2, 1)]);
             let hash = text_hash("digest-test:a", "fun v2() {}");
@@ -175,64 +169,65 @@ mod tests {
             hash
         };
         assert_ne!(first, second);
-        assert_eq!(digest_calls(), 2);
+        assert_ne!(sentinel, second);
 
         let _versions = OpenDocumentVersions::install(&[("digest-test:a", 2, 1)]);
         let longer = text_hash("digest-test:a", "fun v2() {}!");
         assert_ne!(longer, second);
-        assert_eq!(digest_calls(), 3);
     }
 
     #[test]
     fn a_uri_that_leaves_the_open_set_is_hashed_again() {
-        reset_digest_probe();
+        reset_cache();
         let hash = {
             let _versions =
                 OpenDocumentVersions::install(&[("digest-test:a", 4, 4), ("digest-test:b", 1, 5)]);
             text_hash("digest-test:a", "fun a() {}")
         };
-        assert_eq!(digest_calls(), 1);
+        let sentinel = hash.wrapping_add(1);
+        replace_cached_hash("digest-test:a", sentinel);
         let _versions = OpenDocumentVersions::install(&[("digest-test:b", 1, 5)]);
+        assert!(!cache_contains("digest-test:a"));
         let again = {
             let _versions = OpenDocumentVersions::install(&[("digest-test:a", 4, 4)]);
             text_hash("digest-test:a", "fun a() {}")
         };
         assert_eq!(again, hash);
-        assert_eq!(digest_calls(), 2);
+        assert_ne!(again, sentinel);
     }
 
     #[test]
     fn hashing_without_a_version_does_not_reuse_or_fill_the_cache() {
-        reset_digest_probe();
+        reset_cache();
         let first = text_hash("digest-test:a", "fun a() {}");
         let second = text_hash("digest-test:a", "fun a() {}");
         assert_eq!(first, second);
-        assert_eq!(digest_calls(), 2);
+        assert!(!cache_contains("digest-test:a"));
         let _versions = OpenDocumentVersions::install(&[("digest-test:a", 1, 1)]);
         let _ = text_hash("digest-test:a", "fun a() {}");
-        assert_eq!(digest_calls(), 3);
+        assert!(cache_contains("digest-test:a"));
     }
 
     #[test]
     fn close_reopen_with_the_same_version_and_length_hashes_the_new_lifetime() {
-        reset_digest_probe();
+        reset_cache();
         let first = {
             let _versions = OpenDocumentVersions::install(&[("file:///a.kt", 1, 1)]);
             text_hash("file:///a.kt", "old")
         };
-        assert_eq!(digest_calls(), 1);
+        let sentinel = first.wrapping_add(1);
+        replace_cached_hash("file:///a.kt", sentinel);
         // Close and reopen both happen before the next install, so the URI never looks absent.
         let _versions = OpenDocumentVersions::install(&[("file:///a.kt", 1, 2)]);
         let second = text_hash("file:///a.kt", "new");
         assert_ne!(first, second);
-        assert_eq!(digest_calls(), 2);
+        assert_ne!(sentinel, second);
         assert_eq!(text_hash("file:///a.kt", "new"), second);
-        assert_eq!(digest_calls(), 2);
     }
 
     #[test]
-    fn unchanged_large_buffers_hash_no_further_bytes() {
-        reset_digest_probe();
+    fn unchanged_large_buffers_reuse_their_cached_digests() {
+        reset_cache();
         const BUFFERS: usize = 4;
         const BUFFER_BYTES: usize = 64 * 1024;
         let buffers = (0..BUFFERS)
@@ -244,20 +239,21 @@ mod tests {
             .map(|(index, (uri, _))| (uri.as_str(), 1, (index as u64) + 1))
             .collect::<Vec<_>>();
         let _versions = OpenDocumentVersions::install(&versions);
-        for (uri, text) in &buffers {
-            let _ = text_hash(uri, text);
+        let originals = buffers
+            .iter()
+            .map(|(uri, text)| text_hash(uri, text))
+            .collect::<Vec<_>>();
+        let sentinels = originals
+            .iter()
+            .map(|hash| hash.wrapping_add(1))
+            .collect::<Vec<_>>();
+        for ((uri, _), sentinel) in buffers.iter().zip(&sentinels) {
+            replace_cached_hash(uri, *sentinel);
         }
-        let hashed = hashed_bytes();
-        assert_eq!(digest_calls(), BUFFERS);
-        assert_eq!(hashed, BUFFERS * BUFFER_BYTES);
-        for (uri, text) in &buffers {
-            let _ = text_hash(uri, text);
-        }
-        assert_eq!(digest_calls(), BUFFERS);
-        assert_eq!(
-            hashed_bytes(),
-            hashed,
-            "a second pass over unchanged open buffers hashes 0 additional bytes"
-        );
+        let reused = buffers
+            .iter()
+            .map(|(uri, text)| text_hash(uri, text))
+            .collect::<Vec<_>>();
+        assert_eq!(reused, sentinels);
     }
 }

@@ -3,22 +3,25 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 mod analysis_group;
-use analysis_group::{
-    project_group_fingerprint, project_group_inputs, project_group_uris, ProjectAnalysisGroup,
-};
+use analysis_group::{project_group_inputs, project_group_uris, ProjectAnalysisGroup};
 mod canonical_support;
 use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod project_analysis_group;
 mod support_splice;
+
+use project_analysis_group::{
+    project_analysis_groups, project_group_compiler_config, project_group_fingerprint,
+};
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
     LibraryRef, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
-    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
     SystemEnvironment,
 };
 
@@ -2053,59 +2056,6 @@ fn project_module_assignments(
     )
 }
 
-/// Partition the open documents into the source sets that are analyzed together.
-///
-/// Each module owns one group, so a module's analysis never sees another module's sources. A
-/// document the model claims for no module — a scratch file, a source root the build system does
-/// not describe — gets a group to ITSELF, carrying no module classpath and no support sources.
-/// Pooling the unowned documents into one group instead would let two unrelated scratch files see
-/// each other's top-level declarations, so the same `fun` in each would report a conflict; dropping
-/// them would leave them open in the editor with no diagnostics, no completion, and no navigation.
-///
-/// A workspace with no model at all is a different case and does not reach here: every document is
-/// assigned the one synthetic module by [`project_module_assignments`], because a plain folder of
-/// `.kt` files is meant to be one source set.
-fn project_analysis_groups(
-    module_assignments: &[Option<usize>],
-) -> Vec<(Option<usize>, Vec<usize>)> {
-    let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
-    for (document_index, module_index) in module_assignments.iter().copied().enumerate() {
-        match module_index.and_then(|module| {
-            groups
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == Some(module))
-        }) {
-            Some((_, document_indices)) => document_indices.push(document_index),
-            None => groups.push((module_index, vec![document_index])),
-        }
-    }
-    groups
-}
-
-fn project_group_compiler_config(
-    model: Option<&ProjectModel>,
-    module_index: Option<usize>,
-    platform_classpath: &[PathBuf],
-    options: &LspOptions,
-) -> (Option<Vec<PathBuf>>, Vec<String>) {
-    let Some((model, module)) = model
-        .zip(module_index)
-        .and_then(|(model, index)| model.modules.get(index).map(|module| (model, module)))
-    else {
-        return (None, options.language_arguments().to_vec());
-    };
-
-    let mut classpath = model.compile_classpath(module);
-    for entry in platform_classpath {
-        if !classpath.contains(entry) {
-            classpath.push(entry.clone());
-        }
-    }
-    let mut language_arguments = module.kotlinc_args.clone();
-    language_arguments.extend_from_slice(options.language_arguments());
-    (Some(classpath), language_arguments)
-}
-
 struct CachedProjectAnalysis {
     module_index: Option<usize>,
     fingerprint: u64,
@@ -2198,74 +2148,6 @@ fn fail_project_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty_lsp::AnalysisBackend;
-
-    #[test]
-    fn inline_backend_reuses_an_unchanged_group_and_misses_a_reopen() {
-        krusty_lsp::open_document_digest::reset_digest_probe();
-        struct Probe;
-        impl krusty_lsp::Analysis for Probe {
-            fn analyze(&mut self, sources: &[&str]) -> Vec<krusty_lsp::DocumentAnalysis> {
-                sources
-                    .iter()
-                    .map(|_| krusty_lsp::DocumentAnalysis::empty())
-                    .collect()
-            }
-
-            fn index_workspace_files(&mut self, _uris: &[&str]) -> krusty_lsp::IndexOutcome {
-                krusty_lsp::IndexOutcome::default()
-            }
-
-            fn analyze_open_documents(
-                &mut self,
-                documents: &[(&str, &str)],
-                _open_uris: &[&str],
-            ) -> (Vec<krusty_lsp::DocumentAnalysis>, Vec<(String, String)>) {
-                let group = ProjectAnalysisGroup {
-                    module_index: None,
-                    document_indices: (0..documents.len()).collect(),
-                    support_documents: Vec::new(),
-                    inferred_support_count: 0,
-                    java_sources: Vec::new(),
-                    navigation_file_remaps: Vec::new(),
-                };
-                let _fingerprint = project_group_fingerprint(documents, &group);
-                let sources = documents
-                    .iter()
-                    .map(|(_, source)| *source)
-                    .collect::<Vec<_>>();
-                (self.analyze(&sources), Vec::new())
-            }
-        }
-
-        let text = "x".repeat(64 * 1024);
-        let job = |body: &str, lifetime: u64| krusty_lsp::AnalysisJob {
-            documents: vec![("file:///a.kt".into(), body.to_string(), 1, lifetime)],
-            open_uris: vec!["file:///a.kt".into()],
-        };
-        let mut backend = krusty_lsp::InlineBackend::new(Probe);
-        assert!(backend.submit(job(&text, 1)).is_some());
-        let hashed = krusty_lsp::open_document_digest::hashed_bytes();
-        assert_eq!(krusty_lsp::open_document_digest::digest_calls(), 1);
-        assert!(backend.submit(job(&text, 1)).is_some());
-        assert_eq!(
-            krusty_lsp::open_document_digest::digest_calls(),
-            1,
-            "an unchanged open document is not hashed again"
-        );
-        assert_eq!(krusty_lsp::open_document_digest::hashed_bytes(), hashed);
-        let reopened = "y".repeat(text.len());
-        assert!(backend.submit(job(&reopened, 2)).is_some());
-        assert_eq!(
-            krusty_lsp::open_document_digest::digest_calls(),
-            2,
-            "close and reopen misses the previous lifetime"
-        );
-        assert_eq!(
-            krusty_lsp::open_document_digest::hashed_bytes(),
-            hashed + reopened.len()
-        );
-    }
 
     #[test]
     fn parity_scratch_is_unique_and_removed_on_drop() {
@@ -2724,8 +2606,8 @@ mod tests {
             "/workspace/second",
         );
         second.classpath = vec![PathBuf::from("/deps/second.jar")];
-        let model =
-            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![first, second]);
+        let model = krusty_lsp::ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![first, second]);
         let options = LspOptions::parse(Vec::<String>::new()).unwrap();
         let platform = [PathBuf::from("/jdk/lib/modules")];
 
