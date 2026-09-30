@@ -68,6 +68,7 @@ mod value_class_facts;
 mod when_facts;
 
 pub use crate::enclosing_declarations::EnclosingDeclaration;
+pub use crate::fir::FirEqualityMode;
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;

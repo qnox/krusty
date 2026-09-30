@@ -9487,8 +9487,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   structural `Intrinsics.areEqual`. Common lowering copies the mode onto the IR equality, and
   inlining substitutes the operands without replacing the mode, so after `T` is stored as `Double`,
   `-0.0 == 0.0` stays false. A parameter whose static type is `Double` or `Float` stays IEEE, so
-  `-0.0 == 0.0` is true there. Ordering is a separate operation. Test:
-  `tests/ieee754_inline_equality_e2e.rs`. Corpus `ieee754/inline.kt`.
+  `-0.0 == 0.0` is true there. Ordering is a separate operation. A constant equality still folds
+  before emission, so `0.0 == -0.0` is the constant `true`. Test:
+  `tests/ieee754_inline_equality_e2e.rs`, `tests/constant_evaluation_e2e.rs`. Corpus
+  `ieee754/inline.kt`.
 
 - **`toString()` on a primitive is `String.valueOf`** (kotlinc's `FlattenStringConcatenationLowering`,
   which makes a primitive receiver's `toString()` a one-argument string concatenation, and

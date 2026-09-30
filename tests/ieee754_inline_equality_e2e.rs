@@ -71,15 +71,15 @@ fn inlined_equality_keeps_the_checked_mode() {
         krusty::ir::for_each_child(&file.exprs, expression, &mut |child| stack.push(child));
     }
     modes.sort_by_key(|mode| match mode {
-        krusty::fir::FirEqualityMode::Structural => 0,
-        krusty::fir::FirEqualityMode::Ieee754 => 1,
-        krusty::fir::FirEqualityMode::Primitive => 2,
+        krusty::ir::FirEqualityMode::Structural => 0,
+        krusty::ir::FirEqualityMode::Ieee754 => 1,
+        krusty::ir::FirEqualityMode::Primitive => 2,
     });
     assert_eq!(
         modes,
         vec![
-            krusty::fir::FirEqualityMode::Structural,
-            krusty::fir::FirEqualityMode::Ieee754,
+            krusty::ir::FirEqualityMode::Structural,
+            krusty::ir::FirEqualityMode::Ieee754,
         ],
         "inlining must copy the checked equality mode"
     );
