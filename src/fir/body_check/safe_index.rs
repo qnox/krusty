@@ -557,8 +557,8 @@ mod tests {
         }
         // Operator selection stays on the literal's `Int` type. Argument slots still name that
         // literal, so point them at the subject node the update now shares.
-        for slots in types.resolved_call_arg_slots.values_mut() {
-            for slot in slots {
+        for commitment in types.resolved_call_arg_slots.values_mut() {
+            for slot in &mut commitment.slots {
                 if slot.is_some_and(|argument| previous.contains(&argument)) {
                     *slot = Some(subject);
                 }
