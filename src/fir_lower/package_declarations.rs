@@ -161,7 +161,7 @@ pub(super) fn publish(
                     source_order,
                     signature_span: index
                         .package_function_signature_span(declaration)
-                        .unwrap_or_else(|| crate::diag::Span::new(0, 0)),
+                        .unwrap_or_default(),
                 });
             }
             DeclarationKind::Property => {
