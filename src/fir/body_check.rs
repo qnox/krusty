@@ -52,6 +52,8 @@ mod local_classes;
 #[cfg(test)]
 mod local_function_tests;
 mod local_functions;
+#[cfg(test)]
+mod nothing_instantiation_tests;
 mod plugins;
 mod progressions;
 mod properties;

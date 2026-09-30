@@ -1818,6 +1818,10 @@ impl BodyLowering<'_> {
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
+        // The checker already selected the safe-call result. Record that semantic join on the
+        // common-IR `when`; a backend may choose its physical representation but must not
+        // reconstruct `Nothing`, nullability, or another result from the branch instructions.
+        self.ir.whens.exhaustive.insert(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

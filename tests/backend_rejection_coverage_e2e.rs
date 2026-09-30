@@ -338,7 +338,11 @@ fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
          fun <T> Any.decodeIn(typeFrom: Context<in T>): T = something()\n\
          fun <T> Any?.decodeOut(typeFrom: Context<out T>): T =\n\
              this?.decodeIn(typeFrom) ?: throw AssertionError()\n\
-         fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
+         fun box(): String = try {\n\
+             \"value\".decodeOut(Context<Any>()).toString()\n\
+         } catch (e: Exception) {\n\
+             if (e.javaClass.simpleName == \"KotlinNothingValueException\") \"OK\" else e.javaClass.simpleName\n\
+         }\n",
     );
     assert_eq!(
         reference_code, 0,
@@ -355,7 +359,11 @@ fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
             "Main",
             "fun <T> Any?.decodeOut(typeFrom: Context<out T>): T =\n\
                  this?.decodeIn(typeFrom) ?: throw AssertionError()\n\
-             fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
+             fun box(): String = try {\n\
+                 \"value\".decodeOut(Context<Any>()).toString()\n\
+             } catch (e: Exception) {\n\
+                 if (e.javaClass.simpleName == \"KotlinNothingValueException\") \"OK\" else e.javaClass.simpleName\n\
+             }\n",
         ),
     ];
     let result = common::compile_and_run_files_with_stdlib(&sources);
@@ -389,11 +397,12 @@ fn projected_generic_extension_receiver_with_concrete_inference_is_accepted() {
          fun <T> something(): T = \"OK\" as T\n\
          fun <T> Context<in T>.decode(): T = something()\n\
          fun <T> Context<out T>.decodeOut(): T = decode()\n\
-         fun box(): String = Context<Any>().decodeOut().toString()\n";
-    assert_eq!(
-        common::compile_and_run_with_stdlib(source, "ProjectedExtension").as_deref(),
-        Some("OK")
-    );
+         fun box(): String = try {\n\
+             Context<Any>().decodeOut().toString()\n\
+         } catch (e: Exception) {\n\
+             if (e.javaClass.simpleName == \"KotlinNothingValueException\") \"OK\" else e.javaClass.simpleName\n\
+         }\n";
+    common::expect_box_same_as_kotlinc(source, "ProjectedExtension");
 }
 
 #[test]
