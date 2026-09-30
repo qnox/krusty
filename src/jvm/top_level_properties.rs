@@ -92,7 +92,7 @@ pub(super) fn merge_metadata_const(
         getter_declaration: None,
         setter_declaration: None,
         source_member: None,
-        accessor_derived: false,
+        producer: crate::libraries::PropertyProducer::Field,
         read_stability: crate::libraries::PropertyReadStability::Unstable,
     });
 }

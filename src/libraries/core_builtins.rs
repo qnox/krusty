@@ -204,7 +204,7 @@ impl EmptySymbolSource {
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
-                    accessor_derived: false,
+                    producer: crate::libraries::PropertyProducer::KotlinAccessor,
                     read_stability: PropertyReadStability::Unstable,
                 };
                 property.getter.compiler_intrinsic =
@@ -335,7 +335,7 @@ impl EmptySymbolSource {
             getter_declaration: None,
             setter_declaration: None,
             source_member: None,
-            accessor_derived: false,
+            producer: crate::libraries::PropertyProducer::KotlinAccessor,
             read_stability: PropertyReadStability::Unstable,
         };
         property.getter.compiler_intrinsic =

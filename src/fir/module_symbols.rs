@@ -632,7 +632,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             getter_declaration: None,
             setter_declaration: None,
             source_member: None,
-            accessor_derived: false,
+            producer: crate::libraries::PropertyProducer::KotlinAccessor,
             read_stability: crate::libraries::PropertyReadStability::Unstable,
         }
     }
@@ -1187,7 +1187,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
-                accessor_derived: false,
+                producer: crate::libraries::PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::from_declaration(
                     header.flags.has(DeclarationFlags::MUTABLE),
                     header.flags.has(DeclarationFlags::CUSTOM_GETTER)
@@ -1582,7 +1582,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
-                accessor_derived: false,
+                producer: crate::libraries::PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::from_declaration(
                     header.flags.has(DeclarationFlags::MUTABLE),
                     header.flags.has(DeclarationFlags::CUSTOM_GETTER)

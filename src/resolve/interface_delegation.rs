@@ -769,7 +769,7 @@ fn delegation_members(
             // method, not another interface declaration. The function slot already forwards that
             // exact external identity (`CharSequence.isEmpty`/`length`); emitting a Kotlin property
             // accessor as well would duplicate or rename the physical method.
-            .filter(|property| !property.accessor_derived)
+            .filter(|property| !property.accessor_derived())
         {
             let Some(slot) = property_slot(property) else {
                 continue;

@@ -806,7 +806,7 @@ impl<'a> ModuleSymbols<'a> {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: declaration.source_member(),
-                accessor_derived: false,
+                producer: crate::libraries::PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::Unstable,
             }
         }));
@@ -1128,7 +1128,7 @@ fn source_property(
         getter_declaration: None,
         setter_declaration: None,
         source_member: property.source_member,
-        accessor_derived: false,
+        producer: crate::libraries::PropertyProducer::KotlinAccessor,
         read_stability: crate::libraries::PropertyReadStability::from_declaration(
             property.setter_name.is_some(),
             property.has_custom_getter,
@@ -1368,7 +1368,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
-                accessor_derived: false,
+                producer: crate::libraries::PropertyProducer::KotlinAccessor,
                 read_stability: property.read_stability,
             });
         }
@@ -1459,7 +1459,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
-                    accessor_derived: false,
+                    producer: crate::libraries::PropertyProducer::KotlinAccessor,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }

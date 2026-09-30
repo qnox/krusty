@@ -3,6 +3,15 @@
 use super::*;
 use crate::resolve::ResolvedContextArgument;
 
+/// Name kotlinc puts in `checkNotNullExpressionValue` for one property read.
+fn property_platform_check_name(
+    property: &str,
+    getter_name: Option<&str>,
+    producer: crate::libraries::PropertyProducer,
+) -> String {
+    producer.platform_check_name(property, getter_name)
+}
+
 impl BodyFirChecker<'_> {
     /// Whether an exact-Unit expression is an effect that still needs the language-level singleton
     /// at a value boundary. Stored reads and `Unit` itself already produce that value; calls,
@@ -710,13 +719,8 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let message = match self.file.expr(source) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Name(name) | Expr::Member { name, .. } => format!("{name}(...)").into(),
-                _ => return None,
-            },
-            Expr::Member { name, .. } => name.clone().into_boxed_str(),
-            _ => return None,
+        let Some(message) = self.platform_narrowing_message(source) else {
+            return None;
         };
         let narrowing = self
             .body
@@ -728,6 +732,65 @@ impl BodyFirChecker<'_> {
                 to: target,
             },
         })
+    }
+
+    /// kotlinc names the platform value by the callable that produced it. A call, including an
+    /// index `get`, is `name(...)`. A Java bean property names its accessor method the same way.
+    /// A declared Kotlin property is `<get-name>(...)`. A physical field is the bare field name.
+    fn platform_narrowing_message(&self, source: ExprId) -> Option<Box<str>> {
+        match self.file.expr(source) {
+            Expr::Call { callee, .. } => match self.file.expr(*callee) {
+                Expr::Name(name) | Expr::Member { name, .. } => Some(format!("{name}(...)").into()),
+                _ => None,
+            },
+            Expr::Index { .. } => self.callable_assertion_name(source),
+            Expr::Member { name, .. } | Expr::Name(name) => self
+                .property_assertion_name(source)
+                .or(Some(name.clone().into_boxed_str())),
+            _ => None,
+        }
+    }
+
+    fn property_assertion_name(&self, source: ExprId) -> Option<Box<str>> {
+        let spelled = match self.file.expr(source) {
+            Expr::Member { name, .. } | Expr::Name(name) => Some(name.clone()),
+            _ => None,
+        };
+        let message = match self.info.expr_lowers.get(&source)? {
+            ExprLowering::MemberPropertyRead {
+                name,
+                accessor,
+                producer,
+                ..
+            } => property_platform_check_name(
+                name,
+                accessor.as_ref().map(|getter| getter.name.as_str()),
+                *producer,
+            ),
+            ExprLowering::TopLevelPropertyGet(access)
+            | ExprLowering::ExtensionPropertyGet { access } => property_platform_check_name(
+                &access.property.name,
+                Some(access.property.getter.name.as_str()),
+                access.property.producer,
+            ),
+            ExprLowering::MemberExtensionPropertyRead { .. } => {
+                format!("<get-{}>(...)", spelled?)
+            }
+            _ => return None,
+        };
+        Some(message.into())
+    }
+
+    fn callable_assertion_name(&self, source: ExprId) -> Option<Box<str>> {
+        let name = match self.info.resolved_calls.get(&source)? {
+            ResolvedCall::Member(member) => member.member.name.clone(),
+            ResolvedCall::Companion(member) => member.name.clone(),
+            ResolvedCall::Extension(call) => call.callable.name.clone(),
+            ResolvedCall::TopLevel(call) => call.callable.name.clone(),
+            ResolvedCall::MemberExtension { name, .. } => name.clone(),
+            ResolvedCall::LocalFunction(_) => return None,
+        };
+        Some(format!("{name}(...)").into())
     }
 
     /// Materialize one frontend-committed value boundary. The target and any representation-changing

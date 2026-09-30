@@ -12,10 +12,12 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod platform_contract;
+mod property_producer;
 pub use classifier_kind::TypeKind;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
+pub use property_producer::PropertyProducer;
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
@@ -2516,9 +2518,7 @@ pub struct PropertyInfo {
     pub setter_declaration: Option<crate::fir::DeclarationId>,
     /// Exact AST-backed member property from the current compilation module.
     pub source_member: Option<SourceMember>,
-    /// Whether this property is derived from Java bean accessors. A same-named accessible field
-    /// takes precedence during member selection.
-    pub accessor_derived: bool,
+    pub producer: PropertyProducer,
     /// Semantic repeat-read stability, normalized by the declaration provider.
     pub read_stability: PropertyReadStability,
     /// See [`LibraryMember::return_value_status`]; `None` for a Java or current-module property.
@@ -3128,7 +3128,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             getter_declaration: None,
             setter_declaration: None,
             source_member: None,
-            accessor_derived: false,
+            producer: PropertyProducer::KotlinAccessor,
             read_stability: PropertyReadStability::Unstable,
         };
         if let Some(callables) = classifier.declared_callables.get_mut(name) {

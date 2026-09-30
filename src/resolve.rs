@@ -76,6 +76,7 @@ mod dependency_platform;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod enum_entries;
+mod expression_getter;
 mod finalized_projection;
 mod for_loop_iteration;
 mod function_exit;
@@ -88,6 +89,7 @@ mod integer_constants;
 mod interface_delegation;
 mod invoke_selection;
 mod lambda_call_shapes;
+mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
 mod lambda_expectation;
 mod lambda_returns;
@@ -3391,6 +3393,8 @@ struct PropertyReadMemberSelection {
     interface: bool,
     getter: Option<crate::symbol_resolver::ResolvedMember>,
     accessor: Option<Box<crate::libraries::LibraryCallable>>,
+    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
+    producer: crate::libraries::PropertyProducer,
     context_access: Option<Box<ResolvedPropertyAccess>>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     compile_time_constant: Option<crate::libraries::LibraryConst>,
@@ -3405,48 +3409,6 @@ enum PropertyReadAmbiguity {
     MemberExtension,
     Extension,
     MissingContext,
-}
-
-impl PropertyReadSelection {
-    fn ty(&self) -> Ty {
-        match self {
-            Self::Member(member) => member.ty,
-            Self::MemberExtension(property) => property.ty,
-            Self::Extension(access) => access.property.ty,
-        }
-    }
-
-    fn access(&self) -> Option<(Visibility, TypeName)> {
-        match self {
-            Self::Member(member) => member.access,
-            Self::MemberExtension(property) => Some((property.visibility, property.owner)),
-            // ModuleSymbols is constructed for the current source file: it excludes private
-            // extensions from every sibling file and admits the current file's declaration. Once
-            // admitted, a second file-blind visibility check would reject the legal same-file read.
-            Self::Extension(access)
-                if matches!(access.property.getter.origin, Origin::Module { .. })
-                    && (access.property.stable_declaration.is_some()
-                        || access.property.source_key.is_some()) =>
-            {
-                None
-            }
-            Self::Extension(access) => Some((access.property.visibility, access.property.owner)),
-        }
-    }
-
-    fn external_property(&self) -> Option<crate::fir::ExternalPropertyId> {
-        match self {
-            Self::Member(member) => member
-                .accessor
-                .as_deref()
-                .and_then(|accessor| accessor.external_property_identity),
-            Self::MemberExtension(property) => property
-                .getter
-                .as_ref()
-                .and_then(|getter| getter.external_property_identity),
-            Self::Extension(access) => access.property.getter.external_property_identity,
-        }
-    }
 }
 
 type ModuleSymbolCache = HashMap<
@@ -11652,6 +11614,8 @@ pub enum ExprLowering {
         /// Exact selected accessor declaration. Checked FIR extracts its provider identity; this is
         /// transient checker state, not a lowering lookup handle.
         accessor: Option<Box<crate::libraries::LibraryCallable>>,
+        /// Provider-chosen field, Kotlin accessor, or Java accessor.
+        producer: crate::libraries::PropertyProducer,
         /// Source declaration name. This differs from the expression spelling for an aliased import.
         name: String,
         /// Class that declares the selected property. Keeping the semantic owner selected by the
@@ -13916,6 +13880,7 @@ impl<'a> Checker<'a> {
                         interface: local.interface,
                         getter: None,
                         accessor: None,
+                        producer: crate::libraries::PropertyProducer::KotlinAccessor,
                         context_access: None,
                         compiler_intrinsic: None,
                         compile_time_constant: None,
@@ -14016,6 +13981,10 @@ impl<'a> Checker<'a> {
                         accessor: selected_property
                             .as_ref()
                             .map(|property| Box::new(property.getter.clone())),
+                        producer: selected_property.as_ref().map_or(
+                            crate::libraries::PropertyProducer::KotlinAccessor,
+                            |property| property.producer,
+                        ),
                         context_access,
                         compiler_intrinsic: selected_property
                             .as_ref()
@@ -14615,6 +14584,7 @@ impl<'a> Checker<'a> {
                     interface,
                     getter,
                     accessor,
+                    producer,
                     context_access,
                     compiler_intrinsic,
                     compile_time_constant,
@@ -14640,6 +14610,7 @@ impl<'a> Checker<'a> {
                         stable_declaration,
                         source_member,
                         accessor,
+                        producer,
                         name,
                         owner,
                         declaration_ty: ty,
@@ -25481,7 +25452,7 @@ impl<'a> Checker<'a> {
                 selected.owner,
                 selected.property.as_ref().map(|property| (
                     property.name.as_str(),
-                    property.accessor_derived,
+                    property.accessor_derived(),
                     property.setter.is_some(),
                     property.source_key,
                     property.getter.name.as_str(),
@@ -30289,7 +30260,7 @@ fun box(): String {
                             getter_declaration: None,
                             setter_declaration: None,
                             source_member: None,
-                            accessor_derived: false,
+                            producer: crate::libraries::PropertyProducer::KotlinAccessor,
                             read_stability: crate::libraries::PropertyReadStability::Unstable,
                         };
                         (
@@ -54923,8 +54894,7 @@ impl<'a> Checker<'a> {
                 let field_ty = has_backing_field.then_some(storage_ty);
                 self.with_ret_field(prop_ty, field_ty, scope, |c| match g {
                     FunBody::Expr(e) => {
-                        let gt = c.expr_expected(scope, *e, prop_ty);
-                        c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
+                        c.check_expression_getter(scope, *e, prop_ty, p.ty.is_some());
                     }
                     FunBody::Block(b) => {
                         let _ = c.expr_statement(scope, *b);
@@ -57155,13 +57125,11 @@ impl<'a> Checker<'a> {
                             self.with_ret_field(ty, field_ty, &accessor_scope, |checker| {
                                 match getter {
                                     FunBody::Expr(body) => {
-                                        let actual =
-                                            checker.expr_expected(&accessor_scope, *body, ty);
-                                        checker.expect_assignable(
+                                        checker.check_expression_getter(
+                                            &accessor_scope,
+                                            *body,
                                             ty,
-                                            actual,
-                                            checker.span(*body),
-                                            "getter body",
+                                            bp.ty.is_some(),
                                         );
                                     }
                                     FunBody::Block(body) => {
@@ -58388,8 +58356,7 @@ impl<'a> Checker<'a> {
                         {
                             self.with_ret_field(prop_ty, field_ty, scope, |c| match getter {
                                 FunBody::Expr(g) => {
-                                    let gt = c.expr_expected(scope, *g, prop_ty);
-                                    c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
+                                    c.check_expression_getter(scope, *g, prop_ty, bp.ty.is_some());
                                 }
                                 FunBody::Block(g) => {
                                     let _ = c.expr_statement(scope, *g);
