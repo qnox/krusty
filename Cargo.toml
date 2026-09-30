@@ -62,17 +62,19 @@ path = "src/lib.rs"
 opt-level = 3
 lto = "thin"
 
-# Fast-iteration profile for the test round. Test crates stay unoptimized (`opt-level = 0`,
-# inherited from `dev`) so a harness edit relinks in seconds — but with `overflow-checks` and
-# `debug-assertions` OFF: krusty relies on wrapping arithmetic (hashes, JVM value math), which a
-# debug build's overflow checks abort on (SIGABRT). `debug = false` drops debuginfo for a faster
-# link. Run the round with `cargo test --profile gate …` (see run-tests.sh), not `--release`.
+# Fast-iteration profile for the test round. `overflow-checks` and `debug-assertions` are OFF:
+# krusty relies on wrapping arithmetic (hashes, JVM value math), which a debug build's overflow
+# checks abort on (SIGABRT). `debug = false` drops debuginfo for a faster link. Run the round
+# with `cargo test --profile gate …` (see run-tests.sh), not `--release`.
 #
-# The compiler library itself is opt-level 2. The box corpus and e2e compile with that library
-# in-process; an unoptimized compiler made the corpus a 99s wall / 337s CPU run on 4 cores, and
-# the same corpus at opt-level 2 was 19s / 62s with the same pass and fail counts. `codegen-units
-# = 16` is what that measurement used. Dev's 256 units would compile a touch faster and give most
-# of the runtime back. Thin LTO stays off so a compiler edit does not pay a release link.
+# The `krusty` package — library, bins, and integration tests — is opt-level 2 with 16 codegen
+# units. Cargo package overrides cannot split the lib from those tests, and the box corpus and
+# e2e compile with this package in-process. An unoptimized compiler made the corpus a 99s wall /
+# 337s CPU run on 4 cores; this profile finished the same corpus in 20s / 61s with the same pass
+# and fail counts. Dev's 256 codegen units would compile a touch faster and give most of the
+# runtime back. Thin LTO stays off. A one-line incremental rebuild of the package measured 8.5s.
+# Switching an existing opt-level 0 library up to this setting measured 146s (dependencies were
+# already built).
 [profile.gate]
 inherits = "dev"
 overflow-checks = false
