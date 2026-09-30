@@ -198,7 +198,7 @@ fn merged_type(first: &BasicValue, second: &BasicValue) -> BasicValue {
     if first == second && *first != BasicValue::Uninitialized {
         first.clone()
     } else {
-        BasicValue::Reference("Ljava/lang/Object;".to_string())
+        BasicValue::reference("Ljava/lang/Object;")
     }
 }
 
