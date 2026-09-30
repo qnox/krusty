@@ -102,7 +102,7 @@ pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
     classpath: &Classpath,
-    current_facade: &str,
+    current_facade: crate::types::TypeName,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
     let mut delegated_operands = Vec::new();
@@ -861,7 +861,7 @@ fn module_property(
 
 fn synthesize(
     ir: &mut IrFile,
-    current_facade: &str,
+    current_facade: crate::types::TypeName,
     expression: usize,
     mut property: PropRef,
     realization: PropertyReferenceRealization,

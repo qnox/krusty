@@ -8,7 +8,7 @@
 use super::classpath::{Classpath, ExternalCallableKind};
 use crate::fir::ExternalCallableId;
 use crate::ir::{FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FunctionReferenceRealizationTarget {
@@ -40,7 +40,7 @@ fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_re
 /// a second copy an inline splice made) keeps an internal name.
 pub(super) fn reference_class_name(
     ir: &IrFile,
-    current_facade: &str,
+    current_facade: TypeName,
     expression: usize,
     kind: &str,
 ) -> crate::types::TypeName {
@@ -51,7 +51,7 @@ pub(super) fn reference_class_name(
         // the class.
         .filter(|name| ir.classes.iter().all(|class| class.fq_name != *name))
         .unwrap_or_else(|| {
-            type_name(current_facade)
+            current_facade
                 .nested_child("fir")
                 .nested_child(kind)
                 .nested_child(&ir.classes.len().to_string())
@@ -140,7 +140,7 @@ pub(super) fn reference_enclosure(
 fn realize_adapter_reference(
     ir: &mut IrFile,
     classpath: &Classpath,
-    current_facade: &str,
+    current_facade: TypeName,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
     own_invoke: bool,
@@ -632,7 +632,7 @@ fn realize_own_invoke(
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
-    current_facade: &str,
+    current_facade: TypeName,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
         .classes
@@ -681,20 +681,48 @@ mod tests {
     #[test]
     fn synthesized_reference_class_nests_under_the_facade() {
         let ir = IrFile::default();
-        let function = reference_class_name(&ir, "sample/ref6044/FileKt", 3, "function");
-        assert_eq!(function, type_name("sample/ref6044/FileKt$fir$function$0"));
+        let facade = crate::types::type_name("sample/ref6044/FileKt");
+        let function = reference_class_name(&ir, facade, 3, "function");
+        assert_eq!(
+            function,
+            crate::types::type_name("sample/ref6044/FileKt$fir$function$0")
+        );
         assert_eq!(function.render(), "sample/ref6044/FileKt$fir$function$0");
 
-        let nested = reference_class_name(&ir, "sample/Outer$Inner", 1, "property");
-        assert_eq!(nested, type_name("sample/Outer$Inner$fir$property$0"));
+        let nested_facade = crate::types::type_name("sample/Outer$Inner");
+        let nested = reference_class_name(&ir, nested_facade, 1, "property");
+        assert_eq!(
+            nested,
+            crate::types::type_name("sample/Outer$Inner$fir$property$0")
+        );
         assert_eq!(nested.render(), "sample/Outer$Inner$fir$property$0");
 
         let mut occupied = IrFile::default();
         occupied
             .classes
-            .push(IrClass::synthetic(type_name("sample/Other")));
-        let next = reference_class_name(&occupied, "sample/ref6044/FileKt", 0, "function");
-        assert_eq!(next, type_name("sample/ref6044/FileKt$fir$function$1"));
+            .push(IrClass::synthetic(crate::types::type_name("sample/Other")));
+        let next = reference_class_name(&occupied, facade, 0, "function");
+        assert_eq!(
+            next,
+            crate::types::type_name("sample/ref6044/FileKt$fir$function$1")
+        );
+    }
+
+    #[test]
+    fn synthesized_reference_churn_extends_one_facade_identity() {
+        let facade = crate::types::type_name("sample/ref6044/ChurnKt");
+        let mut ir = IrFile::default();
+        for ordinal in 0..512 {
+            let generated = reference_class_name(&ir, facade, ordinal, "function");
+            assert_eq!(
+                generated
+                    .nested_owner()
+                    .and_then(TypeName::nested_owner)
+                    .and_then(TypeName::nested_owner),
+                Some(facade)
+            );
+            ir.classes.push(IrClass::synthetic(generated));
+        }
     }
 
     /// What a reference's single capture is, as the lifted local function declares it.

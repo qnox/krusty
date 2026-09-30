@@ -436,10 +436,35 @@ pub(crate) fn reference_descriptor(classfile_name: &'static str) -> &'static str
     })
 }
 
-/// Descriptor of a companion field. The companion's own internal spelling is the classfile name:
-/// this is not a builtin mapping.
-pub(crate) fn companion_field_descriptor(companion: crate::types::TypeName) -> &'static str {
-    reference_descriptor(companion.rendered())
+/// Owned physical spelling of one companion field for a classfile emission.
+///
+/// The class writer copies both strings into its own constant pool. Keeping this value scoped to
+/// that emission avoids adding common rendered names or descriptors to process-lifetime caches.
+pub(super) struct CompanionSpelling {
+    internal: String,
+    descriptor: String,
+}
+
+impl CompanionSpelling {
+    pub(super) fn internal(&self) -> &str {
+        &self.internal
+    }
+
+    pub(super) fn desc(&self) -> &str {
+        &self.descriptor
+    }
+}
+
+pub(super) fn companion_spelling(companion: TypeName) -> CompanionSpelling {
+    let internal = binary_class_name(companion);
+    let mut descriptor = String::with_capacity(internal.len() + 2);
+    descriptor.push('L');
+    descriptor.push_str(&internal);
+    descriptor.push(';');
+    CompanionSpelling {
+        internal,
+        descriptor,
+    }
 }
 
 /// `[element` for an interned element descriptor, including another array descriptor.
@@ -1122,12 +1147,22 @@ mod tests {
     }
 
     #[test]
-    fn companion_field_descriptor_reuses_the_internal_spelling() {
-        let companion = crate::types::type_name("sample/comp6044/Host").nested_child("Companion");
-        let first = companion_field_descriptor(companion);
-        assert_eq!(first, "Lsample/comp6044/Host$Companion;");
-        assert_eq!(first, format!("L{};", companion.render()));
-        assert!(std::ptr::eq(first, companion_field_descriptor(companion)));
+    fn companion_spelling_is_owned_by_one_emission() {
+        assert!(std::mem::needs_drop::<CompanionSpelling>());
+        for ordinal in 0..512 {
+            let host = crate::types::type_name(&format!("sample/comp6044/Host{ordinal}"));
+            let companion = host.nested_child("Companion");
+            let spelling = companion_spelling(companion);
+            assert_eq!(
+                spelling.internal(),
+                format!("sample/comp6044/Host{ordinal}$Companion")
+            );
+            assert_eq!(
+                spelling.desc(),
+                format!("Lsample/comp6044/Host{ordinal}$Companion;")
+            );
+            // The owned representation is dropped here instead of entering either static cache.
+        }
     }
 
     #[test]

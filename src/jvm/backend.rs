@@ -821,6 +821,9 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
+        // Generated carrier identities extend this one backend-owned facade identity. They never
+        // recover it by parsing the physical spelling again.
+        let facade_identity = crate::types::type_name(&facade);
         let stems = &file.stems;
         crate::jvm::local_class_names::realize(&mut file.ir, |source| {
             crate::jvm::module_calls::facade_for(source, stems)
@@ -834,7 +837,7 @@ impl Backend for JvmBackend {
             return Vec::new();
         }
         if let Err(target) =
-            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
+            crate::jvm::function_references::realize(&mut file.ir, &self.cp, facade_identity)
         {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -848,7 +851,7 @@ impl Backend for JvmBackend {
             &mut file.ir,
             file.stems,
             &self.cp,
-            &facade,
+            facade_identity,
         ) {
             Ok(realizations) => realizations,
             Err(target) => {

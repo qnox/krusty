@@ -15,7 +15,7 @@ use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    boxed_descriptor, companion_field_descriptor, mapped_builtin_virtual_name, method_descriptor,
+    boxed_descriptor, companion_spelling, mapped_builtin_virtual_name, method_descriptor,
     property_getter_name, property_setter_name, reference_array_element, type_descriptor,
 };
 use crate::kt_string::KtStringBuf;
@@ -1455,39 +1455,37 @@ fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;
     };
-    cw.add_field(
-        0x0019,
-        companion.nested_segment_ref(),
-        companion_field_descriptor(companion),
-    );
+    let spelling = companion_spelling(companion);
+    cw.add_field(0x0019, companion.nested_segment_ref(), spelling.desc());
 }
 
 fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;
     };
-    let companion_name = companion.rendered();
-    let descriptor = companion_field_descriptor(companion);
+    let spelling = companion_spelling(companion);
+    let companion_name = spelling.internal();
+    let descriptor = spelling.desc();
     // An INTERFACE's companion self-hosts its singleton (`static final $$INSTANCE`, built in the
     // companion's own `<clinit>`); the interface's `Companion` field merely aliases it.
     if is_jvm_interface(class) {
-        let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
+        let instance = cw.fieldref(companion_name, "$$INSTANCE", descriptor);
         code.getstatic(instance, 1);
-        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+        let field = cw.fieldref(owner, companion.nested_segment_ref(), descriptor);
         code.putstatic(field, 1);
         return;
     }
-    let classifier = cw.class_ref(&companion_name);
+    let classifier = cw.class_ref(companion_name);
     code.new_obj(classifier);
     code.dup();
     code.aconst_null();
     let constructor = cw.methodref(
-        &companion_name,
+        companion_name,
         "<init>",
         "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
     );
     code.invokespecial(constructor, 1, 0);
-    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+    let field = cw.fieldref(owner, companion.nested_segment_ref(), descriptor);
     code.putstatic(field, 1);
 }
 
@@ -3425,8 +3423,8 @@ fn emit_class(
     // table (kotlinc's order), before the instance fields and any hoisted statics — but its pool
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
     if let Some(companion) = c.companion_class {
-        let desc = companion_field_descriptor(companion);
-        let field = (0x0019, companion.nested_segment_ref(), desc);
+        let spelling = companion_spelling(companion);
+        let field = (0x0019, companion.nested_segment_ref(), spelling.desc());
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows it; a singleton's follows its INSTANCE, below.
@@ -4856,8 +4854,8 @@ fn emit_enum_class(
     // the field VISIT — late, not here. Emitting it eagerly put those strings at the head of the
     // constant pool and reordered nearly all of it.
     if let Some(companion) = c.companion_class {
-        let desc = companion_field_descriptor(companion);
-        let field = (0x0019, companion.nested_segment_ref(), desc);
+        let spelling = companion_spelling(companion);
+        let field = (0x0019, companion.nested_segment_ref(), spelling.desc());
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
