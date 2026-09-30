@@ -2647,9 +2647,9 @@ impl KotlincServer {
 /// `kotlinc`).
 ///
 /// A release or RC replays class files, the exit code, and kotlinc's diagnostics from the
-/// recorded-byte cache, for a successful build and for a rejected one. A missing or incomplete dump
-/// fails locally and tells you to refresh the master cache. Read-only CI may instead compile that
-/// invocation live without changing its restored cache.
+/// recorded-byte cache, for a successful build and for a rejected one. A test missing from that
+/// archive fails locally. CI compiles it with kotlinc instead. Master stores that recording;
+/// a pull request leaves the restored archive unchanged.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {

@@ -1,7 +1,8 @@
 name: ci
 
-# Build the conformance test binary once, run it against every supported Kotlin version, and publish
-# only after every version matches its exact box fail/not-applicable manifests.
+# Build the conformance test binary once. Run its box suite against every supported Kotlin
+# version, and run every other test in that binary on the latest version. Publish only after
+# both sets pass and every version matches its exact box fail/not-applicable manifests.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -20,8 +21,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fast, version-independent correctness gate: lint + coverage + latest-version regression
-  # conformance (zero miscompiles). Identical to the local/hook gate (`just ci`).
+  # Lint + coverage (`just ci`). Conformance is `build-conformance-bin`, the version
+  # matrix, and `conformance-regressions`. This job does not compile krusty again for it.
   ci:
     runs-on: ubuntu-latest
     env:
@@ -85,21 +86,17 @@ jobs:
         id: recorded-mode
         env:
           CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
-          MATCHED_KEY: ${{ steps.recorded-bytes.outputs.cache-matched-key }}
           MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
+          # A restored entry is replayed. A test absent from this job's archive compiles
+          # with kotlinc instead of failing. Master publishes the archive, including that
+          # new recording, under this commit. A pull request does not write it.
           record=0
+          compile_missing=1
           write=0
-          compile_missing=0
           if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
-            record=1
             write=1
-          elif [ "$MASTER_PUSH" != true ]; then
-            compile_missing=1
-            if [ -z "$MATCHED_KEY" ]; then
-              record=1
-            fi
           fi
           echo "record=$record" >> "$GITHUB_OUTPUT"
           echo "write=$write" >> "$GITHUB_OUTPUT"
@@ -113,9 +110,7 @@ jobs:
           # fails, a slow runner does not.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
-          # A PR consumes cached entries from its master base and compiles any missing entries live,
-          # including when restore supplied only an older prefix cache. It never changes that cache.
-          # A master push refreshes the archive before publishing its immutable SHA-keyed cache.
+          # This job's archive only. The conformance job publishes a separate one.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
@@ -167,10 +162,15 @@ jobs:
           set -euo pipefail
           bin=$(just conformance-bin)
           cp "$bin" conformance-bin
+          # The non-box tests launch this CLI. The library is already built above.
+          cargo build --profile gate -p krusty-cli
+          cp target/gate/krusty krusty
       - uses: actions/upload-artifact@v7
         with:
           name: conformance-bin
-          path: conformance-bin
+          path: |
+            conformance-bin
+            krusty
           if-no-files-found: error
 
   # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
@@ -230,6 +230,74 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
+
+  # Every conformance test except the box corpus, on the latest Kotlin version. Uses the
+  # artifact from `build-conformance-bin`; it does not compile krusty again.
+  conformance-regressions:
+    needs: [build-conformance-bin, versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: zulu
+          java-version: '25'
+      - name: cache kotlin toolchain, box corpus, and serialization corpus
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/cache/kotlinc/${{ needs.versions.outputs.max }}
+            target/cache/box-corpus/${{ needs.versions.outputs.max }}
+            target/cache/ser-corpus/${{ needs.versions.outputs.max }}
+          key: kotlin-${{ needs.versions.outputs.max }}-${{ hashFiles('kotlin-versions') }}
+      # This job's archive, separate from the one `ci` publishes. A restored entry is
+      # replayed. A test absent from the archive compiles with kotlinc. Master saves
+      # the archive, including that new recording.
+      - name: restore recorded kotlinc bytes
+        id: recorded-bytes
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-
+      - name: select recorded-byte cache mode
+        id: recorded-mode
+        env:
+          CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          compile_missing=1
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+          echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
+      - name: download conformance test binary
+        uses: actions/download-artifact@v8
+        with:
+          name: conformance-bin
+      - name: run conformance regressions
+        env:
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
+          KRUSTY_RECORD_CLASS_DUMPS: "0"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+        run: |
+          set -euo pipefail
+          chmod +x conformance-bin krusty
+          just conformance-regressions "$PWD/conformance-bin" "${{ needs.versions.outputs.max }}"
+      - name: save recorded kotlinc bytes
+        if: steps.recorded-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.sha }}
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
@@ -298,7 +366,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, klib-semantics, conformance, versions, build-release]
+    needs: [ci, klib-semantics, conformance, conformance-regressions, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
