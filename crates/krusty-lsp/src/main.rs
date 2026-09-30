@@ -1,5 +1,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+
+mod canonical_support;
+use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1630,6 +1633,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             })
         });
         let mut remaining_analysis_bytes = krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES;
+        let open_documents = OpenDocumentSlots::from_documents(documents);
         for (module_index, document_indices) in group_seeds {
             let modeled_documents = document_indices
                 .iter()
@@ -1724,7 +1728,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             let remaining_support_entries =
                 MAX_RETAINED_SUPPORT_DOCUMENTS.saturating_sub(support_documents.len());
             let (navigation_file_remaps, added_bytes) = register_canonical_support(
-                documents,
+                &open_documents,
                 &group_support,
                 &mut support_documents,
                 &mut support_indices,
@@ -2195,41 +2199,6 @@ fn project_group_uris<'a>(
     project_group_slots(documents, group)
         .map(|(uri, _)| uri.to_string())
         .collect()
-}
-
-fn register_canonical_support(
-    documents: &[(&str, &str)],
-    group_support: &[(&str, &str)],
-    support_documents: &mut Vec<(String, String)>,
-    support_indices: &mut HashMap<String, usize>,
-    mut remaining_bytes: usize,
-    mut remaining_entries: usize,
-    next_discarded_file: &mut u32,
-) -> (Vec<(u32, u32)>, usize) {
-    let mut added_bytes = 0usize;
-    let mut remaps = Vec::with_capacity(group_support.len());
-    for (local_index, &(uri, source)) in group_support.iter().enumerate() {
-        let canonical =
-            if let Some(index) = documents.iter().position(|(open_uri, _)| *open_uri == uri) {
-                index as u32
-            } else if let Some(index) = support_indices.get(uri) {
-                (documents.len() + index) as u32
-            } else if remaining_entries > 0 && source.len() <= remaining_bytes {
-                let index = support_documents.len();
-                support_indices.insert(uri.to_string(), index);
-                support_documents.push((uri.to_string(), source.to_string()));
-                remaining_bytes -= source.len();
-                remaining_entries -= 1;
-                added_bytes += source.len();
-                (documents.len() + index) as u32
-            } else {
-                let discarded = *next_discarded_file;
-                *next_discarded_file = next_discarded_file.saturating_sub(1);
-                discarded
-            };
-        remaps.push(((documents.len() + local_index) as u32, canonical));
-    }
-    (remaps, added_bytes)
 }
 
 fn project_group_fingerprint(documents: &[(&str, &str)], group: &ProjectAnalysisGroup<'_>) -> u64 {
@@ -2844,8 +2813,9 @@ mod tests {
         let mut support_indices = HashMap::new();
         let mut next_discarded = u32::MAX;
 
+        let open_documents = OpenDocumentSlots::from_documents(&documents);
         let (first_remaps, _) = register_canonical_support(
-            &documents,
+            &open_documents,
             &first_support,
             &mut support_documents,
             &mut support_indices,
@@ -2854,7 +2824,7 @@ mod tests {
             &mut next_discarded,
         );
         let (second_remaps, _) = register_canonical_support(
-            &documents,
+            &open_documents,
             &second_support,
             &mut support_documents,
             &mut support_indices,
@@ -2888,7 +2858,7 @@ mod tests {
         let mut next_discarded = u32::MAX;
 
         let (remaps, added_bytes) = register_canonical_support(
-            &documents,
+            &OpenDocumentSlots::from_documents(&documents),
             &support,
             &mut support_documents,
             &mut support_indices,
