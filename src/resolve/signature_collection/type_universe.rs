@@ -60,6 +60,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                     crate::libraries::LibraryType::declaration_header(),
                 )),
                 callables: library.callables.clone(),
+                builtin_classifier: false,
                 importable_declaration: library.importable_declaration,
             })
         } else {
@@ -317,7 +318,12 @@ pub(in crate::resolve) fn source_type_universe(
                 .copied()
                 .map(|package| super::super::source_package::identity(Some(package)))
                 .collect();
-            let levels = [vec![own], explicit_star, kotlin_defaults, platform_defaults];
+            let levels = crate::symbol_resolver::classifier_precedence_levels(&[
+                vec![own],
+                explicit_star,
+                kotlin_defaults,
+                platform_defaults,
+            ]);
             let mut file_imports = HashMap::new();
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
                 HashMap::new();
@@ -414,14 +420,18 @@ pub(in crate::resolve) fn source_type_universe(
                         .iter()
                         .find_map(|level| {
                             let candidates = level
+                                .packages
                                 .iter()
                                 .filter_map(|&package| {
-                                    classifier_identity(
-                                        &source,
+                                    let record = source.symbols(
                                         crate::symbol_source::SymbolNamespace::Package(package),
                                         &source_name,
-                                    )
-                                    .map(|target| (package, target))
+                                    );
+                                    let target = record.classifier_name?;
+                                    if level.builtins_only && !record.builtin_classifier {
+                                        return None;
+                                    }
+                                    Some((package, target))
                                 })
                                 .collect::<Vec<_>>();
                             if candidates.is_empty() {

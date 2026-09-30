@@ -5509,8 +5509,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   **Which classifier a written path names is the FILE's ordinary resolver scope, not its
   spelling.** Actualization runs before full signature solving because it decides which compact
   declaration subtree survives. Before it does, resolution binds every classifier type it may
-  compare through the same module + provider scope tower used by ordinary signatures: own package,
-  explicit imports and aliases, wildcard imports, Kotlin defaults and platform defaults.
+  compare through the same module + provider scope tower used by ordinary signatures. Explicit
+  imports and aliases outrank the file's own package. The JVM default imports then publish each
+  classifier declared in a `.kotlin_builtins` fragment of `kotlin`, `kotlin.annotation`,
+  `kotlin.collections`, and `kotlin.ranges` as a simple import, and that simple import outranks
+  every star import. The resolved class is what decides: `kotlin.collections.List` is one of those
+  builtins, so `import java.util.*` leaves `Set` as `kotlin.collections.Set` and `import foo.*`
+  does not rebind `List` to a `class List` declared in `foo`. A stdlib declaration in the same
+  package is only a default star. That fact is the winning classifier record's own provenance:
+  an earlier classifier at the same qualified name stays a star-import candidate when a later
+  source also has a `.kotlin_builtins` declaration there, and only the selected builtin receives
+  named-default precedence. `import foo.*` therefore binds `foo.ArrayList`, `foo.Pair`, and
+  `foo.Exception`, while `IntRange` stays `kotlin.ranges.IntRange`. Explicit stars also outrank the
+  other default stars (`kotlin.sequences`, `kotlin.text`, `kotlin.io`, `kotlin.comparisons`, and
+  `java.lang`): `import foo.*` binds `foo.Sequence`, while `Object` stays `java.lang.Object`
+  because it is not one of those simple imports. An explicit import of a JVM class still binds
+  that class (`import java.util.List`).
+  A nested star (`import java.util.Map.*`) binds `java.util.Map.Entry`, and an unmapped class
+  (`Date`) stays visible. Callable lookup does not use this classifier order: an applicable
+  star-imported callable still outranks a default-imported one (`import other.*` plus
+  `Iterable.map` selects `other.map`). Tests:
+  `default_import_resolution_e2e::java_util_star_import_keeps_the_kotlin_collection_name`,
+  `default_import_resolution_e2e::a_stdlib_class_in_a_builtin_package_does_not_outrank_a_star_import`,
+  `symbol_source::tests::an_earlier_classifier_keeps_its_own_builtin_provenance`.
   Actualization consumes only the resulting `(source, header type) -> TypeName` table; it cannot
   inspect imports, query a provider, render a name, or intern an unresolved spelling. `import
   plib.model.Tally` against `plib.model.Tally` written out is one classifier;

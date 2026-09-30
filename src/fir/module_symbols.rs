@@ -1638,6 +1638,7 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             },
         );
         std::rc::Rc::new(ResolvedSymbols {
+            builtin_classifier: false,
             classifier_name: stable_classifier_name,
             classifier,
             callables,
