@@ -8225,7 +8225,7 @@ mod fq_tests {
         )
         .expect("stub");
         let cp = Classpath::new(vec![]);
-        cp.set_stub_overlay(stubs);
+        cp.set_stub_overlay(&stubs);
 
         assert!(cp.stub_overlay_contains_classifier(type_name("p/Outer.Inner")));
         assert!(!cp.stub_overlay_contains_classifier(type_name("p/Outer.Missing")));
