@@ -353,6 +353,73 @@ fn the_message_less_form_is_not_implemented() {
     );
 }
 
+/// A Java bean property names the accessor (`getTitle(...)`), a Java field names the field, a
+/// Kotlin property names `<get-title>(...)`, and `list[0]` names `get(...)`. The getter expression
+/// body guards the Java value inside the getter.
+#[test]
+fn property_and_index_guards_name_the_producing_callable() {
+    let java = [(
+        "J.java".to_string(),
+        r#"
+            public class J {
+                public String name = "n";
+                public String getTitle() { return "t"; }
+            }
+        "#
+        .to_string(),
+    )];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        panic!("javac must compile the platform-name fixture");
+    };
+    let source = r#"
+        fun field(j: J): String = j.name
+        fun bean(j: J): String = j.title
+        fun call(j: J): String = j.getTitle()
+        fun index(xs: java.util.ArrayList<String>): String = xs[0]
+        class Holder(val j: J) {
+            val label: String get() = j.title
+        }
+        class Inferred(val j: J) {
+            val title get() = j.title
+        }
+        fun useInferred(c: Inferred): String = c.title
+        fun box(): String = "OK"
+    "#;
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let classpath = vec![library.clone(), stdlib.clone()];
+    let krusty =
+        common::expect_compile_in_process(source, "PlatformNames", &classpath, Some(jdk.as_path()));
+    let work = common::scratch_dir().expect("allocate kotlinc platform-name fixture");
+    let file = work.join("PlatformNames.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create kotlinc output");
+    std::fs::write(&file, source).expect("write platform-name fixture");
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let cp = format!("{}{sep}{}", library.display(), stdlib.display());
+    let args = vec![
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-classpath".to_string(),
+        cp,
+        "-nowarn".to_string(),
+        file.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
+    let mut reference = Vec::new();
+    collect_classes(&output, &output, &mut reference);
+    let _ = std::fs::remove_dir_all(&work);
+    if let Some(root) = library.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(
+        assertion_sites(&krusty, "krusty"),
+        assertion_sites(&reference, "kotlinc"),
+        "platform guards must name the same callable kotlinc names"
+    );
+}
+
 #[test]
 fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");

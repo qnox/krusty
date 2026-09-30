@@ -105,7 +105,7 @@ impl ExistingLibrary {
                             getter_declaration: None,
                             setter_declaration: None,
                             source_member: None,
-                            accessor_derived: false,
+                            producer: crate::libraries::PropertyProducer::KotlinAccessor,
                             read_stability: crate::libraries::PropertyReadStability::Unstable,
                         }],
                     }),
@@ -272,7 +272,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
                         getter_declaration: None,
                         setter_declaration: None,
                         source_member: None,
-                        accessor_derived: false,
+                        producer: crate::libraries::PropertyProducer::KotlinAccessor,
                         read_stability: crate::libraries::PropertyReadStability::Unstable,
                     }],
                 }),
@@ -394,7 +394,7 @@ impl ExistingLibrary {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
-                accessor_derived: false,
+                producer: crate::libraries::PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::Unstable,
             }
         })
