@@ -359,10 +359,9 @@ mod tests {
             .find(|function| function.kind == FnKind::TopLevel)
             .map(|function| &function.callable)
             .expect("stdlib must declare receiver-less runCatching");
-        let owner = callable.owner.render();
         let body = libraries
             .cp
-            .method_code(&owner, &callable.name, &callable.descriptor)
+            .method_code_name(callable.owner, &callable.name, &callable.descriptor)
             .expect("runCatching must retain its declaration body");
         let instructions = inline::disassemble(&body.code).expect("disassemble runCatching");
         let invoke_sites = inline::function_invoke_sites(&instructions, &body.source_cp);

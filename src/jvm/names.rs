@@ -84,15 +84,7 @@ pub use crate::names::property_getter_name;
 /// A classifier's class id with `$` between nested segments (`app/Outer.Inner` → `app/Outer$Inner`),
 /// read from the name tree. Unlike [`classfile_internal_name`] it maps no built-in.
 pub(super) fn binary_class_name(classifier: TypeName) -> String {
-    match classifier.nested_owner() {
-        Some(owner) => {
-            let segment = classifier
-                .nested_segment_within(owner)
-                .expect("a recorded nested owner must own the classifier segment");
-            format!("{}${segment}", binary_class_name(owner))
-        }
-        None => classifier.render(),
-    }
+    classifier.jvm_binary_name()
 }
 
 /// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
@@ -101,27 +93,47 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
 /// The mapping reads only whether the name is interned, and an interned name stays interned, so the
 /// physical name of a name interned before it is mapped is remembered per thread.
 pub fn classfile_internal_name(internal: &str) -> String {
+    if let Some(identity) = crate::types::existing_type_name(internal) {
+        return classfile_internal_name_of(identity);
+    }
+    physical_classfile_name(internal)
+}
+
+/// Physical JVM classfile name of an interned classifier. A repeated lookup returns the remembered
+/// spelling and does not render the classifier again.
+fn classfile_internal_name_of(internal: TypeName) -> String {
     thread_local! {
         static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
             std::cell::RefCell::default();
     }
-    let identity = crate::types::existing_type_name(internal);
-    if let Some(identity) = identity {
-        if let Some(physical) =
-            INTERNED.with(|known| known.borrow().get(&identity).map(|name| name.to_string()))
-        {
-            return physical;
+    if let Some(physical) =
+        INTERNED.with(|known| known.borrow().get(&internal).map(|name| name.to_string()))
+    {
+        return physical;
+    }
+    let physical = physical_classfile_name_of(internal);
+    INTERNED.with(|known| {
+        known
+            .borrow_mut()
+            .insert(internal, physical.as_str().into())
+    });
+    physical
+}
+
+fn physical_classfile_name_of(internal: TypeName) -> String {
+    if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_jvm_class(internal) {
+        return intrinsic;
+    }
+    if let Some(function) = crate::jvm::function_classifiers::classifier(internal) {
+        if function.is_reflective() {
+            return crate::types::KFUNCTION_INTERNAL.to_owned();
+        }
+        if !function.is_suspend() {
+            return function_interface_internal_name(function.arity());
         }
     }
-    let physical = physical_classfile_name(internal);
-    if let Some(identity) = identity {
-        INTERNED.with(|known| {
-            known
-                .borrow_mut()
-                .insert(identity, physical.as_str().into())
-        });
-    }
-    physical
+    let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
+    mapped.jvm_binary_name()
 }
 
 fn physical_classfile_name(internal: &str) -> String {
@@ -259,7 +271,7 @@ pub fn type_descriptor(ty: Ty) -> String {
     // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
     // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
     // `Ty` that reaches bytecode.
-    let obj_desc = |internal: &str| format!("L{};", classfile_internal_name(internal));
+    let obj_desc_name = |internal: TypeName| format!("L{};", classfile_internal_name_of(internal));
     match ty {
         // The resolution engine converts an undetermined declaration into a decline before
         // anything is emitted, so reaching emission with one is a broken invariant, not a shape to
@@ -278,7 +290,7 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::UShort => "S".into(),
         Ty::UInt => "I".into(),
         Ty::ULong => "J".into(),
-        Ty::String => obj_desc("kotlin/String"),
+        Ty::String => obj_desc_name(crate::types::type_name("kotlin/String")),
         Ty::Unit => "V".into(),
         // A boxed `Array<T>` (`Obj("kotlin/Array", [T])`) is `[<boxed T>` (`Array<Int>` = `[Ljava/lang/Integer;`),
         // and a primitive array class name (`kotlin/IntArray`) is its JVM array descriptor (`[I`) — without
@@ -293,23 +305,23 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
             primitive_array_descriptor(n).expect("checked in the guard")
         }
-        Ty::Obj(n, _) => obj_desc(&n.render()),
+        Ty::Obj(n, _) => obj_desc_name(n),
         // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into
         // signatures (`fun boom(): Nothing`, `fun f(n: Nothing)`, a `Nothing` getter), and kotlinc
         // writes `java.lang.Void` there, not `Object`. A caller compiled against kotlinc's ABI links
         // against that descriptor.
-        Ty::Nothing => obj_desc("java/lang/Void"),
-        Ty::Null | Ty::Error => obj_desc("kotlin/Any"),
+        Ty::Nothing => obj_desc_name(crate::types::type_name("java/lang/Void")),
+        Ty::Null | Ty::Error => obj_desc_name(crate::types::type_name("kotlin/Any")),
         Ty::Fun(s) => format!(
             "L{};",
             function_interface_internal_name(s.params.len() + usize::from(s.suspend))
         ),
         Ty::Nullable(inner) => match *inner {
-            Ty::Unit => obj_desc("kotlin/Unit"),
-            Ty::UByte => obj_desc("kotlin/UByte"),
-            Ty::UShort => obj_desc("kotlin/UShort"),
-            Ty::UInt => obj_desc("kotlin/UInt"),
-            Ty::ULong => obj_desc("kotlin/ULong"),
+            Ty::Unit => obj_desc_name(crate::types::type_name("kotlin/Unit")),
+            Ty::UByte => obj_desc_name(crate::types::type_name("kotlin/UByte")),
+            Ty::UShort => obj_desc_name(crate::types::type_name("kotlin/UShort")),
+            Ty::UInt => obj_desc_name(crate::types::type_name("kotlin/UInt")),
+            Ty::ULong => obj_desc_name(crate::types::type_name("kotlin/ULong")),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
         },
         Ty::TyParam(_, bound)
@@ -318,7 +330,7 @@ pub fn type_descriptor(ty: Ty) -> String {
         | Ty::StarProjection(bound) => type_descriptor(*bound),
         // An `in X` occurrence says a caller may WRITE an `X` there; a value read back through it
         // is only known to be `Any?`, so it erases to `Object` rather than to `X`.
-        Ty::InProjection(_) => obj_desc("java/lang/Object"),
+        Ty::InProjection(_) => obj_desc_name(crate::types::type_name("java/lang/Object")),
     }
 }
 
@@ -349,14 +361,14 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
             .boxed_ref()
             .and_then(Ty::obj_internal)
-            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
+            .map(crate::jvm::names::classfile_internal_name_of)
             .unwrap_or_else(|| instanceof_internal_name(*inner)),
         // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
         // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
         t if t.is_array() => type_descriptor(t),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
+        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n),
         // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
         Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
@@ -477,6 +489,23 @@ mod tests {
         assert_eq!(
             type_descriptor(function),
             "Lkotlin/jvm/functions/FunctionN;"
+        );
+    }
+
+    #[test]
+    fn function_classifier_descriptor_uses_the_jvm_interface() {
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/Function1")),
+            "Lkotlin/jvm/functions/Function1;"
+        );
+        // Exercise the remembered identity path as well as the initial conversion.
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/Function1")),
+            "Lkotlin/jvm/functions/Function1;"
+        );
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/collections/MutableList")),
+            "Ljava/util/List;"
         );
     }
 

@@ -45,10 +45,7 @@ pub(crate) fn inherited_classifier_shape(
     let accessible = match classifier.access {
         ClassifierAccess::Public | ClassifierAccess::Protected => true,
         ClassifierAccess::Internal => classifier.source_file.is_some(),
-        ClassifierAccess::PackagePrivate => {
-            let package = internal.package();
-            inheritor.package_matches(&package)
-        }
+        ClassifierAccess::PackagePrivate => inheritor.namespace() == internal.namespace(),
         ClassifierAccess::Private => false,
     };
     accessible.then_some(classifier)

@@ -782,12 +782,14 @@ impl JvmLibraries {
         if *decode_unavailable {
             return None;
         }
-        let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);
         let Some(body) = self
             .cp
-            .method_code(&owner, &inline_name, body_descriptor)
-            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))
+            .method_code_name(callable.owner, &inline_name, body_descriptor)
+            .or_else(|| {
+                self.cp
+                    .method_code_name(callable.owner, &callable.name, body_descriptor)
+            })
         else {
             *decode_unavailable = true;
             return None;
@@ -1196,10 +1198,11 @@ impl JvmLibraries {
         if realization.mask_count != 1 {
             return Some(false);
         }
-        let owner = realization.declaration_owner.render();
-        let body = self
-            .cp
-            .method_code(&owner, &realization.name, &realization.descriptor)?;
+        let body = self.cp.method_code_name(
+            realization.declaration_owner,
+            &realization.name,
+            &realization.descriptor,
+        )?;
         let Some(instructions) = inline::disassemble(&body.code) else {
             return Some(false);
         };
@@ -1318,11 +1321,14 @@ mod tests {
         assert_eq!(cleanup.arguments.as_slice(), [InlineBodyValue::Cause]);
         assert!(cleanup.callable.external_identity.is_some());
         let descriptor = inline_body_descriptor(callable).expect("use body descriptor");
-        let owner = callable.owner.render();
         let body = libraries
             .cp
-            .method_code(&owner, "use$$forInline", &descriptor)
-            .or_else(|| libraries.cp.method_code(&owner, "use", &descriptor))
+            .method_code_name(callable.owner, "use$$forInline", &descriptor)
+            .or_else(|| {
+                libraries
+                    .cp
+                    .method_code_name(callable.owner, "use", &descriptor)
+            })
             .expect("stdlib must expose the selected use body");
         let instructions = inline::disassemble(&body.code).expect("valid use bytecode");
         let offsets = inline::insn_offsets_at(&instructions, 0);

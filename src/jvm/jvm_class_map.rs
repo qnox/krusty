@@ -594,6 +594,9 @@ struct BuiltinIds {
     metadata_declarations: Vec<Box<[TypeName]>>,
     /// Any builtin (Kotlin or JVM spelling, primitives included) → its canonical JVM internal.
     jvm_builtin: FxHashMap<TypeName, (&'static str, TypeName)>,
+    /// JVM classifier that a Java source declaration denotes → its canonical Kotlin classifier.
+    /// Groups that erase without that inverse (`kotlin/Nothing` → `java/lang/Void`) are absent.
+    source_to_kotlin: FxHashMap<TypeName, TypeName>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
     collection_groups: u32,
     /// Groups whose Kotlin metadata declaration replaces, rather than joins, the JVM source scope.
@@ -620,6 +623,7 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut erasure_group = FxHashMap::default();
         let mut metadata_declarations = Vec::with_capacity(ERASURE_GROUPS.len());
         let mut jvm_builtin = FxHashMap::default();
+        let mut source_to_kotlin = FxHashMap::default();
         let mut collection_groups = 0u32;
         let mut authoritative_scope_groups = 0u32;
         let mut coll_to_kotlin = FxHashMap::default();
@@ -632,8 +636,8 @@ fn builtin_ids() -> &'static BuiltinIds {
                 kotlin_names,
                 jvm_name,
                 scope,
+                maps_java_source_to_kotlin,
                 collection,
-                ..
             } = mapping;
             if let Some((kind, mutable_from)) = collection {
                 for (index, kotlin_name) in kotlin_names.iter().enumerate() {
@@ -661,7 +665,11 @@ fn builtin_ids() -> &'static BuiltinIds {
             // forward identity table prevents consumers from reconstructing only the collection or
             // Kotlin-only-member subsets and silently missing mapped types such as Cloneable/String.
             if let Some(kotlin_name) = kotlin_names.first() {
-                metadata_owner.insert(jvm_id, tn(kotlin_name));
+                let kotlin_id = tn(kotlin_name);
+                metadata_owner.insert(jvm_id, kotlin_id);
+                if *maps_java_source_to_kotlin {
+                    source_to_kotlin.insert(jvm_id, kotlin_id);
+                }
             }
             for kotlin_name in *kotlin_names {
                 let id = tn(kotlin_name);
@@ -725,6 +733,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             erasure_group,
             metadata_declarations,
             jvm_builtin,
+            source_to_kotlin,
             collection_groups,
             authoritative_scope_groups,
             coll_to_kotlin,
@@ -877,6 +886,16 @@ pub fn to_kotlin_internal(internal: &str) -> &str {
         .unwrap_or(internal)
 }
 
+/// Identity form of [`to_kotlin_internal`]. An already-interned classifier does not render or scan
+/// the erasure table as text. `java/lang/Void` stays itself.
+pub(super) fn to_kotlin_type_name(internal: TypeName) -> TypeName {
+    builtin_ids()
+        .source_to_kotlin
+        .get(&internal)
+        .copied()
+        .unwrap_or(internal)
+}
+
 fn primitive_wrapper(t: Ty) -> Option<(&'static str, TypeName)> {
     let scalar = t.scalar_value_repr()?;
     let internal = t.obj_internal()?;
@@ -908,8 +927,8 @@ mod tests {
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
         mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
         maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_internal,
-        to_jvm_type_name, to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
-        wrapper_type_name,
+        to_jvm_type_name, to_kotlin_internal, to_kotlin_type_name, wrapper_internal,
+        wrapper_to_kotlin_prim_name, wrapper_type_name,
     };
     use crate::types::{type_name, CollectionKind, MappedCollection, Ty};
 
@@ -1021,6 +1040,22 @@ mod tests {
             "java/lang/Void",
             "a Java Void declaration is not Kotlin's bottom type"
         );
+        assert_eq!(
+            to_kotlin_type_name(type_name("java/util/List")),
+            type_name("kotlin/collections/List")
+        );
+        assert_eq!(
+            to_kotlin_type_name(type_name("java/lang/String")),
+            type_name("kotlin/String")
+        );
+        assert_eq!(
+            to_kotlin_type_name(type_name("java/util/Map$Entry")),
+            type_name("kotlin/collections/Map.Entry")
+        );
+        let java_void = type_name("java/lang/Void");
+        assert_eq!(to_kotlin_type_name(java_void), java_void);
+        let user = type_name("demo/Foo");
+        assert_eq!(to_kotlin_type_name(user), user);
         assert_eq!(to_jvm_internal("kotlin/Nothing"), "java/lang/Void");
         assert_eq!(
             jvm_collection_to_kotlin_type_name(type_name("java/util/List")),

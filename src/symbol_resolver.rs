@@ -2056,10 +2056,8 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn package_private_member_accessible(&self, owner: TypeName) -> bool {
-        self.access_package.is_some_and(|package| {
-            let declared = owner.package();
-            package.matches(&declared)
-        })
+        self.access_package
+            .is_some_and(|package| package == owner.namespace())
     }
 
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
