@@ -2718,6 +2718,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same unsigned exclusions as the bare-name form apply. (Intermediate chain links narrow too when
   they are stable property paths — see the access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
   `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
+- **A successful non-null `as` narrows its operand for every later read that cannot run until the
+  cast has been evaluated.** `major == (other as Version).major && minor == other.minor` types
+  `other.minor` as `Version`, and `(other as String).length == other.length` types the right
+  `other` as `String`. The same holds for the right operand of `||` and of any eager operator,
+  and for an inferred return whose signature is solved before the body check. A cast on the
+  right of `&&` or `||` does not narrow code that can skip that operand. The cast never widens a
+  more specific stable type (`x: String` stays `String` after `x as Any`). Test:
+  `tests/cast_evaluation_order_e2e.rs`.
 - **Smart casts apply to stable ACCESS PATHS, not only plain names** (`tests/path_smartcast_e2e.rs`).
   `==`/`!=` null checks, `is`/`!is` type tests, and contract conclusions (`returns(false) implies
   (this != null)` — `if (a.p.isNullOrBlank()) … else { a.p.length }`; `require(a.p != null)`) narrow

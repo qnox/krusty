@@ -65743,6 +65743,17 @@ impl<'a> Checker<'a> {
                 Some(ty) => ty,
                 None => self.expr(scope, lhs),
             };
+            // Eager operators evaluate the left operand completely before the right, so a cast
+            // there has run. `&&` / `||` take the short-circuit path above.
+            let mut casts = Vec::new();
+            self.as_cast_narrowings(scope, lhs, &mut casts);
+            let rhs_scope = scope.child(ScopeKind::Block);
+            let scope = if casts.is_empty() {
+                scope
+            } else {
+                self.apply_narrowings(&rhs_scope, &casts, &[], false);
+                &rhs_scope
+            };
             let equality = matches!(op, BinOp::Eq | BinOp::Ne);
             fn contains_bottom_evidence(ty: Ty) -> bool {
                 match ty {

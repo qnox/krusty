@@ -5627,6 +5627,31 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }
 
+    fn narrow_successful_cast(
+        &self,
+        scope: crate::fir::SignatureScope,
+        original: crate::fir::ResolvedTy,
+        target: crate::fir::ResolvedTy,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let oracle = crate::symbol_resolver::SourceOracle(&source);
+        let chosen = if crate::assignable::is_subtype(
+            &crate::assignable::TyCtx::new(),
+            &oracle,
+            original.get(),
+            target.get(),
+        ) {
+            original.get()
+        } else {
+            target.get()
+        };
+        crate::fir::ResolvedTy::new(chosen).map_err(|_| Self::failure())
+    }
+
     fn call_proves_argument_non_null(
         &self,
         origin: crate::fir::OriginId,

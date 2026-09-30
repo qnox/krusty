@@ -247,6 +247,14 @@ pub enum SigExpr {
         /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
         condition: bool,
     },
+    /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
+    /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
+    /// when the cast actually narrows.
+    CastNarrowed {
+        value: SigExprId,
+        target: SigExprId,
+        scope: SignatureScopeId,
+    },
     Substitute {
         base: SigExprId,
         substitutions: SubstitutionRange,
@@ -1146,6 +1154,17 @@ pub trait SignatureSemantics {
     fn make_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
 
     fn make_non_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// The type of a value after a successful non-null `as` cast to `target`. A cast never
+    /// widens: when `original` is already `target` or a subtype, it stays `original`.
+    fn narrow_successful_cast(
+        &self,
+        _scope: SignatureScope,
+        _original: ResolvedTy,
+        target: ResolvedTy,
+    ) -> Result<ResolvedTy, DiagnosticId> {
+        Ok(target)
+    }
 
     /// Whether the callable selected for the call at `origin` carries a
     /// `returns() implies (<parameter> != null)` contract effect for source `argument`.

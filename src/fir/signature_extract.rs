@@ -4,6 +4,7 @@
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
 mod definitely_evaluated;
+mod evaluated_casts;
 mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
@@ -1252,7 +1253,7 @@ impl SignatureConstraintExtractor {
 
     /// Compact smart-cast facts established when `condition` is true. Semantic compatibility is
     /// still decided by the ordinary resolver/checker adapter when these expression types evaluate.
-    fn positive_smartcasts(
+    fn positive_smartcast_facts(
         &mut self,
         file: &File,
         condition: ExprId,
@@ -1709,12 +1710,14 @@ impl SignatureConstraintExtractor {
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs_expression = *lhs;
                 let lhs = self.expression(file, lhs_expression, scope, origin)?;
-                let rhs = if *op == BinOp::And {
-                    let bindings = self.positive_smartcasts(file, lhs_expression, scope, origin)?;
-                    self.smartcast_bindings_branch(file, *rhs, scope, origin, bindings)?
+                let bindings = if *op == BinOp::And {
+                    self.positive_smartcasts(file, lhs_expression, scope, origin)?
                 } else {
-                    self.expression(file, *rhs, scope, origin)?
+                    // `||` and every eager operator evaluate the left operand before the right,
+                    // so a cast there has run. `&&` uses the stronger positive-condition facts.
+                    self.evaluated_as_cast_bindings(file, lhs_expression, scope, origin)?
                 };
+                let rhs = self.smartcast_bindings_branch(file, *rhs, scope, origin, bindings)?;
                 let operator = match op {
                     BinOp::Add => super::SigBinaryOperator::Add,
                     BinOp::Sub => super::SigBinaryOperator::Subtract,

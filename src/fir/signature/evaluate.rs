@@ -1413,6 +1413,20 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     SigExpr::NonNullable(base) => semantics.make_non_nullable(evaluate_expression(
                         semantics, base, graph, demand, memo, computing,
                     )?),
+                    SigExpr::CastNarrowed {
+                        value,
+                        target,
+                        scope,
+                    } => {
+                        let value =
+                            evaluate_expression(semantics, value, graph, demand, memo, computing)?;
+                        let target =
+                            evaluate_expression(semantics, target, graph, demand, memo, computing)?;
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a cast narrowing must retain its declaration scope");
+                        semantics.narrow_successful_cast(scope, value, target)
+                    }
                     SigExpr::ContractNarrowed {
                         value,
                         call,
