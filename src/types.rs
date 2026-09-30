@@ -14,7 +14,10 @@ pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::InlineParameterModifier;
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
-pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
+pub use spelling::{
+    existing_type_name, existing_type_name_child, type_name, type_name_from,
+    type_name_from_multifile_facade,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};

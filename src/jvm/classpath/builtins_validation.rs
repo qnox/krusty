@@ -6,7 +6,9 @@
 use super::{BuiltinsLoadError, Classpath};
 
 impl Classpath {
-    pub(in crate::jvm) fn validate_builtins(&self) -> Result<(), std::sync::Arc<BuiltinsLoadError>> {
+    pub(in crate::jvm) fn validate_builtins(
+        &self,
+    ) -> Result<(), std::sync::Arc<BuiltinsLoadError>> {
         if self.builtins_validated.get() {
             return Ok(());
         }
