@@ -40,6 +40,10 @@ pub enum DiagnosticIdentity {
         reference: Span,
         classifier: TypeName,
     },
+    /// Resolution failure for one import occurrence. Pass 2 may enter the same file once per
+    /// declaration group; the source occurrence, not its rendered message, identifies the one
+    /// file-level diagnostic those entries share.
+    ImportResolution { reference: Span },
 }
 
 #[derive(Clone, Debug)]

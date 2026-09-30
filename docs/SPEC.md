@@ -2113,6 +2113,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   later expression that reads it fails on its own, and the effect's Pass-1 diagnostic is not
   reported because the declaration did not fail (Pass 2 reports the body). Test:
   `streaming_signature_tests::a_failing_statement_does_not_fail_the_inferred_result_of_its_block`.
+- **An unresolved import does not discard the rest of the file's import scope.** A missing
+  classifier (`import com.missing.Foo`, `import com.intellij…`) is one diagnostic on its first
+  unresolved segment. The signature scope skips that import and keeps every other explicit
+  import, star import, and the default imports, so a later `java.io.File`, a bare `List`, and an
+  extension receiver `CharSequence` still resolve. Aborting the whole per-file scope on the first
+  unresolved qualifier reported those names as unresolved too. An unresolved star import is
+  omitted from the star level the same way. The import diagnostic itself is a file fact: body
+  checking re-enters the file once per declaration group and reports that segment only once.
+  Tests:
+  `import_resolution_diag_e2e::an_unresolved_import_keeps_the_rest_of_the_file_scope`,
+  `::an_unresolved_star_import_keeps_default_imports`.
 - **A signature-pass member call hands its parameter to a nested generic call.** A nested call
   argument (`emptyList()`, `mapOf()`) is probed with its formals defaulted (`List<Any>`) and is
   marked `contextual_call`; the top-level path re-selects it under the selected parameter, but

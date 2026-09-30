@@ -55,13 +55,16 @@ impl ProductionSignatureSemantics<'_> {
         let mut stars = Vec::new();
         for import in self.headers.scopes.imports(file.imports) {
             let imported = path(import.path).ok_or_else(Self::failure)?;
+            // An unresolved import is that import's own diagnostic. It must not discard the
+            // file scope: later explicit imports and the default imports still bind.
             if import.wildcard {
-                let owner = match super::super::qualifier_path(&imported, &symbols, None)
-                    .map_err(|_| Self::failure())?
-                {
+                let Ok(qualifier) = super::super::qualifier_path(&imported, &symbols, None) else {
+                    continue;
+                };
+                let owner = match qualifier {
                     super::super::ResolvedQualifier::Package(package) => package,
                     super::super::ResolvedQualifier::Classifier(classifier) => classifier,
-                    super::super::ResolvedQualifier::Value => return Err(Self::failure()),
+                    super::super::ResolvedQualifier::Value => continue,
                 };
                 stars.push(owner);
                 continue;
@@ -71,16 +74,17 @@ impl ProductionSignatureSemantics<'_> {
             let owner = if parent.is_empty() {
                 crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
             } else {
-                match super::super::qualifier_path(parent, &symbols, None)
-                    .map_err(|_| Self::failure())?
-                {
+                let Ok(qualifier) = super::super::qualifier_path(parent, &symbols, None) else {
+                    continue;
+                };
+                match qualifier {
                     super::super::ResolvedQualifier::Package(package) => {
                         crate::symbol_source::SymbolNamespace::Package(package)
                     }
                     super::super::ResolvedQualifier::Classifier(classifier) => {
                         crate::symbol_source::SymbolNamespace::Classifier(classifier)
                     }
-                    super::super::ResolvedQualifier::Value => return Err(Self::failure()),
+                    super::super::ResolvedQualifier::Value => continue,
                 }
             };
             let visible_name = import
