@@ -133,6 +133,7 @@ use signature_collection::{
     base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
     resolve_source_alias_expansion, spelling_scope, supertype_components, supertype_graph,
+    TopLevelFunctionConflictKey,
 };
 pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
 pub(crate) use signature_collection::{
@@ -375,80 +376,6 @@ fn resolved_compact_jvm_name(
                 .map(|value| value.to_string())
         })
         .unwrap_or_else(|| fallback.to_string())
-}
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TopLevelFunctionConflictKey {
-    package: TypeName,
-    receiver: Option<Ty>,
-    name: String,
-    params: Vec<Ty>,
-    formal_bounds: Vec<(u32, Vec<Ty>)>,
-}
-
-impl TopLevelFunctionConflictKey {
-    fn from_signature(signature: &Signature, name: String) -> Option<Self> {
-        let formals = signature
-            .generic_sig
-            .as_ref()
-            .map(|generic| generic.formals.as_slice())
-            .unwrap_or_default();
-        let params = signature
-            .generic_sig
-            .as_ref()
-            .map(|generic| generic.params.as_slice())
-            .unwrap_or(&signature.params);
-        if params.iter().any(|parameter| parameter.contains_error()) {
-            return None;
-        }
-        // This is Kotlin declaration identity, not a backend descriptor key. Preserve generic
-        // arguments, nullability, function shapes, and value-class identities; those facts can
-        // distinguish applicability even when one target later erases them to the same physical
-        // signature. Canonicalize only declaration-owned type-parameter names so alpha-equivalent
-        // declarations still conflict.
-        let normalize = |ty| crate::types::ty_canonicalize_params(ty, formals);
-        let declared_receiver = signature
-            .generic_sig
-            .as_ref()
-            .and_then(|generic| generic.receiver)
-            .or(signature.source_receiver);
-        let formal_bounds = signature
-            .generic_sig
-            .as_ref()
-            .map(|generic| {
-                generic
-                    .formal_bounds
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| {
-                        let formal = &formals[*index];
-                        params
-                            .iter()
-                            .copied()
-                            .chain(declared_receiver)
-                            .any(|ty| ty_mentions_param(ty, std::slice::from_ref(formal)))
-                    })
-                    .map(|(index, bounds)| {
-                        (
-                            index as u32,
-                            bounds.iter().copied().map(normalize).collect(),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let receiver = match declared_receiver {
-            Some(receiver) if receiver.contains_error() => return None,
-            Some(receiver) => Some(normalize(receiver)),
-            None => None,
-        };
-        Some(Self {
-            package: signature.package,
-            receiver,
-            name,
-            params: params.iter().copied().map(normalize).collect(),
-            formal_bounds,
-        })
-    }
 }
 
 fn classifier_bound_is_interface(

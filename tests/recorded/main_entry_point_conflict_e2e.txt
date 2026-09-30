@@ -1,0 +1,11 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[same_file_entry_point_and_ordinary_main_conflict]
+2.4.20:
+  Main.kt:2:1: platform declaration clash: The following declarations have the same JVM signature (main()V):
+  |     fun main(): Unit defined in p
+  |     fun <T> main(): Unit defined in p
+  Main.kt:3:1: platform declaration clash: The following declarations have the same JVM signature (main()V):
+  |     fun main(): Unit defined in p
+  |     fun <T> main(): Unit defined in p

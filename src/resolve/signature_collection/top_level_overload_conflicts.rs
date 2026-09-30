@@ -134,3 +134,91 @@ pub(in crate::resolve) fn commit_top_level_conflict_groups(
         })
         .collect();
 }
+
+/// Publish the exact source-to-conflict-key relation used by invalid-call recovery.
+///
+/// This runs only for the legacy AST entry point. A signature without its declaration is omitted:
+/// recovery must not guess a declared generic arity from the normalized signature payload.
+pub(in crate::resolve) fn publish_legacy_top_level_conflict_recovery_keys(
+    table: &mut SymbolTable,
+    files: &[File],
+) {
+    table.conflicting_top_level_key_by_source.clear();
+    for (name, signatures) in &table.funs {
+        for signature in signatures {
+            let Some((file, declaration)) = signature.source_file.zip(signature.source_decl) else {
+                continue;
+            };
+            let Some(function) =
+                files
+                    .get(file as usize)
+                    .and_then(|source| match source.decl(declaration) {
+                        Decl::Fun(function) => Some(function),
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            let Some(key) = TopLevelFunctionConflictKey::from_signature(
+                signature,
+                name.clone(),
+                function.type_params.len(),
+            ) else {
+                continue;
+            };
+            let local = signature.visibility.is_private()
+                || is_kotlin_main_entry_point(function, &signature.params, signature.ret);
+            let retained = table
+                .conflicting_top_level_candidates
+                .get(&key)
+                .is_some_and(|candidates| !local || candidates.by_file.contains_key(&file));
+            if retained {
+                table
+                    .conflicting_top_level_key_by_source
+                    .insert((file, declaration.0), key);
+            }
+        }
+    }
+    for (name, receivers) in &table.ext_funs {
+        for signatures in receivers.values() {
+            for signature in signatures {
+                let Some((file, declaration, _receiver)) = signature
+                    .source_file
+                    .zip(signature.source_decl)
+                    .zip(signature.source_receiver)
+                    .map(|((file, declaration), receiver)| (file, declaration, receiver))
+                else {
+                    continue;
+                };
+                let Some(declared_type_parameter_count) =
+                    files
+                        .get(file as usize)
+                        .and_then(|source| match source.decl(declaration) {
+                            Decl::Fun(function) => Some(function.type_params.len()),
+                            _ => None,
+                        })
+                else {
+                    continue;
+                };
+                let Some(key) = TopLevelFunctionConflictKey::from_signature(
+                    signature,
+                    name.clone(),
+                    declared_type_parameter_count,
+                ) else {
+                    continue;
+                };
+                let retained = table
+                    .conflicting_top_level_candidates
+                    .get(&key)
+                    .is_some_and(|candidates| {
+                        !signature.visibility.is_private() || candidates.by_file.contains_key(&file)
+                    });
+                if retained {
+                    table
+                        .conflicting_top_level_key_by_source
+                        .insert((file, declaration.0), key);
+                }
+            }
+        }
+    }
+}
