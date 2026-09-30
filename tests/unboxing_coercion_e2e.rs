@@ -173,3 +173,59 @@ fn a_local_frame_type_follows_the_cast_its_initializer_takes() {
         Some(Err(difference)) => panic!("local frame facade differs from kotlinc:\n{difference}"),
     }
 }
+
+/// `fun <T> f() = 1L as T` used as `val x: Int = f()!!` null-checks the erased `Object`, then
+/// unboxes through `Number`. A `checkcast` to `Integer` before that check rejects the `Long`.
+/// A value already stored as `Int?`, and `fun <T> p(x: T): Int = x!!`, still unbox through
+/// `Integer`.
+#[test]
+fn an_asserted_generic_result_unboxes_through_number() {
+    let source = r#"
+        @Suppress("UNCHECKED_CAST")
+        fun <T> f() = 1L as T
+        fun asserted(): Int = f()!!
+        fun wide(): Long = f()!!
+        fun fractional(): Double = d()!!
+        @Suppress("UNCHECKED_CAST")
+        fun <T> d() = 1.5 as T
+        fun narrow(): Byte = b()!!
+        @Suppress("UNCHECKED_CAST")
+        fun <T> b() = 1.toByte() as T
+        fun flag(): Boolean = g()!!
+        @Suppress("UNCHECKED_CAST")
+        fun <T> g() = true as T
+        fun letter(): Char = h()!!
+        @Suppress("UNCHECKED_CAST")
+        fun <T> h() = 'c' as T
+        fun stored(): Int {
+            val y: Int? = f()
+            return y!!
+        }
+        fun <T> param(x: T): Int = x!! as Int
+        fun box(): String {
+            if (asserted() != 1) return "int"
+            if (wide() != 1L) return "long"
+            if (fractional() != 1.5) return "double"
+            if (narrow() != 1.toByte()) return "byte"
+            if (!flag()) return "bool"
+            if (letter() != 'c') return "char"
+            if (param(4) != 4) return "param"
+            return "OK"
+        }
+    "#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "AssertedGeneric").as_deref(),
+        Some("OK")
+    );
+    match common::byte_diff_against_kotlinc_cp(
+        "AssertedGeneric",
+        source,
+        "AssertedGenericKt",
+        &[common::stdlib_jar()],
+    ) {
+        Some(Ok(())) | None => {}
+        Some(Err(difference)) => {
+            panic!("asserted generic unbox differs from kotlinc:\n{difference}")
+        }
+    }
+}

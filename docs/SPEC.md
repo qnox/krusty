@@ -4367,6 +4367,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   wrappers and every number through `java/lang/Number` (`checkcast Number; Number.intValue`), with
   the `checkcast` omitted when the static type already is `Number`; unsigned scalars unbox through
   their `unbox-impl` (`tests/unboxing_coercion_e2e.rs`).
+- **A not-null assertion of a substituted generic result unboxes the erased value.** `fun <T> f(): T`
+  used as `val x: Int = f()!!` checks null on the erased `Object` the call returns, then unboxes
+  through `java/lang/Number`. The assertion does not `checkcast` to the substituted wrapper first:
+  `1L as T` with `T` inferred as `Int?` is a `Long`, and `Long` is a `Number`. The same order holds
+  for every number and for `Boolean` and `Char`, whose wrappers are checked after the null check.
+  A value already stored as `Int?`, or a type-parameter parameter (`fun <T> p(x: T): Int = x!!`),
+  still unboxes through `Integer`. Test: `tests/unboxing_coercion_e2e.rs`.
 - **An `as` cast to a non-null type is guarded unless kotlinc proves its operand non-null.**
   kotlinc's lowering guards every such cast with `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type …")`, because a value of a non-null type can still be `null` at run time (a

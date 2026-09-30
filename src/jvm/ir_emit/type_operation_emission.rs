@@ -55,6 +55,15 @@ impl Emitter<'_> {
             return;
         }
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+        // `val x: Int = f()!!` where `f` returns a type parameter. The assertion checks the erased
+        // call result; the unbox then uses `Number` (or the `Boolean`/`Char` wrapper). Emitting the
+        // substituted wrapper cast as the assertion's operand rejects a `Long` that is a `Number`.
+        if op == IrTypeOp::ImplicitCoercion
+            && !reference_target
+            && self.emit_asserted_erased_scalar(arg, type_operand, code)
+        {
+            return;
+        }
         let (physical_arg, semantic_arg) = match op {
             // A reference target materializes an erased result at its own type, so the result's
             // narrowing to the substituted type is not written first.
@@ -497,6 +506,51 @@ impl Emitter<'_> {
                 code,
             );
         }
+    }
+
+    /// Null-check an erased generic call result, then unbox that `Object`.
+    ///
+    /// The operand is the declaration-result coercion under `!!` (`fun <T> f(): T` read as `Int?`).
+    /// That coercion would `checkcast` the substituted wrapper. kotlinc checks null on the erased
+    /// value and only then unboxes, so a numeric target goes through `java/lang/Number`.
+    fn emit_asserted_erased_scalar(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let asserted = match self.ir.expr(arg) {
+            IrExpr::NotNullAssert {
+                operand,
+                message: None,
+            } => *operand,
+            _ => return false,
+        };
+        if !self.ir.declaration_result_coercions.contains(&asserted) {
+            return false;
+        }
+        let (call, slot) = match self.erased_reference_result(asserted) {
+            Some(super::operand_representation::ErasedResult::Coerced { call, slot }) => {
+                (call, slot)
+            }
+            Some(super::operand_representation::ErasedResult::Invocation) | None => return false,
+        };
+        self.emit_value(call, code);
+        code.dup();
+        let check = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "checkNotNull",
+            "(Ljava/lang/Object;)V",
+        );
+        code.invokestatic(check, 1, 0);
+        let target = ir_ty_to_jvm(&stored_value_ty(type_operand));
+        unbox_prim_from(
+            self.cw,
+            code,
+            ir_ty_to_jvm(&slot),
+            semantic_scalar_adapter(type_operand, target),
+        );
+        true
     }
 
     /// The reference an unboxing coercion reads. kotlinc coerces a value from the type it was
