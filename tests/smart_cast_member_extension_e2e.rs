@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn narrowed_extension_receiver_contributes_its_member_extensions() {

@@ -70,6 +70,35 @@ jobs:
             target/cache/ser-corpus
             target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
+      - name: select recorded-byte cache version
+        id: recorded-version
+        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
+      - name: restore recorded kotlinc bytes
+        id: recorded-bytes
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-
+      - name: select recorded-byte cache mode
+        id: recorded-mode
+        env:
+          CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
+          MATCHED_KEY: ${{ steps.recorded-bytes.outputs.cache-matched-key }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          record=0
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            record=1
+            write=1
+          elif [ -z "$MATCHED_KEY" ]; then
+            record=1
+          fi
+          echo "record=$record" >> "$GITHUB_OUTPUT"
+          echo "write=$write" >> "$GITHUB_OUTPUT"
       - name: just ci
         env:
           # The instrumented e2e run costs ~2x the normal gate under [profile.coverage] (opt 1
@@ -78,7 +107,19 @@ jobs:
           # 6500 of 7105 tests finished, so the budget is twenty minutes: a hung binary still
           # fails, a slow runner does not.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
+          # A PR consumes the exact cache produced for its master base. If that cache has not been
+          # seeded yet, compile the reference bytes for this run but keep the cache read-only.
+          # A master push refreshes the archive before publishing its immutable SHA-keyed cache.
+          KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
         run: just ci
+      - name: save recorded kotlinc bytes
+        if: steps.recorded-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
 
   # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
   # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.

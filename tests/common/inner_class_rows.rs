@@ -54,29 +54,51 @@ fn compile_pairs(
     jvm_target: Option<u16>,
     classes: &[&str],
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let dir = super::common_core::scratch_dir().expect("scratch directory");
-    let reference = dir.join("ref");
-    std::fs::create_dir_all(&reference).expect("reference output directory");
-    let source_path = dir.join(format!("{stem}.kt"));
-    std::fs::write(&source_path, source).expect("fixture source");
-    let mut args = vec!["-d".to_string(), reference.to_string_lossy().into_owned()];
-    if !classpath.is_empty() {
-        args.push("-cp".to_string());
-        args.push(
-            std::env::join_paths(classpath)
-                .expect("a joinable classpath")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    if let Some(target) = jvm_target {
-        args.push("-jvm-target".to_string());
-        args.push(target.to_string());
-    }
-    args.push(source_path.to_string_lossy().into_owned());
-    let (code, stderr) =
-        super::common_core::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
-    assert_eq!(code, 0, "{stem}: kotlinc failed: {stderr}");
+    let target = jvm_target
+        .map(|target| target.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let inputs = super::common_core::byte_dump::class_dump_inputs(source, &target, &[], classpath);
+    let expected = super::common_core::byte_dump::kotlinc_class_dumps(
+        stem,
+        &target,
+        &inputs.variant,
+        inputs.fingerprint,
+        classes,
+        || {
+            let dir = super::common_core::scratch_dir().expect("scratch directory");
+            let reference = dir.join("ref");
+            std::fs::create_dir_all(&reference).expect("reference output directory");
+            let source_path = dir.join(format!("{stem}.kt"));
+            std::fs::write(&source_path, source).expect("fixture source");
+            let mut args = vec!["-d".to_string(), reference.to_string_lossy().into_owned()];
+            if !classpath.is_empty() {
+                args.push("-cp".to_string());
+                args.push(
+                    std::env::join_paths(classpath)
+                        .expect("a joinable classpath")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            if let Some(target) = jvm_target {
+                args.push("-jvm-target".to_string());
+                args.push(target.to_string());
+            }
+            args.push(source_path.to_string_lossy().into_owned());
+            let (code, stderr) = super::common_core::kotlinc_compile(&args)
+                .expect("reference kotlinc is provisioned");
+            assert_eq!(code, 0, "{stem}: kotlinc failed: {stderr}");
+            let mut produced = std::collections::BTreeMap::new();
+            for class in classes {
+                let bytes = std::fs::read(reference.join(format!("{class}.class")))
+                    .unwrap_or_else(|_| panic!("{stem}: kotlinc emits {class}"));
+                produced.insert((*class).to_string(), bytes);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            Some(produced)
+        },
+    )
+    .unwrap_or_else(|| panic!("{stem}: kotlinc did not produce the requested classes"));
 
     let mut krusty_classpath = classpath.to_vec();
     krusty_classpath.push(super::common_core::stdlib_jar());
@@ -107,18 +129,15 @@ fn compile_pairs(
             )
         )
     });
-    let pairs = classes
+    classes
         .iter()
-        .map(|class| {
-            let expected = std::fs::read(reference.join(format!("{class}.class")))
-                .unwrap_or_else(|_| panic!("{stem}: kotlinc emits {class}"));
+        .zip(expected)
+        .map(|(class, expected)| {
             let (_, actual) = compiled
                 .iter()
                 .find(|(name, _)| name == class)
                 .unwrap_or_else(|| panic!("{stem}: krusty did not emit {class}"));
             (expected, actual.clone())
         })
-        .collect();
-    let _ = std::fs::remove_dir_all(&dir);
-    pairs
+        .collect()
 }

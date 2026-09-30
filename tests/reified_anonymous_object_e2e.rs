@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn inline_anonymous_object_preserves_its_enclosing_reified_parameter() {

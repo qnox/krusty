@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn explicit_lambda_label_names_its_extension_receiver() {

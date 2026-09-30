@@ -1811,6 +1811,7 @@ fn read_class_tree(dir: &Path) -> Result<std::collections::BTreeMap<String, Vec<
 /// names (the file name decides kotlinc's facade class name), classpath jar paths, the injected
 /// helpers text, the reference dist identity, and a schema salt — so re-runs pay only for files
 /// whose inputs changed. Transient failures (driver crash, work-dir clobber) are NOT cached.
+/// A snapshot, dev, or beta kotlinc is not cached: that version string is not an immutable build.
 /// `Err` = reference compile failed / unavailable.
 ///
 /// NOTE: only `.class` artifacts are compared; kotlinc's `META-INF/<m>.kotlin_module` is a known
@@ -1840,11 +1841,12 @@ fn reference_compile(
     let key = fnv64(&key_material);
     let cache =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/cache/ref-classes/{key:016x}"));
-    if cache.join("FAILED").is_file() {
+    let cache_dumps = common::byte_dump::published_compiler_id().is_some();
+    if cache_dumps && cache.join("FAILED").is_file() {
         let why = fs::read_to_string(cache.join("FAILED")).unwrap_or_default();
         return Err(why.lines().next().unwrap_or("?").to_string());
     }
-    if cache.join("OK").is_file() {
+    if cache_dumps && cache.join("OK").is_file() {
         return read_class_tree(&cache);
     }
 
@@ -1913,6 +1915,9 @@ fn reference_compile_in(
         common::kotlinc_compile(&args).ok_or_else(|| "kotlinc unavailable".to_string())?;
     if code == 0 {
         let classes = read_class_tree(&out_dir)?;
+        if common::byte_dump::published_compiler_id().is_none() {
+            return Ok(classes);
+        }
         // Publish ATOMICALLY: write the tree + OK marker into a unique staging dir, then rename it
         // to the cache path. A concurrent publisher's rename simply loses (its staging dir is
         // discarded); an already-published cache is never deleted out from under a reader.
@@ -1942,8 +1947,10 @@ fn reference_compile_in(
         {
             Some(first) => {
                 let first = first.to_string();
-                let _ = fs::create_dir_all(cache);
-                let _ = fs::write(cache.join("FAILED"), &first);
+                if common::byte_dump::published_compiler_id().is_some() {
+                    let _ = fs::create_dir_all(cache);
+                    let _ = fs::write(cache.join("FAILED"), &first);
+                }
                 Err(first)
             }
             None => Err(format!(

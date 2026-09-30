@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn constructor_parameter_keeps_class_type_parameter_inside_initializers() {
