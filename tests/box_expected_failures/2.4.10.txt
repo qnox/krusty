@@ -13,7 +13,6 @@ basics/k42000_crossmodule.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-bridges/special.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/kt15446.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
@@ -194,11 +193,7 @@ sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt
 secondaryConstructors/localClasses.kt
 smartCasts/invokeRecieverSmartcastK2.kt
-specialBuiltins/bridgeNotEmptyMap.kt
-specialBuiltins/emptyMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/notEmptyListAny.kt
-specialBuiltins/notEmptyMap.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt25784.kt

@@ -4163,7 +4163,7 @@ fn local_storage_ty(ir: &IrFile, semantic: Ty, init: Option<ExprId>) -> Ty {
 /// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
 /// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
 pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
-    let c = IrConst::zero_for_value_type(super::ir_emit::ir_ty_to_jvm(ty));
+    let c = IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty));
     ir.add_expr(IrExpr::Const(c))
 }
 

@@ -84,12 +84,12 @@ pub(super) fn build_continuation_class(
             // Build the member's CPS descriptor: its value params, then the trailing `Continuation`.
             let mut p_jvm: Vec<crate::types::Ty> = params
                 .iter()
-                .map(crate::jvm::ir_emit::ir_ty_to_jvm)
+                .map(crate::jvm::physical_type::ir_ty_to_jvm)
                 .collect();
-            p_jvm.push(crate::jvm::ir_emit::ir_ty_to_jvm(&continuation_ty()));
+            p_jvm.push(crate::jvm::physical_type::ir_ty_to_jvm(&continuation_ty()));
             let descriptor = crate::jvm::names::method_descriptor(
                 &p_jvm,
-                crate::jvm::ir_emit::ir_ty_to_jvm(&object_ty()),
+                crate::jvm::physical_type::ir_ty_to_jvm(&object_ty()),
             );
             let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
             let owner_midx = owner_cid

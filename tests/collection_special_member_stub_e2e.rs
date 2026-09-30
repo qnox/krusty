@@ -463,3 +463,149 @@ fun box(): String {
     assert_eq!(krusty, "OK");
     assert_eq!(common::kotlinc_box_result(SRC), krusty);
 }
+
+fn class_bytes(source: &str, class: &str) -> common::ModuleClassPair {
+    common::ModuleClassPair::compile(&[("Main.kt", source)], class)
+}
+
+fn method_code(bytes: &[u8], class: &str, marker: &str) -> Vec<String> {
+    let work = common::scratch_dir().expect("a scratch directory for disassembly");
+    let path = work.join(format!("{class}.class"));
+    std::fs::write(&path, bytes).expect("write the class for disassembly");
+    let text = common::javap(&["-c", "-p", "-v", &path.to_string_lossy()]).expect("javap runs");
+    let _ = std::fs::remove_dir_all(work);
+    common::method_instructions(&text, marker)
+}
+
+const NOTHING_MAP: &str = r#"
+private class Key
+
+private object Values : Map<Key, Nothing> {
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = true
+    override fun containsKey(key: Key): Boolean = false
+    override fun containsValue(value: Nothing): Boolean = false
+    override fun get(key: Key): Nothing? = null
+    override val entries: Set<Map.Entry<Key, Nothing>> get() = emptySet()
+    override val keys: Set<Key> get() = emptySet()
+    override val values: Collection<Nothing> get() = emptyList()
+}
+"#;
+
+/// `get(): Nothing?` is `java/lang/Void`. The erased `Map.get` bridge is a different descriptor
+/// and must still be present, with the same bodies kotlinc writes.
+#[test]
+fn nothing_nullable_map_get_matches_kotlinc() {
+    let pair = class_bytes(NOTHING_MAP, "Values");
+    let krusty = common::member_table(&pair.krusty);
+    let kotlinc = common::member_table(&pair.kotlinc);
+    for descriptor in [
+        "get(LKey;)Ljava/lang/Void;",
+        "get(Ljava/lang/Object;)Ljava/lang/Object;",
+    ] {
+        assert!(
+            krusty.iter().any(|row| row.contains(descriptor)),
+            "krusty missing {descriptor}: {krusty:?}"
+        );
+        assert!(
+            kotlinc.iter().any(|row| row.contains(descriptor)),
+            "kotlinc missing {descriptor}: {kotlinc:?}"
+        );
+    }
+    for marker in [
+        "java.lang.Void get(Key);",
+        "java.lang.Object get(java.lang.Object);",
+    ] {
+        let reference = method_code(&pair.kotlinc, "Values", marker);
+        assert!(!reference.is_empty(), "kotlinc emits {marker}");
+        assert_eq!(
+            method_code(&pair.krusty, "Values", marker),
+            reference,
+            "{marker}"
+        );
+    }
+    assert_eq!(
+        run(&format!("{NOTHING_MAP}\nfun box(): String {{\n    val n: Map<Key, Any?> = Values\n    return if (n[Key()] == null) \"OK\" else \"fail\"\n}}\n")),
+        Some("OK".to_string())
+    );
+}
+
+const ANY_LIST: &str = r#"
+private class Element
+
+private object Items : MutableList<Any> {
+    override fun contains(element: Any): Boolean = true
+    override fun indexOf(element: Any): Int = 0
+    override fun lastIndexOf(element: Any): Int = 0
+    override fun remove(element: Any): Boolean = true
+    override fun add(element: Any): Boolean = true
+    override val size: Int get() = 0
+    override fun containsAll(elements: Collection<Any>): Boolean = elements.isEmpty()
+    override fun isEmpty(): Boolean = false
+    override fun get(index: Int): Any = throw UnsupportedOperationException()
+    override fun addAll(elements: Collection<Any>): Boolean = throw UnsupportedOperationException()
+    override fun addAll(index: Int, elements: Collection<Any>): Boolean = throw UnsupportedOperationException()
+    override fun removeAll(elements: Collection<Any>): Boolean = throw UnsupportedOperationException()
+    override fun retainAll(elements: Collection<Any>): Boolean = throw UnsupportedOperationException()
+    override fun clear(): Unit = throw UnsupportedOperationException()
+    override fun set(index: Int, element: Any): Any = throw UnsupportedOperationException()
+    override fun add(index: Int, element: Any): Unit = throw UnsupportedOperationException()
+    override fun removeAt(index: Int): Any = throw UnsupportedOperationException()
+    override fun listIterator(): MutableListIterator<Any> = throw UnsupportedOperationException()
+    override fun listIterator(index: Int): MutableListIterator<Any> = throw UnsupportedOperationException()
+    override fun subList(fromIndex: Int, toIndex: Int): MutableList<Any> = throw UnsupportedOperationException()
+    override fun iterator(): MutableIterator<Any> = throw UnsupportedOperationException()
+}
+"#;
+
+fn assert_same_method(source: &str, class: &str, marker: &str) -> Vec<String> {
+    let pair = class_bytes(source, class);
+    let reference = method_code(&pair.kotlinc, class, marker);
+    assert!(!reference.is_empty(), "kotlinc emits {class} {marker}");
+    let actual = method_code(&pair.krusty, class, marker);
+    assert_eq!(actual, reference, "{class} {marker}");
+    actual
+}
+
+/// `contains(Any)` shares `(Object)Z` with the Java member. `null` returns `false`, and that
+/// parameter is not asserted again. `add(Any)` keeps `checkNotNullParameter`.
+#[test]
+fn non_null_any_contains_rejects_null_before_the_parameter_assertion() {
+    let code = assert_same_method(ANY_LIST, "Items", "boolean contains(java.lang.Object);");
+    let neutral = code
+        .iter()
+        .position(|line| line.contains("ireturn"))
+        .expect("the null path returns");
+    assert!(
+        code[..neutral]
+            .iter()
+            .any(|line| line.contains("ifnonnull")),
+        "null is rejected before the neutral return: {code:?}"
+    );
+    assert!(
+        code.iter()
+            .all(|line| !line.contains("checkNotNullParameter")),
+        "the barrier parameter is not asserted again: {code:?}"
+    );
+    let src = format!(
+        "{ANY_LIST}\nfun box(): String {{\n    val list = Items as MutableList<Any?>\n    if (list.contains(null)) return \"null\"\n    if (!list.contains(Element())) return \"value\"\n    return \"OK\"\n}}\n"
+    );
+    assert_eq!(run(&src), Some("OK".to_string()));
+}
+
+/// `add(Any)` is the same descriptor and is not a collection-barrier member. It keeps the
+/// parameter assertion and has no neutral return ahead of it.
+#[test]
+fn an_ordinary_any_add_keeps_its_parameter_assertion() {
+    let code = assert_same_method(ANY_LIST, "Items", "boolean add(java.lang.Object);");
+    let assertion = code
+        .iter()
+        .position(|line| line.contains("checkNotNullParameter"))
+        .expect("add still checks its parameter");
+    assert!(
+        code[..assertion]
+            .iter()
+            .all(|line| !line.contains("ireturn")),
+        "add does not return before the parameter assertion: {code:?}"
+    );
+}
