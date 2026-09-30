@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::super::analysis::{AnalyzerError, At, BasicInterpreter, BasicValue, Interpreter};
+use super::super::analysis::{
+    intern_descriptor, AnalyzerError, At, BasicInterpreter, BasicValue, Interpreter,
+};
 use super::super::descriptors;
 use super::super::opcodes::*;
 use super::recognizers::{self, ValueClasses};
@@ -73,7 +75,7 @@ impl<'a> BoxingInterpreter<'a> {
         Ok(BoxingValue::Boxed {
             id,
             tainted: false,
-            ty: boxed_type.to_string(),
+            ty: intern_descriptor(boxed_type),
         })
     }
 
@@ -186,7 +188,7 @@ impl<'a> BoxingInterpreter<'a> {
             return BoxingValue::Boxed {
                 id: *id,
                 tainted: true,
-                ty: ty.clone(),
+                ty: *ty,
             };
         }
         self.candidates.remove(*id);
@@ -233,7 +235,7 @@ impl<'a> BoxingInterpreter<'a> {
             | (BoxingValue::Basic(other), BoxingValue::Iterator(_))
                 if *other != BasicValue::Null =>
             {
-                BoxingValue::Basic(BasicValue::Reference("Ljava/lang/Object;".to_string()))
+                BoxingValue::Basic(BasicValue::reference("Ljava/lang/Object;"))
             }
             _ => BoxingValue::Basic(self.basic.merge(&v.basic(), &w.basic())),
         }

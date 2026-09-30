@@ -93,7 +93,7 @@ impl Interpreter for IntLikeCoerceInterpreter {
         }
         // `BasicValue(value.type)`: a copy keeps the type alone, so `null` becomes `Object`.
         Ok(CoerceValue::Basic(match value.basic() {
-            BasicValue::Null => BasicValue::Reference("Ljava/lang/Object;".to_string()),
+            BasicValue::Null => BasicValue::reference("Ljava/lang/Object;"),
             other => other,
         }))
     }
