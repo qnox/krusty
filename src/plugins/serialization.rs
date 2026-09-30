@@ -51,7 +51,9 @@ use generated_classifier::{
     companion_fq, publish_generated_classifier_facts, publish_serializer_accessor_declaration,
     serializer_fq, serializer_name, SERIALIZER_OBJECT_NAME,
 };
-use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
+use generated_members::{
+    add_serializer_members, descriptor_property, publish_write_self, GeneratedSerializerMembers,
+};
 pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties};
@@ -1534,31 +1536,11 @@ impl IrPlugin for SerializationPlugin {
             // along; and `getDescriptor` is described as the accessor of a `descriptor` PROPERTY,
             // registered below rather than as a function.
             let descriptor_order = 3 + u32::from(is_generic);
-            ser.properties.push(crate::ir::IrProperty {
-                name: "descriptor".to_string(),
-                context_params: Vec::new(),
-                source_order: descriptor_order,
-                decl_line: 0,
-                ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-                type_params: Vec::new(),
-                visibility: crate::types::Visibility::Public,
-                return_value_status: Default::default(),
-                annotations: Box::new([]),
-                initializer: None,
-                storage_ty: None,
-                backing_field: Some(descriptor_field),
-                is_var: false,
-                is_open: false,
-                modifiers: Default::default(),
-                delegate_field: None,
-                is_private: false,
-                setter_visibility: crate::types::Visibility::Public,
-                getter: Some(descriptor),
-                setter: None,
-                getter_jvm_name: None,
-                setter_jvm_name: None,
-                needs_access_bridge: false,
-            });
+            ser.properties.push(descriptor_property(
+                descriptor,
+                descriptor_field,
+                descriptor_order,
+            ));
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
             // and delegates to the concrete `Foo`-typed override.
