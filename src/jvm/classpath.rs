@@ -3658,6 +3658,28 @@ impl Classpath {
         EntryReadResult::Data(buf)
     }
 
+    /// Load `owner`'s nested class (`Owner$Companion`) without rendering `owner` when the catalog is
+    /// complete. A complete-catalog miss does not intern the nested name. An incomplete catalog still
+    /// probes the textual class file, because names omitted from that catalog cannot be trusted.
+    pub(crate) fn find_nested_class(
+        &self,
+        owner: TypeName,
+        nested: &str,
+    ) -> Option<std::sync::Arc<ClassInfo>> {
+        if let Some(existing) = crate::types::existing_type_name_nested_child(owner, nested) {
+            return self.find_name(existing);
+        }
+        let tree = self.package_tree();
+        if tree.catalog_complete() {
+            if !tree.contains_nested_class(owner, nested) {
+                return None;
+            }
+            return self.find_name(crate::types::type_name_nested_child(owner, nested));
+        }
+        let spelling = owner.jvm_nested_binary_name(nested);
+        self.find(&spelling)
+    }
+
     /// Find a class by textual internal name without interning a miss. The global type-name tree is for
     /// identities that actually exist; arbitrary classifier/callable probes must not add leaves to it.
     pub fn find(&self, internal: &str) -> Option<std::sync::Arc<ClassInfo>> {
@@ -5079,9 +5101,9 @@ impl PackageTree {
         !self.jars_for_class_id(class).is_empty()
     }
 
-    /// Whether `owner`'s flattened JVM nested class is declared. The owner class file itself need
-    /// not be present. Both probes stay inside the catalog's name tree, so a failed symbol lookup
-    /// neither formats nor interns a candidate.
+    /// Whether `owner`'s flattened JVM nested class (`Owner$Companion`,
+    /// `Outer$Inner$Companion`) is declared. The owner class file itself need not be present. Both
+    /// probes stay inside the catalog's name tree, so a miss neither formats nor interns a candidate.
     pub(super) fn contains_nested_class(&self, owner: TypeName, nested: &str) -> bool {
         let Some(package) = crate::types::existing_type_name_in(&self.names, owner.namespace())
         else {
@@ -6505,6 +6527,106 @@ mod fq_tests {
             std::fs::remove_file(path).expect("archive remains closed");
         }
         std::fs::remove_dir(directory).expect("remove exact class miss directory");
+    }
+
+    #[test]
+    fn companion_class_miss_does_not_intern_or_open_archives() {
+        let directory = test_temp_dir("companion-class-miss");
+        let mut paths = Vec::new();
+        for index in 0..(OPEN_ARCHIVE_CAP * 4) {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar_entry(
+                &path,
+                &format!("probe/compmiss6044/Present{index}.class"),
+                b"class bytes are read lazily",
+            );
+            paths.push(path);
+        }
+        let classpath = Classpath::new(paths.clone());
+        let owner = type_name("probe/compmiss6044/Owner");
+        const MISSING: &str = "probe/compmiss6044/Owner$Companion";
+        assert!(crate::types::existing_type_name(MISSING).is_none());
+        assert!(classpath.find_nested_class(owner, "Companion").is_none());
+        assert!(
+            crate::types::existing_type_name(MISSING).is_none(),
+            "a companion miss must not enter the global type-name tree"
+        );
+        assert!(classpath.archives.borrow().is_empty());
+        drop(classpath);
+        for path in paths {
+            std::fs::remove_file(path).expect("archive remains closed");
+        }
+        std::fs::remove_dir(directory).expect("remove companion miss directory");
+    }
+
+    #[test]
+    fn companion_class_hit_interns_only_when_present() {
+        let directory = test_temp_dir("companion-class-hit");
+        let path = directory.join("companions.jar");
+        let only = "probe/comphit6044/Only$Companion";
+        let inner = "probe/comphit6044/Outer$Inner$Companion";
+        let only_bytes = crate::jvm::classfile::ClassWriter::new(only, "java/lang/Object").finish();
+        let inner_bytes =
+            crate::jvm::classfile::ClassWriter::new(inner, "java/lang/Object").finish();
+        write_test_archive_entries(
+            &path,
+            &[
+                ("probe/comphit6044/Only$Companion.class", &only_bytes),
+                (
+                    "probe/comphit6044/Outer$Inner$Companion.class",
+                    &inner_bytes,
+                ),
+            ],
+        );
+        let classpath = Classpath::new(vec![path.clone()]);
+        assert!(crate::types::existing_type_name(only).is_none());
+        assert!(crate::types::existing_type_name(inner).is_none());
+
+        let only_owner = type_name("probe/comphit6044/Only");
+        let found = classpath
+            .find_nested_class(only_owner, "Companion")
+            .expect("companion class is in the catalog");
+        assert_eq!(found.this_class, type_name(only));
+
+        let inner_owner = type_name("probe/comphit6044/Outer.Inner");
+        let found_inner = classpath
+            .find_nested_class(inner_owner, "Companion")
+            .expect("nested companion class is in the catalog");
+        assert_eq!(found_inner.this_class, type_name(inner));
+
+        assert!(classpath.find_nested_class(only_owner, "Missing").is_none());
+        assert!(crate::types::existing_type_name("probe/comphit6044/Only$Missing").is_none());
+
+        drop(classpath);
+        std::fs::remove_file(path).expect("remove companion jar");
+        std::fs::remove_dir(directory).expect("remove companion hit directory");
+    }
+
+    #[test]
+    fn incomplete_catalog_companion_absent_from_the_index() {
+        let directory = test_temp_dir("incomplete-companion");
+        let package = directory.join("probe").join("latecomp6044");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(package.join("Broken.class"), [0, 1, 2, 3]).expect("write broken class");
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(!classpath.package_tree().catalog_complete());
+
+        let owner = type_name("probe/latecomp6044/Owner");
+        const COMPANION: &str = "probe/latecomp6044/Owner$Companion";
+        const ABSENT: &str = "probe/latecomp6044/Owner$Absent";
+        assert!(crate::types::existing_type_name(COMPANION).is_none());
+        assert!(classpath.find_nested_class(owner, "Absent").is_none());
+        assert!(crate::types::existing_type_name(ABSENT).is_none());
+
+        let bytes = crate::jvm::classfile::ClassWriter::new(COMPANION, "java/lang/Object").finish();
+        std::fs::write(package.join("Owner$Companion.class"), bytes).expect("write companion");
+        let found = classpath
+            .find_nested_class(owner, "Companion")
+            .expect("incomplete catalog still reads the class file");
+        assert_eq!(found.this_class, type_name(COMPANION));
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove incomplete companion directory");
     }
 
     #[test]
