@@ -30,7 +30,7 @@ use super::classpath::{
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
-use crate::jvm::names::same_mapped_virtual_name;
+use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -1332,9 +1332,15 @@ impl JvmLibraries {
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
     ) -> std::collections::HashMap<String, LibraryConst> {
-        let internal = ci.this_class();
-        let companion_internal = format!("{internal}$Companion");
-        let Some(companion) = self.cp.find(&companion_internal) else {
+        let companion = if let Some(companion) =
+            crate::types::existing_type_name_nested_child(ci.this_class, "Companion")
+        {
+            self.cp.find_name(companion)
+        } else {
+            let companion_internal = format!("{}$Companion", ci.this_class.render());
+            self.cp.find(&companion_internal)
+        };
+        let Some(companion) = companion else {
             return std::collections::HashMap::new();
         };
         let prop_rets: std::collections::HashMap<_, _> =
@@ -1613,7 +1619,6 @@ impl JvmLibraries {
                     return mapped_builtin_signature(internal_name);
                 }
             };
-            let internal = &internal_name.render();
             let mut constructors = Vec::new();
             let mut members = Vec::new();
             let mut companion = Vec::new();
@@ -2063,20 +2068,35 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     companion.push(member);
                 } else {
-                    let source_name =
-                        super::names::mapped_builtin_virtual_source_name(&ci.this_class(), &m.name);
-                    if source_name != m.name {
-                        let mut alias = member.clone();
-                        alias.name = source_name.to_string();
-                        alias.physical_name = Some(m.name.clone());
-                        // `java.lang.Number.doubleValue()` and friends are Kotlin's `Number.toDouble`
-                        // declarations, but remain VIRTUAL calls: a bounded `T : Number` can hold any
-                        // numeric wrapper. Only declarations owned by a concrete Kotlin scalar are
-                        // numeric-conversion intrinsics (normalized by the builtin provider path).
-                        members.push(alias);
-                    } else {
-                        members.push(member);
+                    // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
+                    // `Number.toInt` declarations. The realization table records the classfile
+                    // owner (`java/lang/Number`); the requested name may be the Kotlin mapped
+                    // identity (`kotlin/Number`) because class lookup translates it first.
+                    if let Some(source) =
+                        super::mapped_builtin_declarations::source_name_for_realization(
+                            ci.this_class,
+                            &m.name,
+                            &member.descriptor,
+                        )
+                    {
+                        if source != member.name {
+                            member.physical_name = Some(m.name.clone());
+                            member.name = source.to_string();
+                            // The convention check above saw the classfile spelling (`charAt`).
+                            // A realization that publishes that method as Kotlin `get` is the same
+                            // operator a Java method declared `get` would be, so index syntax on a
+                            // `StringBuilder` still reaches `CharSequence` through the Java face.
+                            if uses_java_type_semantics
+                                && java_method_has_operator_convention(
+                                    &member.name,
+                                    member.params.len(),
+                                )
+                            {
+                                member.set_is_operator(true);
+                            }
+                        }
                     }
+                    members.push(member);
                 }
             }
             // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) or `kotlin/String` takes
@@ -2244,6 +2264,7 @@ impl JvmLibraries {
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
+                    let internal = internal_name.render();
                     ci.fields.iter().find_map(|f| {
                         // A Kotlin companion-object instance field is always `public static final`, typed as the
                         // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
@@ -2555,13 +2576,16 @@ impl JvmLibraries {
                 .collect();
             // An enum entry is a `static` field of the enum's OWN type (`descriptor == L<internal>;`).
             const ACC_STATIC: u16 = 0x0008;
-            let enum_entry_descriptor = format!("L{internal};");
-            let enum_entries: Vec<String> = ci
-                .fields
-                .iter()
-                .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == enum_entry_descriptor)
-                .map(|f| f.name.clone())
-                .collect();
+            let enum_entries: Vec<String> = if ci.access & crate::jvm::classreader::ACC_ENUM != 0 {
+                let enum_entry_descriptor = format!("L{};", internal_name.render());
+                ci.fields
+                    .iter()
+                    .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == enum_entry_descriptor)
+                    .map(|f| f.name.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // A MAPPED Kotlin builtin (`kotlin/collections/MutableList`, `kotlin/CharSequence`, …) has
             // no `.class` of its own; the members read above came from the JVM class it maps to
             // (`java/util/List`). That class's method set is NOT its Kotlin API: `java.util.List`
@@ -2606,8 +2630,8 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name(
-                            internal,
+                        same_mapped_virtual_name_of(
+                            internal_name,
                             member_physical,
                             builtin_physical,
                             &member.descriptor,
@@ -5954,6 +5978,34 @@ mod tests {
     }
 
     #[test]
+    fn java_charsequence_get_realization_is_an_operator() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ));
+        let sequence = libraries
+            .classifier_record(type_name("java/lang/CharSequence"))
+            .expect("java.lang.CharSequence");
+        let operator_get = sequence
+            .declared_callables
+            .get("get")
+            .expect("CharSequence.get")
+            .functions()
+            .iter()
+            .any(|function| {
+                function.flags.operator
+                    && function.callable.reflection_name.as_deref() == Some("get")
+                    && function.callable.params.len() == 1
+            });
+        assert!(operator_get, "realized charAt must be operator get");
+    }
+
+    #[test]
     fn decoded_collection_barrier_role_is_declaration_exact() {
         assert_eq!(
             collection_barrier_role(
@@ -6077,6 +6129,45 @@ mod tests {
                 .all(|member| member.name != "intValue"),
             "provider boundary must not leak the physical Java spelling"
         );
+    }
+
+    #[test]
+    fn mapped_kotlin_number_publishes_jdk_realizations_without_stdlib() {
+        let Some(jdk) = crate::toolchain::jdk_modules() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![jdk]),
+        ));
+        let classifier = libraries
+            .classifier_record(type_name("kotlin/Number"))
+            .expect("kotlin.Number");
+        for (source, physical) in [
+            ("toByte", "byteValue"),
+            ("toShort", "shortValue"),
+            ("toInt", "intValue"),
+            ("toLong", "longValue"),
+            ("toFloat", "floatValue"),
+            ("toDouble", "doubleValue"),
+        ] {
+            assert!(
+                classifier.members.iter().any(|member| {
+                    member.name == source && member.physical_name.as_deref() == Some(physical)
+                }),
+                "missing {source} realized by {physical}"
+            );
+        }
+        assert!(classifier.members.iter().all(|member| {
+            !matches!(
+                member.name.as_str(),
+                "byteValue"
+                    | "shortValue"
+                    | "intValue"
+                    | "longValue"
+                    | "floatValue"
+                    | "doubleValue"
+            )
+        }));
     }
 
     #[test]

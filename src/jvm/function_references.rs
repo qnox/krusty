@@ -92,7 +92,6 @@ fn external_reflection(
     } else {
         callable.descriptor.clone()
     };
-    let owner = callable.owner.render();
     let (owner_class, physical_name, top_level) = match realization.kind {
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
             if callable.descriptor.is_empty() =>
@@ -108,7 +107,11 @@ fn external_reflection(
         }
         ExternalCallableKind::Member => (
             receiver.and_then(Ty::kotlin_class_internal),
-            crate::jvm::names::mapped_builtin_virtual_name(&owner, &callable.name, &descriptor),
+            crate::jvm::names::mapped_builtin_virtual_name(
+                callable.owner,
+                &callable.name,
+                &descriptor,
+            ),
             false,
         ),
         // A selected function reference names a function, never a constructor or a field.

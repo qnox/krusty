@@ -47,6 +47,25 @@ struct ClassLite {
     ext_names: HashSet<String>,
 }
 
+/// Copy an interned classifier into the local index by its stored `/` segments.
+///
+/// [`crate::types::insert_type_name_in`] also publishes `exact_nested_owner`. That inserts the
+/// lexical owner (`Outer`) beside the physical classfile node (`Outer$Inner`) and shifts later
+/// [`NameId`]s. The class index only follows the path the class file recorded.
+fn insert_classifier(names: &NameTree, internal: TypeName) -> NameId {
+    let mut segments = Vec::new();
+    let mut current = internal;
+    while current != TypeName::ROOT {
+        segments.push(current.segment_ref());
+        current = current.parent().unwrap_or(TypeName::ROOT);
+    }
+    let mut parent = NameTree::ROOT;
+    for segment in segments.into_iter().rev() {
+        parent = names.child_of(parent, segment);
+    }
+    parent
+}
+
 fn collect_class_bytes(
     bytes: &[u8],
     internal: &str,
@@ -56,8 +75,8 @@ fn collect_class_bytes(
     let Some(class) = parse_metadata_class(bytes, internal)? else {
         return Ok(());
     };
-    let this_class = names.insert(&class.this_class());
-    let super_class = class.super_class().map(|name| names.insert(&name));
+    let this_class = insert_classifier(names, class.this_class);
+    let super_class = class.super_class.map(|name| insert_classifier(names, name));
     let statics = class
         .methods
         .iter()
@@ -456,5 +475,21 @@ mod tests {
         let empty = JarPackages::default();
         assert!(ext_scan_wanted("p/HelpersKt", &empty));
         assert!(!ext_scan_wanted("p/Regular", &empty));
+    }
+
+    #[test]
+    fn class_index_copies_classifier_segments_without_nested_owners() {
+        let nested = type_name("krusty/index/Outer$Inner");
+        assert!(nested.nested_owner().is_some());
+
+        let copied = NameTree::default();
+        let copied_id = insert_classifier(&copied, nested);
+        assert_eq!(copied.render(copied_id), "krusty/index/Outer$Inner");
+        assert_eq!(copied.get("krusty/index/Outer"), None);
+
+        let with_owner = NameTree::default();
+        crate::types::insert_type_name_in(&with_owner, nested);
+        assert!(with_owner.get("krusty/index/Outer").is_some());
+        assert!(with_owner.len() > copied.len());
     }
 }

@@ -10485,8 +10485,9 @@ impl<'a> Emitter<'a> {
                         }
                         return;
                     }
+                    let owner_identity = *owner;
                     let (owner, name, descriptor) = (
-                        owner.render(),
+                        owner_identity.render(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                     );
@@ -10583,7 +10584,7 @@ impl<'a> Emitter<'a> {
                         self.value_ty(recv),
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
+                    let jvm_name = mapped_builtin_virtual_name(owner_identity, &name, &descriptor);
                     let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                         let mut operands = Vec::with_capacity(args.len() + 1);
                         operands.push(recv);

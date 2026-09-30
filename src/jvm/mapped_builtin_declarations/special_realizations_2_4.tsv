@@ -10,3 +10,9 @@ kotlin/collections/Map	entries	()Ljava/util/Set;	property	java/util/Map	entrySet
 kotlin/collections/MutableList	removeAt	(I)Ljava/lang/Object;	function	java/util/List	remove
 kotlin/CharSequence	length	()I	property	java/lang/CharSequence	length
 kotlin/CharSequence	get	(I)C	function	java/lang/CharSequence	charAt
+kotlin/Number	toByte	()B	function	java/lang/Number	byteValue
+kotlin/Number	toShort	()S	function	java/lang/Number	shortValue
+kotlin/Number	toInt	()I	function	java/lang/Number	intValue
+kotlin/Number	toLong	()J	function	java/lang/Number	longValue
+kotlin/Number	toFloat	()F	function	java/lang/Number	floatValue
+kotlin/Number	toDouble	()D	function	java/lang/Number	doubleValue

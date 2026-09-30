@@ -128,7 +128,7 @@ fn external_method_name(
         .ok_or(SkipReason::Bridges)?;
     let callable = realization.callable;
     Ok(crate::jvm::names::mapped_builtin_virtual_name(
-        &callable.owner.render(),
+        callable.owner,
         &callable.name,
         &callable.descriptor,
     )
