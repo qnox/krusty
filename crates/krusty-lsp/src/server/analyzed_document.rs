@@ -215,8 +215,8 @@ mod tests {
         assert_eq!(
             published,
             vec![
-                "analysis worker returned an incomplete source set",
-                "analysis worker returned an incomplete source set",
+                "Analysis worker returned an incomplete source set",
+                "Analysis worker returned an incomplete source set",
             ]
         );
         assert!(service.source_set_for_test().is_empty());
