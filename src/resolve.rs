@@ -44195,7 +44195,19 @@ impl<'a> Checker<'a> {
                     "postponed argument call={call:?} parameter={parameter} expected={nested_expected:?} generic_ret={:?}",
                     generic_sig.ret,
                 );
-                let mut nested_bindings =
+                let concrete_nested =
+                    match crate::symbol_resolver::nested_result_from_concrete_parameter(
+                        &generic_sig,
+                        nested_expected,
+                        &signature.formals,
+                        |actual, bound| self.receiver_is_assignable(actual, bound),
+                    ) {
+                        Ok(result) => result,
+                        Err(()) => continue,
+                    };
+                let mut nested_bindings = if concrete_nested.is_some() {
+                    crate::symbol_resolver::GSigBinds::new()
+                } else {
                     match crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                         &source,
                         &generic_sig,
@@ -44214,7 +44226,8 @@ impl<'a> Checker<'a> {
                             crate::symbol_resolver::unconstrained_result_bindings(&generic_sig)
                         }
                         None => continue,
-                    };
+                    }
+                };
                 // A symbolic outer expectation may bind the nested producer's formal directly to
                 // an outer call variable. That relation is valid only when the OUTER variable's
                 // own upper bound satisfies the nested declaration's bound. For
@@ -44254,10 +44267,9 @@ impl<'a> Checker<'a> {
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} nested_bindings={nested_bindings:?}",
                 );
-                let nested_actual = crate::symbol_resolver::ty_subst_keep_unbound(
-                    generic_sig.ret,
-                    &nested_bindings,
-                );
+                let nested_actual = concrete_nested.unwrap_or_else(|| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(generic_sig.ret, &nested_bindings)
+                });
                 let nested_constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     &signature,
                     at_call_site,
