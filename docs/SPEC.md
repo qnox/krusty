@@ -5147,6 +5147,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fields in source order, after `$$INSTANCE`. Reference constants carry `@NotNull`. The companion's
   `@Metadata` still lists every const; the interface's metadata lists `Companion` and not the const
   names. Tests: `tests/interface_companion_const_fields_e2e.rs`.
+- **An interface companion reads its own instance from `$$INSTANCE`.** The companion class stores
+  that field in its `<clinit>` before any property initializer runs, and the interface's `Companion`
+  field aliases it only after that `<clinit>` returns. A qualified use of the companion from the
+  companion's own methods or initializers — including `run { Test.ok() }` in a property initializer —
+  loads `$$INSTANCE`. Callers outside the companion still load the interface's `Companion` field.
+  The emitted class's interface-companion role is fixed once per emitter and both singleton IR forms
+  share that storage choice. Verified against kotlinc 2.4.20. Tests:
+  `tests/interface_companion_e2e.rs`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a
