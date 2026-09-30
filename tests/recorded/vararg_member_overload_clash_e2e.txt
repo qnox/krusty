@@ -1,0 +1,7 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[member_array_and_vararg_of_the_same_element_still_clash]
+2.4.20:
+  Main.kt:4:5: platform declaration clash: The following declarations have the same JVM signature (take([LElement;)LPayload;):
+  Main.kt:5:5: platform declaration clash: The following declarations have the same JVM signature (take([LElement;)LPayload;):

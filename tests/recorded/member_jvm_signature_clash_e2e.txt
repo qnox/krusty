@@ -1,0 +1,32 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[alpha_equivalent_function_type_parameters_still_clash]
+2.4.20:
+  Main.kt:4:5: conflicting overloads:
+  Main.kt:5:5: conflicting overloads:
+
+[array_and_vararg_with_the_same_return_are_a_platform_clash]
+2.4.20:
+  Main.kt:4:5: platform declaration clash: The following declarations have the same JVM signature (take([LElement;)LPayload;):
+  Main.kt:5:5: platform declaration clash: The following declarations have the same JVM signature (take([LElement;)LPayload;):
+
+[inferred_returns_that_erase_together_are_a_platform_clash]
+2.4.20:
+  Main.kt:5:5: platform declaration clash: The following declarations have the same JVM signature (f(LBucket;)LPayload;):
+  Main.kt:6:5: platform declaration clash: The following declarations have the same JVM signature (f(LBucket;)LPayload;):
+
+[return_type_alone_does_not_overload_a_member]
+2.4.20:
+  Main.kt:4:5: conflicting overloads:
+  Main.kt:5:5: conflicting overloads:
+
+[unused_formals_of_differing_arity_with_one_return_are_a_platform_clash]
+2.4.20:
+  Main.kt:3:5: platform declaration clash: The following declarations have the same JVM signature (f()LPayload;):
+  Main.kt:4:5: platform declaration clash: The following declarations have the same JVM signature (f()LPayload;):
+
+[unused_formals_of_the_same_arity_still_clash]
+2.4.20:
+  Main.kt:4:5: conflicting overloads:
+  Main.kt:5:5: conflicting overloads:
