@@ -666,7 +666,7 @@ fn field_accessor_shape(
     let field = owner.fields.get(property.backing_field? as usize)?;
     let internal = owner.fq_name.render();
     let field_ty = jvm_declared_ty(&field.ty);
-    let field_descriptor = type_descriptor(field_ty);
+    let field_descriptor = type_descriptor(field_ty).to_owned();
     let name = if write {
         member_property_accessor_name(&property_setter_name(&property.name), false)
     } else {
@@ -754,12 +754,8 @@ pub(super) fn member_property_access_bridge(
         .backing_field
         .and_then(|index| class.fields.get(index as usize))
         .map(|field| type_descriptor(declared_property_accessor_jvm(ir, property, field)))
-        .unwrap_or_else(|| value.to_string());
-    let carried = if declared_accessor {
-        exposed.as_str()
-    } else {
-        value
-    };
+        .unwrap_or(value);
+    let carried = if declared_accessor { exposed } else { value };
     let descriptor = if read {
         if static_field {
             format!("(){exposed}")
