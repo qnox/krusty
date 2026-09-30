@@ -9120,13 +9120,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   override written on `Nothing` takes `java/lang/Void`. The JVM records one plan for that bridge —
   the erased parameter and the neutral result — and emission writes that plan. The bridge tests
   `instanceof Void` and, on a miss, returns `false` or `-1` without calling the override. `null` is
-  not a `Void`, so it misses too. `Nothing` is uninhabited and therefore not a nullable reference;
-  the barrier still applies, because the JVM parameter is the narrower `Void` class. A plain
+  not a `Void`, so it misses too. `List<Nothing?>` is the nullable parameter: `null` is dispatched
+  into the override, and a non-null foreign value still takes the neutral result. `Nothing` is
+  uninhabited and therefore not a nullable reference; the barrier still applies, because the JVM
+  parameter is the narrower `Void` class. A plain
   `checkcast` to `Void` throws `ClassCastException` for every real argument
   (`specialBuiltins/emptyList.kt`). `containsValue` uses the same barrier as `contains`. Tests:
   `tests/collection_special_member_stub_e2e.rs`
   (`nothing_list_bridges_report_absence_instead_of_casting_to_void`,
-  `nothing_map_contains_value_reports_absence`).
+  `nothing_map_contains_value_reports_absence`,
+  `nullable_nothing_list_admits_null_and_rejects_a_foreign_value`).
 
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
   `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at

@@ -396,7 +396,9 @@ fun box(): String {
     return "OK"
 }
 "#;
-    assert_eq!(run(SRC).expect("List<Nothing> bridges"), "OK");
+    let krusty = run(SRC).expect("List<Nothing> bridges");
+    assert_eq!(krusty, "OK");
+    assert_eq!(common::kotlinc_box_result(SRC), krusty);
 }
 
 /// `Map.containsValue` is the value-side twin of `contains`: a non-`Void` argument is not a value
@@ -422,5 +424,42 @@ fun box(): String {
     return "OK"
 }
 "#;
-    assert_eq!(run(SRC).expect("Map<_, Nothing>.containsValue"), "OK");
+    let krusty = run(SRC).expect("Map<_, Nothing>.containsValue");
+    assert_eq!(krusty, "OK");
+    assert_eq!(common::kotlinc_box_result(SRC), krusty);
+}
+
+/// `Nothing?` is a nullable `Void`. `null` is a value of that parameter and runs the override;
+/// a non-null foreign value still misses `instanceof Void` and takes the neutral result.
+#[test]
+fn nullable_nothing_list_admits_null_and_rejects_a_foreign_value() {
+    const SRC: &str = r#"
+private object EmptyList : List<Nothing?> {
+    override fun contains(element: Nothing?): Boolean = element == null
+    override fun containsAll(elements: Collection<Nothing?>): Boolean = elements.isEmpty()
+    override fun indexOf(element: Nothing?): Int = if (element == null) -2 else -3
+    override fun lastIndexOf(element: Nothing?): Int = if (element == null) -2 else -3
+    override val size: Int get() = 0
+    override fun isEmpty(): Boolean = true
+    override fun iterator(): Iterator<Nothing?> = throw UnsupportedOperationException()
+    override fun get(index: Int): Nothing? = throw UnsupportedOperationException()
+    override fun listIterator(): ListIterator<Nothing?> = throw UnsupportedOperationException()
+    override fun listIterator(index: Int): ListIterator<Nothing?> = throw UnsupportedOperationException()
+    override fun subList(fromIndex: Int, toIndex: Int): List<Nothing?> = throw UnsupportedOperationException()
+}
+
+fun box(): String {
+    val n = EmptyList as List<Any?>
+    if (!n.contains(null)) return "null contains"
+    if (n.indexOf(null) != -2) return "null index ${n.indexOf(null)}"
+    if (n.lastIndexOf(null) != -2) return "null last"
+    if (n.contains("")) return "foreign contains"
+    if (n.indexOf("") != -1) return "foreign index ${n.indexOf("")}"
+    if (n.lastIndexOf("") != -1) return "foreign last"
+    return "OK"
+}
+"#;
+    let krusty = run(SRC).expect("List<Nothing?> bridges");
+    assert_eq!(krusty, "OK");
+    assert_eq!(common::kotlinc_box_result(SRC), krusty);
 }
