@@ -4,7 +4,7 @@
 //! declaration-side and implementation-side types a target erases for its bridges. A backend
 //! consumes these edges; it never re-derives an override by matching names.
 
-use super::{FunId, Ty, TypeName};
+use super::{FunId, IrFile, Ty, TypeName};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrPropertyOverride {
