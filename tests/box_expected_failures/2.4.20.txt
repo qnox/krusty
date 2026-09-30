@@ -32,7 +32,6 @@ contextParameters/genericPropertyWithContextParameters.kt
 contextParameters/kt51290.kt
 contextParameters/sameExtensionContextAndDispatchReceiver.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
-controlStructures/returnsNothing/propertyGetter.kt
 controlflow/for_loops_array_nested.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt

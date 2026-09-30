@@ -113,6 +113,30 @@ fun box(): String {\n\
 }
 
 #[test]
+fn nothing_property_getter_terminates_the_other_branch() {
+    const SRC: &str = "var flag = true\n\
+object Test {\n\
+    val magic: Nothing get() = null!!\n\
+}\n\
+fun box(): String {\n\
+    val a: String\n\
+    if (flag) {\n\
+        a = \"OK\"\n\
+    } else {\n\
+        Test.magic\n\
+    }\n\
+    return a\n\
+}\n";
+    run_both(SRC, "Nothing property getter");
+    let (krusty, kotlinc) = compile_both_for_bytecode(SRC);
+    assert_eq!(
+        method_body(&krusty, "BottomKt", "box"),
+        method_body(&kotlinc, "BottomKt", "box"),
+        "Nothing property getter branch bytecode"
+    );
+}
+
+#[test]
 fn nothing_call_in_if_expression_value() {
     const SRC: &str = "fun fail(): Nothing = throw RuntimeException(\"x\")\n\
 fun pick(b: Boolean): String {\n\
