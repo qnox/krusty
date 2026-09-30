@@ -185,6 +185,7 @@ reified/extensionLambda.kt
 reified/innerObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
+reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
 safeCall/parenthesizedSafeCallsAndOperators.kt
 sam/constructors/sameWrapperClass.kt
