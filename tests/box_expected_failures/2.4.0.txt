@@ -204,7 +204,6 @@ specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
-unit/kt56723.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt25784.kt
 unsignedTypes/kt43286.kt

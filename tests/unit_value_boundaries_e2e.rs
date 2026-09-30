@@ -22,7 +22,8 @@ class Holder(val p: Int) {\n\
 }\n\
 val topKind: String = when { log == \"\" -> \"empty\" else -> \"full\" }\n\
 val Unit.marker: Int get() = 7\n\
-fun invokedReceiver(f: () -> Unit): Int = f().marker\n";
+fun invokedReceiver(f: () -> Unit): Int = f().marker\n\
+fun invokedToString(f: () -> Unit): String = f().toString()\n";
 
 #[test]
 fn unit_values_reach_their_consumers() {
@@ -49,7 +50,8 @@ fn unit_values_reach_their_consumers() {
              \x20   if (sink !== Unit) return \"fail tryFinallyValue\"\n\
              \x20   if (Holder(0).kind != \"zero\" || Holder(1).kind != \"other\") return \"fail Holder\"\n\
              \x20   if (invokedReceiver {{ effect() }} != 7) return \"fail invokedReceiver\"\n\
-             \x20   if (log != \"eeeeefe\") return \"fail log \" + log\n\
+             \x20   if (invokedToString {{ effect() }} != \"kotlin.Unit\") return \"fail invokedToString\"\n\
+             \x20   if (log != \"eeeeefee\") return \"fail log \" + log\n\
              \x20   return \"OK\"\n\
              }}\n"
         ),
@@ -73,6 +75,7 @@ fn unit_values_are_materialized_where_kotlinc_materializes_them() {
         "void invokedBranch(",
         "void whenValue(",
         "int invokedReceiver(",
+        "java.lang.String invokedToString(",
         "static {}",
     ] {
         let reference = method_instructions(&built.reference, member);
