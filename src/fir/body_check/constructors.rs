@@ -135,16 +135,12 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::UnsupportedCallShape,
                         )
                     })?;
-                let omitted = slots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(parameter, slot)| {
-                        (parameter >= context_args.len()
-                            && slot.is_none()
-                            && vararg != Some(parameter))
-                        .then_some(parameter)
-                    })
-                    .collect();
+                let omitted = omitted_constructor_parameters(
+                    &slots,
+                    context_args.len(),
+                    vararg,
+                    &member.call_sig,
+                );
                 crate::trace_compiler!(
                     "fir",
                     "slotted constructor owner={owner} stable={:?} module_classifier={:?} external={:?}",
@@ -215,16 +211,12 @@ impl BodyFirChecker<'_> {
                         )
                     })?;
                 let vararg = ctor.declaration.call_sig.vararg_index;
-                let omitted = slots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(parameter, slot)| {
-                        (parameter >= context_args.len()
-                            && slot.is_none()
-                            && vararg != Some(parameter))
-                        .then_some(parameter)
-                    })
-                    .collect();
+                let omitted = omitted_constructor_parameters(
+                    &slots,
+                    context_args.len(),
+                    vararg,
+                    &ctor.declaration.call_sig,
+                );
                 self.external_constructor_call(
                     expression,
                     &args,
@@ -699,7 +691,7 @@ impl BodyFirChecker<'_> {
             let parameter_id = u32::try_from(parameter).map_err(|_| {
                 self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
             })?;
-            if vararg == Some(parameter) && !saw_vararg {
+            if vararg == Some(parameter) && !saw_vararg && !omitted.contains(&parameter) {
                 checked_arguments.push(FirCallArgument::Vararg {
                     parameter: parameter_id,
                     origin: self
@@ -900,6 +892,26 @@ fn checked_delegation_target(
             })
         }
     }
+}
+
+/// Parameters the call left empty. An omitted `vararg` with no declared default is an empty
+/// array, so it stays out of this list. A declared default is a real omission.
+fn omitted_constructor_parameters(
+    slots: &[Option<ExprId>],
+    context_count: usize,
+    vararg: Option<usize>,
+    call_sig: &crate::libraries::CallSig,
+) -> Vec<usize> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(parameter, slot)| {
+            let implicit_empty_vararg =
+                vararg == Some(parameter) && !call_sig.param_has_default(parameter);
+            (parameter >= context_count && slot.is_none() && !implicit_empty_vararg)
+                .then_some(parameter)
+        })
+        .collect()
 }
 
 fn add_constructor_delegation(

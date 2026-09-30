@@ -1148,6 +1148,27 @@ fn constructor_vararg_elements_keep_source_order_and_spread_decisions() {
 }
 
 #[test]
+fn omitted_constructor_vararg_with_a_declared_default_uses_that_default() {
+    let (body, _) = checked_function_body(
+        "class Element\n\
+         class Box(vararg values: Element = arrayOf(Element(), Element()))\n\
+         fun make(): Box = Box()\n",
+        "make",
+    );
+    let FirExprKind::ConstructorCall(call) = &body
+        .expr(root_expression(&body))
+        .expect("defaulted vararg constructor call")
+        .kind
+    else {
+        panic!("omitted constructor vararg with a declared default must become checked constructor-call FIR")
+    };
+    assert!(matches!(
+        call.arguments.as_ref(),
+        [FirCallArgument::Default { parameter: 0, .. }]
+    ));
+}
+
+#[test]
 fn omitted_constructor_vararg_is_an_explicit_empty_pack() {
     let (body, _) = checked_function_body(
         "class Box(vararg values: String)\nfun make(): Box = Box()\n",

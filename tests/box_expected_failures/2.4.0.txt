@@ -89,7 +89,6 @@ funInterface/noConversionForSubtype.kt
 funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
-function/defaultsWithVarArg2.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
