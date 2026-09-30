@@ -66,3 +66,50 @@ fn a_generic_property_setter_parameter_addresses_its_type_parameter_by_id() {
         }\n";
     assert_identical("generic_property_setter", SRC, "app/Holder");
 }
+
+/// A context property owns its type parameters just like an extension property does. Its property
+/// type and context parameters name them, while each accessor declares the same parameters in its
+/// own metadata scope after the enclosing class parameter.
+#[test]
+fn a_context_property_publishes_its_own_type_parameters() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        package app\n\
+        \n\
+        class Entries<K, V>\n\
+        \n\
+        class Holder<Z> {\n\
+        \x20   context(key: K, value: V)\n\
+        \x20   var <K, V> entries: Entries<K, V>\n\
+        \x20       get() = Entries<K, V>()\n\
+        \x20       set(given) {}\n\
+        }\n";
+    assert_identical("generic_context_property", SRC, "app/Holder");
+}
+
+#[test]
+fn top_level_context_declarations_keep_the_compatibility_type_list() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        package app\n\
+        \n\
+        context(key: K)\n\
+        val <K> current: K get() = key\n\
+        context(key: K)\n\
+        fun <K> currentFun(): K = key\n";
+    assert_identical(
+        "TopLevelGenericContextProperty",
+        SRC,
+        "app/TopLevelGenericContextPropertyKt",
+    );
+}
+
+#[test]
+fn a_context_function_keeps_the_compatibility_type_list() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        package app\n\
+        \n\
+        class Holder {\n\
+        \x20   context(key: K)\n\
+        \x20   fun <K> current(): K = key\n\
+        }\n";
+    assert_identical("generic_context_function", SRC, "app/Holder");
+}

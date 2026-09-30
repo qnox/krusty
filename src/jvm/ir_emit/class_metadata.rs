@@ -403,7 +403,7 @@ pub(super) fn build_class_metadata(
                     })
                     .map(|index| index as u32),
                     receiver: None,
-                    type_params: Vec::new(),
+                    type_params: property.type_params.clone(),
                     getter,
                     setter,
                     setter_parameter_name: super::super::parameter_names::explicit_setter(

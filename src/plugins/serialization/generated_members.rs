@@ -4,7 +4,7 @@ use super::{class_ty, kserializer_of, unit};
 use crate::ir::{
     Callee, ExprId, IrExpr, IrFile, IrFunction, IrGeneratedDeclarationDebug,
     IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication,
-    IrGeneratedMemberPublication,
+    IrGeneratedMemberPublication, IrProperty,
 };
 use crate::types::{Ty, TypeName, Visibility};
 
@@ -115,6 +115,42 @@ impl GeneratedSerializerMembers {
             metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
             functions,
         }
+    }
+}
+
+/// The `descriptor` property whose accessor is `getDescriptor`.
+///
+/// Metadata describes that accessor as a property, not as one of the serializer functions.
+/// The property declares no type parameters of its own.
+pub(super) fn descriptor_property(
+    getter: u32,
+    backing_field: u32,
+    source_order: u32,
+) -> IrProperty {
+    IrProperty {
+        name: "descriptor".to_string(),
+        context_params: Vec::new(),
+        source_order,
+        decl_line: 0,
+        ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+        type_params: Vec::new(),
+        visibility: Visibility::Public,
+        return_value_status: Default::default(),
+        annotations: Box::new([]),
+        initializer: None,
+        storage_ty: None,
+        backing_field: Some(backing_field),
+        is_var: false,
+        is_open: false,
+        modifiers: Default::default(),
+        delegate_field: None,
+        is_private: false,
+        setter_visibility: Visibility::Public,
+        getter: Some(getter),
+        setter: None,
+        getter_jvm_name: None,
+        setter_jvm_name: None,
+        needs_access_bridge: false,
     }
 }
 
