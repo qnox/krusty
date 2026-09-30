@@ -55,6 +55,27 @@ impl AnalysisBatch {
         }
     }
 
+    /// Pair each URI and version with the analysis at the same position, with no source text.
+    ///
+    /// Callers that did not retain the buffer use this. A length mismatch still drops every
+    /// analysis, the same as [`Self::from_job`].
+    pub fn from_versions(
+        documents: Vec<(String, i64)>,
+        analyses: Vec<DocumentAnalysis>,
+        support_documents: Vec<(String, String)>,
+        pending: bool,
+    ) -> Self {
+        Self::from_job(
+            documents
+                .into_iter()
+                .map(|(uri, version)| (uri, String::new(), version))
+                .collect(),
+            analyses,
+            support_documents,
+            pending,
+        )
+    }
+
     pub fn versions(&self) -> Vec<(String, i64)> {
         self.documents
             .iter()
@@ -80,6 +101,22 @@ mod tests {
             msg: message.to_string(),
             file: 0,
         }])
+    }
+
+    #[test]
+    fn versions_without_source_text_stay_paired_with_each_analysis() {
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 3)],
+            vec![diagnostic("boom")],
+            Vec::new(),
+            false,
+        );
+        assert!(batch.complete);
+        assert_eq!(batch.documents[0].uri, "file:///a.kt");
+        assert_eq!(batch.documents[0].version, 3);
+        assert_eq!(batch.documents[0].text, "");
+        assert!(batch.documents[0].analysis.is_some());
+        assert_eq!(batch.versions(), vec![("file:///a.kt".into(), 3)]);
     }
 
     #[test]

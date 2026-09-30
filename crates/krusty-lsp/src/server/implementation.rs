@@ -1975,9 +1975,7 @@ where
 
     #[cfg(test)]
     pub(crate) fn open_text_for_test(&self, uri: &str) -> Option<&str> {
-        self.documents
-            .get(uri)
-            .map(|document| document.text.as_str())
+        Some(self.documents.get(uri)?.text.as_str())
     }
 
     #[cfg(test)]
@@ -4909,11 +4907,8 @@ mod tests {
             jobs[0].documents[0].2
         };
 
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), version)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), version)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -5002,11 +4997,8 @@ mod tests {
             .dispatch_pending_analysis()
             .expect("initial analysis job");
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             Vec::new(),
             Vec::new(),
             true,
@@ -5666,11 +5658,8 @@ mod tests {
         assert_eq!(service.pending_analysis_requests.len(), 1);
 
         let maximum_message = "x".repeat(MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES);
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::with_diagnostics(vec![Diagnostic {
                 span: krusty::diag::Span::new(0, 3),
                 editor_span: None,
@@ -5759,11 +5748,8 @@ mod tests {
         }));
         assert!(pending.messages.is_empty());
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[source]),
             Vec::new(),
             false,
@@ -5806,11 +5792,8 @@ mod tests {
 
         let mut analyses = crate::analysis::analyze_for_lsp(&[open_source, support_source]);
         analyses.truncate(1);
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(open_uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(open_uri.into(), 1)],
             analyses,
             vec![(support_uri.into(), support_source.into())],
             false,
@@ -6302,11 +6285,8 @@ mod tests {
         service.open_document_for_test(open_uri, open_source, 1);
 
         // The live index is rebuilt from each batch; the project index must not be.
-        let _ = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(open_uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(open_uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[open_source]),
             Vec::new(),
             false,
@@ -6350,11 +6330,8 @@ mod tests {
             )]),
         });
         service.open_document_for_test(uri, edited, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[edited]),
             Vec::new(),
             false,
@@ -6398,11 +6375,8 @@ mod tests {
             symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, disk)]),
         });
         service.open_document_for_test(uri, buffer, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[buffer]),
             Vec::new(),
             false,
@@ -6485,11 +6459,8 @@ mod tests {
             symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, source)]),
         });
         service.open_document_for_test(uri, source, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[source]),
             Vec::new(),
             false,
@@ -6545,11 +6516,8 @@ mod tests {
         }));
         assert!(pending.messages.is_empty());
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             crate::analysis::analyze_for_lsp(&[source]),
             Vec::new(),
             false,
@@ -6590,11 +6558,8 @@ mod tests {
         );
         assert_eq!(dev_service.pending_analysis_requests.len(), 1);
 
-        let messages = dev_service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![(uri.into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = dev_service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -6834,11 +6799,8 @@ mod tests {
 
         let mut a_analysis = analysis_with_diagnostic("current");
         a_analysis.definitions = DefinitionIndex::wire_saturation_fixture(2);
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
             vec![a_analysis, DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -6892,11 +6854,8 @@ mod tests {
             "params": {"textDocument": {"uri": "file:///b.kt"}},
         }));
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
             vec![DocumentAnalysis::empty(), DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -6932,11 +6891,8 @@ mod tests {
             .is_empty());
 
         service.open_document_for_test("file:///a.kt", "new", 2);
-        let stale = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let stale = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -6947,11 +6903,8 @@ mod tests {
         let _current_job = service
             .dispatch_pending_analysis()
             .expect("current-version analysis");
-        let current = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 2)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let current = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 2)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -6991,11 +6944,8 @@ mod tests {
 
         service.open_document_for_test("file:///a.kt", "v2", 2);
 
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -7015,11 +6965,8 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "v1", 1);
         service.take_analysis_job();
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -7040,11 +6987,8 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
         service.take_analysis_job();
-        service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![analysis_with_diagnostic("boom")],
             Vec::new(),
             false,
@@ -7070,11 +7014,8 @@ mod tests {
             json!({"textDocument": {"uri": "file:///a.kt"}, "previousResultId": result_id.clone()}),
         );
         assert!(pending.messages.is_empty());
-        let completed = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let completed = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![analysis_with_diagnostic("boom")],
             Vec::new(),
             false,
@@ -7101,11 +7042,8 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
         service.take_analysis_job();
-        service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![analysis_with_diagnostic("before")],
             Vec::new(),
             false,
@@ -7123,11 +7061,8 @@ mod tests {
         service
             .dispatch_pending_analysis()
             .expect("replacement diagnostic analysis");
-        service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![analysis_with_diagnostic("after")],
             Vec::new(),
             false,
@@ -7168,11 +7103,8 @@ mod tests {
         service.open_document_for_test("file:///a.kt", "v1", 1);
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -7232,11 +7164,8 @@ mod tests {
         );
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis {
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7301,11 +7230,8 @@ mod tests {
         service.open_document_for_test("file:///a.kt", "x", 1);
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis {
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7408,11 +7334,8 @@ mod tests {
         );
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -7462,11 +7385,8 @@ mod tests {
         );
         service.did_open(None, did_open("file:///a.kt", "new", 1), true);
 
-        let stale_batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let stale_batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![with_diagnostic()],
             Vec::new(),
             false,
@@ -7492,11 +7412,8 @@ mod tests {
             .dispatch_pending_analysis()
             .expect("fresh job re-dispatches after discard");
         assert_eq!(fresh_job.documents[0].1, "new");
-        let fresh_batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let fresh_batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![with_diagnostic()],
             Vec::new(),
             false,
@@ -7530,11 +7447,8 @@ mod tests {
         assert!(second.is_none(), "in-flight → coalesced");
         assert!(service.resubmit_pending_for_test());
 
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
@@ -7566,11 +7480,8 @@ mod tests {
 
         service.open_document_for_test("file:///a.kt", "v2", 2);
 
-        let batch = AnalysisBatch::from_job(
-            { vec![("file:///a.kt".into(), 1)] }
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
             vec![DocumentAnalysis::empty()],
             Vec::new(),
             false,
