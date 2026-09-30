@@ -81,6 +81,7 @@ mod function_value_conversions;
 mod generic_call_bindings;
 mod implicit_rungs;
 mod inspection_analysis;
+mod integer_constants;
 mod interface_delegation;
 mod invoke_selection;
 mod lambda_call_shapes;
@@ -172,6 +173,7 @@ pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
+use integer_constants::{call_arg_kind, folded_integer_literal, FoldedIntegerLiteral};
 use lambda_expectation::{
     functional_argument_expectation, module_member_lambda_shape, shaped_argument_inlining,
     written_inline_modifier, FunctionalArgumentExpectation, MemberLambdaShape,
@@ -2645,119 +2647,6 @@ fn positional_score_by(
         sc += if p == a { 2 } else { 1 };
     }
     Some(sc)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FoldedIntegerLiteral {
-    Signed(i32),
-    Unsigned(i32),
-}
-
-impl FoldedIntegerLiteral {
-    fn value(self) -> i32 {
-        match self {
-            Self::Signed(value) | Self::Unsigned(value) => value,
-        }
-    }
-
-    fn binary(self, right: Self, operation: impl FnOnce(i32, i32) -> Option<i32>) -> Option<Self> {
-        match (self, right) {
-            (Self::Signed(left), Self::Signed(right)) => operation(left, right).map(Self::Signed),
-            (Self::Unsigned(left), Self::Unsigned(right)) => {
-                operation(left, right).map(Self::Unsigned)
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Recognize and safely fold the integer-constant syntax accepted at call sites.
-///
-/// This is deliberately the one AST walk used by both lightweight signature inference and the full
-/// checker. Every operation is checked in the expression's ordinary `Int` representation, not in a
-/// wider scratch type: lowering evaluates the same `Int` operations before any call-boundary
-/// coercion, so accepting an expression that overflows here would silently change Kotlin semantics.
-/// Keeping this outside either phase also prevents the two call paths from drifting on which
-/// expressions carry literal provenance.
-fn folded_integer_literal(file: &File, expression: ExprId) -> Option<FoldedIntegerLiteral> {
-    match file.expr(expression) {
-        Expr::IntLit(value) => i32::try_from(*value).ok().map(FoldedIntegerLiteral::Signed),
-        Expr::UIntLit(value) => i32::try_from(*value)
-            .ok()
-            .map(FoldedIntegerLiteral::Unsigned),
-        Expr::Unary {
-            op: UnOp::Plus,
-            operand,
-        } => folded_integer_literal(file, *operand),
-        Expr::Unary {
-            op: UnOp::Neg,
-            operand,
-        } => match folded_integer_literal(file, *operand)? {
-            FoldedIntegerLiteral::Signed(value) => {
-                value.checked_neg().map(FoldedIntegerLiteral::Signed)
-            }
-            FoldedIntegerLiteral::Unsigned(_) => None,
-        },
-        Expr::Binary { op, lhs, rhs, .. }
-            if matches!(
-                op,
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-            ) =>
-        {
-            let left = folded_integer_literal(file, *lhs)?;
-            let right = folded_integer_literal(file, *rhs)?;
-            left.binary(right, |left, right| match op {
-                BinOp::Add => left.checked_add(right),
-                BinOp::Sub => left.checked_sub(right),
-                BinOp::Mul => left.checked_mul(right),
-                BinOp::Div => left.checked_div(right),
-                BinOp::Rem => left.checked_rem(right),
-                _ => unreachable!("guarded integer constant operator"),
-            })
-        }
-        Expr::Call { callee, args } if args.len() == 1 => {
-            let Expr::Member { receiver, name } = file.expr(*callee) else {
-                return None;
-            };
-            let left = folded_integer_literal(file, *receiver)?;
-            let right = folded_integer_literal(file, args[0])?;
-            left.binary(right, |left, right| match name.as_str() {
-                "plus" => left.checked_add(right),
-                "minus" => left.checked_sub(right),
-                "times" => left.checked_mul(right),
-                "div" => left.checked_div(right),
-                "rem" => left.checked_rem(right),
-                _ => None,
-            })
-        }
-        Expr::Call { callee, args } if args.is_empty() => {
-            let Expr::Member { receiver, name } = file.expr(*callee) else {
-                return None;
-            };
-            let value = folded_integer_literal(file, *receiver)?;
-            match (name.as_str(), value) {
-                ("unaryPlus", value) => Some(value),
-                ("unaryMinus", FoldedIntegerLiteral::Signed(value)) => {
-                    value.checked_neg().map(FoldedIntegerLiteral::Signed)
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Combine an already-computed runtime type with syntax-only call-argument provenance.
-fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
-    if file.is_spread_arg(expression) {
-        CallArgKind::Spread(ty)
-    } else if matches!(file.expr(expression), Expr::Lambda { .. }) {
-        CallArgKind::LambdaLiteral(ty)
-    } else if let Some(value) = folded_integer_literal(file, expression) {
-        CallArgKind::integer_literal(ty, value.value())
-    } else {
-        CallArgKind::Typed(ty)
-    }
 }
 
 fn positional_candidate_score(
@@ -29020,52 +28909,6 @@ enum class EntryChoice {
                 symbols.resolved_annotation(0, &annotation)
             );
         }
-    }
-
-    #[test]
-    fn integer_literal_provenance_is_call_local_and_range_aware() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "fun sample() { target(127, 128, -129, 1 + 2, 1 / 0, 2_000_000_000 + 2_000_000_000, 255u, 256u, 65536u, 1u + 2u) }",
-            &mut diagnostics,
-        );
-        let arguments = file
-            .expr_arena
-            .iter()
-            .find_map(|expression| match expression {
-                Expr::Call { callee, args }
-                    if matches!(file.expr(*callee), Expr::Name(name) if name == "target") =>
-                {
-                    Some(args)
-                }
-                _ => None,
-            })
-            .expect("target call");
-        let kinds = arguments
-            .iter()
-            .enumerate()
-            .map(|(index, argument)| {
-                let ty = if index >= 6 { Ty::UInt } else { Ty::Int };
-                call_arg_kind(&file, *argument, ty)
-            })
-            .collect::<Vec<_>>();
-
-        assert!(kinds[0].adapts_integer_literal_to(Ty::Byte));
-        assert!(!kinds[1].adapts_integer_literal_to(Ty::Byte));
-        assert!(kinds[1].adapts_integer_literal_to(Ty::Short));
-        assert!(!kinds[2].adapts_integer_literal_to(Ty::Byte));
-        assert!(kinds[3].adapts_integer_literal_to(Ty::Byte));
-        assert!(!kinds[4].adapts_integer_literal_to(Ty::Short));
-        assert!(!kinds[4].adapts_integer_literal_to(Ty::Long));
-        assert!(!kinds[5].adapts_integer_literal_to(Ty::Long));
-        assert!(kinds[6].adapts_integer_literal_to(Ty::UByte));
-        assert!(!kinds[7].adapts_integer_literal_to(Ty::UByte));
-        assert!(kinds[7].adapts_integer_literal_to(Ty::UShort));
-        assert!(!kinds[8].adapts_integer_literal_to(Ty::UShort));
-        assert!(kinds[8].adapts_integer_literal_to(Ty::ULong));
-        assert!(kinds[9].adapts_integer_literal_to(Ty::UByte));
-        assert!(kinds[..6].iter().all(|argument| argument.ty() == Ty::Int));
-        assert!(kinds[6..].iter().all(|argument| argument.ty() == Ty::UInt));
     }
 
     #[test]
@@ -69893,15 +69736,24 @@ impl<'a> Checker<'a> {
         }
         // Bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`),
         // resolved via the shared `builtin_bitwise_ret` (also used by signature inference): a
-        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type. A fitting
+        // argument, including an integer constant, keeps this primitive result. A plain `Int`
+        // passed where `Long` is required does not: reporting success here recorded no call, so a
+        // later phase reported an unknown call shape instead of the argument mismatch.
         if let Some(ret) = builtin_bitwise_ret(rt, name, arg_tys.len()) {
-            if let Some(arg0) = arg_tys.first() {
+            if let Some(&arg0) = arg_tys.first() {
                 let expected = if matches!(name, "shl" | "shr" | "ushr") {
                     Ty::Int
                 } else {
                     rt
                 };
-                self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
+                let argument = args[0];
+                let adapts =
+                    call_arg_kind(self.file, argument, arg0).adapts_integer_literal_to(expected);
+                if !self.receiver_is_assignable(arg0, expected) && !adapts {
+                    return None;
+                }
+                self.expect_assignable(expected, arg0, self.span(argument), "argument");
             }
             return Some(ret);
         }

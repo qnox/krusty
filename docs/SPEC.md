@@ -6034,6 +6034,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reports it rather than the value silently truncating. The stored constant is the bit pattern of the
   magnitude in the expected type's REPRESENTATION (`200u` as a `UByte` is the byte `-56`). Test:
   `tests/feature_coverage_i_e2e.rs::unsigned_literal_takes_the_expected_type`.
+- **An integer-constant conditional adapts like the literal it is made of.** An `if` with an `else`,
+  a `when` with an `else` arm, and a block (through its trailing expression, statements included)
+  is an integer constant when every branch value is one. Overload resolution then uses the same
+  expected-type rule as a bare literal: `v or if (hasMore) 0x80 else 0` selects `Long.or` because
+  both branches fit `Long`, and `f(if (c) 1 else 2)` still prefers `f(Int)` over `f(Long)`. A branch
+  that does not fit (`200` into `Byte`) or is not a constant (`x: Int`) does not adapt. The
+  conditional is still computed as `Int` and widened at the use, so an overflowing `Int` addition
+  inside a branch wraps before that widening. Test:
+  `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`.
 - **`UByte`/`UShort` operate as `UInt`.** Their representation is the SIGN-extended `byte`/`short` the
   JVM loads, so every widening out of it masks first (`UByte.toInt()` is `iand 0xFF`, `UShort.toInt()`
   is `iand 0xFFFF`) — exactly kotlinc's lowering. Kotlin gives them no arithmetic of their own: each

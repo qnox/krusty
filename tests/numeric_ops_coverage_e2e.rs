@@ -89,3 +89,37 @@ fn integral_or_xor() {
          }\n",
     );
 }
+
+#[test]
+fn integer_constant_conditional_adapts() {
+    run_ok(
+        "IntConstCond",
+        "fun continuation(v: Long, hasMore: Boolean): Int =\n\
+         ((v and 0x7f) or if (hasMore) 0x80 else 0).toInt()\n\
+         fun whenBits(v: Long, n: Int): Long = v or when (n) { 0 -> 0x80; else -> 0 }\n\
+         fun nested(v: Long, a: Boolean, b: Boolean): Long =\n\
+         v or if (a) if (b) 0x80 else 0x40 else 0\n\
+         fun blocked(v: Long, hasMore: Boolean): Long =\n\
+         v or if (hasMore) { 0x80 } else { val ignored = 1; 0 }\n\
+         fun shifted(v: Long, wide: Boolean): Long = v shl if (wide) 1 else 2\n\
+         fun byteIf(c: Boolean): Byte = if (c) 1 else 2\n\
+         fun preferInt(x: Int): String = \"int\"\n\
+         fun preferInt(x: Long): String = \"long\"\n\
+         fun box(): String {\n\
+         if (continuation(1L, true) != 129) return \"cont\"\n\
+         if (continuation(1L, false) != 1) return \"cont0\"\n\
+         if (whenBits(1L, 0) != 129L) return \"when\"\n\
+         if (whenBits(1L, 1) != 1L) return \"when0\"\n\
+         if (nested(1L, true, true) != 129L) return \"nest\"\n\
+         if (nested(1L, true, false) != 65L) return \"nest2\"\n\
+         if (nested(1L, false, true) != 1L) return \"nest0\"\n\
+         if (blocked(1L, true) != 129L) return \"block\"\n\
+         if (blocked(1L, false) != 1L) return \"block0\"\n\
+         if (shifted(1L, true) != 2L) return \"shl\"\n\
+         if (shifted(1L, false) != 4L) return \"shl0\"\n\
+         if (byteIf(true) != 1.toByte()) return \"byte\"\n\
+         if (preferInt(if (true) 1 else 2) != \"int\") return \"prefer\"\n\
+         return \"OK\"\n\
+         }\n",
+    );
+}
