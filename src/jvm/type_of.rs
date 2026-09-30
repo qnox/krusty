@@ -231,12 +231,12 @@ fn class_instance(ty: Ty) -> Result<TypeOfInsn, TypeOfError> {
             if name.matches("kotlin/Array") || crate::types::prim_array_element(name).is_some() =>
         {
             if crate::types::prim_array_element(name).is_some_and(Ty::is_unsigned) {
-                crate::jvm::names::classfile_internal_name(&name.render())
+                crate::jvm::names::classfile_name(name).to_string()
             } else {
                 crate::jvm::names::type_descriptor(inner)
             }
         }
-        Ty::Obj(name, _) => crate::jvm::names::classfile_internal_name(&name.render()),
+        Ty::Obj(name, _) => crate::jvm::names::classfile_name(name).to_string(),
         _ => return Err(TypeOfError::Undescribable(ty)),
     };
     Ok(TypeOfInsn::LdcClass(class))
@@ -408,7 +408,7 @@ impl Generator<'_, '_> {
         match container {
             Container::Class(classifier) => {
                 self.push(TypeOfInsn::LdcClass(
-                    crate::jvm::names::classfile_internal_name(&classifier.render()),
+                    crate::jvm::names::classfile_name(classifier).to_string(),
                 ));
                 self.reflection(
                     "getOrCreateKotlinClass",
@@ -454,7 +454,7 @@ impl Generator<'_, '_> {
             .or(declaration.dispatch_receiver);
         let facade = ir.foreign_template_facade(function).map_or_else(
             || self.parameters.facade.to_owned(),
-            |facade| crate::jvm::names::classfile_internal_name(&facade.render()),
+            |facade| crate::jvm::names::classfile_name(facade).to_string(),
         );
         let name = if with_arity {
             ir.fn_source_names
@@ -480,7 +480,7 @@ impl Generator<'_, '_> {
         }
         descriptor.push_str("Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
         self.push(TypeOfInsn::LdcClass(owner.map_or(facade, |owner| {
-            crate::jvm::names::classfile_internal_name(&owner.render())
+            crate::jvm::names::classfile_name(owner).to_string()
         })));
         self.push(TypeOfInsn::LdcString(name));
         self.push(TypeOfInsn::LdcString(signature));

@@ -1,5 +1,7 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
+use std::borrow::Cow;
+
 use crate::types::{InternalName, Ty, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
@@ -95,33 +97,31 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
     }
 }
 
-/// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
-/// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
-///
-/// The mapping reads only whether the name is interned, and an interned name stays interned, so the
-/// physical name of a name interned before it is mapped is remembered per thread.
-pub fn classfile_internal_name(internal: &str) -> String {
+/// Physical JVM classfile name of an interned classifier. Computed once per identity, then borrowed.
+/// Callers that already hold a [`TypeName`] use this instead of rendering the name to look it up.
+pub fn classfile_name(name: TypeName) -> &'static str {
     thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, Box<str>>> =
+        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
             std::cell::RefCell::default();
     }
-    let identity = crate::types::existing_type_name(internal);
-    if let Some(identity) = identity {
-        if let Some(physical) =
-            INTERNED.with(|known| known.borrow().get(&identity).map(|name| name.to_string()))
-        {
-            return physical;
-        }
+    if let Some(physical) = INTERNED.with(|known| known.borrow().get(&name).copied()) {
+        return physical;
     }
-    let physical = physical_classfile_name(internal);
-    if let Some(identity) = identity {
-        INTERNED.with(|known| {
-            known
-                .borrow_mut()
-                .insert(identity, physical.as_str().into())
-        });
+    let owned = physical_classfile_name(&name.render());
+    let leaked: &'static str = Box::leak(owned.into_boxed_str());
+    INTERNED.with(|known| *known.borrow_mut().entry(name).or_insert(leaked))
+}
+
+/// Convert a semantic classifier spelling to its physical JVM classfile name. Kotlin metadata spells
+/// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
+///
+/// An interned identity borrows the spelling from [`classfile_name`]. A spelling that was never
+/// interned is owned for this call and is not retained.
+pub fn classfile_internal_name(internal: &str) -> Cow<'static, str> {
+    match crate::types::existing_type_name(internal) {
+        Some(identity) => Cow::Borrowed(classfile_name(identity)),
+        None => Cow::Owned(physical_classfile_name(internal)),
     }
-    physical
 }
 
 fn physical_classfile_name(internal: &str) -> String {
@@ -328,7 +328,7 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
             primitive_array_descriptor(n).expect("checked in the guard")
         }
-        Ty::Obj(n, _) => obj_desc(&n.render()),
+        Ty::Obj(n, _) => format!("L{};", classfile_name(n)),
         // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into
         // signatures (`fun boom(): Nothing`, `fun f(n: Nothing)`, a `Nothing` getter), and kotlinc
         // writes `java.lang.Void` there, not `Object`. A caller compiled against kotlinc's ABI links
@@ -384,14 +384,14 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
             .boxed_ref()
             .and_then(Ty::obj_internal)
-            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
+            .map(|name| classfile_name(name).to_string())
             .unwrap_or_else(|| instanceof_internal_name(*inner)),
         // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
         // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
         t if t.is_array() => type_descriptor(t),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
+        Ty::Obj(n, _) => classfile_name(n).to_string(),
         // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
         Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
@@ -460,6 +460,28 @@ mod tests {
             classfile_internal_name("kotlin/Int.Companion"),
             "kotlin/jvm/internal/IntCompanionObject"
         );
+    }
+
+    #[test]
+    fn an_interned_classfile_name_is_borrowed_once() {
+        let name = crate::types::type_name("kotlin/Any");
+        let first = classfile_name(name);
+        let second = classfile_name(name);
+        assert_eq!(first, "java/lang/Object");
+        assert!(std::ptr::eq(first, second));
+        assert!(std::ptr::eq(
+            classfile_internal_name("kotlin/Any").as_ref(),
+            first
+        ));
+
+        let unique = "sample/unretained/Once.Only";
+        assert!(crate::types::existing_type_name(unique).is_none());
+        let left = classfile_internal_name(unique);
+        let right = classfile_internal_name(unique);
+        assert_eq!(left, "sample/unretained/Once$Only");
+        assert_eq!(left, right);
+        assert!(matches!(left, Cow::Owned(_)));
+        assert!(!std::ptr::eq(left.as_ref(), right.as_ref()));
     }
 
     #[test]
