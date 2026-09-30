@@ -298,17 +298,17 @@ impl Checker<'_> {
 
 /// The value-parameter default flags of one selected signature.
 ///
-/// An empty table is the provider's "no parameter declares a default" fact, and only for the
-/// whole signature. A non-empty table contributes exactly the suffix after `context_count`,
-/// and that suffix must be one flag per value parameter. A slice that does not exist is a
-/// miss: callers do not substitute an all-false table or the unsliced flags.
+/// An empty table is the provider's "no parameter declares a default" fact, including after a
+/// context prefix is removed. A non-empty table contributes exactly the suffix after
+/// `context_count`, and that suffix must be one flag per value parameter. A slice that does not
+/// exist is a miss: callers do not substitute an all-false table or the unsliced flags.
 fn value_parameter_defaults<'a>(
     param_defaults: &'a [bool],
     context_count: usize,
     value_parameter_count: usize,
 ) -> Option<&'a [bool]> {
     if param_defaults.is_empty() {
-        return (context_count == 0).then_some(param_defaults);
+        return Some(param_defaults);
     }
     let declared = param_defaults.get(context_count..)?;
     (declared.len() == value_parameter_count).then_some(declared)
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn a_short_default_table_is_not_reread_as_value_parameter_flags() {
         assert_eq!(value_parameter_defaults(&[], 0, 3), Some(&[][..]));
-        assert!(value_parameter_defaults(&[], 1, 2).is_none());
+        assert_eq!(value_parameter_defaults(&[], 1, 2), Some(&[][..]));
         assert!(value_parameter_defaults(&[true, false], 3, 2).is_none());
         assert!(value_parameter_defaults(&[true], 0, 2).is_none());
         assert_eq!(
