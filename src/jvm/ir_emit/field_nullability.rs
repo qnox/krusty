@@ -31,9 +31,12 @@ fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> 
 /// (`@NotNull`, plus an `Intrinsics.checkNotNullParameter` guard wherever one applies), `2` = a nullable
 /// reference (`@Nullable`, never guarded).
 ///
-/// A field declared as a TYPE PARAMETER answers from that parameter's BOUND, not from the erased
-/// descriptor: `<T : Cargo>`/`<T : Any>` cannot hold null and is `@NotNull`, while an unbounded `<T>`
-/// (= `Any?`) or a `<T : Cargo?>` is left UNANNOTATED — kotlinc does not mark it `@Nullable`.
+/// A field declared as a BARE type parameter answers from that parameter's BOUND, not from the
+/// erased descriptor: `<T : Cargo>`/`<T : Any>` cannot hold null and is `@NotNull`, while an
+/// unbounded `<T>` (= `Any?`) or a `<T : Cargo?>` is left UNANNOTATED — kotlinc does not mark it
+/// `@Nullable`. A nullable OCCURRENCE (`var c: T?`) is `@Nullable` even when the bound is not:
+/// the `?` is what admits null, and treating the bound as the field's nullability emits a setter
+/// line entry at the width of a null check the setter does not have (`pc == code_length`).
 ///
 /// One predicate for the pool seeder, the field/accessor/parameter annotations, the `var` setter guard,
 /// and the constructor's `LineNumberTable` start pc, because those must agree: classify a field as
@@ -45,10 +48,10 @@ pub(super) fn field_nullability_kind(ir: &IrFile, fq_name: &str, name: &str, t: 
     }
     if matches!(t, Ty::PlatformNullable(_)) {
         0
+    } else if t.is_nullable() {
+        2
     } else if let Some(parameter) = type_parameter_field_name(ir, fq_name, name) {
         u8::from(!ir.class_type_param_admits_null(fq_name, parameter))
-    } else if matches!(t, Ty::Nullable(_)) {
-        2
     } else {
         1
     }
