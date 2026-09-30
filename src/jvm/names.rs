@@ -139,66 +139,31 @@ fn physical_classfile_name(internal: &str) -> String {
 
 pub use crate::names::property_setter_name;
 
-/// Physical JVM name for a mapped Kotlin virtual member.
-pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &str) -> &'a str {
-    if let Some(owner) = crate::types::existing_type_name(owner) {
-        if let Some(physical) =
-            super::mapped_builtin_declarations::physical_name_for_call(owner, name, descriptor)
-        {
-            return physical;
-        }
+/// Physical JVM name for a mapped Kotlin virtual member. The owner is already resolved and
+/// interned, so the realization table never depends on whether some earlier operation happened to
+/// intern a classfile spelling.
+pub fn mapped_builtin_virtual_name<'a>(
+    owner: TypeName,
+    name: &'a str,
+    descriptor: &str,
+) -> &'a str {
+    if let Some(physical) =
+        super::mapped_builtin_declarations::physical_name_for_call(owner, name, descriptor)
+    {
+        return physical;
     }
-    match (owner, name) {
-        ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
-        ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
-        (
-            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
-            "start",
-        ) => "getFirst",
-        (
-            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
-            "endInclusive",
-        ) => "getLast",
-        (
-            "kotlin/reflect/KCallable"
-            | "kotlin/reflect/KProperty"
-            | "kotlin/reflect/KProperty0"
-            | "kotlin/reflect/KProperty1"
-            | "kotlin/reflect/KMutableProperty0"
-            | "kotlin/reflect/KMutableProperty1",
-            "name",
-        ) => "getName",
-        ("java/lang/Number", "toByte") => "byteValue",
-        ("java/lang/Number", "toShort") => "shortValue",
-        ("java/lang/Number", "toInt") => "intValue",
-        ("java/lang/Number", "toLong") => "longValue",
-        ("java/lang/Number", "toFloat") => "floatValue",
-        ("java/lang/Number", "toDouble") => "doubleValue",
-        _ => name,
-    }
+    name
 }
 
 /// Whether two semantic member spellings address one mapped JVM method.
-pub(super) fn same_mapped_virtual_name(
-    owner: &str,
+pub(super) fn same_mapped_virtual_name_of(
+    owner: TypeName,
     left: &str,
     right: &str,
     descriptor: &str,
 ) -> bool {
     mapped_builtin_virtual_name(owner, left, descriptor)
         == mapped_builtin_virtual_name(owner, right, descriptor)
-}
-
-pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {
-    match (owner, name) {
-        ("java/lang/Number", "byteValue") => "toByte",
-        ("java/lang/Number", "shortValue") => "toShort",
-        ("java/lang/Number", "intValue") => "toInt",
-        ("java/lang/Number", "longValue") => "toLong",
-        ("java/lang/Number", "floatValue") => "toFloat",
-        ("java/lang/Number", "doubleValue") => "toDouble",
-        _ => name,
-    }
 }
 
 fn split_field_descriptor(desc: &str) -> Option<(&str, &str)> {
@@ -410,6 +375,29 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapped_virtual_renames_require_an_exact_declaration_realization() {
+        let cases = [
+            ("java/lang/CharSequence", "get", "(I)C", "charAt"),
+            (
+                "java/util/List",
+                "removeAt",
+                "(I)Ljava/lang/Object;",
+                "remove",
+            ),
+            ("java/lang/Number", "toDouble", "()D", "doubleValue"),
+            ("java/lang/Number", "toDouble", "()I", "toDouble"),
+            ("demo/Foo", "get", "()V", "get"),
+        ];
+        for (owner, name, descriptor, renamed) in cases {
+            assert_eq!(
+                mapped_builtin_virtual_name(crate::types::type_name(owner), name, descriptor),
+                renamed,
+                "{owner}.{name}"
+            );
+        }
+    }
 
     #[test]
     fn file_facade_names_follow_kotlinc_package_part_rules() {

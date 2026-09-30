@@ -56,7 +56,7 @@ impl JvmLibraries {
                     .as_deref()
                     .unwrap_or(member.name.as_str());
                 (crate::jvm::names::mapped_builtin_virtual_name(
-                    physical_owner_text,
+                    physical_owner,
                     declared_name,
                     descriptor,
                 ) == name

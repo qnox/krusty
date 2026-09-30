@@ -142,6 +142,24 @@ pub(super) fn physical_name_for_call(
         .map(|realization| realization.physical_name)
 }
 
+/// Kotlin source name for one exact JVM realization. Publishing `java.lang.Number.intValue`
+/// uses this so the member is `toInt` and the classfile spelling stays on `physical_name`.
+pub(super) fn source_name_for_realization(
+    physical_owner: TypeName,
+    physical_name: &str,
+    descriptor: &str,
+) -> Option<&'static str> {
+    special_realizations()
+        .iter()
+        .find(|realization| {
+            realization.kind == MappedBuiltinMemberKind::Function
+                && realization.physical_owner == physical_owner
+                && realization.physical_name == physical_name
+                && realization.descriptor == descriptor
+        })
+        .map(|realization| realization.source_name)
+}
+
 /// Whether a concrete classfile method is the realization of an exact mapped builtin property.
 pub(super) fn is_property_realization(
     physical_owner: TypeName,
@@ -235,7 +253,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(special_realizations().len(), 8);
+        assert_eq!(special_realizations().len(), 14);
         assert_eq!(rows.len(), special_realizations().len());
 
         assert_eq!(
