@@ -30,6 +30,31 @@ pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
     }
     name
 }
+
+/// The public multifile facade for a part stored in `names`.
+///
+/// `CollectionsKt__CollectionsKt` collapses to `CollectionsKt`. The part's parent path is copied
+/// into the global name tree; the `__` suffix is never rendered.
+pub(crate) fn type_name_from_multifile_facade(names: &NameTree, part_id: NameId) -> TypeName {
+    let segment = names.segment(part_id);
+    let Some((facade_segment, _)) = segment.split_once("__") else {
+        return type_name_from(names, part_id);
+    };
+    if facade_segment.is_empty() {
+        return type_name_from(names, part_id);
+    }
+    let parent = names.parent(part_id).map_or(NameTree::ROOT, |parent| {
+        type_names().insert_from(names, parent)
+    });
+    let Some((base, nested)) = split_nested_name(facade_segment) else {
+        return TypeName(type_names().child_of(parent, facade_segment));
+    };
+    let mut name = TypeName(type_names().child_of(parent, base));
+    for segment in nested_segments(nested) {
+        name = type_name_nested_child(name, segment);
+    }
+    name
+}
 /// The nested classifier segments of `nested`, split at `.` and `$`. A `$` right after a separator
 /// begins the next segment rather than separating an empty one, so kotlinc's `$$inlined$` copy
 /// (`A$f$$inlined$g$1`) keeps its own identity instead of collapsing onto `A$f$inlined$g$1`.
@@ -94,6 +119,27 @@ pub fn existing_type_name_child(parent: TypeName, segment: &str) -> Option<TypeN
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name_tree::NameTree;
+
+    #[test]
+    fn a_multifile_part_collapses_to_the_public_facade_identity() {
+        let names = NameTree::default();
+        let part = names.insert("kotlin/collections/CollectionsKt__CollectionsKt");
+        assert_eq!(
+            type_name_from_multifile_facade(&names, part),
+            type_name("kotlin/collections/CollectionsKt")
+        );
+        let single = names.insert("kotlin/collections/MapsKt");
+        assert_eq!(
+            type_name_from_multifile_facade(&names, single),
+            type_name("kotlin/collections/MapsKt")
+        );
+        let nested = names.insert("pkg/Outer$Inner__Part");
+        assert_eq!(
+            type_name_from_multifile_facade(&names, nested),
+            type_name("pkg/Outer$Inner")
+        );
+    }
 
     #[test]
     fn a_doubled_dollar_names_its_own_class() {

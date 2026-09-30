@@ -17,6 +17,7 @@ mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
+mod package_facades;
 mod property_identity;
 mod value_class_erasure;
 
@@ -1817,6 +1818,9 @@ pub struct Classpath {
     /// super chain for every extension emit-handle lookup, so the candidate vec is built once and
     /// shared behind `Rc`. Bounded by the queried facades (the working set).
     facade_statics_memo: RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<Vec<ExtCandidate>>>>,
+    /// Public multifile facades of one package. The list is fixed for this classpath snapshot, and
+    /// every name lookup in the package used to rebuild it.
+    package_facades_memo: RefCell<HashMap<TypeName, Vec<TypeName>>>,
     /// The classpath `SymbolSource` result memo. Namespace identity is the first key so a package and a
     /// same-named classifier cannot collide; the nested LRU accepts `&str` leaves without allocating on
     /// cache hits.
@@ -2026,6 +2030,7 @@ impl Classpath {
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
             facade_statics_memo: RefCell::new(crate::lru::LruCache::new(META_CAP)),
+            package_facades_memo: RefCell::new(HashMap::new()),
             symbols_memo: RefCell::new(HashMap::new()),
             external_callables: RefCell::new(Vec::new()),
             external_callable_ids: RefCell::new(HashMap::new()),
@@ -4462,40 +4467,6 @@ impl Classpath {
                 .insert(key, rc.clone());
         }
         rc
-    }
-
-    /// The PUBLIC multifile facades a package declares, from the `kotlin_module` catalog (the parts
-    /// `…Kt__X` collapsed to their public facade `…Kt`), across every jar that declares the package. The
-    /// `@Metadata`-driven extension/top-level discovery reads each facade's merged metadata — the source
-    /// of truth — instead of scanning JVM statics. Declaration order, deduped.
-    pub fn package_facades(&self, pkg: &str) -> Vec<TypeName> {
-        self.package_facades_name(type_name(pkg))
-    }
-
-    pub fn package_facades_name(&self, pkg: TypeName) -> Vec<TypeName> {
-        let tree = self.package_tree();
-        let mut out = Vec::new();
-        let Some(node) = tree.node_for_name(pkg) else {
-            return out;
-        };
-        for &jar_id in &node.jars {
-            if self.entries.get(jar_id).is_none() {
-                continue;
-            }
-            let jp = self.entry_packages(jar_id);
-            if let Some(pe) = jp.entry_name(pkg) {
-                for &part_id in &pe.facades {
-                    let part = jp.names.render(part_id);
-                    let facade = part
-                        .split_once("__")
-                        .map_or_else(|| type_name_from(&jp.names, part_id), |(f, _)| type_name(f));
-                    if !out.contains(&facade) {
-                        out.push(facade);
-                    }
-                }
-            }
-        }
-        out
     }
 
     /// The scoped, lazy analogue of [`Self::find_extensions`]: the [`ExtCandidate`]s named `jvm_name`
@@ -7872,9 +7843,8 @@ mod fq_tests {
         let cp = Classpath::new(vec![jar]);
         let facades = cp.package_facades("kotlin/collections");
         // The public facade is listed (the `__`-part is collapsed to it) and deduped.
-        assert!(facades
-            .iter()
-            .any(|f| f.matches("kotlin/collections/CollectionsKt")));
+        assert!(facades.contains(&type_name("kotlin/collections/CollectionsKt")));
+        assert_eq!(facades, cp.package_facades("kotlin/collections"));
         assert!(
             !facades.iter().any(|f| f.contains("__")),
             "parts collapse to the public facade"
