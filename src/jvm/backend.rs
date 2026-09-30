@@ -659,8 +659,9 @@ impl JvmBackend {
             report_backend_pass_failure(reason, diags);
             return Vec::new();
         }
-        if let Err(message) = crate::jvm::declaration_collisions::validate(&ir) {
-            diags.error(crate::diag::Span::new(0, 0), message);
+        if crate::jvm::declaration_collisions::validate(&ir, &pass_facts.override_results, diags)
+            .is_err()
+        {
             return Vec::new();
         }
         let metadata = facade_package_metadata_from_ir(&ir, module_name, self.param_assertions);
