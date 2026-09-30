@@ -140,70 +140,35 @@ struct EnclosingFieldRead {
 /// (`this` is slot 0) and the type of that instance.
 ///
 /// Captures are spliced in front of that parameter, so its field index is not its slot. The
-/// parameter is the unnamed, non-capture constructor argument the inner-class lowering inserted;
-/// a capture has a capture record, and a source parameter has a name.
+/// parameter is the one whose provenance is the enclosing instance.
 fn enclosing_instance_parameter(class: &crate::ir::IrClass) -> Option<(u32, crate::types::Ty)> {
-    if !class.is_inner_class {
-        return None;
-    }
     let (index, argument) = class.ctor_args.iter().enumerate().find(|(_, argument)| {
-        argument.name.is_none()
-            && argument.capture.is_none()
-            && argument.context_kind == crate::types::ContextParameterKind::None
-            && argument.is_field
+        argument.provenance == crate::ir::IrCtorParameterProvenance::EnclosingInstance
     })?;
     let slot = u32::try_from(index).ok()?.checked_add(1)?;
     Some((slot, argument.ty))
 }
 
-fn constructor_capture_at(
-    class: &crate::ir::IrClass,
-    field: u32,
-) -> Option<&crate::ir::IrConstructorCapture> {
-    class.ctor_args.iter().find_map(|argument| {
-        (argument.field_index == Some(field))
-            .then_some(argument.capture.as_ref())
-            .flatten()
-    })
-}
-
 /// A superclass capture the inner subclass does not itself hold, read from the enclosing instance.
 ///
-/// The enclosing local class often captured the same receiver on its own, so the closure identity
-/// stored for its field names that class, not the superclass field. Receiver captures still
-/// describe the same source receiver. Lexical values are not joined this way: two shadowed locals
-/// can share a spelling, and only the closure identity says which one a field holds.
+/// The enclosing local class stores that closure under its own field, but both fields carry the
+/// receiver-rung identity the checker assigned. Lowering reads that identity from the constructor
+/// parameter. It does not compare capture labels: two receivers can share a callable or lambda
+/// label, and one receiver can be rendered under more than one label.
 fn enclosing_superclass_capture(
     ir: &IrFile,
     class: usize,
-    parent: crate::ir::ClassId,
-    field: u32,
     identity: crate::fir::ClassCaptureIdentity,
 ) -> Option<EnclosingFieldRead> {
     let (slot, outer_ty) = enclosing_instance_parameter(&ir.classes[class])?;
     let outer = outer_ty
         .obj_internal()
         .and_then(|name| ir.class_id_by_name(name))?;
-    if let Some(field) = (0..ir.classes[outer as usize].fields.len()).find_map(|index| {
-        let candidate = u32::try_from(index).ok()?;
-        (ir.class_capture_identities.get(&(outer, candidate)) == Some(&identity))
-            .then_some(candidate)
-    }) {
-        return Some(EnclosingFieldRead {
-            slot,
-            class: outer,
-            field,
-        });
-    }
-    let wanted = constructor_capture_at(&ir.classes[parent as usize], field)?.clone();
-    // A receiver-less capture is a lexical value. Shadowed locals share a spelling, so only the
-    // closure identity — already missed above — may join them.
-    wanted.receiver.as_ref()?;
     let field = ir.classes[outer as usize]
         .ctor_args
         .iter()
         .find_map(|argument| {
-            (argument.capture.as_ref() == Some(&wanted))
+            (argument.capture_identity == Some(identity))
                 .then_some(argument.field_index)
                 .flatten()
         })?;
@@ -232,7 +197,9 @@ fn enclosing_superclass_capture(
 /// field from that parameter. The uninitialized inner instance cannot be the receiver of
 /// `getfield`, and giving the inner constructor its own copy of the capture would be a different
 /// calling convention. A capture the subclass does hold is still forwarded from its own prefix
-/// parameter; the field read fills only an identity that parameter list does not have.
+/// parameter; the field read fills only an identity that parameter list does not have. Both the
+/// enclosing parameter's role and the field's closure identity are recorded on the constructor;
+/// the field is never chosen by comparing capture names.
 ///
 /// Only a call that is short by exactly the parent's prefix is filled, whether it reaches the
 /// primary constructor or a secondary one. Anything else is a shape this does not understand and
@@ -316,7 +283,7 @@ pub(super) fn finalize_local_superclass_captures(
         };
         let own_prefix = ir.classes[class].constructor_prefix_count as usize;
         let mut supplies = Vec::with_capacity(wanted.len());
-        for (field, (identity, _)) in wanted.iter().enumerate() {
+        for (identity, _) in &wanted {
             let own = (0..own_prefix).position(|candidate| {
                 u32::try_from(candidate).ok().and_then(|candidate| {
                     ir.class_capture_identities.get(&(class as u32, candidate))
@@ -326,11 +293,7 @@ pub(super) fn finalize_local_superclass_captures(
                 supplies.push(SuperCaptureSupply::PrefixParameter(slot));
                 continue;
             }
-            let Ok(field) = u32::try_from(field) else {
-                break;
-            };
-            let Some(read) = enclosing_superclass_capture(ir, class, parent, field, *identity)
-            else {
+            let Some(read) = enclosing_superclass_capture(ir, class, *identity) else {
                 break;
             };
             supplies.push(SuperCaptureSupply::EnclosingField(read));
@@ -1181,6 +1144,8 @@ pub(super) fn accept_constructor_body(
                     check: None,
                     anonymous_super_forward: None,
                     capture: None,
+                    provenance: crate::ir::IrCtorParameterProvenance::Value,
+                    capture_identity: None,
                 }
             })
             .collect::<Vec<_>>();

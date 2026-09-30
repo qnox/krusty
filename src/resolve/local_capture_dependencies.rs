@@ -137,6 +137,9 @@ impl Checker<'_> {
             captures[existing].capture_dependency = captures[existing]
                 .capture_dependency
                 .or(candidate.capture_dependency);
+            if captures[existing].receiver_capture.is_none() {
+                captures[existing].receiver_capture = candidate.receiver_capture;
+            }
             return;
         }
         captures.push(candidate);
@@ -232,6 +235,7 @@ impl Checker<'_> {
                         semantic_receiver: None,
                         lexical_shadow_depth,
                         capture_dependency: None,
+                        receiver_capture: None,
                     },
                     required_identity,
                 );
@@ -394,11 +398,17 @@ impl Checker<'_> {
             };
             required.source = source;
             required.lexical_shadow_depth = lexical_shadow_depth;
-            required.capture_dependency = required.capture_dependency.or_else(|| {
-                u32::try_from(field)
-                    .ok()
-                    .map(|field| crate::fir::ClassCaptureIdentity { owner, field })
-            });
+            required.capture_dependency =
+                required
+                    .capture_dependency
+                    .or(match required.receiver_capture {
+                        Some(receiver) => {
+                            Some(crate::fir::ClassCaptureIdentity::Receiver(receiver))
+                        }
+                        None => u32::try_from(field)
+                            .ok()
+                            .map(|field| crate::fir::ClassCaptureIdentity::Field { owner, field }),
+                    });
             Self::merge_or_push_local_dependency_capture(
                 captures,
                 capture_bindings,

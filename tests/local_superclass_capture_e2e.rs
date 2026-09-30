@@ -218,7 +218,9 @@ fn an_inner_class_reads_a_superclass_capture_from_the_enclosing_instance() {
     let enclosing = inner
         .ctor_args
         .iter()
-        .find(|argument| argument.capture.is_none() && argument.name.is_none())
+        .find(|argument| {
+            argument.provenance == krusty::ir::IrCtorParameterProvenance::EnclosingInstance
+        })
         .expect("enclosing-instance parameter");
     let outer = ir
         .class_id_by_name(enclosing.ty.obj_internal().expect("enclosing class"))
@@ -269,11 +271,12 @@ fn an_inner_class_reads_a_superclass_capture_from_the_enclosing_instance() {
         ir.expr(*receiver)
     );
     assert_eq!(*class, outer);
-    let capture = ir.classes[outer as usize]
+    let outer_argument = ir.classes[outer as usize]
         .ctor_args
         .iter()
         .find(|argument| argument.field_index == Some(*index))
-        .and_then(|argument| argument.capture.as_ref());
+        .expect("enclosing capture field");
+    let capture = outer_argument.capture.as_ref();
     assert!(
         matches!(
             capture,
@@ -308,6 +311,58 @@ fn an_inner_local_class_returns_the_captured_extension_receiver() {
          \x20   return Outer().Inner().result()\n\
          }\n\
          fun box() = \"OK\".bar()\n",
+    );
+}
+
+/// A function and a lambda spelled `bar` are different receivers. The superclass reads the lambda.
+/// The enclosing class also captures the function's `Host` receiver, and that field is not the
+/// super argument.
+#[test]
+fn same_spelled_extension_receivers_do_not_cross_on_the_enclosing_instance() {
+    agrees_with_kotlinc(
+        "DistinctExtensionReceiverLabels",
+        "class Host(val mark: String)\n\
+         fun Host.bar(): String {\n\
+         \x20   return \"OK\".run bar@{\n\
+         \x20       open class Local {\n\
+         \x20           fun read() = this@bar\n\
+         \x20       }\n\
+         \x20       class Holder {\n\
+         \x20           fun fromHost() = mark\n\
+         \x20           inner class Inner : Local()\n\
+         \x20       }\n\
+         \x20       val inner = Holder().Inner().read()\n\
+         \x20       val seen = Holder().fromHost()\n\
+         \x20       if (inner == \"OK\" && seen == \"NO\") \"OK\" else inner + seen\n\
+         \x20   }\n\
+         }\n\
+         fun box() = Host(\"NO\").bar()\n",
+    );
+}
+
+/// Two lambdas spelled `label` are different receivers. The superclass reads the inner `String`
+/// lambda. The enclosing class also stores the outer `Host` lambda, which carries the same label.
+#[test]
+fn same_spelled_lambda_receivers_do_not_cross_on_the_enclosing_instance() {
+    agrees_with_kotlinc(
+        "DistinctLambdaReceiverLabels",
+        "class Host(val mark: String)\n\
+         fun box(): String {\n\
+         \x20   return Host(\"NO\").run label@{\n\
+         \x20       \"OK\".run label@{\n\
+         \x20           open class Local {\n\
+         \x20               fun read() = this@label\n\
+         \x20           }\n\
+         \x20           class Holder {\n\
+         \x20               fun fromHost() = mark\n\
+         \x20               inner class Inner : Local()\n\
+         \x20           }\n\
+         \x20           val seen = Holder().fromHost()\n\
+         \x20           val inner = Holder().Inner().read()\n\
+         \x20           if (inner == \"OK\" && seen == \"NO\") \"OK\" else inner + seen\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n",
     );
 }
 

@@ -138,6 +138,20 @@ pub struct IrJvmValueClassSecondaryCtor {
     pub descriptor: String,
 }
 
+/// Why one primary-constructor parameter exists.
+///
+/// Common lowering selects a synthetic parameter by this role. The absence of a source name, or of
+/// a capture record, is not a role: an enclosing instance and a capture are both unnamed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrCtorParameterProvenance {
+    /// A parameter a source declaration or another compiler-generated declaration wrote.
+    Value,
+    /// A closure value carried ahead of the parameters the source wrote.
+    Capture,
+    /// The enclosing instance of an inner class. A backend may format this as `this$0`.
+    EnclosingInstance,
+}
+
 /// A constructor parameter that carries a value a local or anonymous class captures from its
 /// enclosing scope. kotlinc's LocalDeclarationsLowering adds it ahead of the declared parameters,
 /// stores it before the super call, and leaves it out of the class's metadata: it has no source

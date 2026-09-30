@@ -40,8 +40,8 @@ mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 use anonymous_object_capture::{
-    record_anonymous_construction_captures, AnonymousCaptureCandidate,
-    SelectedLocalCallableCaptures,
+    merge_local_receiver_capture, record_anonymous_construction_captures,
+    AnonymousCaptureCandidate, SelectedLocalCallableCaptures,
 };
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
@@ -117,6 +117,7 @@ mod postponed_diagnostics;
 mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
+mod receiver_capture_identity;
 mod receiver_flow;
 mod receiver_function_values;
 mod receiver_uses;
@@ -18414,6 +18415,7 @@ impl<'a> Checker<'a> {
                         receiver: None,
                         semantic_receiver: None,
                         receiver_identity: None,
+                        receiver_capture: None,
                     });
                 });
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
@@ -18492,6 +18494,10 @@ impl<'a> Checker<'a> {
                                     extension_declaration,
                                     receiver.class_receiver,
                                 )),
+                                receiver_capture: self.implicit_receiver_capture_id(
+                                    receiver.class_receiver,
+                                    identity,
+                                ),
                                 receiver_label: (!receiver.class_receiver)
                                     .then(|| {
                                         extension_declaration
@@ -24309,111 +24315,7 @@ impl<'a> Checker<'a> {
                 // count increased is a runtime input the local classifier must carry. This covers
                 // multiple simultaneous receivers (`this@extension` and `this@Outer`) without
                 // type/name matching and without asking lowering to repeat scope lookup.
-                let innermost_class = scope.innermost_class_receiver_identity();
-                let mut class_receiver_ordinal = 0usize;
-                let receiver_candidates = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    // Lexical object/companion singletons are materialized from their published
-                    // singleton identity and deliberately use `usize::MAX` instead of a scoped
-                    // receiver coordinate. They are not closure captures.
-                    .filter(|receiver| receiver.receiver_depth != usize::MAX)
-                    .map(|receiver| {
-                        let class_label_identity = receiver
-                            .class_receiver
-                            .then(|| {
-                                let ordinal = class_receiver_ordinal;
-                                class_receiver_ordinal += 1;
-                                self.this_labels
-                                    .iter()
-                                    .enumerate()
-                                    .rev()
-                                    .filter(|(_, (_, _, is_class))| *is_class)
-                                    .nth(ordinal)
-                                    .map(|(index, _)| receiver_label_identity(index))
-                            })
-                            .flatten();
-                        let label = self
-                            .this_labels
-                            .len()
-                            .checked_sub(receiver.receiver_depth + 1)
-                            .and_then(|index| self.this_labels.get(index))
-                            .filter(|(_, _, is_class)| !*is_class)
-                            .map(|(label, _, _)| label.clone().into_boxed_str());
-                        let source = if innermost_class == Some(receiver.identity) {
-                            AnonymousObjectCaptureSource::EnclosingInstance {
-                                current: receiver.current,
-                                depth: u32::try_from(receiver.receiver_depth)
-                                    .expect("too many implicit receiver rungs"),
-                            }
-                        } else {
-                            AnonymousObjectCaptureSource::ImplicitReceiver {
-                                current: receiver.current,
-                                depth: u32::try_from(receiver.receiver_depth)
-                                    .expect("too many implicit receiver rungs"),
-                            }
-                        };
-                        let candidate = AnonymousObjectCapture {
-                            name: if matches!(
-                                source,
-                                AnonymousObjectCaptureSource::EnclosingInstance { .. }
-                            ) {
-                                "this$0".to_string()
-                            } else if receiver.current {
-                                "this$receiver".to_string()
-                            } else {
-                                format!("this$receiver${}", receiver.receiver_depth)
-                            },
-                            ty: receiver.ty,
-                            shared_cell: false,
-                            storage_ty: None,
-                            source,
-                            receiver_label: label,
-                            receiver: Some(self.captured_receiver(
-                                scope,
-                                receiver.identity,
-                                receiver.extension_receiver,
-                                receiver.class_receiver,
-                            )),
-                            semantic_receiver: Some(
-                                if matches!(
-                                    source,
-                                    AnonymousObjectCaptureSource::EnclosingInstance { .. }
-                                ) {
-                                    AnonymousObjectReceiverSource::EnclosingInstance {
-                                        current: receiver.current,
-                                        depth: u32::try_from(receiver.receiver_depth)
-                                            .expect("too many implicit receiver rungs"),
-                                    }
-                                } else {
-                                    AnonymousObjectReceiverSource::ImplicitReceiver {
-                                        current: receiver.current,
-                                        depth: u32::try_from(receiver.receiver_depth)
-                                            .expect("too many implicit receiver rungs"),
-                                    }
-                                },
-                            ),
-                            lexical_shadow_depth: 0,
-                            capture_dependency: None,
-                        };
-                        let mut identities = vec![receiver.identity];
-                        if let Some(identity) = class_label_identity {
-                            if identity != receiver.identity {
-                                identities.push(identity);
-                            }
-                        }
-                        let uses = identities
-                            .into_iter()
-                            .map(|identity| {
-                                (
-                                    identity,
-                                    self.implicit_receiver_identity_use_count(identity),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        (candidate, uses)
-                    })
-                    .collect::<Vec<_>>();
+                let receiver_candidates = self.local_class_receiver_candidates(scope);
                 let mut captures = self.local_class_captures(scope, d, &cl);
                 if captures.forwarded_super_arguments.is_empty() {
                     self.discovered_anonymous_super_forwards.remove(&d);
@@ -24443,6 +24345,7 @@ impl<'a> Checker<'a> {
                             semantic_receiver: None,
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
+                            receiver_capture: None,
                         });
                     }
                 }
@@ -24466,8 +24369,9 @@ impl<'a> Checker<'a> {
                     &mut capture_bindings,
                 );
                 let mut used_receivers = Vec::new();
-                for (candidate, identities) in receiver_candidates {
-                    let Some(first_use) = identities
+                for observed in receiver_candidates {
+                    let Some(first_use) = observed
+                        .uses_before
                         .iter()
                         .filter(|(identity, before)| {
                             self.implicit_receiver_identity_use_count(*identity) > *before
@@ -24480,15 +24384,12 @@ impl<'a> Checker<'a> {
                     else {
                         continue;
                     };
-                    used_receivers.push((first_use, candidate.source));
-                    if captures
-                        .values
-                        .iter()
-                        .all(|existing| existing.source != candidate.source)
-                    {
-                        captures.values.push(candidate);
-                        capture_bindings.push(None);
-                    }
+                    used_receivers.push((first_use, observed.capture.source));
+                    merge_local_receiver_capture(
+                        &mut captures.values,
+                        &mut capture_bindings,
+                        observed.capture,
+                    );
                 }
                 capture_field_order::order_receivers_by_first_use(
                     &mut captures.values,
@@ -37144,6 +37045,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_local_class_captures: HashMap::new(),
         discovered_local_class_capture_bindings: HashMap::new(),
         local_function_capture_bindings: HashMap::new(),
+        receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
         next_flow_identity: 0,
@@ -39882,6 +39784,7 @@ struct Checker<'a> {
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
     /// Resolver-only binding identities parallel to lifted local-function capture vectors.
     local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
+    receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
     try_body_writes: Vec<std::collections::HashSet<lexical_bindings::BindingIdentity>>,

@@ -1045,6 +1045,8 @@ impl<'a> CommonIrBodySink<'a> {
                     check: None,
                     anonymous_super_forward: None,
                     capture: None,
+                    provenance: crate::ir::IrCtorParameterProvenance::EnclosingInstance,
+                    capture_identity: None,
                 },
             );
             class.ctor_param_count += 1;

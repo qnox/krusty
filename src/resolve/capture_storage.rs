@@ -369,7 +369,7 @@ impl Checker<'_> {
     /// skipped file, when the name is one of the unmodelled kinds); under-reporting emits a class
     /// without the constructor parameter its capture needs.
     pub(super) fn local_class_captures(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         declaration: crate::ast::DeclId,
         cl: &ClassDecl,
@@ -397,10 +397,8 @@ impl Checker<'_> {
         // so with an extension receiver or a receiver lambda nearer than the enclosing class the
         // checker's `this` and the object handed to the constructor are two different values. Every
         // name then falls through to the value channel, finds no binding, and the class is rejected.
-        let innermost_label = self.this_labels.last();
-        let enclosing_instance = scope
-            .this_ty()
-            .filter(|_| innermost_label.is_some_and(|label| label.2));
+        // Assign the closure id before borrowing `this_labels`: the label reference lives for
+        // the rest of this inventory, and the id table needs a mutable checker.
         let implicit_receiver_capture = scope
             .implicit_receivers_with_declarations()
             .into_iter()
@@ -409,11 +407,17 @@ impl Checker<'_> {
                 scope.innermost_class_receiver_identity() != Some(*identity)
             })
             .map(|(ty, extension, identity, class_receiver)| {
+                let receiver_capture = self.implicit_receiver_capture_id(class_receiver, identity);
                 (
                     ty,
                     self.captured_receiver(scope, identity, extension, class_receiver),
+                    receiver_capture,
                 )
             });
+        let innermost_label = self.this_labels.last();
+        let enclosing_instance = scope
+            .this_ty()
+            .filter(|_| innermost_label.is_some_and(|label| label.2));
         if implicit_receiver_capture.is_some() {
             // Receiver properties are reached through the captured receiver coordinate below; they
             // are not independent lexical values. Keeping both creates an impossible constructor
@@ -712,6 +716,7 @@ impl Checker<'_> {
                     }),
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
+                    receiver_capture: None,
                 }),
                 None => {
                     result.unsupported.get_or_insert("this".to_string());
@@ -723,7 +728,7 @@ impl Checker<'_> {
         // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
         // conservatively is harmless when no member ultimately reads it and prevents a later body
         // callback from attempting source-scope lookup after the enclosing body has been dropped.
-        if let Some((receiver, receiver_name)) = implicit_receiver_capture {
+        if let Some((receiver, receiver_name, receiver_capture)) = implicit_receiver_capture {
             result.values.push(AnonymousObjectCapture {
                 name: "this$receiver".to_string(),
                 ty: receiver,
@@ -743,6 +748,7 @@ impl Checker<'_> {
                 }),
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
+                receiver_capture,
             });
         }
         captured.sort();
@@ -786,6 +792,7 @@ impl Checker<'_> {
                 semantic_receiver: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
+                receiver_capture: None,
             });
         }
         result

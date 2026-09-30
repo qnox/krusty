@@ -862,16 +862,20 @@ impl BodyFirChecker<'_> {
         };
         for (field, capture) in captures.iter().enumerate() {
             let field = u32::try_from(field).expect("too many local-class captures");
-            let own_identity = ClassCaptureIdentity {
+            let field_identity = ClassCaptureIdentity::Field {
                 owner: capture_owner,
                 field,
             };
-            let capture_identity =
-                if self.hoist_anonymous_super_argument && capture.semantic_receiver.is_some() {
-                    Some(own_identity)
-                } else {
-                    capture.capture_dependency.or(Some(own_identity))
-                };
+            // A receiver rung is normalized once, at capture publication, into the closure id.
+            // Hoisting an anonymous super argument still stores an enclosing class instance as
+            // this classifier's own field; that instance has no closure id.
+            let capture_identity = if let Some(receiver) = capture.receiver_capture {
+                Some(ClassCaptureIdentity::Receiver(receiver))
+            } else if self.hoist_anonymous_super_argument && capture.semantic_receiver.is_some() {
+                Some(field_identity)
+            } else {
+                capture.capture_dependency.or(Some(field_identity))
+            };
             let mut ty = self.resolved_type(span, capture.ty)?;
             let source = match capture.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
@@ -1124,7 +1128,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
-                        capture_identity: None,
+                        capture_identity,
                     });
                     self.anonymous_receiver_capture_source(
                         origin,
@@ -1145,7 +1149,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
-                        capture_identity: None,
+                        capture_identity,
                     });
                     self.anonymous_receiver_capture_source(
                         origin,

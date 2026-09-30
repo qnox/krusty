@@ -409,10 +409,13 @@ pub(crate) struct ClassCaptureBinding {
     pub(crate) capture_identity: Option<ClassCaptureIdentity>,
 }
 
+/// Semantic closure coordinate. A lexical capture is the classifier field that first stored it.
+/// An implicit receiver is the checker's receiver-rung identity, shared by every classifier that
+/// captured that rung. Label spelling is not part of either coordinate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ClassCaptureIdentity {
-    pub(crate) owner: TypeName,
-    pub(crate) field: u32,
+pub(crate) enum ClassCaptureIdentity {
+    Field { owner: TypeName, field: u32 },
+    Receiver(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
