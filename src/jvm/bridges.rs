@@ -617,7 +617,7 @@ fn bridge_erasure(ty: Ty) -> Ty {
         Ty::TyParam(_, bound) if matches!(*bound, Ty::TyParam(..)) => Ty::obj("kotlin/Any"),
         Ty::TyParam(_, bound) => stored_value_ty(bridge_erasure(*bound)),
         Ty::Nullable(inner) => Ty::nullable(bridge_erasure(*inner)),
-        Ty::Obj(internal, _) if internal.render().is_empty() => Ty::obj("kotlin/Any"),
+        Ty::Obj(internal, _) if internal == crate::types::TypeName::ROOT => Ty::obj("kotlin/Any"),
         other => other,
     }
 }
@@ -634,5 +634,10 @@ mod tests {
 
         assert_eq!(bridge_erasure(method), Ty::obj("kotlin/Any"));
         assert_eq!(bridge_erasure(owner), Ty::obj("sample/Entity"));
+    }
+
+    #[test]
+    fn an_empty_classifier_erases_to_any() {
+        assert_eq!(bridge_erasure(Ty::obj("")), Ty::obj("kotlin/Any"));
     }
 }

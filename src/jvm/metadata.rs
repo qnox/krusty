@@ -2473,10 +2473,13 @@ fn decode_functions(
                             })
                             .collect()
                     };
+                    // Trace selection follows the resolved function-classifier family. Rendering
+                    // remains confined to the trace payload below.
+                    #[cfg(feature = "trace")]
                     if value_params.iter().any(|parameter| {
                         parameter
                             .ty
-                            .is_some_and(|ty| ty.render().contains("Function"))
+                            .is_some_and(|ty| super::function_classifiers::classifier(ty).is_some())
                     }) {
                         crate::trace_compiler!(
                             "metadata_functions",

@@ -19,6 +19,8 @@ mod method_bodies;
 mod method_body_cache;
 mod package_facades;
 mod property_identity;
+#[cfg(test)]
+mod test_support;
 mod value_class_erasure;
 
 pub(crate) use crate::libraries::{
@@ -4119,7 +4121,7 @@ impl Classpath {
     ) -> Option<MethodCode> {
         let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         let read_once = || {
-            self.class_bytes(&internal.render())
+            self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal_id))
                 .and_then(|bytes| ClassBodies::parse(std::sync::Arc::new(bytes)))
                 .and_then(|class| class.method_code(name, descriptor))
         };
@@ -5751,6 +5753,7 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 
 #[cfg(test)]
 mod fq_tests {
+    use super::test_support::{test_temp_dir, write_test_jar_with_entry};
     use super::*;
 
     #[test]
@@ -6365,17 +6368,6 @@ mod fq_tests {
 
         drop(java8);
         std::fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    fn test_temp_dir(tag: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("krusty-{tag}-{}-{unique}", std::process::id()));
-        std::fs::create_dir(&directory).expect("create test directory");
-        directory
     }
 
     fn write_invalid_package_facade(directory: &Path, internal: &str) {
@@ -7384,16 +7376,6 @@ mod fq_tests {
             &code,
         );
         cw.finish()
-    }
-
-    fn write_test_jar_with_entry(path: &Path, entry_name: &str, bytes: &[u8]) {
-        let file = File::create(path).expect("create jar");
-        let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        writer.start_file(entry_name, options).expect("start entry");
-        std::io::Write::write_all(&mut writer, bytes).expect("write entry");
-        writer.finish().expect("finish jar");
     }
 
     fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {
