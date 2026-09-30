@@ -83,7 +83,6 @@ extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 extensionProperties/accessorForPrivateSetter.kt
 extensionProperties/extensionPropertyWithInline.kt
-fieldRename/delegates.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
 funInterface/funInterfaceWithSuspendMethod.kt
@@ -128,9 +127,6 @@ inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/hiddenConstructor/innerClassConstructor.kt
 inlineClasses/hiddenConstructor/innerClassConstructorGeneric.kt
-inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
-inlineClasses/inlineClassCollection/inlineListOfInlineClassGeneric.kt
-inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/jvmInline.kt
 inlineClasses/kt25771.kt
 inlineClasses/kt27096_enum.kt
