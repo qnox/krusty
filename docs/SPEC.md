@@ -2542,6 +2542,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result type that can bind them. Branch order does not affect the binding. If no sibling can bind
   the formals, the cannot-infer diagnostic is reported at the call. Test:
   `tests/conditional_branch_inference_e2e.rs`.
+- **A formal that appears only inside another formal's projected bound is inferred from that
+  argument.** `<R, C : MutableCollection<in R>> id(c: C)` applied to `MutableCollection<T>` or
+  `ArrayList<T>` binds `R` to `T`, including when `T` belongs to the caller. A star argument
+  binds the contravariant variable to `Nothing` (`MutableCollection<*>` satisfies
+  `MutableCollection<in Nothing>`). An `out` projection contributes its type argument
+  instead: `Context<out T>` passed where `Context<in R>` is expected binds `R` to `T`.
+  An argument outside that bound, such as `Int`, is rejected.
+  The same rule instantiates the reified element of `filterIsInstanceTo` from the
+  destination collection. Tests: `tests/generic_bound_projection_e2e.rs` and
+  `tests/backend_rejection_coverage_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
