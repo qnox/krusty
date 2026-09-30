@@ -183,6 +183,7 @@ pub(super) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature>
 pub(super) fn constructor_inference_signature(
     class_signature: Option<&str>,
     owner: TypeName,
+    declaration: &str,
     mut method: GenericSig,
 ) -> GenericSig {
     let Some((class_formals, class_bounds, _)) = class_signature.and_then(parse_class_gsig) else {
@@ -212,12 +213,13 @@ pub(super) fn constructor_inference_signature(
     let declared_formals = method.formals.clone();
     let mut constructor_formals = Vec::with_capacity(declared_formals.len());
     let mut rename = std::collections::HashMap::new();
-    for formal in &declared_formals {
+    for (ordinal, formal) in declared_formals.iter().enumerate() {
         if class_formals
             .iter()
             .any(|class_formal| class_formal == formal)
         {
-            let fresh = crate::types::constructor_type_parameter(formal);
+            let fresh =
+                crate::types::constructor_type_parameter(owner, declaration, ordinal, formal);
             rename.insert(formal.as_str(), fresh);
             constructor_formals.push(fresh.to_string());
         } else {
@@ -270,6 +272,7 @@ mod constructor_inference_signature_tests {
         let signature = constructor_inference_signature(
             Some("<V:Ljava/lang/Object;>Ljava/lang/Object;"),
             owner,
+            "()V",
             void_constructor(&[], &[Ty::ty_param("V", Ty::obj("kotlin/Any"))]),
         );
 
@@ -287,6 +290,7 @@ mod constructor_inference_signature_tests {
         let signature = constructor_inference_signature(
             Some("<E:Ljava/lang/Object;>Ljava/lang/Object;"),
             owner,
+            "(Ljava/lang/Object;Ljava/lang/Object;)V",
             void_constructor(
                 &["U"],
                 &[
@@ -314,6 +318,7 @@ mod constructor_inference_signature_tests {
         let signature = constructor_inference_signature(
             Some("<T:Ljava/lang/Object;>Ljava/lang/Object;"),
             owner,
+            "(Ljava/lang/Object;)V",
             void_constructor(&["T"], &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
         );
 
@@ -332,5 +337,26 @@ mod constructor_inference_signature_tests {
             crate::types::type_parameter_source_name(&signature.formals[1]),
             "T"
         );
+    }
+
+    #[test]
+    fn overloaded_constructors_do_not_share_a_shadowed_formal() {
+        let shadow = |owner: &str, declaration: &str| {
+            constructor_inference_signature(
+                Some("<T:Ljava/lang/Object;>Ljava/lang/Object;"),
+                type_name(owner),
+                declaration,
+                void_constructor(&["T"], &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            )
+        };
+        let left = shadow("demo/Left", "(I)V");
+        let overload = shadow("demo/Left", "(Ljava/lang/String;)V");
+        let other = shadow("demo/Right", "(I)V");
+
+        assert_ne!(left.formals[1], overload.formals[1]);
+        assert_ne!(left.formals[1], other.formals[1]);
+        for formal in [&left.formals[1], &overload.formals[1], &other.formals[1]] {
+            assert_eq!(crate::types::type_parameter_source_name(formal), "T");
+        }
     }
 }

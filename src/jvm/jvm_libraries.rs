@@ -1968,16 +1968,16 @@ impl JvmLibraries {
                             m.return_nullability,
                         );
                     }
-                    // A constructor's classfile signature returns void and omits the class type
-                    // parameters. Publish the classifier result after parameter nullability, so
-                    // inference sees the constructed type and return nullability stays on the
-                    // value parameters.
+                    // A constructor's classfile signature returns void and omits class type
+                    // parameters. Publish the classifier result after parameter nullability so
+                    // inference sees the constructed type; return nullability stays on values.
                     if uses_java_type_semantics && m.name == "<init>" {
                         if let Some(signature) = member.generic_sig.take() {
                             member.generic_sig = Some(self.semanticize_jvm_generic_sig(
                                 generic_signatures::constructor_inference_signature(
                                     ci.signature.as_deref(),
                                     internal_name,
+                                    &m.descriptor,
                                     signature,
                                 ),
                             ));

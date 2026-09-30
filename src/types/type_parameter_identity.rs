@@ -46,11 +46,20 @@ pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
 }
 
 /// A constructor-declared type parameter that hides a class type parameter of the same spelling.
-/// The JVM signature uses one name for both; they are different inference variables. Diagnostics
-/// still print the source spelling.
-pub(crate) fn constructor_type_parameter(source: &str) -> &'static str {
+/// The JVM signature uses one name for both; they are different inference variables. `declaration`
+/// is the caller's stable constructor identity (owner alone cannot separate overloads) and is not
+/// interpreted. Diagnostics still print the source spelling.
+pub(crate) fn constructor_type_parameter(
+    owner: super::TypeName,
+    declaration: &str,
+    ordinal: usize,
+    source: &str,
+) -> &'static str {
     let source = intern(source);
-    let semantic = intern(&format!("\0ctor:{source}"));
+    let semantic = intern(&format!(
+        "\0ctor:{}:{declaration}:{ordinal}",
+        owner.name_id().0
+    ));
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -73,12 +82,32 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{declaration_type_parameter, type_parameter_source_name};
+    use super::{
+        constructor_type_parameter, declaration_type_parameter, type_parameter_source_name,
+    };
 
     #[test]
     fn source_spelling_is_not_parsed_from_the_semantic_identity() {
         let semantic = declaration_type_parameter(11, 7, 19, 0, "T$nested");
         assert_eq!(type_parameter_source_name(semantic), "T$nested");
         assert_ne!(semantic, "T$nested");
+    }
+
+    #[test]
+    fn constructor_formals_that_share_a_spelling_stay_distinct() {
+        let left = crate::types::type_name("demo/Left");
+        let right = crate::types::type_name("demo/Right");
+        let first = constructor_type_parameter(left, "(I)V", 0, "T");
+        let overload = constructor_type_parameter(left, "(Ljava/lang/String;)V", 0, "T");
+        let other_owner = constructor_type_parameter(right, "(I)V", 0, "T");
+        let next_formal = constructor_type_parameter(left, "(I)V", 1, "T");
+
+        assert_ne!(first, overload);
+        assert_ne!(first, other_owner);
+        assert_ne!(first, next_formal);
+        assert_eq!(type_parameter_source_name(first), "T");
+        assert_eq!(type_parameter_source_name(overload), "T");
+        assert_eq!(type_parameter_source_name(other_owner), "T");
+        assert_eq!(type_parameter_source_name(next_formal), "T");
     }
 }
