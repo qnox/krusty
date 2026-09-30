@@ -45,23 +45,29 @@ pub(super) fn emit(
     );
     delegated_property_array::declare(env, c.fq_name, cw);
 
-    // Backing fields follow INSTANCE in the field table.
-    for (field_index, field) in c.fields.iter().enumerate() {
-        let acc = declared_field_access(c, field_index, true);
-        let type_parameter = ir
-            .field_signatures(fq_name)
-            .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
-            .map(|(_, parameter)| parameter.as_str())
-            .or(field.type_param.as_deref());
-        let field_sig =
-            property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
-        let physical_name = instance_field_jvm_name(ir, c, field);
-        cw.add_field_sig(
-            acc,
-            &physical_name,
-            &ir_type_desc(&field.ty),
-            field_sig.as_deref(),
-        );
+    // An interface companion interleaves const fields with instance fields in source order, and
+    // both intern at the field-table visit (after `<clinit>` and the accessors). A named object's
+    // backing fields stay on the eager path this block has always used.
+    if interface_companion {
+        emit_interface_companion_member_fields(ir, c, signature_formatter, fq_name, cw);
+    } else {
+        for (field_index, field) in c.fields.iter().enumerate() {
+            let acc = declared_field_access(c, field_index, true);
+            let type_parameter = ir
+                .field_signatures(fq_name)
+                .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+                .map(|(_, parameter)| parameter.as_str())
+                .or(field.type_param.as_deref());
+            let field_sig =
+                property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+            let physical_name = instance_field_jvm_name(ir, c, field);
+            cw.add_field_sig(
+                acc,
+                &physical_name,
+                &ir_type_desc(&field.ty),
+                field_sig.as_deref(),
+            );
+        }
     }
 
     let init_body = c.init_body;
@@ -176,5 +182,112 @@ pub(super) fn emit(
     }
     if !clinit_line_entries.is_empty() {
         cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
+    }
+}
+
+/// Instance backing fields and companion-owned `const val`s, in source order, after `$$INSTANCE`.
+///
+/// A public or internal const also has a copy on the interface. The copy that stays here is the
+/// companion's own field: private when the declaration is private, public otherwise (`internal` has
+/// no JVM spelling). Each reference field carries the same nullability annotation as any other
+/// backing field, attached here so its name is not interned ahead of the field visit.
+fn emit_interface_companion_member_fields(
+    ir: &IrFile,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+) {
+    enum Member {
+        Instance(usize),
+        Const(u32),
+    }
+    let property_order = |field_index: usize| {
+        c.properties
+            .iter()
+            .find(|property| property.backing_field == Some(field_index as u32))
+            .map(|property| property.source_order)
+            .unwrap_or(u32::MAX)
+    };
+    let mut members = Vec::new();
+    for (field_index, _) in c.fields.iter().enumerate() {
+        members.push((
+            property_order(field_index),
+            field_index as u32,
+            Member::Instance(field_index),
+        ));
+    }
+    for (static_index, property) in ir.statics.iter().enumerate() {
+        if property.is_const && property.owner_matches(fq_name) {
+            members.push((
+                property.source_order,
+                static_index as u32,
+                Member::Const(static_index as u32),
+            ));
+        }
+    }
+    members.sort_by_key(|(order, tie, _)| (*order, *tie));
+    for (_, _, member) in members {
+        match member {
+            Member::Instance(field_index) => {
+                let field = &c.fields[field_index];
+                let acc = declared_field_access(c, field_index, true);
+                let type_parameter = ir
+                    .field_signatures(fq_name)
+                    .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+                    .map(|(_, parameter)| parameter.as_str())
+                    .or(field.type_param.as_deref());
+                let field_sig =
+                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+                let physical_name = instance_field_jvm_name(ir, c, field);
+                let descriptor = ir_type_desc(&field.ty);
+                let nullability = field_visibility::publishes_field_nullability(c, field_index)
+                    .then(|| {
+                        nullability_annotation(field_nullability_kind(
+                            ir,
+                            fq_name,
+                            &field.name,
+                            field.ty,
+                        ))
+                    })
+                    .flatten();
+                cw.add_field_late_sig(
+                    acc,
+                    &physical_name,
+                    &descriptor,
+                    field_sig.as_deref(),
+                    None,
+                    nullability,
+                );
+                if let Some(annotations) = c
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == field.name)
+                {
+                    cw.set_last_late_field_annotations(&annotations.annotations);
+                }
+            }
+            Member::Const(static_index) => {
+                let property = &ir.statics[static_index as usize];
+                let descriptor = ir_type_desc(&property.ty);
+                let access = if property.visibility.is_private() {
+                    0x001a // PRIVATE | STATIC | FINAL
+                } else {
+                    0x0019 // PUBLIC | STATIC | FINAL
+                };
+                let value = property
+                    .init
+                    .and_then(|init| static_fields::constant_value(ir, init));
+                let nullability = (descriptor.starts_with('L') || descriptor.starts_with('['))
+                    .then(|| {
+                        if property.ty.is_nullable() {
+                            "Lorg/jetbrains/annotations/Nullable;"
+                        } else {
+                            "Lorg/jetbrains/annotations/NotNull;"
+                        }
+                    });
+                cw.add_field_late(access, &property.name, &descriptor, value, nullability);
+            }
+        }
     }
 }

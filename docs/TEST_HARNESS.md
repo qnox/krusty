@@ -167,17 +167,19 @@ output once. An index entry is an open version range plus a content fingerprint 
 `2.4.20..` covers that release and every newer one until a
 later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
 release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
-still matches the fixture and the compiler's version falls in the range. A release
+still matches the fixture and the compiler's version falls in the range. Locally, a release
 (`2.4.20`, `2.4.20-release-482`) or an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no
 matching dump fails the test and does not run kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and
-rewrites the ranges the run reaches. GitHub restores an immutable cache for the PR's master base;
-PR jobs never save it. A successful master job refreshes and saves the cache under the supported
-Kotlin version and master commit. If that exact base cache has not been seeded yet, CI compiles the
-reference bytes for that run without publishing them. A snapshot, dev, or beta build never reads
-or writes dumps — that version string is not a stable artifact, so it still compiles. Class-file kotlinc calls go through the same
+rewrites the ranges the run reaches. GitHub restores an immutable cache for the PR's master base.
+PR and merge-group jobs replay every matching entry, compile missing or incomplete entries live,
+and never save the result. Thus a partial prefix cache is an accelerator, not an authority. A
+successful master job refreshes and saves the cache under the supported Kotlin version and master
+commit. A snapshot, dev, or beta build never reads or writes dumps — that version string is not a
+stable artifact, so it still compiles. Class-file kotlinc calls go through the same
 archive. A successful build and a rejected one both keep the exit code and kotlinc's
-diagnostics, and an assert replays them. A dump that has class files but no exit code or
-diagnostics fails that assert instead of compiling. The text ledger in `tests/recorded/` is still
+diagnostics, and an assert replays them. Locally, a dump that has class files but no exit code or
+diagnostics fails that assert instead of compiling; read-only CI compiles that incomplete entry
+live. The text ledger in `tests/recorded/` is still
 the committed oracle for a diagnostic test; filling it reads kotlinc through this archive. The
 archive is read at runtime and is not compiled into the test binary or committed to the repository.
 The corpus byte-diff cache under `target/cache/ref-classes/` follows

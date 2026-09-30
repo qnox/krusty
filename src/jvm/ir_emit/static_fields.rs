@@ -8,39 +8,24 @@
 
 use super::*;
 
-/// The constant-pool index for a `const val`'s `ConstantValue` attribute when its initializer is a
-/// compile-time literal; `None` otherwise (then the field is initialized in `<clinit>` as before).
-pub(super) fn const_value_idx(
-    ir: &IrFile,
-    init: crate::ir::ExprId,
-    cw: &mut ClassWriter,
-) -> Option<u16> {
-    use crate::ir::{IrConst, IrExpr};
+/// The `ConstantValue` payload of a compile-time literal, excluding `null` (JVMS 4.7.2 has no
+/// constant for it). The field-table visit interns it; callers must not intern it earlier.
+pub(super) fn constant_value(ir: &IrFile, init: crate::ir::ExprId) -> Option<crate::ir::IrConst> {
     match ir.expr(init) {
-        IrExpr::Const(c) => Some(match c {
-            IrConst::Boolean(b) => cw.const_int(*b as i32),
-            IrConst::Byte(v) => cw.const_int(*v as i32),
-            IrConst::Short(v) => cw.const_int(*v as i32),
-            IrConst::Int(v) => cw.const_int(*v),
-            // `UByte`/`UShort` ride in the `B`/`S` their value class wraps.
-            IrConst::UByte(v) => cw.const_int(i32::from(*v as i8)),
-            IrConst::UShort(v) => cw.const_int(i32::from(*v as i16)),
-            IrConst::UInt(v) => cw.const_int(*v as i32),
-            IrConst::ULong(v) => cw.const_long(*v as i64),
-            IrConst::Char(c) => cw.const_int(*c as i32),
-            IrConst::Long(v) => cw.const_long(*v),
-            IrConst::Float(v) => cw.const_float(*v),
-            IrConst::Double(v) => cw.const_double(*v),
-            IrConst::String(s) => cw.const_string_kt(s),
-            IrConst::Null => return None,
-        }),
+        crate::ir::IrExpr::Const(value) if !matches!(value, crate::ir::IrConst::Null) => {
+            Some(value.clone())
+        }
         _ => None,
     }
 }
 
-/// Whether `init` is a `ConstantValue`-eligible literal (mirrors [`const_value_idx`] without interning).
+/// Whether `init` is a `ConstantValue`-eligible literal. The field-table visit interns the payload;
+/// this only decides that `<clinit>` must not store the same value.
 pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
+    matches!(
+        ir.expr(init),
+        crate::ir::IrExpr::Const(value) if !matches!(value, crate::ir::IrConst::Null)
+    )
 }
 
 /// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
@@ -114,13 +99,8 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // first interns at its accessor body and the const payload lands after the `<clinit>` window.
         let cv = s
             .init
-            .filter(|&init| s.is_const && const_value_idx_peek(ir, init))
-            .and_then(|init| match ir.expr(init) {
-                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
-                    Some(c.clone())
-                }
-                _ => None,
-            });
+            .filter(|_| s.is_const)
+            .and_then(|init| constant_value(ir, init));
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
@@ -375,7 +355,10 @@ pub(super) fn emit_class_static_fields(
         .statics
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.owner_matches(fq_name))
+        .filter(|(_, property)| property.owner_matches(fq_name))
+        // An interface companion emits its const fields beside its instance fields, in source
+        // order. The interface keeps a separate copy of each public or internal const.
+        .filter(|(_, property)| !(property.is_const && companion_of_interface(ir, c)))
         .map(|(index, property)| (index as u32, property))
         .collect();
     owner_statics.sort_by_key(|(_, property)| property.line);
@@ -408,12 +391,7 @@ pub(super) fn emit_class_static_fields(
         let cv = s
             .init
             .filter(|_| fold)
-            .and_then(|init| match ir.expr(init) {
-                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
-                    Some(c.clone())
-                }
-                _ => None,
-            });
+            .and_then(|init| constant_value(ir, init));
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
