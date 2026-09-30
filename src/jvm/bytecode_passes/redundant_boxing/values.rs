@@ -21,7 +21,7 @@ pub(super) enum BoxingValue {
     Boxed {
         id: BoxId,
         tainted: bool,
-        ty: String,
+        ty: &'static str,
     },
     /// `ProgressionIteratorBasicValue`, made by the `iterator()` call at `call`.
     Iterator(ProgressionIterator),
@@ -41,10 +41,8 @@ impl BoxingValue {
     pub(super) fn basic(&self) -> BasicValue {
         match self {
             BoxingValue::Basic(value) => value.clone(),
-            BoxingValue::Boxed { ty, .. } => BasicValue::Reference(ty.clone()),
-            BoxingValue::Iterator(iterator) => {
-                BasicValue::Reference(iterator.descriptor().to_string())
-            }
+            BoxingValue::Boxed { ty, .. } => BasicValue::Reference(*ty),
+            BoxingValue::Iterator(iterator) => BasicValue::reference(iterator.descriptor()),
         }
     }
 

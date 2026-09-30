@@ -60,7 +60,7 @@ impl UnitSourceValue {
             UnitSourceValue::Long => BasicValue::Long,
             UnitSourceValue::Double => BasicValue::Double,
             UnitSourceValue::Reference | UnitSourceValue::Unit(_) => {
-                BasicValue::Reference("Ljava/lang/Object;".to_string())
+                BasicValue::reference("Ljava/lang/Object;")
             }
         }
     }

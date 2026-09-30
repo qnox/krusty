@@ -35,9 +35,7 @@ impl NewValue {
     fn basic(&self) -> BasicValue {
         match self {
             NewValue::Basic(value) => value.clone(),
-            NewValue::Uninitialized { class, .. } => {
-                BasicValue::Reference(descriptors::of_internal_name(class))
-            }
+            NewValue::Uninitialized { class, .. } => BasicValue::of_class(class),
         }
     }
 }
@@ -229,9 +227,9 @@ impl Executor<NewValueInterpreter> for NewValueFrames {
         frame.execute(at, interpreter)?;
         if let Some((_, class)) = initializes {
             frame.stack.pop();
-            frame.stack.push(NewValue::Basic(BasicValue::Reference(
-                descriptors::of_internal_name(&class),
-            )));
+            frame
+                .stack
+                .push(NewValue::Basic(BasicValue::of_class(&class)));
         }
         Ok(())
     }

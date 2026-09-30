@@ -63,7 +63,7 @@ impl FixStackValue {
             FixStackValue::Long => BasicValue::Long,
             FixStackValue::Float => BasicValue::Float,
             FixStackValue::Double => BasicValue::Double,
-            FixStackValue::Object => BasicValue::Reference("Ljava/lang/Object;".to_string()),
+            FixStackValue::Object => BasicValue::reference("Ljava/lang/Object;"),
             FixStackValue::Uninitialized => BasicValue::Uninitialized,
         }
     }
