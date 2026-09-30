@@ -10,6 +10,9 @@ use crate::types::{type_name, TypeName};
 pub struct SourceFile {
     pub path: Arc<str>,
     pub package: TypeName,
+    /// `PrioritizedEnumEntries`: the synthetic `entries` property outranks a same-named companion
+    /// member. On by default for this compiler's language level; a source directive can turn it off.
+    pub prioritized_enum_entries: bool,
 }
 
 #[derive(Debug, Default)]
@@ -29,8 +32,17 @@ impl SourceMap {
         self.files.push(SourceFile {
             path: path.into().into(),
             package: TypeName::ROOT,
+            prioritized_enum_entries: true,
         });
         id
+    }
+
+    pub fn set_prioritized_enum_entries(&mut self, id: SourceFileId, enabled: bool) {
+        let file = self
+            .files
+            .get_mut(id.raw() as usize)
+            .expect("enum-entries priority requires an interned source identity");
+        file.prioritized_enum_entries = enabled;
     }
 
     pub fn get(&self, id: SourceFileId) -> Option<&SourceFile> {

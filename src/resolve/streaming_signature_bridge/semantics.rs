@@ -1463,6 +1463,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.implicit_receivers(scope),
         );
         if spelling.contains('.') {
+            // Bind the root once through the value tower. If it exists, every later segment is a
+            // member of that semantic receiver; never reinterpret the root spelling as a package
+            // or classifier when a later lookup fails.
+            if let Some(receiver) =
+                self.qualified_value_receiver(scope, spelling, origin, demand)?
+            {
+                return Ok(receiver);
+            }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 if qualifier
                     .strip_prefix("this@")
@@ -1482,6 +1490,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(classifier) =
                     self.qualified_classifier_or_source_alias(scope, qualifier)
                 {
+                    // The enum qualifier's value is its companion, but `Enum.entries` is still the
+                    // classifier property. `Enum.Companion.entries` names the companion member.
+                    if let Some(result) =
+                        self.prioritized_enum_entries_on_qualifier(scope, qualifier, name)
+                    {
+                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+                    }
                     if let Some(result) =
                         self.select_qualified_associated_property(scope, classifier, name, demand)?
                     {
@@ -4598,6 +4613,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
             }
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+        }
+        if spelling == "entries" {
+            if let Some(result) = self.enum_entries_on_companion_receiver(scope, receiver.get()) {
+                return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+            }
         }
         Err(self.record_missing_member(scope, origin, receiver.get(), spelling))
     }

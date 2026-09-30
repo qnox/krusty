@@ -520,7 +520,10 @@ impl ProductionSignatureSemantics<'_> {
         let Some(stub) = self.headers.stub(declaration) else {
             return Self::failure();
         };
-        if stub.kind != crate::fir::DeclarationKind::Property {
+        // A written type that failed to resolve already reports that reference. "Add an explicit
+        // type" belongs only to a property whose type was supposed to be inferred.
+        if stub.kind != crate::fir::DeclarationKind::Property || stub.signature_inference.is_none()
+        {
             return Self::failure();
         }
         let Some(name) = stub
@@ -1122,6 +1125,50 @@ impl ProductionSignatureSemantics<'_> {
             return None;
         };
         Some((owner, declared_name))
+    }
+
+    fn prioritized_enum_entries(&self, scope: crate::fir::SignatureScope) -> bool {
+        self.headers
+            .sources
+            .get(scope.source)
+            .is_none_or(|file| file.prioritized_enum_entries)
+    }
+
+    /// Synthetic `entries` on an enum qualifier. `Enum.Companion.entries` is a different qualifier
+    /// and stays the companion member; this only matches the enum classifier itself.
+    fn prioritized_enum_entries_on_qualifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        qualifier: &str,
+        segment: &str,
+    ) -> Option<Ty> {
+        if segment != "entries" || !self.prioritized_enum_entries(scope) {
+            return None;
+        }
+        let classifier = self.qualified_classifier(scope, qualifier)?;
+        self.selected_implicit_classifier_property(scope, classifier, segment)
+    }
+
+    /// `Enum.entries` when the qualifier's value is that enum's companion. The synthetic
+    /// property belongs to the enum classifier; a companion that does not declare `entries`
+    /// does not hide it. Source and classpath enums share the resolver's classifier view.
+    fn enum_entries_on_companion_receiver(
+        &self,
+        scope: crate::fir::SignatureScope,
+        receiver: Ty,
+    ) -> Option<Ty> {
+        let companion = receiver.non_null().obj_internal()?;
+        let owner = companion.nested_owner()?;
+        self.with_resolver(scope, |resolver| {
+            let enum_declaration = resolver.classifier(owner)?;
+            if !enum_declaration.is_enum() {
+                return None;
+            }
+            let declared_companion = enum_declaration.companion_object.as_ref()?.1;
+            (declared_companion == companion).then_some(())
+        })
+        .ok()?;
+        self.selected_implicit_classifier_property(scope, owner, "entries")
     }
 
     fn selected_implicit_classifier_property(

@@ -1738,11 +1738,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`override val`) are not yet modeled — skipped.
 - **Every enum classifier has the synthetic `entries: EnumEntries<E>` property.** Resolution selects
   the enum by semantic type identity, including nested and cross-file classifiers, then carries the
-  exact zero-argument static accessor advertised by that symbol provider into lowering. Source/module
-  and dependency shapes therefore share one target handoff; lowering never reconstructs a call from
-  the declaration origin. If a provider exposes the enum kind but no direct accessor realization, the
-  valid property is typed but rejected before emission with a stable boundary until an alternative
-  cached-mapping realization is implemented.
+  exact zero-argument static accessor advertised by that symbol provider into lowering. The enum
+  name's companion value does not hide it: `Enum.entries` is that property when the reference is
+  inside the companion and when the expression's type is inferred. A companion member of the same
+  spelling is `Enum.Companion.entries`. With `-PrioritizedEnumEntries`, that companion member is
+  selected first. Source/module and dependency shapes therefore share one target handoff; lowering
+  never reconstructs a call from the declaration origin. If a provider exposes the enum kind but no
+  direct accessor realization, the valid property is typed but rejected before emission with a stable
+  boundary until an alternative cached-mapping realization is implemented. Test:
+  `tests/enum_entries_e2e.rs`.
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form

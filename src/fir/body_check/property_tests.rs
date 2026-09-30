@@ -52,6 +52,48 @@ fn legacy_enum_entries_priority_selects_companion_property_first() {
 }
 
 #[test]
+fn legacy_inferred_enum_entries_keeps_the_companion_member() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +EnumEntries -PrioritizedEnumEntries\n\
+         enum class Choice {;\n\
+             companion object { val entries = \"OK\" }\n\
+         }\n\
+         fun use() = Choice.entries\n",
+        "use",
+    );
+
+    assert_eq!(
+        body.expr(root_expression(&body))
+            .expect("companion property read")
+            .ty
+            .get(),
+        Ty::String,
+    );
+}
+
+#[test]
+fn prioritized_inferred_enum_entries_is_the_classifier_property() {
+    let (body, _) = checked_function_body(
+        "enum class Choice {\n\
+             A;\n\
+             companion object { val entries = \"NO\" }\n\
+         }\n\
+         fun use() = Choice.entries\n",
+        "use",
+    );
+
+    let ty = body
+        .expr(root_expression(&body))
+        .expect("synthetic entries read")
+        .ty
+        .get();
+    assert!(
+        matches!(ty, Ty::Obj(name, _) if name.segment_ref() == "EnumEntries"),
+        "{ty:?}"
+    );
+}
+
+#[test]
 fn top_level_property_read_keeps_only_its_stable_property_identity() {
     let (body, index) = checked_function_body("val answer = 42\nfun read() = answer\n", "read");
     let FirExprKind::PropertyRead {
