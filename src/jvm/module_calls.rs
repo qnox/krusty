@@ -447,6 +447,17 @@ pub(super) fn realize_default_calls(
     Ok(())
 }
 
+/// Receiver-first `$DefaultImpls` static for a legacy concrete interface member.
+fn interface_holder_static(
+    owner: crate::types::TypeName,
+    descriptor: &str,
+) -> (crate::types::TypeName, String) {
+    (
+        crate::types::type_name_nested_child(owner, "DefaultImpls"),
+        crate::jvm::names::receiver_first_method_descriptor(owner, descriptor),
+    )
+}
+
 /// Realize checked semantic `super` dispatch as the JVM's physical non-virtual call. This is a
 /// separate pass because compiler plugins add checked declarations after the streaming frontend
 /// has completed, while the backend must remain the sole owner of descriptors and invocation
@@ -522,6 +533,22 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                         dispatch_receiver: Some(receiver),
                         args: bridge_arguments,
                     }),
+                    crate::libraries::MemberRealization::InterfaceHolder => {
+                        let (holder, holder_descriptor) =
+                            interface_holder_static(owner, &descriptor);
+                        let mut operands = bridge_arguments;
+                        operands.insert(0, receiver);
+                        ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: holder,
+                                name,
+                                descriptor: holder_descriptor,
+                                inline: crate::libraries::InlineKind::None,
+                            },
+                            dispatch_receiver: None,
+                            args: operands,
+                        })
+                    }
                     crate::libraries::MemberRealization::Direct { pass_receiver } => {
                         let mut operands = bridge_arguments;
                         if pass_receiver {
@@ -600,6 +627,26 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                         dispatch_receiver,
                         args,
                     },
+                    crate::libraries::MemberRealization::InterfaceHolder => {
+                        let (holder, holder_descriptor) =
+                            interface_holder_static(owner, &descriptor);
+                        let mut operands = args;
+                        operands.insert(
+                            0,
+                            dispatch_receiver
+                                .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
+                        );
+                        IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: holder,
+                                name,
+                                descriptor: holder_descriptor,
+                                inline: crate::libraries::InlineKind::None,
+                            },
+                            dispatch_receiver: None,
+                            args: operands,
+                        }
+                    }
                     crate::libraries::MemberRealization::Direct { pass_receiver } => {
                         let mut operands = args;
                         if pass_receiver {

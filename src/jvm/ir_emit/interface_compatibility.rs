@@ -201,6 +201,33 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
+            // A legacy concrete member's body is the dependency holder. Present that
+            // static to the existing holder-forward arm; ordinary calls stay virtual.
+            let holder_body = (member.realization
+                == crate::libraries::MemberRealization::InterfaceHolder)
+                .then(|| {
+                    let mut with_receiver = vec![Ty::obj_name(interface)];
+                    with_receiver.extend_from_slice(&param_tys);
+                    (
+                        crate::types::type_name_nested_child(interface, "DefaultImpls"),
+                        method_descriptor(&with_receiver, physical_ret),
+                    )
+                });
+            let realization = if holder_body.is_some() {
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true,
+                }
+            } else {
+                member.realization
+            };
+            let owner = holder_body
+                .as_ref()
+                .map(|(holder, _)| *holder)
+                .or(member.owner);
+            let descriptor = holder_body
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.as_str())
+                .unwrap_or(member.descriptor.as_ref());
             surface(
                 &name,
                 &param_tys,
@@ -212,9 +239,9 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_ret,
                 member.is_abstract(),
                 member.visibility,
-                member.realization,
-                member.owner,
-                &member.descriptor,
+                realization,
+                owner,
+                descriptor,
                 cw,
                 default_impls,
             );

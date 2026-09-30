@@ -1918,6 +1918,7 @@ impl BodyFirChecker<'_> {
             crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
             crate::libraries::MemberRealization::Dispatch
             | crate::libraries::MemberRealization::Direct { .. }
+            | crate::libraries::MemberRealization::InterfaceHolder
             | crate::libraries::MemberRealization::RangeConstruction { .. } => None,
         };
         if let Some(operation) = primitive_operation.and_then(intrinsic_binary_operation) {

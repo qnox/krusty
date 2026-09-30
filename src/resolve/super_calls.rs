@@ -52,8 +52,10 @@ impl ResolvedSuperCall {
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let suspend = member.suspend();
-        let physical_owner = member.owner?;
         let (owner, interface) = match realization {
+            // The interface method stays the semantic owner. JVM lowering calls the
+            // receiver-first holder static; resolution does not name that class.
+            crate::libraries::MemberRealization::InterfaceHolder => (dispatch_owner, true),
             // A dispatched `super` call names the supertype it is qualified with, as kotlinc's
             // `invokespecial` does, and the JVM resolves the declaration from there: an interface
             // declaration through the InterfaceMethodref search path, a class declaration inherited
@@ -67,8 +69,8 @@ impl ResolvedSuperCall {
             // A class declaration reached through an interface qualifier is named on its declaring
             // class through a Methodref: `super<I>.hashCode()` calls `Object.hashCode`, which `I`
             // only inherits.
-            crate::libraries::MemberRealization::Dispatch => (physical_owner, false),
-            crate::libraries::MemberRealization::Direct { .. } => (physical_owner, interface),
+            crate::libraries::MemberRealization::Dispatch => (member.owner?, false),
+            crate::libraries::MemberRealization::Direct { .. } => (member.owner?, interface),
             crate::libraries::MemberRealization::Intrinsic(_)
             | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
@@ -259,7 +261,8 @@ impl Checker<'_> {
                 }
                 let realization = callable.member_realization;
                 let physical_owner = match realization {
-                    crate::libraries::MemberRealization::Dispatch => owner,
+                    crate::libraries::MemberRealization::Dispatch
+                    | crate::libraries::MemberRealization::InterfaceHolder => owner,
                     crate::libraries::MemberRealization::Direct { .. } => callable.owner,
                     crate::libraries::MemberRealization::Intrinsic(_)
                     | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,

@@ -1910,22 +1910,17 @@ impl JvmLibraries {
                     }
                 }
                 // A concrete Kotlin interface declaration may have no body on the interface at
-                // all. Normalize that ABI at the provider boundary: semantic selection still sees
-                // the metadata declaration, while lowering receives the exact static holder owner,
-                // name, and descriptor as its ordinary direct realization.
+                // all: the classfile method is abstract and the body is the receiver-first
+                // `$DefaultImpls` static. Ordinary calls stay on the interface method so an
+                // override is dispatched. The holder realization is only the non-virtual body
+                // (`super`, forwarders, compatibility holders).
                 if ci.is_interface()
                     && declaration.is_some_and(|declaration| !declaration.is_abstract())
                     && m.is_abstract()
+                    && interface_holder_method(&self.cp, internal_name, &m.name, &m.descriptor)
+                        .is_some()
                 {
-                    if let Some((holder, holder_method_descriptor)) =
-                        interface_holder_method(&self.cp, internal_name, &m.name, &m.descriptor)
-                    {
-                        member.owner = Some(holder);
-                        member.descriptor = holder_method_descriptor;
-                        member.realization = crate::libraries::MemberRealization::Direct {
-                            pass_receiver: true,
-                        };
-                    }
+                    member.realization = crate::libraries::MemberRealization::InterfaceHolder;
                 }
                 // The declared return classifier comes directly from the metadata declaration. A
                 // nullable declared return stays absent because it is genuinely boxed.
@@ -3385,9 +3380,9 @@ fn interface_holder_method(
     descriptor: &str,
 ) -> Option<(TypeName, String)> {
     // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
-    // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
-    // method whose implementation must be replaced by the receiver-first holder static. Keeping
-    // this representation test here makes functions and property accessors share one ABI rule.
+    // concrete and remains the only body. Only the legacy shape has an ABSTRACT interface method
+    // plus a receiver-first holder static. Keeping this representation test here makes functions
+    // and property accessors share one ABI rule.
     let interface_class = cp.find_name(interface)?;
     if !interface_class.methods.iter().any(|method| {
         method.is_abstract() && method.name == name && method.descriptor == descriptor
@@ -3940,14 +3935,10 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_accessor_inline(getter_public);
-                if let Some((holder, descriptor)) =
-                    interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor)
+                if interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor).is_some()
                 {
-                    getter.owner = holder;
-                    getter.descriptor = descriptor;
-                    getter.member_realization = crate::libraries::MemberRealization::Direct {
-                        pass_receiver: true,
-                    };
+                    getter.member_realization =
+                        crate::libraries::MemberRealization::InterfaceHolder;
                 }
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
@@ -3991,14 +3982,11 @@ impl JvmLibraries {
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
-                    if let Some((holder, descriptor)) =
-                        interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor)
+                    if interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor)
+                        .is_some()
                     {
-                        setter.owner = holder;
-                        setter.descriptor = descriptor;
-                        setter.member_realization = crate::libraries::MemberRealization::Direct {
-                            pass_receiver: true,
-                        };
+                        setter.member_realization =
+                            crate::libraries::MemberRealization::InterfaceHolder;
                     }
                     Some(setter)
                 });

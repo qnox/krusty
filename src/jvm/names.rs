@@ -265,6 +265,19 @@ pub(crate) fn reference_array_element(ty: Ty) -> Ty {
     }
 }
 
+/// Descriptor of the receiver-first static that implements `descriptor` for `owner`.
+/// `owner`'s method `(Ljava/lang/Comparable;)Z` becomes
+/// `(Lowner;Ljava/lang/Comparable;)Z`.
+pub(crate) fn receiver_first_method_descriptor(
+    owner: crate::types::TypeName,
+    descriptor: &str,
+) -> String {
+    let rest = descriptor
+        .strip_prefix('(')
+        .expect("a method descriptor starts with '('");
+    format!("({}{rest}", type_descriptor(Ty::obj_name(owner)))
+}
+
 /// A JVM method descriptor `(params)ret` from krusty `Ty`s.
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
     let mut s = String::from("(");

@@ -10402,6 +10402,7 @@ impl ResolvedCall {
             crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
             crate::libraries::MemberRealization::Dispatch
             | crate::libraries::MemberRealization::Direct { .. }
+            | crate::libraries::MemberRealization::InterfaceHolder
             | crate::libraries::MemberRealization::RangeConstruction { .. } => None,
         }
     }

@@ -401,6 +401,7 @@ pub(super) fn realize(
         let declared_params = callable.declared_params.clone();
         let inline_modifiers = callable.inline_modifiers.clone();
         let member_realization = callable.member_realization;
+        let mut parameter_realization = member_realization;
         let semantic_role = callable.semantic_role;
         let descriptor = if callable.descriptor.is_empty() {
             crate::jvm::names::method_descriptor(&callable.physical_params, callable.physical_ret)
@@ -857,7 +858,33 @@ pub(super) fn realize(
                 };
             }
             ExternalCallableKind::Member => match callable.member_realization {
-                crate::libraries::MemberRealization::Dispatch => {
+                crate::libraries::MemberRealization::InterfaceHolder
+                    if matches!(
+                        property_dispatch,
+                        crate::ir::IrPropertyDispatch::Super { .. }
+                    ) =>
+                {
+                    // `super` on a legacy interface member calls the holder static. An ordinary
+                    // call stays on the interface method below, so an override is dispatched.
+                    parameter_realization = crate::libraries::MemberRealization::Direct {
+                        pass_receiver: true,
+                    };
+                    let receiver = dispatch_receiver.take().ok_or(target)?;
+                    args.insert(0, receiver);
+                    let holder =
+                        crate::types::type_name_nested_child(callable.owner, "DefaultImpls");
+                    *callee = Callee::Static {
+                        owner: holder,
+                        name: callable.name.clone(),
+                        descriptor: crate::jvm::names::receiver_first_method_descriptor(
+                            callable.owner,
+                            &descriptor,
+                        ),
+                        inline: crate::libraries::InlineKind::None,
+                    };
+                }
+                crate::libraries::MemberRealization::Dispatch
+                | crate::libraries::MemberRealization::InterfaceHolder => {
                     // A non-public Kotlin inline member has no legal call instruction: its classfile
                     // method is private and exists only as an inline-body container. Preserve the
                     // dispatch receiver, but route the selected physical handle through the JVM
@@ -1034,7 +1061,7 @@ pub(super) fn realize(
         if extension_receiver_at.is_none() && kind == ExternalCallableKind::Member {
             if let Some(position) = extension_receiver_parameter {
                 let consumes_dispatch = matches!(
-                    member_realization,
+                    parameter_realization,
                     crate::libraries::MemberRealization::Direct {
                         pass_receiver: true
                     }
@@ -1049,7 +1076,7 @@ pub(super) fn realize(
             ir,
             index as crate::ir::ExprId,
             kind,
-            member_realization,
+            parameter_realization,
             false,
             declared_params,
         );
@@ -1058,7 +1085,7 @@ pub(super) fn realize(
             expression,
             target,
             kind,
-            member_realization,
+            parameter_realization,
             false,
             inline_modifiers,
         )?;

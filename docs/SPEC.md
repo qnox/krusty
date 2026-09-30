@@ -1553,6 +1553,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty emits and accepts all three modes. Under `disable`, holder methods, class forwarders,
   `super` calls, properties, and default-argument calls use provider-recorded realizations across
   source files and module boundaries; a consumer's own mode never reinterprets a dependency.
+  An ordinary call to a `disable`-compiled interface member is still `invokeinterface` on that
+  member. The `$DefaultImpls` static is the body a class forwards to when it does not override
+  the member, and the target of `super`; it is not the call an override must replace.
+  `ClosedRange.contains` is that shape in the standard library.
+  Test: `tests/interface_holder_dispatch_e2e.rs`.
   `$DefaultImpls` holder bytes are differential-tested exactly against kotlinc, including their
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
   synthetic Kotlin metadata.

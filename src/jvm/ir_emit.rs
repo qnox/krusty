@@ -5938,6 +5938,16 @@ fn emit_default_impls_forwarders(
                 continue;
             }
             let (target_owner, target_name, target_desc, dispatch) = match member.realization {
+                crate::libraries::MemberRealization::InterfaceHolder => {
+                    let mut with_receiver = vec![Ty::obj_name(interface)];
+                    with_receiver.extend_from_slice(&param_tys);
+                    (
+                        crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
+                        name.clone(),
+                        method_descriptor(&with_receiver, ret),
+                        ForwarderDispatch::HolderStatic,
+                    )
+                }
                 crate::libraries::MemberRealization::Direct {
                     pass_receiver: true,
                 } => {

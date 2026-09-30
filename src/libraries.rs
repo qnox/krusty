@@ -210,6 +210,11 @@ pub enum MemberRealization {
     /// Direct provider call. Some realizations encode the semantic receiver as their first argument
     /// (value-class implementation methods); others address a singleton implementation directly.
     Direct { pass_receiver: bool },
+    /// A concrete Kotlin interface member whose JVM method is abstract. Ordinary calls dispatch
+    /// on the interface method, so an override is selected. `super`, an implementing class's
+    /// forwarder, and a compatibility holder call the receiver-first static on
+    /// `<Interface>$DefaultImpls`. The provider records this only after that static is present.
+    InterfaceHolder,
     /// Compiler-supplied implementation attached to this exact semantic declaration. The provider
     /// identifies the declaration; common lowering only preserves the operation for each backend.
     Intrinsic(CompilerIntrinsic),

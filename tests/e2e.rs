@@ -969,6 +969,8 @@ mod interface_companion_e2e;
 mod interface_default_args_e2e;
 #[path = "interface_default_method_e2e.rs"]
 mod interface_default_method_e2e;
+#[path = "interface_holder_dispatch_e2e.rs"]
+mod interface_holder_dispatch_e2e;
 #[path = "interface_default_property_e2e.rs"]
 mod interface_default_property_e2e;
 #[path = "interface_delegation_e2e.rs"]
