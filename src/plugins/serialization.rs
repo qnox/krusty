@@ -1395,7 +1395,7 @@ impl IrPlugin for SerializationPlugin {
             }
             let ser_fq = serializer_fq(&class_fq);
             let serializer_type_parameters = ir
-                .class_signature(&class_fq)
+                .class_signature_name(class_name)
                 .map(|signature| signature.type_params.clone())
                 .unwrap_or_default();
             let type_params = serializer_type_parameters
@@ -2672,8 +2672,8 @@ mod tests {
         c.ctor_param_count = 1;
         let id = ir.add_class(c);
         ir.record_class_source_qualified_name(id, "demo.Box");
-        ir.insert_class_signature(
-            "demo/Box",
+        ir.insert_class_signature_name(
+            ir.classes[id as usize].fq_name,
             crate::ir::IrGenericSig {
                 type_params: vec![crate::ir::IrTypeParameter {
                     name: "T".to_string(),

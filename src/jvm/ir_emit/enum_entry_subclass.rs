@@ -86,7 +86,7 @@ pub(super) fn emit_enum_entry_subclass(
         &ctor,
     );
     if let Some(defaults) = ir
-        .class_ctor_defaults(&superclass)
+        .class_ctor_defaults_name(c.superclass)
         .filter(|defaults| defaults.iter().any(Option::is_some))
     {
         emit_ctor_default_stub_with_prefix(

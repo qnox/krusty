@@ -389,7 +389,7 @@ pub(super) fn build_class_metadata(
                             .position(|candidate| candidate == parameter)
                     })
                     .or_else(|| {
-                        ir.field_signatures(&c.fq_name()).and_then(|signatures| {
+                        ir.field_signatures(c.fq_name).and_then(|signatures| {
                             signatures
                                 .iter()
                                 .find(|(field, _)| field == &property.name)
@@ -575,7 +575,7 @@ pub(super) fn build_class_metadata(
             .iter()
             .take(c.ctor_param_count as usize)
             .map(|field| {
-                let type_param = ir.field_signatures(&c.fq_name()).and_then(|signatures| {
+                let type_param = ir.field_signatures(c.fq_name).and_then(|signatures| {
                     signatures
                         .iter()
                         .find(|(name, _)| name == &field.name)
@@ -1264,7 +1264,7 @@ pub(super) fn build_class_metadata(
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
     let class_type_parameters = ir
-        .class_signature(&c.fq_name())
+        .class_signature_name(c.fq_name)
         .map(|signature| signature.type_params.as_slice())
         .unwrap_or_default();
     // `c.fields` is the JVM storage realization by this point: value-class lowering may replace a
@@ -1287,7 +1287,7 @@ pub(super) fn build_class_metadata(
     let superclass = c.superclass;
     let any = crate::types::wk::any();
     let mut supertypes = ir
-        .class_signature(&c.fq_name())
+        .class_signature_name(c.fq_name)
         .filter(|signature| !signature.supers.is_empty())
         .map(|signature| signature.supers.clone())
         .unwrap_or_default();

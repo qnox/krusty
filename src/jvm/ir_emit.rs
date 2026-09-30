@@ -242,13 +242,13 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
     class.has_primary_ctor
         && (class.is_sealed
             || (class.is_companion && !companion_of_interface(ir, class))
-            || ir.has_value_param_ctor(&class.fq_name()))
+            || ir.has_value_param_ctor(class.fq_name))
 }
 
 /// Whether the primary's marker accessor follows the members as a companion's or a hidden
 /// value-class primary's does. A sealed class's accessors are `constructor_accessors`' to emit.
 fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
-    class.is_companion || (!class.is_sealed && ir.has_value_param_ctor(&class.fq_name()))
+    class.is_companion || (!class.is_sealed && ir.has_value_param_ctor(class.fq_name))
 }
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
@@ -913,7 +913,7 @@ fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> b
         && c.secondary_ctors.is_empty()
         && c.fields.len() == 1
         && c.fields[0].is_final()
-        && !ir.has_value_param_ctor(&c.fq_name())
+        && !ir.has_value_param_ctor(c.fq_name)
 }
 
 /// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
@@ -1072,7 +1072,7 @@ fn attach_synth_debug_tables(
     // independent of the constructor's exact `IrCtorArg.check` facts above: a value class may omit
     // its private-constructor guard while its public mutable-property setter still requires one.
     let is_nonnull_ref =
-        |name: &str, ty: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, ty) };
+        |name: &str, ty: Ty| -> bool { is_nonnull_reference_field(ir, c.fq_name, name, ty) };
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for (field_index, f) in c.fields.iter().enumerate() {
@@ -1279,9 +1279,8 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
-    let ann = |name: &str, t: Ty| {
-        nullability_annotation(field_nullability_kind(ir, &c.fq_name(), name, t))
-    };
+    let ann =
+        |name: &str, t: Ty| nullability_annotation(field_nullability_kind(ir, c.fq_name, name, t));
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
     // prefix's fields and other compiler-generated storage are not annotated.
@@ -2821,7 +2820,7 @@ fn emit_declared_property_accessor(
         return;
     };
     let type_parameter = ir
-        .field_signatures(fq_name)
+        .field_signatures(c.fq_name)
         .and_then(|signatures| {
             signatures
                 .iter()
@@ -2934,7 +2933,7 @@ fn emit_declared_property_accessor(
             let guarded = param_assertions
                 && accessor_jt.is_reference()
                 && !property.ty.is_nullable()
-                && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
+                && is_nonnull_reference_field(ir, c.fq_name, &field.name, field.ty);
             if guarded {
                 st.aload(1);
                 st.push_string("<set-?>", cw);
@@ -3358,8 +3357,8 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
-    let value_param_ctor = ir.has_value_param_ctor(&fq_name);
+        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c));
+    let value_param_ctor = ir.has_value_param_ctor(c.fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
     let ctor_signature = method_signatures::written_signature(
@@ -3416,7 +3415,7 @@ fn emit_class(
         "value_classes",
         "class {} signature: raw={:?}",
         fq_name,
-        ir.class_signature(&fq_name)
+        ir.class_signature_name(c.fq_name)
     );
     // (The class `Signature` was set with the writer; interface refs were added with the header,
     // before the pool seeding.)
@@ -3475,7 +3474,7 @@ fn emit_class(
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
         // like kotlinc; disjoint (a field is one or the other).
         let type_parameter = ir
-            .field_signatures(&fq_name)
+            .field_signatures(c.fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
@@ -3509,7 +3508,7 @@ fn emit_class(
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
-                .then(|| nullability_annotation(field_nullability_kind(ir, &fq_name, name, *ty)))
+                .then(|| nullability_annotation(field_nullability_kind(ir, c.fq_name, name, *ty)))
                 .flatten();
             cw.add_field_late_sig(
                 acc,
@@ -3707,7 +3706,7 @@ fn emit_class(
             // primary. The checker records whether this exact selection is that primary; only then
             // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
             // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
-            let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c, &superclass);
+            let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c);
             e.emit_constructor_delegation_arguments(
                 &c.super_args,
                 &c.super_ctor_params,
@@ -3849,7 +3848,7 @@ fn emit_class(
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+        if let Some(defaults) = ir.class_ctor_defaults_name(c.fq_name) {
             // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
             // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
             let prefix_count = c.constructor_prefix_count as usize;
@@ -3934,7 +3933,7 @@ fn emit_class(
     // visibility (a PROTECTED primary gets a protected convenience ctor).
     if c.has_primary_ctor {
         let param_tys = class_ctor_jvm_tys(c);
-        let value_param_ctor = ir.has_value_param_ctor(&fq_name);
+        let value_param_ctor = ir.has_value_param_ctor(c.fq_name);
         let ctor_access = if is_continuation || c.is_anonymous_object {
             0x0000
         } else if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
@@ -3946,7 +3945,7 @@ fn emit_class(
                 _ => 0x0001,
             }
         };
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+        if let Some(defaults) = ir.class_ctor_defaults_name(c.fq_name) {
             if !param_tys.is_empty()
                 && defaults.len() == param_tys.len()
                 && defaults.iter().all(Option::is_some)
@@ -4877,7 +4876,8 @@ fn emit_enum_class(
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (f, t) in c.fields.iter().zip(&field_tys) {
-        let nullability = nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty));
+        let kind = field_nullability_kind(ir, c.fq_name, &f.name, f.ty);
+        let nullability = nullability_annotation(kind);
         cw.add_field_late(
             enum_field_acc(f),
             &f.name,
@@ -4900,7 +4900,7 @@ fn emit_enum_class(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
+        let ann = (field_nullability_kind(ir, c.fq_name, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
         cw.add_field_late_sig(
             acc,
@@ -5033,7 +5033,7 @@ fn emit_enum_class(
         cw.reserve_method_name(&property_getter_name(&f.name));
         cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
         // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+        match field_nullability_kind(ir, c.fq_name, &f.name, f.ty) {
             1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
             2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
             _ => {}
@@ -5071,7 +5071,7 @@ fn emit_enum_class(
         }
     }
     if let Some(defaults) = ir
-        .class_ctor_defaults(&fq)
+        .class_ctor_defaults_name(c.fq_name)
         .filter(|defaults| defaults.iter().any(Option::is_some))
     {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
@@ -7051,10 +7051,9 @@ fn class_ctor_generic_sig(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
     c: &crate::ir::IrClass,
-    fq_name: &str,
 ) -> Option<String> {
     let param_tys = class_ctor_jvm_tys(c);
-    let ftp = ir.field_signatures(fq_name);
+    let ftp = ir.field_signatures(c.fq_name);
     let is_field: Vec<bool> = if c.ctor_args.is_empty() {
         vec![true; param_tys.len()]
     } else {
@@ -9450,7 +9449,7 @@ impl<'a> Emitter<'a> {
                         // A call supplying defaults targets the public `$default` overload instead,
                         // which reaches the accessor itself.
                         let use_accessor = default_parameters.is_empty()
-                            && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
+                            && ((ctor_params.is_none() && self.ir.has_value_param_ctor(*internal))
                                 || self.ir.has_value_class_parameter_construction(e)
                                 || self.ir.construction_targets.get(&e).is_some_and(|target| {
                                     constructor_accessors::reached_through_accessor(
@@ -12596,9 +12595,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
 }
 
-fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
+fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass) -> (Vec<Ty>, bool) {
     let mut params = jvm_tys(&c.super_ctor_params);
-    let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(superclass))
+    let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(c.superclass))
         || constructor_accessors::reached_through_accessor(
             c.super_ctor,
             Some(c.fq_name_id()),

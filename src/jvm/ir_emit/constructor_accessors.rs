@@ -63,7 +63,7 @@ pub(super) fn emit_accessors(ir: &IrFile, class: &IrClass, owner: &str, cw: &mut
         private_constructors_called_from_outside(ir, class.fq_name_id())
             .into_iter()
             .filter(|&ordinal| match ordinal.checked_sub(1) {
-                None => !ir.has_value_param_ctor(owner),
+                None => !ir.has_value_param_ctor(class.fq_name),
                 Some(secondary) => !class.secondary_ctors[secondary as usize].vc_params,
             })
             .collect()

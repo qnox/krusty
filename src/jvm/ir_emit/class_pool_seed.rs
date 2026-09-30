@@ -61,7 +61,7 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut
     } = seed;
     // The header of the primary ctor's `$default` overload, which kotlinc writes right after it.
     let default_marker_desc = ir
-        .class_ctor_defaults(fq_name)
+        .class_ctor_defaults_name(c.fq_name)
         .filter(|defaults| defaults.iter().any(Option::is_some))
         .map(|defaults| {
             let source_parameter_count = defaults

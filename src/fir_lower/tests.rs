@@ -2185,7 +2185,7 @@ fn consuming_sink_publishes_generic_declaration_shapes_without_syntax_lookup() {
         .find(|class| class.fq_name.matches("Box"))
         .expect("generic source class");
     assert_eq!(class.type_params, ["T"]);
-    let class_signature = ir.class_signature("Box").expect("class generic signature");
+    let class_signature = ir.class_signature_name(class.fq_name).expect("signature");
     assert_eq!(class_signature.type_params.len(), 1);
     assert_eq!(
         class_signature.type_params[0].variance,
@@ -2239,7 +2239,7 @@ fn generic_value_class_underlying_uses_its_declared_type_parameter_identity() {
             .find(|class| class.fq_name.matches(name))
             .expect("generic value class");
         let signature = ir
-            .class_signature(name)
+            .class_signature_name(class.fq_name)
             .expect("generic value-class signature");
         let underlying = class
             .fields

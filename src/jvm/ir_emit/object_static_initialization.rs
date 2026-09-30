@@ -49,7 +49,7 @@ pub(super) fn emit(
     for (field_index, field) in c.fields.iter().enumerate() {
         let acc = declared_field_access(c, field_index, true);
         let type_parameter = ir
-            .field_signatures(fq_name)
+            .field_signatures(c.fq_name)
             .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());

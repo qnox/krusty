@@ -133,7 +133,7 @@ pub(super) fn emit_annotation_impl_class(
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
         // constructor nothing emits (`NoSuchMethodError`). kotlinc emits it on the impl class too.
-        if let Some(defaults) = ir.class_ctor_defaults(&fq) {
+        if let Some(defaults) = ir.class_ctor_defaults_name(c.fq_name) {
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
             // An annotation class's members carry no declaration annotations of their own.
             constructor_defaults::emit_ctor_default_stub(

@@ -2,14 +2,14 @@
 //! its annotations, parameter guards and constructor line table must agree on.
 
 use crate::ir::IrFile;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// The TYPE PARAMETER a field is declared as (`class Pair<A, B>(val a: A)` → `a` is `A`), or `None` when
 /// the field has a type of its own. `field_signatures` already tracks these — it is what drives their
 /// `Signature` attribute. Callers ask so they can consult that parameter's BOUND: the erased descriptor
 /// says nothing about whether the field can hold null.
-fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> Option<&'a str> {
-    ir.field_signatures(fq_name)
+fn type_parameter_field_name<'a>(ir: &'a IrFile, owner: TypeName, field: &str) -> Option<&'a str> {
+    ir.field_signatures(owner)
         .and_then(|signatures| {
             signatures
                 .iter()
@@ -17,7 +17,7 @@ fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> 
                 .map(|(_, parameter)| parameter.as_str())
         })
         .or_else(|| {
-            let class = ir.class_id_by_name(crate::types::type_name(fq_name))?;
+            let class = ir.class_id_by_name(owner)?;
             ir.classes[class as usize]
                 .fields
                 .iter()
@@ -38,15 +38,15 @@ fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> 
 /// One predicate for the pool seeder, the field/accessor/parameter annotations, the `var` setter guard,
 /// and the constructor's `LineNumberTable` start pc, because those must agree: classify a field as
 /// guarded in one and unguarded in another and the line entry lands at the wrong offset.
-pub(super) fn field_nullability_kind(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> u8 {
+pub(super) fn field_nullability_kind(ir: &IrFile, owner: TypeName, name: &str, t: Ty) -> u8 {
     let d = crate::jvm::names::type_descriptor(t);
     if !(d.starts_with('L') || d.starts_with('[')) {
         return 0;
     }
     if matches!(t, Ty::PlatformNullable(_)) {
         0
-    } else if let Some(parameter) = type_parameter_field_name(ir, fq_name, name) {
-        u8::from(!ir.class_type_param_admits_null(fq_name, parameter))
+    } else if let Some(parameter) = type_parameter_field_name(ir, owner, name) {
+        u8::from(!ir.class_type_param_admits_null(owner, parameter))
     } else if matches!(t, Ty::Nullable(_)) {
         2
     } else {
@@ -64,6 +64,6 @@ pub(super) fn nullability_annotation(kind: u8) -> Option<&'static str> {
 }
 
 /// Whether a field/constructor parameter is a NON-NULL reference — [`field_nullability_kind`] `== 1`.
-pub(super) fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> bool {
-    field_nullability_kind(ir, fq_name, name, t) == 1
+pub(super) fn is_nonnull_reference_field(ir: &IrFile, owner: TypeName, name: &str, t: Ty) -> bool {
+    field_nullability_kind(ir, owner, name, t) == 1
 }

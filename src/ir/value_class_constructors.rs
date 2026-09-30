@@ -41,20 +41,16 @@ impl ValueClassConstructorFacts {
 }
 
 impl IrFile {
-    pub fn mark_value_param_ctor(&mut self, internal: &str) {
-        self.mark_value_param_ctor_name(crate::types::type_name(internal));
-    }
-
     pub fn mark_value_param_ctor_name(&mut self, internal: TypeName) {
         self.value_class_constructor_facts
             .primary_owners
             .insert(internal);
     }
 
-    pub fn has_value_param_ctor(&self, internal: &str) -> bool {
+    pub fn has_value_param_ctor(&self, internal: TypeName) -> bool {
         self.value_class_constructor_facts
             .primary_owners
-            .contains(&crate::types::type_name(internal))
+            .contains(&internal)
     }
 
     pub(crate) fn mark_value_class_parameter_construction(&mut self, call: ExprId) {
@@ -88,5 +84,20 @@ impl IrFile {
             .values()
             .flatten()
             .copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::type_name;
+
+    #[test]
+    fn value_param_ctor_fact_is_keyed_by_type_name() {
+        let mut ir = IrFile::default();
+        let owner = type_name("demo/Box");
+        ir.mark_value_param_ctor_name(owner);
+        assert!(ir.has_value_param_ctor(owner));
+        assert!(!ir.has_value_param_ctor(type_name("demo/Other")));
     }
 }

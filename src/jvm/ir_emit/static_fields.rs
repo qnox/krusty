@@ -106,7 +106,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field.
-        let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
+        let nullability = field_nullability_kind(ir, env.facade_class, &s.name, s.ty);
         let field_ann = super::nullability_annotation(nullability);
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
@@ -249,7 +249,12 @@ pub(super) fn emit_default_static_accessor(
     // it there published a non-null `String` setter for a `var x: Label?` and refused the null
     // the property accepts, so the declaration's own recorded type answers instead.
     let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
-    let nullability = field_nullability_kind(ir, owner, &s.name, accessor_ty);
+    let nullability = field_nullability_kind(
+        ir,
+        s.owner.unwrap_or(env.facade_class),
+        &s.name,
+        accessor_ty,
+    );
     let acc_ann = super::nullability_annotation(nullability);
     // The accessors erase the property's type arguments in their descriptors, so each carries the
     // same generic `Signature` its backing field does — kotlinc signs `getXs()` as

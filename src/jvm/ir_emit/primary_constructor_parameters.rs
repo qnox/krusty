@@ -52,7 +52,7 @@ pub(super) struct SourceCtorParameter<'a> {
 /// primary hidden behind a marker accessor are all invisible from outside.
 fn annotates_parameter_nullability(ir: &IrFile, c: &IrClass) -> bool {
     !c.is_value
-        && !ir.has_value_param_ctor(&c.fq_name())
+        && !ir.has_value_param_ctor(c.fq_name)
         && ir.ctor_visibilities.get(&c.fq_name_id()) != Some(&crate::types::Visibility::Private)
 }
 
@@ -70,14 +70,13 @@ pub(super) fn primary_ctor_source_parameters<'a>(
 }
 
 fn source_parameters<'a>(ir: &IrFile, c: &'a IrClass) -> Vec<SourceCtorParameter<'a>> {
-    let fq_name = c.fq_name();
     let prefix = c.constructor_prefix_count as usize;
     if c.ctor_args.is_empty() {
         return c.fields[..c.ctor_param_count as usize]
             .iter()
             .skip(prefix)
             .map(|field| SourceCtorParameter {
-                nullability: field_nullability_kind(ir, &fq_name, &field.name, field.ty),
+                nullability: field_nullability_kind(ir, c.fq_name, &field.name, field.ty),
                 annotations: None,
             })
             .collect();
@@ -92,21 +91,16 @@ fn source_parameters<'a>(ir: &IrFile, c: &'a IrClass) -> Vec<SourceCtorParameter
             nullability: match field {
                 Some(field) => {
                     let field = &c.fields[field];
-                    field_nullability_kind(ir, &fq_name, &field.name, field.ty)
+                    field_nullability_kind(ir, c.fq_name, &field.name, field.ty)
                 }
-                None => plain_parameter_nullability(ir, c, &fq_name, argument),
+                None => plain_parameter_nullability(ir, c, argument),
             },
             annotations: c.ctor_param_annotations.get(index),
         })
         .collect()
 }
 
-fn plain_parameter_nullability(
-    ir: &IrFile,
-    c: &IrClass,
-    fq_name: &str,
-    argument: &crate::ir::IrCtorArg,
-) -> u8 {
+fn plain_parameter_nullability(ir: &IrFile, c: &IrClass, argument: &crate::ir::IrCtorArg) -> u8 {
     let descriptor = crate::jvm::names::type_descriptor(argument.ty);
     if !(descriptor.starts_with('L') || descriptor.starts_with('[')) {
         return 0;
@@ -118,7 +112,7 @@ fn plain_parameter_nullability(
             .type_params
             .get(parameter as usize)
             .expect("a constructor parameter's type parameter is declared by its class");
-        u8::from(!ir.class_type_param_admits_null(fq_name, name))
+        u8::from(!ir.class_type_param_admits_null(c.fq_name, name))
     } else if matches!(argument.ty, Ty::Nullable(_)) {
         2
     } else {
