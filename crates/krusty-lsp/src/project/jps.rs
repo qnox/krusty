@@ -1,6 +1,6 @@
 //! JPS (`.idea/` project model) provider. Pure static parse — no build tool runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::jdk::{is_jdk_home, SystemEnvironment};
@@ -392,14 +392,16 @@ fn parse_module_with_exports(
 fn expand_exported_deps(modules: &mut [Module], exported: &HashMap<ModuleId, ExportedDeps>) {
     for module in modules.iter_mut() {
         let mut queue: Vec<ModuleId> = module.depends_on.clone();
-        let mut visited: std::collections::HashSet<ModuleId> =
+        let mut visited: HashSet<ModuleId> =
             queue.iter().cloned().chain(module.id.clone()).collect();
+        // Own entries stay ahead of anything an exported dependency adds.
+        let mut seen_classpath: HashSet<PathBuf> = module.classpath.iter().cloned().collect();
         while let Some(dependency) = queue.pop() {
             let Some(exports) = exported.get(&dependency) else {
                 continue;
             };
             for jar in &exports.classpath {
-                if !module.classpath.contains(jar) {
+                if seen_classpath.insert(jar.clone()) {
                     module.classpath.push(jar.clone());
                 }
             }
@@ -440,11 +442,12 @@ fn module_output(
 fn dedup<I, T>(items: I) -> Vec<T>
 where
     I: IntoIterator<Item = T>,
-    T: PartialEq,
+    T: Clone + Eq + std::hash::Hash,
 {
-    let mut result: Vec<T> = Vec::new();
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
     for item in items {
-        if !result.contains(&item) {
+        if seen.insert(item.clone()) {
             result.push(item);
         }
     }
@@ -966,6 +969,56 @@ mod tests {
         assert_eq!(
             test.outputs,
             vec![ModuleOutput::classes(tree.path("out/test/app"))]
+        );
+    }
+
+    #[test]
+    fn repeated_order_entries_keep_the_first_occurrence() {
+        let tree = crate::project::testing::TempTree::new("jps-dedup");
+        let iml = tree.write(
+            "app/app.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="module" module-name="core" />
+                   <orderEntry type="module-library">
+                     <library><CLASSES>
+                       <root url="jar://$PROJECT_DIR$/libs/first.jar!/" />
+                     </CLASSES></library>
+                   </orderEntry>
+                   <orderEntry type="module" module-name="other" />
+                   <orderEntry type="module-library">
+                     <library><CLASSES>
+                       <root url="jar://$PROJECT_DIR$/libs/second.jar!/" />
+                     </CLASSES></library>
+                   </orderEntry>
+                   <orderEntry type="module" module-name="core" />
+                   <orderEntry type="module-library">
+                     <library><CLASSES>
+                       <root url="jar://$PROJECT_DIR$/libs/first.jar!/" />
+                     </CLASSES></library>
+                   </orderEntry>
+                 </component>
+               </module>"#,
+        );
+
+        let modules = parse_module(&iml, tree.root(), &HashMap::new(), None, None).unwrap();
+        let main = modules
+            .iter()
+            .find(|module| module.id == Some(ModuleId::new("app", "main")))
+            .unwrap();
+        assert_eq!(
+            main.classpath,
+            vec![tree.path("libs/first.jar"), tree.path("libs/second.jar"),]
+        );
+        assert_eq!(
+            main.depends_on,
+            vec![
+                ModuleId::new("core", "main"),
+                ModuleId::new("other", "main"),
+            ]
         );
     }
 
@@ -1674,6 +1727,71 @@ mod tests {
             .contains(&tree.path("libs/streamex.jar")));
         let java = model.module(&ModuleId::new("java", "main")).unwrap();
         assert!(java.depends_on.contains(&ModuleId::new("xmldom", "main")));
+    }
+
+    #[test]
+    fn an_exported_jar_already_on_the_classpath_stays_in_its_original_place() {
+        let tree = crate::project::testing::TempTree::new("jps-exported-jar");
+        tree.write(
+            ".idea/modules.xml",
+            r#"<project version="4">
+                 <component name="ProjectModuleManager">
+                   <modules>
+                     <module fileurl="file://$PROJECT_DIR$/lib/lib.iml" filepath="$PROJECT_DIR$/lib/lib.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/app/app.iml" filepath="$PROJECT_DIR$/app/app.iml" />
+                   </modules>
+                 </component>
+               </project>"#,
+        );
+        tree.write(
+            ".idea/libraries/shared.xml",
+            r#"<component name="libraryTable">
+                 <library name="Shared">
+                   <CLASSES><root url="jar://$PROJECT_DIR$/libs/shared.jar!/" /></CLASSES>
+                 </library>
+               </component>"#,
+        );
+        tree.write(
+            ".idea/libraries/extra.xml",
+            r#"<component name="libraryTable">
+                 <library name="Extra">
+                   <CLASSES><root url="jar://$PROJECT_DIR$/libs/extra.jar!/" /></CLASSES>
+                 </library>
+               </component>"#,
+        );
+        tree.write(
+            "lib/lib.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="library" name="Shared" level="project" exported="" />
+                   <orderEntry type="library" name="Extra" level="project" exported="" />
+                 </component>
+               </module>"#,
+        );
+        tree.write(
+            "app/app.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="library" name="Shared" level="project" />
+                   <orderEntry type="module" module-name="lib" />
+                 </component>
+               </module>"#,
+        );
+
+        let model = JpsProvider::new(tree.root())
+            .probe_with_jdk_tables(&[])
+            .unwrap();
+        let app = model.module(&ModuleId::new("app", "main")).unwrap();
+        assert_eq!(
+            app.classpath,
+            vec![tree.path("libs/shared.jar"), tree.path("libs/extra.jar")]
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Maven project-model provider using effective POM and dependency plugin output.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::fingerprint::collect_build_files;
@@ -405,12 +406,13 @@ fn classpath_of(entry: &ReactorModule, file: &str, reactor: &[ReactorModule]) ->
         return Vec::new();
     };
     let mut classpath = Vec::new();
+    let mut seen = HashSet::new();
     for path in std::env::split_paths(contents.trim()) {
         if path.as_os_str().is_empty() {
             continue;
         }
         let entry = reactor_output_for(&path, reactor).unwrap_or(path);
-        if !classpath.contains(&entry) {
+        if seen.insert(entry.clone()) {
             classpath.push(entry);
         }
     }
@@ -658,6 +660,31 @@ mod tests {
         assert_eq!(
             app.depends_on,
             vec![ModuleId::new("com.example:core", "main")]
+        );
+    }
+
+    #[test]
+    fn a_repeated_classpath_entry_stays_once_in_file_order() {
+        let tree = reactor_fixture();
+        tree.write(
+            "app/.krusty-classpath.txt",
+            &classpath_line(&[
+                "/m2/kotlin-stdlib.jar",
+                "/m2/other.jar",
+                "/m2/kotlin-stdlib.jar",
+            ]),
+        );
+
+        let model = probe(&tree);
+        let app = model
+            .module(&ModuleId::new("com.example:app", "main"))
+            .unwrap();
+        assert_eq!(
+            app.classpath,
+            vec![
+                PathBuf::from("/m2/kotlin-stdlib.jar"),
+                PathBuf::from("/m2/other.jar"),
+            ]
         );
     }
 
