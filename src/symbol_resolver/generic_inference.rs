@@ -25,7 +25,8 @@ pub(crate) use call_constraints::{
 };
 pub(crate) use call_site_variables::CallSiteVariables;
 pub(crate) use postponed_result::{
-    instantiate_unconstrained_result, unconstrained_result_bindings,
+    instantiate_unconstrained_result, nested_result_from_concrete_parameter,
+    unconstrained_result_bindings,
 };
 
 /// Whether `left` is the same callable parameter shape as `right` with a strict superset of
@@ -1861,6 +1862,17 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
         }
     }
 
+    /// A use-site `in`/`out` on an expected argument is the enclosing parameter's variance, not a
+    /// second type for the variable that fills it. `Box<T, *, List<T>>` against
+    /// `Box<in String, *, List<String>>` is one equation `T = String`. A star is not that inner
+    /// type and stays a distinct candidate.
+    fn expected_argument(ty: Ty) -> Ty {
+        match ty {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
+            other => other,
+        }
+    }
+
     fn collect(
         declared: Ty,
         expected: Ty,
@@ -1872,6 +1884,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
             (Ty::TyParam(declared, _), expected_ty)
                 if formals.iter().any(|formal| formal.as_str() == declared) =>
             {
+                let expected_ty = expected_argument(expected_ty);
                 let symbolic = symbolic_parameter(expected_ty);
                 if symbolic {
                     constrained_formals.insert(declared.to_string());

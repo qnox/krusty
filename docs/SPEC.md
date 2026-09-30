@@ -6713,6 +6713,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the real mismatch is still reported. Tests:
   `tests/expected_return_invariant_binding_e2e.rs`, `symbol_resolver` variance unit regressions.
 
+- **A nested result-only call is solved from the concrete parts of the enclosing parameter.**
+  `fun <T, R, A> Src<T>.gather(c: Box<in T, A, R>): R` called as `src<String>().gather(producer())`,
+  where `fun <T> producer(): Box<T, *, List<T>>` has no argument or receiver that fixes `T`, leaves
+  the parameter shape `Box<in String, A, R>` after the receiver is known. `String` is concrete;
+  `A` and `R` are still the outer call's variables. The `in` on that concrete argument is the
+  parameter's use-site variance, so it is the same equation as `String`, not a second binding.
+  The nested variable is solved from that concrete part (`T = String`), and the instantiated
+  result `Box<String, *, List<String>>` is the
+  argument that binds the outer variables (`R = List<String>`). A concrete type in another
+  argument of the nested result (`Box<T, Int, List<T>>`) is the same equation. An outer variable
+  is not evidence: `emptyList()` passed to `fun <T> take(x: List<T>): List<T>` while `T` is still
+  open contributes nothing, so the enclosing expected result can still supply the element type.
+  Completing the nested call to its declared upper bound and using that placeholder as the
+  argument would fix the outer result to `Any`. Test:
+  `tests/nested_concrete_argument_inference_e2e.rs`.
+
 - **A value never has a projected type; a projected binding is approximated.** Matching a member
   against a star-projected receiver binds the member's own formal to the PROJECTION — the stdlib
   `fun <K, V> Map<out K, V>.get(key: K): V?` applied to `Map<*, *>` binds `V` to `out Any?`. The
