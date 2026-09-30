@@ -8,7 +8,72 @@ use crate::ir::{ClassId, IrBinOp, IrExpr};
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
+struct StoredConstructorProperty {
+    class_name: String,
+    field_name: String,
+    ty: Ty,
+}
+
+fn constructor_initializer_store_line(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    index: u32,
+) -> Option<u32> {
+    let class_decl = ir.classes.get(class as usize)?;
+    let field = class_decl.fields.get(index as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
+    ir.prop_decl_lines
+        .get(&(class_decl.fq_name_id(), field.name.clone()))
+        .copied()
+        .filter(|line| *line != 0)
+}
+
 impl Emitter<'_> {
+    /// A constructor-property parameter keeps its source value slot in common IR. After that
+    /// parameter has been stored, an initializer reads the field, which is what the JVM verifier
+    /// and kotlinc both see. Plain parameters and reads before the store stay on the local slot.
+    pub(super) fn load_constructor_value(
+        &mut self,
+        index: u32,
+        ty: Ty,
+        slot: u16,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(stored) = self.stored_constructor_property(index) else {
+            super::load(ty, slot, code);
+            return;
+        };
+        // A JVM instance constructor's receiver is the mandated physical slot 0. The active
+        // constructor-class identity above proves this is not a generated static holder.
+        code.aload(0);
+        let descriptor = type_descriptor(stored.ty);
+        let field = self
+            .cw
+            .fieldref(&stored.class_name, &stored.field_name, &descriptor);
+        code.getfield(field, slot_words(stored.ty) as i32);
+    }
+
+    fn stored_constructor_property(&self, index: u32) -> Option<StoredConstructorProperty> {
+        let class_id = self.constructor_initializer_class?;
+        if index == 0 {
+            return None;
+        }
+        let class = self.ir.classes.get(class_id as usize)?;
+        let argument = class.ctor_args.get(index as usize - 1)?;
+        if !argument.is_field {
+            return None;
+        }
+        let field_index = argument.field_index?;
+        let field = class.fields.get(field_index as usize)?;
+        Some(StoredConstructorProperty {
+            class_name: class.fq_name(),
+            field_name: instance_field_jvm_name(self.ir, class, field),
+            ty: field.ty,
+        })
+    }
+
     pub(super) fn emit_set_field(
         &mut self,
         statement: u32,
@@ -22,6 +87,11 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             return;
         }
+        let initializer_line = self
+            .constructor_initializer_class
+            .is_some()
+            .then(|| constructor_initializer_store_line(self.ir, class, index))
+            .flatten();
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let name = instance_field_jvm_name(self.ir, class_decl, field);
@@ -58,6 +128,9 @@ impl Emitter<'_> {
                 self.emit_value(value, code);
             }
             return;
+        }
+        if let Some(line) = initializer_line {
+            code.mark_line(line);
         }
         // Receiver, then value, as Kotlin evaluates them. A value that cannot carry the operand
         // stack has both evaluated into temporaries in that order and reloaded; every other value,

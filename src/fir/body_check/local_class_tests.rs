@@ -2,15 +2,22 @@ use super::test_support::{checked_function_body, root_expression};
 use super::*;
 
 #[derive(Default)]
-struct StreamedBodySink(Vec<FirBody>);
+struct StreamedBodySink(Vec<(BodyOwnerId, FirBody)>);
 
 impl CheckedBodySink for StreamedBodySink {
-    fn accept_finalized(&mut self, _owner: BodyOwnerId, body: FirBody) {
-        self.0.push(body);
+    fn accept_finalized(&mut self, owner: BodyOwnerId, body: FirBody) {
+        self.0.push((owner, body));
     }
 }
 
 fn checked_streamed_bodies(source: &str) -> (ResolvedModuleIndex, Vec<FirBody>) {
+    let (index, owned) = checked_streamed_owned_bodies(source);
+    (index, owned.into_iter().map(|(_, body)| body).collect())
+}
+
+fn checked_streamed_owned_bodies(
+    source: &str,
+) -> (ResolvedModuleIndex, Vec<(BodyOwnerId, FirBody)>) {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("FirLocalCapture")];
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
@@ -351,6 +358,54 @@ fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
     assert_eq!(anchor.kind, DeclarationKind::Constructor);
     assert_eq!(anchor.owner, Some(*owner));
     assert_eq!(*field, 0);
+}
+
+#[test]
+fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() {
+    let (_, bodies) = checked_streamed_bodies(
+        "open class X(val fn: () -> Unit)\n\
+         open class C(val x: X)\n\
+         class B(var value: Int) {\n\
+             fun update() { object : C(object : X({ value = 3 }) {}) {}.x.fn() }\n\
+         }\n",
+    );
+    let receiver_captures = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::AnonymousObject(object) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                object.captures.iter().find(|capture| {
+                    matches!(
+                        capture.receiver.as_ref(),
+                        Some(crate::fir::FirCapturedReceiver::Enclosing)
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receiver_captures.len(),
+        2,
+        "the nested lambda must retain both live receiver coordinates: {receiver_captures:?}"
+    );
+    assert!(
+        matches!(
+            &receiver_captures[0].source,
+            FirLocalClassCaptureSource::EnclosingReceiver { path } if path.is_empty()
+        ),
+        "the outer anonymous object must retain its live enclosing-receiver coordinate: {receiver_captures:?}"
+    );
+    assert!(
+        matches!(
+            receiver_captures[1].source,
+            FirLocalClassCaptureSource::DispatchReceiver
+        ),
+        "the nested anonymous object must retain B's live dispatch receiver instead of reinterpreting B's field 0: {receiver_captures:?}"
+    );
 }
 
 #[test]
@@ -1148,5 +1203,68 @@ fn inherited_body_local_call_keeps_the_subclass_dispatch_receiver_for_protected_
              class Derived : Base() { fun read() = value() }\n\
              return Derived().read()\n\
          }\n",
+    );
+}
+
+#[test]
+fn anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument() {
+    let (index, owned) = checked_streamed_owned_bodies(
+        "open class Base(val value: Int)\n\
+         fun box(): String {\n\
+             val one = 1\n\
+             class Local(n: Int) : Base(n + 1)\n\
+             val anon = object : Base(one + 1) {}\n\
+             return if (Local(one).value == 2 && anon.value == 2) \"OK\" else \"fail\"\n\
+         }\n",
+    );
+    let mut saw_local = false;
+    let mut saw_anonymous = false;
+    for (owner, body) in &owned {
+        let declaration = DeclarationId::from_raw(owner.raw());
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.kind != DeclarationKind::Constructor || anchor.sibling != 0 {
+            continue;
+        }
+        let Some(classifier) = anchor.owner else {
+            continue;
+        };
+        let Some(header) = index.declaration_header(classifier) else {
+            continue;
+        };
+        let Some(root) = body.roots().first().copied() else {
+            continue;
+        };
+        let Some(statement) = body.statement(root) else {
+            continue;
+        };
+        let FirStatementKind::ConstructorDelegation(call) = &statement.kind else {
+            continue;
+        };
+        let Some(FirCallArgument::Expression { value, .. }) = call.arguments.first() else {
+            continue;
+        };
+        let kind = &body.expr(*value).expect("delegation argument").kind;
+        if header
+            .flags
+            .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+        {
+            assert!(
+                matches!(kind, FirExprKind::ForwardedSuperArgument { slot: 0 }),
+                "anonymous super argument must name its parameter, got {kind:?}"
+            );
+            saw_anonymous = true;
+        } else if header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
+            assert!(
+                !matches!(kind, FirExprKind::Constant(FirConstant::Null)),
+                "local-class super argument must be the source expression"
+            );
+            saw_local = true;
+        }
+    }
+    assert!(
+        saw_anonymous && saw_local,
+        "both the anonymous forward and the local-class argument must be present"
     );
 }

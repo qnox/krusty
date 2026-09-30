@@ -132,14 +132,13 @@ pub(super) fn finalize_interface_delegations(
             continue;
         };
         for (ordinal, delegation) in header.interface_delegations.iter().enumerate() {
-            materialize_delegation(index, declaration, class, ordinal, delegation, ir)?;
+            materialize_delegation(declaration, class, ordinal, delegation, ir)?;
         }
     }
     Ok(())
 }
 
 fn materialize_delegation(
-    index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     class: crate::ir::ClassId,
     delegation_ordinal: usize,
@@ -227,7 +226,6 @@ fn materialize_delegation(
                 );
                 ir.fn_source_names.insert(function, member.name.to_string());
                 let parameter_identities = member
-                    .overridden
                     .parameter_identities
                     .iter()
                     .map(super::resolved_parameter_identity)
@@ -289,10 +287,7 @@ fn materialize_delegation(
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect(),
-                        implementation_parameter_identities: member
-                            .overridden
-                            .parameter_identities
-                            .to_vec(),
+                        implementation_parameter_identities: member.parameter_identities.to_vec(),
                         overridden_parameter_identities: member
                             .overridden
                             .parameter_identities

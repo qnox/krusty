@@ -206,6 +206,7 @@ impl BodyFirChecker<'_> {
                 .chain(self.outer_receiver_frames.iter().cloned())
                 .collect(),
             constructor_prefix_capture_access: false,
+            hoist_anonymous_super_argument: false,
         };
         for (ordinal, (parameter, ty)) in function
             .params

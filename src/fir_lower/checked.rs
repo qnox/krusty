@@ -936,6 +936,9 @@ impl BodyLowering<'_> {
             for argument in &mut arguments {
                 match argument {
                     IrCheckedArgument::Expression { parameter, value } => {
+                        if super::constructors::is_forwarded_super_argument(self.ir, *value) {
+                            continue;
+                        }
                         let ty = *parameter_types.get(*parameter as usize).ok_or(
                             FirLoweringFailure::MissingExternalParameter {
                                 parameter: *parameter,

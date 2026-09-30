@@ -199,7 +199,8 @@ pub(super) fn realize(
             | IrExpr::NewArray { .. }
             | IrExpr::Vararg { .. }
             | IrExpr::PluginPlaceholder { .. }
-            | IrExpr::CurrentContinuation => {}
+            | IrExpr::CurrentContinuation
+            | IrExpr::ForwardedSuperArgument { .. } => {}
         }
     }
     Ok(())

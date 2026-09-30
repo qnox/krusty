@@ -1805,6 +1805,10 @@ pub struct ResolvedDelegatedCall {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedFunction {
     pub name: Box<str>,
+    /// Parameter identities of the generated forwarding declaration. These differ from the
+    /// overridden declaration when a provider exposes an unnamed value parameter: the forwarder
+    /// owns a typed compiler-generated parameter role whose physical spelling belongs to a target.
+    pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     /// Function-owned generic parameters of the selected interface declaration. A generated
     /// forwarder is itself a generic declaration, so these identities must travel with the checked
     /// delegation plan; common lowering and metadata must not rediscover them from parameter types.

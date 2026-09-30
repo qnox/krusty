@@ -623,6 +623,29 @@ impl BodyFirChecker<'_> {
         omitted: Vec<usize>,
         vararg: Option<usize>,
     ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
+        self.checked_constructor_arguments_forwarding(
+            span,
+            arguments,
+            parameters,
+            argument_slots,
+            omitted,
+            vararg,
+            &[],
+        )
+    }
+
+    /// `forwarded` arguments are evaluated at an anonymous object's construction site. The
+    /// constructor receives the value and must not resolve names inside the source expression.
+    fn checked_constructor_arguments_forwarding(
+        &mut self,
+        span: Span,
+        arguments: &[ExprId],
+        parameters: &[Ty],
+        argument_slots: Vec<usize>,
+        omitted: Vec<usize>,
+        vararg: Option<usize>,
+        forwarded: &[ExprId],
+    ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
         if arguments.len() != argument_slots.len() {
             return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
         }
@@ -635,17 +658,28 @@ impl BodyFirChecker<'_> {
                 let parameter_ty = parameters.get(parameter).copied().ok_or_else(|| {
                     self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let parameter_slot = parameter;
                 let parameter = u32::try_from(parameter).map_err(|_| {
                     self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
-                let value = self.expression(*argument)?;
+                // A vararg is packed in this constructor. The construction site skips that slot,
+                // so treating it as a forward would leave an unbound parameter record.
+                let forwarded = forwarded.contains(argument) && vararg != Some(parameter_slot);
+                let value = if forwarded {
+                    self.forwarded_super_argument(*argument, parameter_ty, parameter)?
+                } else {
+                    self.expression(*argument)?
+                };
                 if Some(parameter as usize) != vararg {
                     let target = self.resolved_type(span, parameter_ty)?;
                     return Ok(FirCallArgument::Expression {
                         parameter,
                         value,
-                        conversion: self
-                            .selected_value_conversion(*argument, value, target, cause)?,
+                        conversion: if forwarded {
+                            None
+                        } else {
+                            self.selected_value_conversion(*argument, value, target, cause)?
+                        },
                     });
                 }
                 saw_vararg = true;
@@ -709,6 +743,92 @@ impl BodyFirChecker<'_> {
             }
         }
         Ok(checked_arguments.into_boxed_slice())
+    }
+
+    /// A forwarded super argument contributes no names to this constructor. The node names the
+    /// selected superclass parameter; source casts stay around that record.
+    fn forwarded_super_argument(
+        &mut self,
+        argument: ExprId,
+        parameter_ty: Ty,
+        slot: u32,
+    ) -> Result<FirExprId, BodyCheckFailure> {
+        let span = self
+            .file
+            .expr_span(argument)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let ty = self.resolved_type(span, parameter_ty)?;
+        let origin = self.expression_origin(argument)?;
+        let (core, shells) = super::local_classes::peel_super_type_operators(self.file, argument);
+        self.forwarded_super_shell(argument, core, shells, slot, ty, origin)
+    }
+
+    fn forwarded_super_shell(
+        &mut self,
+        expression: ExprId,
+        core: ExprId,
+        shells: u8,
+        slot: u32,
+        ty: ResolvedTy,
+        origin: OriginId,
+    ) -> Result<FirExprId, BodyCheckFailure> {
+        if shells == 0 || expression == core {
+            return Ok(self.body.add_expr(FirExpr {
+                origin,
+                ty,
+                kind: FirExprKind::ForwardedSuperArgument { slot },
+            }));
+        }
+        match self.file.expr(expression) {
+            Expr::As {
+                operand,
+                ty: type_ref,
+                nullable,
+            } => {
+                let target_ty = self.info.resolved_type(type_ref).ok_or_else(|| {
+                    self.failure(
+                        Some(type_ref.span),
+                        BodyCheckFailureKind::UnresolvedTypeSyntax,
+                    )
+                })?;
+                let target = self.resolved_type(type_ref.span, target_ty)?;
+                let operand =
+                    self.forwarded_super_shell(*operand, core, shells - 1, slot, target, origin)?;
+                let origin = self.expression_origin(expression)?;
+                Ok(self.body.add_expr(FirExpr {
+                    origin,
+                    ty: target,
+                    kind: FirExprKind::TypeOperation {
+                        operation: if *nullable {
+                            FirTypeOperation::SafeCast
+                        } else {
+                            FirTypeOperation::Cast
+                        },
+                        operand,
+                        target,
+                    },
+                }))
+            }
+            Expr::NotNull { operand } => {
+                let operand =
+                    self.forwarded_super_shell(*operand, core, shells - 1, slot, ty, origin)?;
+                let origin = self.expression_origin(expression)?;
+                Ok(self.body.add_expr(FirExpr {
+                    origin,
+                    ty,
+                    kind: FirExprKind::TypeOperation {
+                        operation: FirTypeOperation::NotNullAssertion,
+                        operand,
+                        target: ty,
+                    },
+                }))
+            }
+            _ => Ok(self.body.add_expr(FirExpr {
+                origin,
+                ty,
+                kind: FirExprKind::ForwardedSuperArgument { slot },
+            })),
+        }
     }
 
     fn constructor_outer_receiver(
@@ -917,6 +1037,7 @@ fn omitted_constructor_parameters(
 fn add_constructor_delegation(
     checker: &mut BodyFirChecker<'_>,
     class: DeclarationId,
+    transient: Option<DeclId>,
     span: Span,
     arguments: &[ExprId],
     resolved: &ResolvedCtorDelegation,
@@ -931,13 +1052,38 @@ fn add_constructor_delegation(
     let previous_capture_access =
         std::mem::replace(&mut checker.constructor_prefix_capture_access, true);
     let checked_sources = (|| {
-        let arguments = checker.checked_constructor_arguments_at(
+        // Arguments the resolver recorded as construction-site forwards name that parameter.
+        // Everything else, including ordinary local-class super arguments and lexical captures,
+        // is checked here as the real expression.
+        let anonymous = checker
+            .index
+            .declaration_header(class)
+            .is_some_and(|header| {
+                header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+            });
+        let forwarded = if anonymous {
+            transient
+                .and_then(|transient| {
+                    checker
+                        .info
+                        .anonymous_forwarded_super_arguments
+                        .get(&transient)
+                        .cloned()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let arguments = checker.checked_constructor_arguments_forwarding(
             span,
             arguments,
             resolved.target.params(),
             resolved.argument_slots.clone(),
             resolved.omitted.clone(),
             resolved.vararg,
+            &forwarded,
         )?;
         let arguments = checker.constructor_arguments_with_context_at(
             Some(span),
@@ -955,7 +1101,7 @@ fn add_constructor_delegation(
         Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;
-    let (arguments, outer_receiver) = checked_sources?;
+    let (checked_arguments, outer_receiver) = checked_sources?;
     if resolved.outer_receiver.is_some() != outer_receiver.is_some() {
         return Err(checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
     }
@@ -986,7 +1132,7 @@ fn add_constructor_delegation(
             external_capture_arguments: None,
             parameter_types: checker
                 .published_parameter_types(Some(span), resolved.target.params())?,
-            arguments,
+            arguments: checked_arguments,
             substitutions: Box::new([]),
         }),
     });
@@ -1216,6 +1362,7 @@ pub(super) fn check_and_dispatch_constructor_body(
             add_constructor_delegation(
                 &mut checker,
                 class_declaration,
+                Some(transient_class),
                 class.span,
                 &class.base_args,
                 resolved,
@@ -1329,6 +1476,7 @@ pub(super) fn check_and_dispatch_constructor_body(
         Some(resolved) => add_constructor_delegation(
             &mut checker,
             class_declaration,
+            None,
             constructor.span,
             secondary_source_arguments(constructor),
             resolved,

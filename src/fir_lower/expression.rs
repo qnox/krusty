@@ -128,6 +128,9 @@ impl BodyLowering<'_> {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
                 self.ir.add_expr(IrExpr::Const(constant))
             }
+            FirExprKind::ForwardedSuperArgument { slot } => self
+                .ir
+                .add_expr(IrExpr::ForwardedSuperArgument { slot: *slot }),
             FirExprKind::ArrayLiteral {
                 array_type,
                 elements,
@@ -342,84 +345,7 @@ impl BodyLowering<'_> {
                 self.declaration_result(lowered, declared_result, expression.ty.get())
             }
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
-            FirExprKind::AnonymousObject(object) => {
-                let (classifier, mut arguments) =
-                    self.prepare_captured_class(object.declaration, &object.captures)?;
-                let header = self
-                    .index
-                    .classifier_header(object.declaration)
-                    .ok_or(FirLoweringFailure::MissingLocalClass(object.declaration))?;
-                let mut delegate_parameters = Vec::with_capacity(object.delegate_arguments.len());
-                for argument in &object.delegate_arguments {
-                    let resolved = header
-                        .interface_delegations
-                        .get(argument.delegation as usize)
-                        .ok_or(FirLoweringFailure::MissingLocalClass(object.declaration))?;
-                    let expected_parameter = arguments
-                        .len()
-                        .checked_add(delegate_parameters.len())
-                        .and_then(|parameter| u32::try_from(parameter).ok())
-                        .ok_or(FirLoweringFailure::ValueIdentityOverflow)?;
-                    if resolved.source
-                        != crate::fir::ResolvedInterfaceDelegateSource::SyntheticConstructorParameter(
-                            expected_parameter,
-                        )
-                    {
-                        return Err(FirLoweringFailure::MissingLocalClass(object.declaration));
-                    }
-                    let ty = self
-                        .body
-                        .expr(argument.value)
-                        .ok_or(FirLoweringFailure::MissingExpression(argument.value))?
-                        .ty
-                        .get();
-                    let value = self.expression(argument.value)?;
-                    delegate_parameters.push((value, ty));
-                }
-                {
-                    let class = self
-                        .ir
-                        .checked_classifier_classes
-                        .get(&object.declaration)
-                        .copied()
-                        .ok_or(FirLoweringFailure::MissingLocalClass(object.declaration))?;
-                    let class = &mut self.ir.classes[class as usize];
-                    class
-                        .ctor_args
-                        .extend(
-                            delegate_parameters
-                                .iter()
-                                .map(|(_, ty)| crate::ir::IrCtorArg {
-                                    name: None,
-                                    context_kind: crate::types::ContextParameterKind::None,
-                                    ty: *ty,
-                                    declared_ty: None,
-                                    is_field: false,
-                                    field_index: None,
-                                    has_default: false,
-                                    is_vararg: false,
-                                    type_param: None,
-                                    check: None,
-                                    capture: None,
-                                }),
-                        );
-                    class.constructor_prefix_count = class
-                        .constructor_prefix_count
-                        .checked_add(delegate_parameters.len() as u32)
-                        .ok_or(FirLoweringFailure::ValueIdentityOverflow)?;
-                }
-                arguments.extend(delegate_parameters);
-                let (arguments, parameter_types): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
-                self.ir.add_expr(IrExpr::New {
-                    internal: classifier,
-                    args: arguments,
-                    ctor_params: Some(parameter_types),
-                    ctor_desc: None,
-                    external_target: None,
-                    defaults: Box::new([]),
-                    default_prefix_count: 0,
-                })
-            }
+            FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self.checked_call(call)?;
                 if let IrExpr::Call {

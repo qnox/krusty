@@ -394,6 +394,7 @@ pub(super) fn finalize_constructors(
         let (mut arguments, default_parameters) =
             constructor_arguments(arguments, &parameters, ir, declaration)?;
         let mut parameters = parameters;
+        let outer_shift = u32::from(outer_receiver.is_some());
         if let Some((outer_receiver, outer_parameter)) = outer_receiver.zip(outer_parameter) {
             arguments.insert(0, outer_receiver);
             parameters.insert(0, outer_parameter);
@@ -417,6 +418,36 @@ pub(super) fn finalize_constructors(
             if !default_parameters.is_empty() {
                 ir.super_constructor_default_arguments
                     .insert(class.fq_name, default_parameters);
+            }
+            if let Some(classifier) = index
+                .declaration_anchor(declaration)
+                .and_then(|anchor| anchor.owner)
+            {
+                let forwards = ir
+                    .anonymous_super_forwards
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == classifier)
+                    .map(|((_, slot), forward)| (*slot, *forward))
+                    .collect::<Vec<_>>();
+                let class_index = constructor.class as usize;
+                for (slot, (parameter, shells)) in forwards {
+                    let index = slot
+                        .checked_add(outer_shift)
+                        .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?
+                        as usize;
+                    let current = *ir.classes[class_index]
+                        .super_args
+                        .get(index)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                    let replacement = rewrite_anonymous_super_forward(
+                        ir,
+                        current,
+                        shells,
+                        parameter,
+                        declaration,
+                    )?;
+                    ir.classes[class_index].super_args[index] = replacement;
+                }
             }
         } else {
             let class = &ir.classes[constructor.class as usize];
@@ -570,6 +601,75 @@ fn push_secondary_constructor(
             .insert((own, secondary_ordinal), external_target);
     }
     Ok(())
+}
+
+/// A construction-site forward is already a value. Spilling it inside the anonymous constructor
+/// would replace the parameter record with a temporary and leave the bind with nothing to rewrite.
+pub(super) fn is_forwarded_super_argument(ir: &IrFile, mut expression: crate::ir::ExprId) -> bool {
+    loop {
+        match ir.expr(expression) {
+            IrExpr::ForwardedSuperArgument { .. } => return true,
+            IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg, .. } => {
+                expression = *arg;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Bind one frontend-recorded anonymous super forward to its synthetic constructor parameter.
+/// Source casts and not-null assertions stay in the anonymous constructor; implicit coercions are
+/// not source operators and are descended through without consuming a shell. Any other expression
+/// is a real argument and is left untouched by failing the bind instead of being replaced.
+fn rewrite_anonymous_super_forward(
+    ir: &mut IrFile,
+    expression: crate::ir::ExprId,
+    shells: u8,
+    parameter: u32,
+    declaration: crate::fir::DeclarationId,
+) -> Result<crate::ir::ExprId, FirFileLoweringFailure> {
+    let parameter_value = parameter
+        .checked_add(1)
+        .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
+    let forward = |ir: &mut IrFile| ir.add_expr(IrExpr::GetValue(parameter_value));
+    if shells == 0 {
+        return match ir.expr(expression) {
+            IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
+            _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
+        };
+    }
+    let node = ir.expr(expression).clone();
+    match node {
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => {
+            let next = if op == IrTypeOp::ImplicitCoercion {
+                shells
+            } else {
+                shells.saturating_sub(1)
+            };
+            let arg = rewrite_anonymous_super_forward(ir, arg, next, parameter, declaration)?;
+            Ok(ir.add_expr(IrExpr::TypeOp {
+                op,
+                arg,
+                type_operand,
+            }))
+        }
+        IrExpr::NotNullAssert { operand, message } => {
+            let operand = rewrite_anonymous_super_forward(
+                ir,
+                operand,
+                shells.saturating_sub(1),
+                parameter,
+                declaration,
+            )?;
+            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, message }))
+        }
+        IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
+        _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
+    }
 }
 
 fn constructor_arguments(
@@ -948,6 +1048,7 @@ pub(super) fn accept_constructor_body(
                         })
                         .flatten(),
                     check: None,
+                    anonymous_super_forward: None,
                     capture: None,
                 }
             })
