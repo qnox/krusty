@@ -25,6 +25,7 @@ pub fn emit_analyzed<B: Backend>(
     module_name: &str,
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
+    let _supertype_projection = crate::symbol_resolver::SupertypeProjectionCache::enter();
     let StreamingSourceSetAnalysis {
         symbols,
         reparse_sources,
@@ -71,7 +72,6 @@ pub fn emit_analyzed<B: Backend>(
         );
         return Vec::new();
     }
-
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
