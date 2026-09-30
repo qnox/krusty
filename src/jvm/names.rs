@@ -998,6 +998,28 @@ mod tests {
     }
 
     #[test]
+    fn method_descriptor_appends_parameter_spellings() {
+        assert_eq!(method_descriptor(&[], Ty::Unit), "()V");
+        assert_eq!(
+            method_descriptor(&[Ty::Int, Ty::Long], Ty::Boolean),
+            "(IJ)Z"
+        );
+        let params = [
+            Ty::String,
+            Ty::obj("kotlin/IntArray"),
+            Ty::nullable(Ty::Int),
+        ];
+        assert_eq!(
+            params_descriptor(&params),
+            "Ljava/lang/String;[ILjava/lang/Integer;"
+        );
+        assert_eq!(
+            method_descriptor(&params, Ty::obj("java/lang/Object")),
+            "(Ljava/lang/String;[ILjava/lang/Integer;)Ljava/lang/Object;"
+        );
+    }
+
+    #[test]
     fn repeated_type_descriptors_share_one_spelling() {
         assert_eq!(type_descriptor(Ty::Int), "I");
         assert!(std::ptr::eq(
