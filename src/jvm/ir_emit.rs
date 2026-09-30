@@ -3173,13 +3173,19 @@ fn emit_scheduled_member(
             env,
         );
     } else {
+        let desc = declared_method_desc(ir, env.override_results, fid);
+        let name = f.name.clone();
         cw.add_abstract_method_sig(
             0x0001 | 0x0400,
-            &f.name,
-            &declared_method_desc(ir, env.override_results, fid),
+            &name,
+            &desc,
             declared_method_signature(signature_formatter, ir, env.override_results, fid)
                 .as_deref(),
         );
+        // An abstract member is still a source declaration. Its annotations are the same payload a
+        // concrete member writes from `emit_method`; omitting them drops `@Deprecated` on an
+        // interface or abstract-class member.
+        emit_recorded_function_annotations(ir, cw, fid, &name, &desc);
     }
     // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
     // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
@@ -4604,13 +4610,15 @@ fn emit_interface_class(
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
             let desc = declared_method_desc(ir, env.override_results, fid);
+            let name = f.name.clone();
             cw.add_abstract_method_sig(
                 0x0001 | 0x0400,
-                &f.name,
+                &name,
                 &desc,
                 declared_method_signature(&signature_formatter, ir, env.override_results, fid)
                     .as_deref(),
             );
+            emit_recorded_function_annotations(ir, &mut cw, fid, &name, &desc);
             // An abstract method still carries kotlinc's nullability annotations.
             let (result, params) = super::abstract_method_nullability::annotations(ir, fid, f);
             if result.is_some() || params.iter().any(Option::is_some) {
@@ -5180,13 +5188,16 @@ fn emit_enum_class(
             } else {
                 // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
                 // entry subclasses override it.
+                let desc = declared_method_desc(ir, env.override_results, fid);
+                let name = f.name.clone();
                 cw.add_abstract_method_sig(
                     0x0001 | 0x0400,
-                    &f.name,
-                    &declared_method_desc(ir, env.override_results, fid),
+                    &name,
+                    &desc,
                     declared_method_signature(&signature_formatter, ir, env.override_results, fid)
                         .as_deref(),
                 );
+                emit_recorded_function_annotations(ir, &mut *cw, fid, &name, &desc);
             }
         }
     };
@@ -6781,14 +6792,29 @@ fn emit_method_inner_with_holder(
     // User annotations declared on the function. A HIDDEN-deprecated declaration additionally gets
     // `ACC_SYNTHETIC`: kotlinc keeps it only for binary compatibility, and a consumer reads both
     // facts (the annotation for resolution, the flag for the JVM) off this realization.
-    if let Some(annotations) = ir.function_annotations.get(&fid) {
-        e.cw.set_method_annotations(&f.name, &desc, annotations);
-        if annotations.deprecated() {
-            e.cw.mark_method_deprecated(&f.name, &desc);
-        }
-        if annotations.deprecated_hidden() {
-            e.cw.set_method_synthetic(&f.name, &desc);
-        }
+    emit_recorded_function_annotations(ir, e.cw, fid, &f.name, &desc);
+}
+
+/// Write a declaration's recorded annotations onto a method the caller has already added.
+///
+/// Concrete members and abstract members share this. `@Deprecated` also sets the JVM attribute, and
+/// `DeprecationLevel.HIDDEN` marks the method synthetic, matching kotlinc's class file.
+fn emit_recorded_function_annotations(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    fid: u32,
+    name: &str,
+    desc: &str,
+) {
+    let Some(annotations) = ir.function_annotations.get(&fid) else {
+        return;
+    };
+    cw.set_method_annotations(name, desc, annotations);
+    if annotations.deprecated() {
+        cw.mark_method_deprecated(name, desc);
+    }
+    if annotations.deprecated_hidden() {
+        cw.set_method_synthetic(name, desc);
     }
 }
 

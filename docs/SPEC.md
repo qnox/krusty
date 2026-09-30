@@ -5076,6 +5076,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (kotlinc's layout — `is_backing_field_prop` excludes const, so it is neither an instance field nor a
   `getX()` accessor). This removes the init-ordering hazard that gated such an object out; a computed
   (non-literal) const keeps the object gated. Test: `tests/object_const_val_e2e.rs`.
+- **A singleton `const val` folds the same compile-time expressions as a top-level one.** An object or
+  companion initializer is not limited to a bare literal. Concatenation, arithmetic, a string template,
+  and a read of another constant (`FULL = FATAL + " now"`, `TAGGED = PREFIX + "-tag"`, `N = 1 + 2`)
+  publish one payload on the singleton before annotation arguments and other files are checked. An
+  annotation written before the companion (`@Deprecated(FATAL, ReplaceWith(REPLACEMENT))`) and a
+  qualified read (`Logger.FULL`, `Service.TAG`) therefore fold, and a later top-level constant may
+  read the singleton. An abstract member carries those declaration annotations on its JVM method, the
+  same attribute a concrete member gets. Test:
+  `tests/annotation_emission_e2e.rs::singleton_const_expressions_are_annotation_constants`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a
