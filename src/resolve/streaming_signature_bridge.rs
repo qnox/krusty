@@ -62,7 +62,7 @@ enum SelectedTopLevelCall {
     /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
     /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
     ClassifierInvoke(TypeName, Option<Ty>),
-    Constructor(Box<crate::libraries::LibraryMember>),
+    Constructor(Box<crate::symbol_resolver::SelectedConstructorDeclaration>),
     /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
     /// constructor, so this is not a `Constructor` selection — the result is the interface itself.
     SamConstructor(crate::types::TypeName),
@@ -2533,12 +2533,13 @@ impl ProductionSignatureSemantics<'_> {
     fn constructor_result(
         &self,
         scope: crate::fir::SignatureScope,
-        member: &crate::libraries::LibraryMember,
+        selected: &crate::symbol_resolver::SelectedConstructorDeclaration,
         arguments: &[Ty],
         bound_outer: Option<Ty>,
         explicit_type_arguments: &[Ty],
         expected: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let member = &selected.declaration;
         let owner = member.owner.ok_or_else(Self::failure)?;
         let Some(class) = self.table.class_by_type_name(owner) else {
             // Library constructors such as `java.util.HashMap` are selected from the symbol
@@ -2554,30 +2555,25 @@ impl ProductionSignatureSemantics<'_> {
                     &module as &dyn crate::symbol_source::SymbolSource,
                     &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
                 ]);
-                if let Some(classifier) =
-                    crate::symbol_source::SymbolSource::classifier(&source, owner)
+                let formals = selected.type_parameters.type_params.as_slice();
+                let bounds = selected.type_parameters.type_param_bounds.as_slice();
+                let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+                    &source,
+                    owner,
+                    formals,
+                    bounds,
+                    expected,
+                    &mut bindings,
+                );
+                if !formals.is_empty() && formals.iter().all(|formal| bindings.contains_key(formal))
                 {
-                    let formals = classifier.type_parameters.type_params.as_slice();
-                    let bounds = classifier.type_parameters.type_param_bounds.as_slice();
-                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
-                    crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
-                        &source,
-                        owner,
-                        formals,
-                        bounds,
-                        expected,
-                        &mut bindings,
-                    );
-                    if !formals.is_empty()
-                        && formals.iter().all(|formal| bindings.contains_key(formal))
-                    {
-                        let arguments = formals
-                            .iter()
-                            .map(|formal| bindings.get(formal).copied().ok_or_else(Self::failure))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        return crate::fir::ResolvedTy::new(Ty::obj_args_name(owner, &arguments))
-                            .map_err(|_| Self::failure());
-                    }
+                    let arguments = formals
+                        .iter()
+                        .map(|formal| bindings.get(formal).copied().ok_or_else(Self::failure))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return crate::fir::ResolvedTy::new(Ty::obj_args_name(owner, &arguments))
+                        .map_err(|_| Self::failure());
                 }
             }
             let result = if member.ret.obj_internal() == Some(owner) {

@@ -1824,7 +1824,7 @@ impl<'a> SymbolResolver<'a> {
         internal: TypeName,
         args: &[CallArgKind],
         type_args: &[Ty],
-    ) -> Option<LibraryMember> {
+    ) -> Option<SelectedConstructorDeclaration> {
         let classifier = self.src.classifier(internal)?;
         let mut selected = select_constructor_declaration_from_type_with_type_arguments(
             self.lib,
@@ -1915,7 +1915,10 @@ impl<'a> SymbolResolver<'a> {
                 &constructor.call_sig,
             )),
         );
-        selected
+        selected.map(|declaration| SelectedConstructorDeclaration {
+            declaration,
+            type_parameters: classifier.type_parameters.clone(),
+        })
     }
 
     pub(crate) fn classifier_in_scope(&self, name: &str) -> CandidateSelection<TypeName> {
@@ -4568,6 +4571,15 @@ pub struct SyntheticCtorCall {
 pub enum SelectedConstructorCall {
     Direct(Box<LibraryMember>),
     Platform(Box<SyntheticCtorCall>),
+}
+
+/// The semantic declaration and classifier-owned generic facts selected as one resolver decision.
+/// Consumers may complete contextual result inference from these facts without resolving the
+/// classifier again through a provider-specific path.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectedConstructorDeclaration {
+    pub(crate) declaration: LibraryMember,
+    pub(crate) type_parameters: crate::types::TypeParameters<Vec<Vec<Ty>>>,
 }
 
 fn select_constructor_call(

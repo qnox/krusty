@@ -1122,16 +1122,20 @@ impl ProductionSignatureSemantics<'_> {
                     return None;
                 }
                 selected.owner.get_or_insert(internal);
-                Some(selected)
+                Some(crate::symbol_resolver::SelectedConstructorDeclaration {
+                    declaration: selected,
+                    type_parameters: classifier.type_parameters.clone(),
+                })
             })?;
+            let declaration = &selected.declaration;
             let slots = crate::libraries::map_call_args(
                 &source_indices,
                 Some(&names),
-                &selected.call_sig.param_names,
-                selected.params.len(),
-                selected.call_sig.required,
-                &selected.call_sig.param_defaults,
-                selected.call_sig.vararg_index,
+                &declaration.call_sig.param_names,
+                declaration.params.len(),
+                declaration.call_sig.required,
+                &declaration.call_sig.param_defaults,
+                declaration.call_sig.vararg_index,
                 trailing_lambda,
             )
             .ok()?;
@@ -1146,7 +1150,7 @@ impl ProductionSignatureSemantics<'_> {
             let parameters = resolver
                 .specialized_constructor_parameter_types(
                     internal,
-                    &selected,
+                    declaration,
                     &mapped_probes,
                     type_arguments,
                 )
@@ -2697,8 +2701,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             realization.declaration.clone()
                         }
                     };
+                    let owner = declaration.owner?;
+                    let type_parameters = resolver.classifier(owner)?.type_parameters.clone();
                     return Some((
-                        SelectedTopLevelCall::Constructor(Box::new(declaration)),
+                        SelectedTopLevelCall::Constructor(Box::new(
+                            crate::symbol_resolver::SelectedConstructorDeclaration {
+                                declaration,
+                                type_parameters,
+                            },
+                        )),
                         argument_types.clone(),
                     ));
                 }

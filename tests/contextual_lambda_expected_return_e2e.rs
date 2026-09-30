@@ -44,12 +44,23 @@ fn return_only_call_in_a_lambda_uses_the_expected_type() {
 fn a_statement_before_the_lambda_result_does_not_fail_signature_inference() {
     let src = "import kotlin.coroutines.*\n\
         import kotlin.coroutines.intrinsics.*\n\
+        open class EmptyContinuation : Continuation<Any?> {\n\
+        \x20   override val context = EmptyCoroutineContext\n\
+        \x20   companion object : EmptyContinuation()\n\
+        \x20   override fun resumeWith(result: Result<Any?>) { result.getOrThrow() }\n\
+        }\n\
         suspend fun suspendHere() = suspendCoroutineUninterceptedOrReturn {\n\
         \x20   it.resume(Unit)\n\
         \x20   COROUTINE_SUSPENDED\n\
         }\n\
-        fun box(): String = \"OK\"\n";
+        fun box(): String {\n\
+        \x20   var result = \"fail\"\n\
+        \x20   suspend { suspendHere(); result = \"OK\" }.startCoroutine(EmptyContinuation)\n\
+        \x20   return result\n\
+        }\n";
     common::assert_accepted_like_kotlinc(src);
+    assert_eq!(common::kotlinc_box_result(src), "OK");
+    common::expect_box_ok_with_stdlib(src, "ExpectedSuspendStatement");
 }
 
 #[test]
