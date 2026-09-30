@@ -4904,7 +4904,12 @@ interface inherits from a function-type supertype, whichever provider published 
 resolver's SAM selection (`symbol_resolver/sam.rs`) records the identity of the member it selects;
 a provider member published without one is rejected at checking rather than named by its spelling.
 `IrSamTarget::wraps_function_value` says whether the lambda wraps an existing function value (the
-adapter lowering generates) or implements the method with its own body. The JVM backend keeps
-implementing the method by `IrSamTarget::method`. Tests: `fir/body_check/lambda_tests.rs` (the
-checker's choice among same-named members, a function-type supertype, a nullable Java function-value
-conversion) and `fir_lower/sam_target_tests.rs` (lowering carries both facts).
+adapter lowering generates) or implements the method with its own body. The JVM names the physical
+slot from that declaration's recorded signature and suspend fact, not from a classifier/name/arity
+map, so two methods that share a name and an arity keep distinct value-class hashes. Tests:
+`fir/body_check/lambda_tests.rs` (the checker's choice among same-named members, a function-type
+supertype, a nullable Java function-value conversion, and a provider member with no identity),
+`fir_lower/sam_target_tests.rs` (lowering carries both facts),
+`fun_interface_constructor_reference_returns_a_checked_sam_delegate` (exact `method_target` and
+`wraps_function_value`), and `tests/fun_interface_value_class_e2e.rs` (the abstract slot among
+same-name, same-arity siblings).
