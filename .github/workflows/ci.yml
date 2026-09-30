@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fast, version-independent correctness gate: lint + coverage + latest-version regression
-  # conformance (zero miscompiles). Identical to the local/hook gate (`just ci`).
+  # Lint + coverage (`just ci`). Conformance is `build-conformance-bin` and the
+  # version matrix; this job does not compile krusty again for it.
   ci:
     runs-on: ubuntu-latest
     env:
