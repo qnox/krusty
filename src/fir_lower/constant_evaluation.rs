@@ -153,7 +153,13 @@ impl ConstantEvaluation {
                 let operand = self.evaluate(body, *operand)?;
                 unary(*operation, operand, ty)
             }
-            FirExprKind::Binary {
+            FirExprKind::Equality {
+                operation,
+                lhs,
+                rhs,
+                ..
+            }
+            | FirExprKind::Binary {
                 operation,
                 lhs,
                 rhs,

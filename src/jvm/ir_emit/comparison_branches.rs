@@ -37,9 +37,9 @@ impl Emitter<'_> {
 
     /// A comparison in value position: its Boolean result on the operand stack.
     pub(super) fn emit_comparison(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        let (op, lhs, rhs) = self.comparison_parts(expression);
+        let (op, lhs, rhs, mode) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
-            this.emit_comparison_value(op, lhs, rhs, code)
+            this.emit_comparison_value(op, lhs, rhs, mode, code)
         });
     }
 
@@ -51,15 +51,19 @@ impl Emitter<'_> {
         jt: bool,
         code: &mut CodeBuilder,
     ) {
-        let (op, lhs, rhs) = self.comparison_parts(expression);
+        let (op, lhs, rhs, mode) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
-            this.emit_compare_branch(op, lhs, rhs, target, jt, code)
+            this.emit_compare_branch(op, lhs, rhs, mode, target, jt, code)
         });
     }
 
-    fn comparison_parts(&self, expression: ExprId) -> (IrBinOp, ExprId, ExprId) {
+    fn comparison_parts(
+        &self,
+        expression: ExprId,
+    ) -> (IrBinOp, ExprId, ExprId, Option<crate::fir::FirEqualityMode>) {
         match *self.ir.expr(expression) {
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => (op, lhs, rhs),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => (op, lhs, rhs, None),
+            IrExpr::Equality { op, mode, lhs, rhs } => (op, lhs, rhs, Some(mode)),
             ref other => panic!("a comparison is a primitive binary operation, not {other:?}"),
         }
     }
@@ -82,9 +86,25 @@ impl Emitter<'_> {
         result
     }
 
-    fn emit_comparison_value(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+    fn emit_comparison_value(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        mode: Option<crate::fir::FirEqualityMode>,
+        code: &mut CodeBuilder,
+    ) {
         // kotlinc's `Ieee754Equals` produces its Boolean itself, and `!=` is `Not` over it.
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs) {
+        // A recorded mode is the checker's decision. Storage types after inline substitution do
+        // not choose again.
+        let ieee = match mode {
+            Some(crate::fir::FirEqualityMode::Ieee754) => true,
+            Some(
+                crate::fir::FirEqualityMode::Structural | crate::fir::FirEqualityMode::Primitive,
+            ) => false,
+            None => matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs),
+        };
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && ieee {
             self.emit_ieee754_equals(lhs, rhs, code);
             if op == IrBinOp::Ne {
                 self.negate_material_bool(code);
@@ -97,7 +117,7 @@ impl Emitter<'_> {
         // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
         // null/reference/numeric case tables here previously let zero-left ordering acquire a different
         // node-shape rule depending on whether the comparison happened to be an `if` condition.
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, f, false, code) {
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, mode, f, false, code) {
             self.materialize_cmp_bool(f, code);
             return;
         }
@@ -178,11 +198,12 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
+        mode: Option<crate::fir::FirEqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
     ) {
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, target, jt, code) {
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, mode, target, jt, code) {
             return;
         }
 
@@ -209,6 +230,7 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
+        mode: Option<crate::fir::FirEqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
@@ -236,7 +258,11 @@ impl Emitter<'_> {
             }
             return true;
         }
-        if matches!(op, Eq | Ne) && self.is_ieee754_equality(lhs, rhs) {
+        let recorded_ieee = mode == Some(crate::fir::FirEqualityMode::Ieee754);
+        let recorded_structural = mode == Some(crate::fir::FirEqualityMode::Structural);
+        if matches!(op, Eq | Ne)
+            && (recorded_ieee || (mode.is_none() && self.is_ieee754_equality(lhs, rhs)))
+        {
             self.emit_ieee754_equals(lhs, rhs, code);
             if (op == Eq) == jt {
                 code.ifne(target);
@@ -280,6 +306,11 @@ impl Emitter<'_> {
                 code.if_acmpne(target);
             }
             return true;
+        }
+        // A recorded structural equality stays `Intrinsics.areEqual` even when inline substitution
+        // stored both operands as scalars. Null and enum comparisons above keep their own shape.
+        if recorded_structural && matches!(op, Eq | Ne) {
+            return false;
         }
         // Structural equality's value result has different optimal consumers: value position can use it
         // directly, while control flow branches on it. Tell the caller to select that final operation;

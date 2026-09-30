@@ -582,7 +582,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 a.join(", ")
             )
         }
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs } | IrExpr::Equality { op, lhs, rhs, .. } => {
             format!(
                 "({} {} {})",
                 emit_expr(ir, *lhs, inst),

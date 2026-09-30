@@ -129,25 +129,31 @@ impl Emitter<'_> {
                 default = Some(*body);
                 continue;
             };
-            let IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs,
-                rhs,
-            } = self.ir.expr(*cond)
-            else {
+            let (lhs, rhs) = match self.ir.expr(*cond) {
+                IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs,
+                    rhs,
+                } => (*lhs, *rhs),
+                IrExpr::Equality {
+                    op: IrBinOp::Eq,
+                    mode: crate::fir::FirEqualityMode::Primitive,
+                    lhs,
+                    rhs,
+                } => (*lhs, *rhs),
+                _ => return None,
+            };
+            let IrExpr::Const(IrConst::Int(key)) = self.ir.expr(rhs) else {
                 return None;
             };
-            let IrExpr::Const(IrConst::Int(key)) = self.ir.expr(*rhs) else {
+            let IrExpr::GetValue(variable) = self.ir.expr(lhs) else {
                 return None;
             };
-            let IrExpr::GetValue(variable) = self.ir.expr(*lhs) else {
-                return None;
-            };
-            if self.value_ty(*lhs) != Ty::Int {
+            if self.value_ty(lhs) != Ty::Int {
                 return None;
             }
             match subject {
-                None => subject = Some((*variable, *lhs)),
+                None => subject = Some((*variable, lhs)),
                 Some((already, _)) if already == *variable => {}
                 Some(_) => return None,
             }

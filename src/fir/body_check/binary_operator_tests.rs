@@ -1,6 +1,8 @@
-use super::test_support::{checked_function_body, root_expression};
+use super::test_support::{
+    checked_function_body, checked_function_body_with_platform, jvm_semantics, root_expression,
+};
 use super::*;
-use crate::fir::{FirBody, FirConstant};
+use crate::fir::{FirBody, FirConstant, FirEqualityMode};
 
 /// The only built-in binary operation in `body`, as `(operation, lhs, rhs)`.
 fn binary(body: &FirBody, operation: FirBinaryOperation) -> (FirExprId, FirExprId) {
@@ -11,6 +13,12 @@ fn binary(body: &FirBody, operation: FirBinaryOperation) -> (FirExprId, FirExprI
                 operation: found,
                 lhs,
                 rhs,
+            }
+            | FirExprKind::Equality {
+                operation: found,
+                lhs,
+                rhs,
+                ..
             } if found == operation => Some((lhs, rhs)),
             _ => None,
         })
@@ -170,11 +178,72 @@ fn double_type_parameter_against_any_stays_structural_equality() {
     assert!(
         matches!(
             kind,
-            FirExprKind::Binary {
+            FirExprKind::Equality {
                 operation: FirBinaryOperation::Equal,
+                mode: FirEqualityMode::Structural,
                 ..
             }
         ),
         "Any must select structural equality, found {kind:?}"
     );
+}
+
+/// The checker records IEEE equality for a static `Double` or `Float`, including a parameter
+/// bounded by one, and structural equality for `Comparable<Double>`.
+#[test]
+fn source_equality_mode_follows_the_static_operand_types() {
+    let cases = [
+        (
+            "fun equal(a: Double, b: Double): Boolean = a == b\n",
+            FirEqualityMode::Ieee754,
+            false,
+        ),
+        (
+            "fun equal(a: Float, b: Float): Boolean = a == b\n",
+            FirEqualityMode::Ieee754,
+            false,
+        ),
+        (
+            "fun <T : Double> equal(a: T, b: T): Boolean = a == b\n",
+            FirEqualityMode::Ieee754,
+            false,
+        ),
+        (
+            "fun equal(a: Int, b: Int): Boolean = a == b\n",
+            FirEqualityMode::Primitive,
+            false,
+        ),
+        (
+            "fun <T : Comparable<Double>> equal(a: T, b: T): Boolean = a == b\n",
+            FirEqualityMode::Structural,
+            true,
+        ),
+        (
+            "fun equal(a: Comparable<Double>, b: Comparable<Double>): Boolean = a == b\n",
+            FirEqualityMode::Structural,
+            true,
+        ),
+    ];
+    for (source, mode, platform) in cases {
+        let (body, _) = if platform {
+            checked_function_body_with_platform(source, "equal", jvm_semantics())
+        } else {
+            checked_function_body(source, "equal")
+        };
+        let kind = &body
+            .expr(root_expression(&body))
+            .expect("checked equality")
+            .kind;
+        assert!(
+            matches!(
+                kind,
+                FirExprKind::Equality {
+                    operation: FirBinaryOperation::Equal,
+                    mode: found,
+                    ..
+                } if *found == mode
+            ),
+            "{source} selected {kind:?}, expected {mode:?}"
+        );
+    }
 }

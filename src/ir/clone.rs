@@ -222,7 +222,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::Vararg {
             elements: values, ..
         } => values.iter_mut().for_each(|value| *value = map(*value)),
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } | IrExpr::Equality { lhs, rhs, .. } => {
             *lhs = map(*lhs);
             *rhs = map(*rhs);
         }

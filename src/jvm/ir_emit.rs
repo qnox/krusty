@@ -10367,6 +10367,7 @@ impl<'a> Emitter<'a> {
                 arg,
                 type_operand,
             } => self.emit_type_operation(e, *op, *arg, *type_operand, code),
+            IrExpr::Equality { .. } => self.emit_comparison(e, code),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
@@ -11263,16 +11264,24 @@ impl<'a> Emitter<'a> {
             // leaves only its `String` result — but a parent operand sequence still must treat it as
             // branchy if any part is (it builds the StringBuilder mid-stack otherwise).
             IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.emits_control_flow(p)),
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
-                    // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
-                    // and the value-compare path it remaps to for primitives both do.
-                    || matches!(op, RefEq | RefNe)
-                    // `x == null`/`x != null` emits an `ifnull`/`ifnonnull` branch+merge frame.
+            IrExpr::Equality { op, mode, lhs, rhs } => {
+                (*mode != crate::fir::FirEqualityMode::Structural
+                    && matches!(op, Eq | Ne)
+                    && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.emits_control_flow(*lhs) || self.emits_control_flow(*rhs)
+                    || self.emits_control_flow(*lhs)
+                    || self.emits_control_flow(*rhs)
+            }
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
+                    || matches!(op, RefEq | RefNe)
+                    || (matches!(op, Eq | Ne)
+                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
+                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
+                    || self.emits_control_flow(*lhs)
+                    || self.emits_control_flow(*rhs)
             }
             IrExpr::Call {
                 callee,
@@ -11857,6 +11866,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
+            IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le

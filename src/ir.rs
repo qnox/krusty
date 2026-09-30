@@ -719,6 +719,15 @@ pub enum IrExpr {
         lhs: ExprId,
         rhs: ExprId,
     },
+    /// Source `==`/`!=` whose mode was fixed by checking. Inlining copies `mode` unchanged; a
+    /// backend realizes it and does not choose IEEE versus structural equality from the operand
+    /// storage types substitution may have produced.
+    Equality {
+        op: IrBinOp,
+        mode: crate::fir::FirEqualityMode,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
     /// Built-in numeric unary negation.
     PrimitiveNeg {
         operand: ExprId,

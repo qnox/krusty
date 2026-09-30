@@ -105,7 +105,6 @@ funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-ieee754/inline.kt
 inference/capturedSelfInsideIntersection.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/kt67609.kt

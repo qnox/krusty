@@ -2344,6 +2344,12 @@ pub(crate) fn lower_value_classes(
                 op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
                 lhs,
                 rhs,
+            }
+            | IrExpr::Equality {
+                op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
+                lhs,
+                rhs,
+                ..
             } => {
                 let (l, r) = (*lhs, *rhs);
                 match (repr_ctx.repr(l), repr_ctx.repr(r)) {
@@ -3025,6 +3031,12 @@ pub(crate) fn lower_value_classes(
                 op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
                 lhs,
                 rhs,
+            }
+            | IrExpr::Equality {
+                op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
+                lhs,
+                rhs,
+                ..
             } = &ir.exprs[id as usize]
             {
                 let (l, r) = (*lhs, *rhs);

@@ -625,6 +625,21 @@ impl BodyLowering<'_> {
                     }
                 }
             }
+            FirExprKind::Equality {
+                operation,
+                mode,
+                lhs,
+                rhs,
+            } => {
+                let lhs = self.expression(*lhs)?;
+                let rhs = self.expression(*rhs)?;
+                self.ir.add_expr(IrExpr::Equality {
+                    op: lower_binary_operation(*operation),
+                    mode: *mode,
+                    lhs,
+                    rhs,
+                })
+            }
             FirExprKind::Binary {
                 operation,
                 lhs,

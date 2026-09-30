@@ -886,6 +886,19 @@ pub enum FirUnaryOperation {
     BitwiseNot,
 }
 
+/// How a source `==`/`!=` was checked. Inline substitution may store a different value, and this
+/// mode stays the one the checker selected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirEqualityMode {
+    /// `Intrinsics.areEqual` after boxing a primitive operand. A type parameter is this unless its
+    /// upper bound is one primitive float.
+    Structural,
+    /// Primitive IEEE-754 equality of one `Float` or `Double`, including a parameter bounded by it.
+    Ieee754,
+    /// Primitive `icmp`/`lcmp` of scalar operands that are not a floating pair.
+    Primitive,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirBinaryOperation {
     Add,
@@ -1371,6 +1384,13 @@ pub enum FirExprKind {
         lhs: FirExprId,
         rhs: FirExprId,
     },
+    /// Source `==`/`!=` with the equality mode the checker selected from the static operand types.
+    Equality {
+        operation: FirBinaryOperation,
+        mode: FirEqualityMode,
+        lhs: FirExprId,
+        rhs: FirExprId,
+    },
     /// Kotlin structural equality between one nullable primitive wrapper and its non-null primitive.
     /// The wrapper is null-tested and unboxed before primitive comparison; this is a frontend-selected
     /// semantic operation, not a physical-type guess left to a backend.
@@ -1511,6 +1531,7 @@ impl FirExprKind {
             | FirExprKind::ImplicitConversion { .. }
             | FirExprKind::Unary { .. }
             | FirExprKind::Binary { .. }
+            | FirExprKind::Equality { .. }
             | FirExprKind::NullablePrimitiveComparison { .. }
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::Range { .. }
