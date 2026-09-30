@@ -2626,6 +2626,11 @@ pub struct ResolvedSymbols {
     pub classifier_name: Option<TypeName>,
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
     pub classifier: Option<std::sync::Arc<LibraryType>>,
+    /// The winning classifier was declared in a `.kotlin_builtins` fragment.
+    ///
+    /// This is part of the classifier facet. A composite keeps the flag of the child that supplied
+    /// the classifier; a later child's builtins declaration does not mark an earlier one.
+    pub builtin_classifier: bool,
     pub callables: Callables,
     /// A declaration that is importable but has no classifier or callable candidate, such as a
     /// primitive typealias or enum entry.

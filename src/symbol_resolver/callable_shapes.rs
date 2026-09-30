@@ -105,6 +105,7 @@ mod tests {
                     .map(|(_, declaration)| declaration.clone())
             });
             std::rc::Rc::new(ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
                 classifier,
                 callables: Callables::None,

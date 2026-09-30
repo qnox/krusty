@@ -1494,6 +1494,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             }
         };
         let record = std::rc::Rc::new(ResolvedSymbols {
+            builtin_classifier: false,
             classifier_name,
             classifier,
             callables,

@@ -124,6 +124,47 @@ impl Checker<'_> {
         Some(Ty::obj_args_name(owner, &fixed))
     }
 
+    /// An alias whose import rung is above every imported class of `name`.
+    ///
+    /// A default-star typealias (`kotlin.collections.ArrayList`) must not answer before an
+    /// explicit-star class (`foo.ArrayList`). The earlier rung wins.
+    pub(super) fn alias_ahead_of_imported_classifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        source: &impl SymbolSource,
+    ) -> Option<TypeName> {
+        let alias_level = self.imported_alias_level(name)?;
+        let class_level = self.import_levels.iter().position(|level| {
+            !crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level)
+                .is_empty()
+        });
+        if class_level.is_some_and(|class_level| class_level <= alias_level) {
+            return None;
+        }
+        self.scoped_source_alias_classifier(scope, name)
+    }
+
+    fn imported_alias_level(&self, name: &str) -> Option<usize> {
+        self.import_levels.iter().position(|level| {
+            level.packages.iter().any(|&package| {
+                crate::types::existing_type_name_child(package, name)
+                    .filter(|&identity| self.source_alias_declared(identity))
+                    .filter(|_| {
+                        !level.builtins_only
+                            || self
+                                .libraries
+                                .symbols(
+                                    crate::symbol_source::SymbolNamespace::Package(package),
+                                    name,
+                                )
+                                .builtin_classifier
+                    })
+                    .is_some()
+            })
+        })
+    }
+
     /// The result constraint of an alias constructor call. A fixed facet with inference positions
     /// does not constrain the result; the call's own expected type does.
     pub(super) fn alias_constructor_result_constraint(

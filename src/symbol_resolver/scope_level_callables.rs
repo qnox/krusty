@@ -60,6 +60,7 @@ mod tests {
         };
         let record = |owners: &[&str]| {
             Rc::new(ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: None,
                 classifier: None,
                 callables: Callables::from_parts(

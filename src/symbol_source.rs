@@ -203,6 +203,7 @@ impl SymbolSource for CompositeSource<'_> {
             _ => {
                 let mut classifier = None;
                 let mut classifier_name = None;
+                let mut builtin_classifier = false;
                 let mut fns = Vec::new();
                 let mut props = Vec::new();
                 let mut importable_declaration = false;
@@ -210,6 +211,7 @@ impl SymbolSource for CompositeSource<'_> {
                     if classifier.is_none() {
                         classifier = r.classifier.clone();
                         classifier_name = r.classifier_name;
+                        builtin_classifier = r.builtin_classifier;
                     }
                     match &r.callables {
                         Callables::Functions(f) => fns.extend(f.overloads.iter().cloned()),
@@ -237,6 +239,7 @@ impl SymbolSource for CompositeSource<'_> {
                 std::rc::Rc::new(ResolvedSymbols {
                     classifier_name,
                     classifier,
+                    builtin_classifier,
                     callables,
                     importable_declaration,
                 })
@@ -506,6 +509,7 @@ mod tests {
                         .unwrap_or_else(|| classifier_name.expect("classifier identity"))
                 }),
                 classifier,
+                builtin_classifier: false,
                 callables,
                 importable_declaration: false,
             })
@@ -740,6 +744,76 @@ mod tests {
                 SymbolNamespace::Classifier(crate::types::type_name("sample/Outer$Inner")),
                 "Deep",
             )
+        );
+    }
+
+    struct ProvenanceSource {
+        identity: TypeName,
+        builtin: bool,
+    }
+
+    impl SymbolSource for ProvenanceSource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            let Some(identity) = namespace
+                .existing_classifier(name)
+                .filter(|identity| *identity == self.identity)
+            else {
+                return std::rc::Rc::new(ResolvedSymbols::default());
+            };
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: Some(identity),
+                classifier: Some(std::sync::Arc::new(LibraryType::declaration_header())),
+                builtin_classifier: self.builtin,
+                ..ResolvedSymbols::default()
+            })
+        }
+    }
+
+    #[test]
+    fn an_earlier_classifier_keeps_its_own_builtin_provenance() {
+        let list = crate::types::type_name("kotlin/collections/List");
+        let package = crate::types::type_name("kotlin/collections");
+        let user = ProvenanceSource {
+            identity: list,
+            builtin: false,
+        };
+        let builtin = ProvenanceSource {
+            identity: list,
+            builtin: true,
+        };
+        let earlier = CompositeSource::new(vec![&user as &dyn SymbolSource, &builtin]);
+        let record = earlier.symbols(SymbolNamespace::Package(package), "List");
+        assert_eq!(record.classifier_name, Some(list));
+        assert!(!record.builtin_classifier);
+
+        let named = crate::symbol_resolver::ClassifierImportLevel {
+            packages: vec![package],
+            builtins_only: true,
+        };
+        let star = crate::symbol_resolver::ClassifierImportLevel {
+            packages: vec![package],
+            builtins_only: false,
+        };
+        assert!(
+            crate::symbol_resolver::classifier_candidates_at_import_level(&earlier, "List", &named)
+                .is_empty()
+        );
+        assert_eq!(
+            crate::symbol_resolver::classifier_candidates_at_import_level(&earlier, "List", &star),
+            vec![list]
+        );
+
+        let selected = CompositeSource::new(vec![&builtin as &dyn SymbolSource, &user]);
+        assert!(
+            selected
+                .symbols(SymbolNamespace::Package(package), "List")
+                .builtin_classifier
+        );
+        assert_eq!(
+            crate::symbol_resolver::classifier_candidates_at_import_level(
+                &selected, "List", &named
+            ),
+            vec![list]
         );
     }
 }
