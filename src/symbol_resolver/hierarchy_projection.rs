@@ -8,13 +8,15 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
 thread_local! {
-    static PROJECTION_CACHE: RefCell<Option<FxHashMap<Ty, &'static [Ty]>>> = RefCell::new(None);
+    /// Owned projection lists. These are hierarchy results, not `Ty::Obj` argument slices, so they
+    /// stay in this map and are freed when the compilation drops it.
+    static PROJECTION_CACHE: RefCell<Option<FxHashMap<Ty, Box<[Ty]>>>> = RefCell::new(None);
     static PROJECTION_CACHE_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Remembers applied supertypes for the enclosing compilation. The map is empty until a
 /// compilation enters it, and it dies with that compilation, so a later source set cannot reuse a
-/// classifier that happened to share a name.
+/// classifier that happened to share a name. Each stored list is owned by the map.
 pub(crate) struct SupertypeProjectionCache;
 
 impl SupertypeProjectionCache {
@@ -41,8 +43,14 @@ impl Drop for SupertypeProjectionCache {
     }
 }
 
-fn projection_cache_get(ty: Ty) -> Option<&'static [Ty]> {
-    PROJECTION_CACHE.with(|cache| cache.borrow().as_ref()?.get(&ty).copied())
+fn projection_cache_get(ty: Ty) -> Option<Vec<Ty>> {
+    PROJECTION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()?
+            .get(&ty)
+            .map(|applied| applied.to_vec())
+    })
 }
 
 fn projection_cache_insert(ty: Ty, applied: &[Ty]) {
@@ -51,8 +59,19 @@ fn projection_cache_insert(ty: Ty, applied: &[Ty]) {
         let Some(cache) = cache.as_mut() else {
             return;
         };
-        cache.insert(ty, crate::types::intern_tys(applied));
+        cache.insert(ty, applied.to_vec().into_boxed_slice());
     });
+}
+
+#[cfg(test)]
+fn stored_projection_ptr(ty: Ty) -> Option<*const Ty> {
+    PROJECTION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()?
+            .get(&ty)
+            .map(|applied| applied.as_ptr())
+    })
 }
 
 /// The classifier whose declarations form an expression type's member scope. `Nothing` has no
@@ -114,14 +133,14 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     let key = ty.non_null();
     if matches!(key, Ty::Fun(_)) {
         if let Some(cached) = projection_cache_get(key) {
-            return cached.to_vec();
+            return cached;
         }
         let applied = vec![crate::libraries::function_classifiers::supertype_classifier(key)];
         projection_cache_insert(key, &applied);
         return applied;
     }
     if let Some(cached) = projection_cache_get(ty) {
-        return cached.to_vec();
+        return cached;
     }
     let Some(internal) = ty.kotlin_class_internal() else {
         return Vec::new();
@@ -557,6 +576,24 @@ mod tests {
             vec![Ty::obj("kotlin/Number")]
         );
         assert_eq!(second.queries.get(), 1);
+    }
+
+    #[test]
+    fn a_cached_projection_is_owned_by_the_compilation() {
+        let (source, ty) = probe("kotlin/Any");
+        {
+            let _cache = SupertypeProjectionCache::enter();
+            let applied = direct_supertypes(&source, ty);
+            let stored = stored_projection_ptr(ty).expect("projection stored");
+            let interned = crate::types::intern_tys(&applied);
+            assert_eq!(applied.as_slice(), interned);
+            assert_ne!(
+                stored,
+                interned.as_ptr(),
+                "a hierarchy result must not be the global type-argument slice"
+            );
+        };
+        assert!(stored_projection_ptr(ty).is_none());
     }
 
     #[test]
