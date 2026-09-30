@@ -15,6 +15,24 @@ impl Checker<'_> {
         self.classifier_enum_entry_ordinal(owner, name).is_some()
     }
 
+    /// The enum whose companion is the already-bound receiver value. `Enum.entries` is a
+    /// classifier property of the enum, not a member of the companion value. Inspecting the
+    /// resolved receiver type preserves a local/property root that shadows the enum spelling.
+    pub(super) fn enum_entries_value_classifier(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+    ) -> Option<TypeName> {
+        let companion = self.expr(scope, receiver).non_null().obj_internal()?;
+        let owner = companion.nested_owner()?;
+        let declaration = self.resolver().classifier(owner)?;
+        if !declaration.is_enum() {
+            return None;
+        }
+        let declared_companion = declaration.companion_object.as_ref()?.1;
+        (declared_companion == companion).then_some(owner)
+    }
+
     pub(super) fn record_enum_entry(&mut self, expression: ExprId, owner: TypeName, name: &str) {
         let ordinal = self.classifier_enum_entry_ordinal(owner, name);
         if let Some(ordinal) = ordinal.and_then(|ordinal| u32::try_from(ordinal).ok()) {
