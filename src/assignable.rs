@@ -171,8 +171,11 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // A type parameter's semantic identity is its key. Carried bounds are constraint metadata and
     // may be normalized differently while a generic call is instantiated, so same-named parameters
     // stay one type. The exception is a definitely-non-null intersection: `<T>` (bound `Any?`) is
-    // not a subtype of `T & Any`, while `T & Any` remains a subtype of `T`.
-    if definitely_non_null_intersection_bound(sup, sub).is_some() {
+    // not a subtype of `T & Any`, while `T & Any` remains a subtype of `T`. The nullable target
+    // `(T & Any)?` is a different relation — `T` and `T?` are both subtypes of it — so only the
+    // intersection written as the target itself is rejected here.
+    if matches!(sup, Ty::TyParam(..)) && definitely_non_null_intersection_bound(sup, sub).is_some()
+    {
         return false;
     }
     if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
@@ -648,6 +651,10 @@ mod tests {
         assert!(
             !ok(parameter, intersection),
             "T is not a subtype of T & Any"
+        );
+        assert!(
+            ok(intersection, s("kotlin/Any")),
+            "T & Any is a subtype of Any"
         );
         assert!(ok(intersection, parameter), "T & Any is a subtype of T");
         assert!(ok(parameter, Ty::nullable(intersection)));

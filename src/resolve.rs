@@ -16410,6 +16410,14 @@ impl<'a> Checker<'a> {
         {
             return Some(1);
         }
+        // `<R : Any>` instantiated as `V & Any` is the selected candidate even though `V` is not a
+        // subtype of that intersection. Applicability has to keep it; the selected-call check
+        // reports the mismatch (`nn(v)` expects `Any`).
+        if !expected.is_nullable()
+            && crate::assignable::definitely_non_null_intersection_bound(expected, actual).is_some()
+        {
+            return Some(0);
+        }
         self.erased_function_param_fits(expected, actual)
             .then_some(1)
     }
