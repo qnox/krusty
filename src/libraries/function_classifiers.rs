@@ -87,20 +87,23 @@ pub(crate) fn classifier(internal: TypeName) -> Option<FunctionClassifier> {
 }
 
 /// Intern a provider-owned classifier identity only after its complete namespace and numeric family
-/// have been recognized. Arbitrary lookup spellings never enter the name interner.
-pub(crate) fn classifier_name(fqn: &str) -> Option<TypeName> {
-    let (package, name) = fqn.rsplit_once('/')?;
-    let digits = match package {
-        "kotlin" => name.strip_prefix("Function")?,
-        "kotlin/coroutines" => name.strip_prefix("SuspendFunction")?,
-        "kotlin/reflect" => match name.strip_prefix("KSuspendFunction") {
+/// have been recognized. The package is already an interned namespace; the leaf enters the name
+/// tree only when it is one of the numeric function families.
+pub(crate) fn classifier_name_in(package: TypeName, name: &str) -> Option<TypeName> {
+    let digits = if package.matches("kotlin") {
+        name.strip_prefix("Function")?
+    } else if package.matches("kotlin/coroutines") {
+        name.strip_prefix("SuspendFunction")?
+    } else if package.matches("kotlin/reflect") {
+        match name.strip_prefix("KSuspendFunction") {
             Some(digits) => digits,
             None => name.strip_prefix("KFunction")?,
-        },
-        _ => return None,
+        }
+    } else {
+        return None;
     };
     (!digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())).then_some(())?;
-    Some(type_name(fqn))
+    Some(type_name_child(package, name))
 }
 
 /// A supertype as a classifier: a function type (`class C : suspend (A) -> R`) stands for the
@@ -337,6 +340,17 @@ pub(crate) fn synthetic(function: FunctionClassifier) -> Arc<LibraryType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifier_name_in_recognizes_numeric_families_without_a_rendered_path() {
+        let function = classifier_name_in(type_name("kotlin"), "Function2").expect("Function2");
+        assert!(function.matches("kotlin/Function2"));
+        let reflective =
+            classifier_name_in(type_name("kotlin/reflect"), "KFunction1").expect("KFunction1");
+        assert!(reflective.matches("kotlin/reflect/KFunction1"));
+        assert!(classifier_name_in(type_name("kotlin"), "println").is_none());
+        assert!(classifier_name_in(type_name("demo"), "Function1").is_none());
+    }
 
     #[test]
     fn recognizes_only_the_builtin_classifier_namespaces() {

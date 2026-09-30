@@ -366,18 +366,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
             return std::rc::Rc::new(ResolvedSymbols::default());
         };
-        let function_fqn = if package.matches("kotlin") {
-            Some(format!("kotlin/{name}"))
-        } else if package.matches("kotlin/coroutines") {
-            Some(format!("kotlin/coroutines/{name}"))
-        } else if package.matches("kotlin/reflect") {
-            Some(format!("kotlin/reflect/{name}"))
-        } else {
-            None
-        };
-        if let Some(function) = function_fqn
-            .as_deref()
-            .and_then(super::function_classifiers::classifier_name)
+        if let Some(function) = super::function_classifiers::classifier_name_in(package, name)
             .and_then(super::function_classifiers::classifier)
         {
             let internal = function.identity();

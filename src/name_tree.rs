@@ -456,13 +456,22 @@ impl NameTree {
     pub fn existing_nested_child_of(&self, owner: NameId, nested: &str) -> Option<NameId> {
         let owner_node = self.node(owner);
         let parent = owner_node.parent?;
-        let h = child_hash_parts(
-            parent,
-            &[owner_node.segment.as_bytes(), b"$", nested.as_bytes()],
-        );
+        self.existing_nested_under(parent, &owner_node.segment, nested)
+    }
+
+    /// The classfile sibling `owner_segment$nested` under `parent`, without requiring the owner
+    /// class itself to be present. Classpath catalogs can contain `Outer$Inner.class` without an
+    /// `Outer.class`, so nested membership must follow the flattened classfile segment directly.
+    pub(crate) fn existing_nested_under(
+        &self,
+        parent: NameId,
+        owner_segment: &str,
+        nested: &str,
+    ) -> Option<NameId> {
+        let h = child_hash_parts(parent, &[owner_segment.as_bytes(), b"$", nested.as_bytes()]);
         // SAFETY: see `child_or_insert`.
         let table = unsafe { &*self.current.load(Ordering::Acquire) };
-        table.probe_nested(&self.arena, parent, &owner_node.segment, nested, h)
+        table.probe_nested(&self.arena, parent, owner_segment, nested, h)
     }
 
     /// The already-interned child of `parent` for `segment`, without inserting.
