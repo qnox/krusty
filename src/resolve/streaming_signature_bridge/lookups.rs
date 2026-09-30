@@ -547,8 +547,16 @@ impl ProductionSignatureSemantics<'_> {
                 for &package in &level.packages {
                     let Some(candidate) = crate::types::existing_type_name_child(package, spelling)
                         .filter(|&id| expansion(id).is_some())
-                        .filter(|&id| {
-                            !level.builtins_only || self.table.libraries.is_builtin_classifier(id)
+                        .filter(|_| {
+                            !level.builtins_only
+                                || self
+                                    .table
+                                    .libraries
+                                    .symbols(
+                                        crate::symbol_source::SymbolNamespace::Package(package),
+                                        spelling,
+                                    )
+                                    .builtin_classifier
                         })
                     else {
                         continue;

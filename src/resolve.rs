@@ -27519,6 +27519,7 @@ val result = object { fun value(): String = captured }
                     "()V",
                 );
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
@@ -27549,6 +27550,7 @@ val result = object { fun value(): String = captured }
             };
             let classifier = internal.and_then(import_classifier);
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: internal.map(|internal| {
                     classifier
                         .as_ref()
@@ -30020,6 +30022,7 @@ fun box(): String {
                     | "JavaState"
             ) {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::None,
@@ -30061,6 +30064,7 @@ fun box(): String {
                     info
                 };
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
@@ -30230,6 +30234,7 @@ fun box(): String {
                 ..Default::default()
             };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: None,
                 classifier: None,
                 callables: crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
@@ -51581,13 +51586,14 @@ impl<'a> Checker<'a> {
                 .packages
                 .iter()
                 .filter_map(|&package| {
-                    classifier_identity(
-                        &source,
+                    let record = source.symbols(
                         crate::symbol_source::SymbolNamespace::Package(package),
                         name,
-                    )
-                    .filter(|&target| !level.builtins_only || source.is_builtin_classifier(target))
-                    .map(|target| (package, self.libraries.canonical_source_type_name(target)))
+                    );
+                    record
+                        .classifier_name
+                        .filter(|_| !level.builtins_only || record.builtin_classifier)
+                        .map(|target| (package, self.libraries.canonical_source_type_name(target)))
                 })
                 .collect::<Vec<_>>();
             if candidates.is_empty() {
@@ -52187,7 +52193,16 @@ impl<'a> Checker<'a> {
             for &package in &level.packages {
                 let Some(candidate) = crate::types::existing_type_name_child(package, name)
                     .filter(|&id| declared(id))
-                    .filter(|&id| !level.builtins_only || self.libraries.is_builtin_classifier(id))
+                    .filter(|_| {
+                        !level.builtins_only
+                            || self
+                                .libraries
+                                .symbols(
+                                    crate::symbol_source::SymbolNamespace::Package(package),
+                                    name,
+                                )
+                                .builtin_classifier
+                    })
                 else {
                     continue;
                 };

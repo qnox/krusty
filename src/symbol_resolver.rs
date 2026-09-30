@@ -7779,6 +7779,7 @@ mod tests {
                     None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
@@ -7844,6 +7845,7 @@ mod tests {
                 classifier
             });
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
@@ -7958,6 +7960,7 @@ mod tests {
                     crate::libraries::Callables::None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: classifier.as_ref().map(|classifier| {
                     classifier
                         .alias_target
@@ -9035,6 +9038,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
@@ -9083,6 +9087,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),

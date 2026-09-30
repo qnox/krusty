@@ -150,8 +150,15 @@ impl Checker<'_> {
             level.packages.iter().any(|&package| {
                 crate::types::existing_type_name_child(package, name)
                     .filter(|&identity| self.source_alias_declared(identity))
-                    .filter(|&identity| {
-                        !level.builtins_only || self.libraries.is_builtin_classifier(identity)
+                    .filter(|_| {
+                        !level.builtins_only
+                            || self
+                                .libraries
+                                .symbols(
+                                    crate::symbol_source::SymbolNamespace::Package(package),
+                                    name,
+                                )
+                                .builtin_classifier
                     })
                     .is_some()
             })

@@ -393,6 +393,7 @@ mod tests {
                     .map(|function| function_classifiers::synthetic(function))
             });
             std::rc::Rc::new(ResolvedSymbols {
+                builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
                 classifier,
                 callables: Callables::None,

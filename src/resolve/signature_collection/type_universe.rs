@@ -37,10 +37,6 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
         self.libraries.platform_flexible_upper_bound(lower)
     }
 
-    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
-        self.libraries.is_builtin_classifier(internal)
-    }
-
     fn symbols(
         &self,
         namespace: crate::symbol_source::SymbolNamespace,
@@ -64,6 +60,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                     crate::libraries::LibraryType::declaration_header(),
                 )),
                 callables: library.callables.clone(),
+                builtin_classifier: false,
                 importable_declaration: library.importable_declaration,
             })
         } else {
@@ -409,13 +406,12 @@ pub(in crate::resolve) fn source_type_universe(
                                 .packages
                                 .iter()
                                 .filter_map(|&package| {
-                                    let target = classifier_identity(
-                                        &source,
+                                    let record = source.symbols(
                                         crate::symbol_source::SymbolNamespace::Package(package),
                                         &source_name,
-                                    )?;
-                                    if level.builtins_only && !source.is_builtin_classifier(target)
-                                    {
+                                    );
+                                    let target = record.classifier_name?;
+                                    if level.builtins_only && !record.builtin_classifier {
                                         return None;
                                     }
                                     Some((package, target))

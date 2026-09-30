@@ -4463,6 +4463,9 @@ impl JvmLibraries {
             })
             .or_else(|| self.proven_classifier(namespace, name));
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
+        let from_builtins = classifier.is_some()
+            && classifier_name
+                .is_some_and(|identity| self.cp.builtin_classifier_name(identity).is_some());
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
                 .alias_target
@@ -4818,10 +4821,10 @@ impl JvmLibraries {
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
         let core = EmptySymbolSource.symbols(namespace, name);
-        let (classifier_name, classifier) = if classifier.is_some() {
-            (classifier_name, classifier)
+        let (classifier_name, classifier, builtin_classifier) = if classifier.is_some() {
+            (classifier_name, classifier, from_builtins)
         } else {
-            (core.classifier_name, core.classifier.clone())
+            (core.classifier_name, core.classifier.clone(), false)
         };
         let classifier = classifier.map(|classifier| {
             classifier_name.map_or(classifier.clone(), |owner| {
@@ -4841,6 +4844,7 @@ impl JvmLibraries {
             ResolvedSymbols {
                 classifier_name,
                 classifier,
+                builtin_classifier,
                 callables,
                 importable_declaration,
             },
@@ -4849,10 +4853,6 @@ impl JvmLibraries {
 }
 
 impl SymbolSource for JvmLibraries {
-    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
-        self.cp.builtin_classifier_name(internal).is_some()
-    }
-
     /// Both answered by the classpath, which is where this provider interned them.
     fn external_callable(
         &self,

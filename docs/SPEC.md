@@ -5507,7 +5507,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every star import. The resolved class is what decides: `kotlin.collections.List` is one of those
   builtins, so `import java.util.*` leaves `Set` as `kotlin.collections.Set` and `import foo.*`
   does not rebind `List` to a `class List` declared in `foo`. A stdlib declaration in the same
-  package is only a default star. `import foo.*` therefore binds `foo.ArrayList`, `foo.Pair`, and
+  package is only a default star. That fact is the winning classifier record's own provenance:
+  an earlier classifier at the same qualified name stays a star-import candidate when a later
+  source also has a `.kotlin_builtins` declaration there, and only the selected builtin receives
+  named-default precedence. `import foo.*` therefore binds `foo.ArrayList`, `foo.Pair`, and
   `foo.Exception`, while `IntRange` stays `kotlin.ranges.IntRange`. Explicit stars also outrank the
   other default stars (`kotlin.sequences`, `kotlin.text`, `kotlin.io`, `kotlin.comparisons`, and
   `java.lang`): `import foo.*` binds `foo.Sequence`, while `Object` stays `java.lang.Object`
@@ -5518,7 +5521,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   star-imported callable still outranks a default-imported one (`import other.*` plus
   `Iterable.map` selects `other.map`). Tests:
   `default_import_resolution_e2e::java_util_star_import_keeps_the_kotlin_collection_name`,
-  `default_import_resolution_e2e::a_stdlib_class_in_a_builtin_package_does_not_outrank_a_star_import`.
+  `default_import_resolution_e2e::a_stdlib_class_in_a_builtin_package_does_not_outrank_a_star_import`,
+  `symbol_source::tests::an_earlier_classifier_keeps_its_own_builtin_provenance`.
   Actualization consumes only the resulting `(source, header type) -> TypeName` table; it cannot
   inspect imports, query a provider, render a name, or intern an unresolved spelling. `import
   plib.model.Tally` against `plib.model.Tally` written out is one classifier;

@@ -6,7 +6,7 @@
 //! callable order: a classifier declared in a `.kotlin_builtins` fragment is a simple default
 //! import and outranks a star import. A stdlib class in the same package is only a default star.
 
-use crate::symbol_source::SymbolSource;
+use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
 use super::{classifier_candidates_at_scope_level, CandidateSelection, FunctionScopeRef};
@@ -40,7 +40,11 @@ pub(crate) fn classifier_candidates_at_import_level<S: SymbolSource + ?Sized>(
 ) -> Vec<TypeName> {
     let mut candidates = classifier_candidates_at_scope_level(source, name, &level.packages);
     if level.builtins_only {
-        candidates.retain(|candidate| source.is_builtin_classifier(*candidate));
+        candidates.retain(|candidate| {
+            let (namespace, leaf) = SymbolNamespace::classifier_key(*candidate);
+            let record = source.symbols(namespace, leaf);
+            record.builtin_classifier && record.classifier_name == Some(*candidate)
+        });
     }
     candidates
 }

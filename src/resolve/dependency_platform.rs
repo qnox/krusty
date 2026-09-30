@@ -324,11 +324,6 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
-    fn is_builtin_classifier(&self, internal: TypeName) -> bool {
-        self.platform.is_builtin_classifier(internal)
-            || self.source().is_builtin_classifier(internal)
-    }
-
     /// The compiled platform assigns every dependency identity this federation hands out.
     fn external_callable(
         &self,
@@ -416,8 +411,15 @@ impl SymbolSource for DependencyPlatform {
             }
         }
         let (source_functions, source_properties) = source.callables.clone().into_parts();
+        let classifier_name = primary.classifier_name.or(source.classifier_name);
+        let builtin_classifier = if primary.classifier_name.is_some() {
+            primary.builtin_classifier
+        } else {
+            source.builtin_classifier
+        };
         let merged = Rc::new(ResolvedSymbols {
-            classifier_name: primary.classifier_name.or(source.classifier_name),
+            classifier_name,
+            builtin_classifier,
             classifier,
             callables: Callables::from_parts(
                 merge_functions(self.platform.as_ref(), primary_functions, source_functions),
