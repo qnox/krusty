@@ -758,6 +758,19 @@ fn ci_runs_prebuilt_box_and_regression_conformance() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
+    let regression_job = workflow
+        .split_once("  conformance-regressions:\n")
+        .expect("conformance regression job")
+        .1
+        .split_once("  # Build the release binaries")
+        .expect("end of conformance regression job")
+        .0;
+    assert!(
+        regression_job.contains("uses: actions/cache/restore@v6")
+            && regression_job.contains("path: target/cache/class-dumps")
+            && regression_job.contains("KRUSTY_CLASS_DUMP_COMPILE_MISSING: \"1\""),
+        "the prebuilt regression lane restores recorded bytes and compiles a cache miss live"
+    );
     let release = workflow
         .find("needs: [ci, klib-semantics, conformance, conformance-regressions, versions, build-release]")
         .expect("release waits on both conformance sets");
