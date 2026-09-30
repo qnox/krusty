@@ -5322,8 +5322,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   selects on the SUBSTITUTED types krusty erased away — `foo(x: T)` vs `foo(x: A<T>)`); an
   erased-`Any` ARGUMENT at a differing position likewise. Override CHAINS across owners keep
   most-derived-first order, erasure differences and all. Exact erased duplicates stay rejected
-  (`ClassFormatError`). Tests: `member_overloads_e2e`; corpus
-  `bridges/substitutionInSuperClass/*` stay sound skips.
+  (`ClassFormatError`). Kotlin declaration identity and the JVM descriptor are different checks.
+  The checker compares published signatures: the Kotlin name, the extension receiver, and the value
+  parameters, including generic arguments, nullability, and the `vararg` flag. A function's own
+  type parameters are alpha-equivalent by ordinal, and the declaration's type-parameter count is
+  part of that identity even when a formal does not occur in the receiver or the value parameters.
+  `<T> f(): Int` and `<T, U> f(): String` are distinct overloads; a call selects one by its
+  explicit type-argument count. The same value parameters and the same return erase to one JVM
+  method, so `<T> f(): String` beside `<T, U> f(): String` is a `platform declaration clash`.
+  The return type is not part of that identity, so `f(): Int` beside
+  `f(): String`, `<T> f(x: T)` beside `<U> f(x: U)`, and `<T> f()` beside `<U> f()`, are
+  `conflicting overloads`. `Array<String>` and `vararg String` are different Kotlin signatures. A missing or
+  erroneous published signature is left unresolved rather than completed from source spelling or a
+  stand-in return. After representation, the JVM backend compares the physical method name and
+  descriptor, return included. `print(vararg Any?): Printer` and `print(objects: Array<Any?>): Unit`
+  stay distinct (`([Ljava/lang/Object;)LPrinter;` versus `([Ljava/lang/Object;)V`), including when
+  the `Unit` overload is `@Deprecated(level = HIDDEN)`. The same parameter erasure with one return
+  is a `platform declaration clash` (`Array<String>` and `vararg String` both returning `String`;
+  `List<Int>` and `List<String>` both returning `String`). Tests: `member_overloads_e2e`,
+  `member_jvm_signature_clash_e2e`; corpus `bridges/substitutionInSuperClass/*` stay sound skips.
 
 - **`override` must override something (module-closed hierarchies).** With overloads, a same-name
   sibling of a different arity no longer pairs with a supertype method, so an `override` modifier

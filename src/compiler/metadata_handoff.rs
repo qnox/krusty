@@ -107,6 +107,8 @@ pub(super) fn accept_active_debug_metadata(
             {
                 ir.fn_decl_lines.insert(ir_function, function.decl_line);
                 ir.fn_sig_lines.insert(ir_function, function.sig_line);
+                ir.fn_signature_offsets
+                    .insert(ir_function, function.span.lo);
                 if function.body_close_line != 0 {
                     ir.fn_close_lines
                         .insert(ir_function, function.body_close_line);

@@ -2428,6 +2428,10 @@ pub struct IrFile {
     /// LineNumberTable instead points here — the two differ exactly when an expression body starts
     /// on a later line than the signature. Same side-map rationale as `fn_decl_lines`.
     pub fn_sig_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → source byte offset of the `fun` keyword. The JVM backend reports a platform
+    /// declaration clash at this position. A method with no entry is a bridge, a default stub, or
+    /// another representation, not a source declaration.
+    pub fn_signature_offsets: std::collections::HashMap<u32, u32>,
     /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
     /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
     /// interleaving property accessors among functions; lowering groups them by kind, so the JVM

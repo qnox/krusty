@@ -1197,6 +1197,8 @@ mod member_extension_property_override_e2e;
 mod member_generic_nullable_result_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
+#[path = "member_jvm_signature_clash_e2e.rs"]
+mod member_jvm_signature_clash_e2e;
 #[path = "member_overloads_e2e.rs"]
 mod member_overloads_e2e;
 #[path = "member_property_inference_e2e.rs"]

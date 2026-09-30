@@ -99,6 +99,7 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
+mod member_overload_clash;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
@@ -4858,21 +4859,12 @@ fn constructor_argument_matches(
 enum ErasedTypeKey {
     Ty(Ty),
     Function(usize),
-    Unresolved(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ErasedSigKey {
-    name: String,
-    receiver: Option<ErasedTypeKey>,
-    params: Vec<ErasedTypeKey>,
 }
 
 fn erased_key_ty(key: ErasedTypeKey) -> Ty {
     match key {
         ErasedTypeKey::Ty(t) => t,
         ErasedTypeKey::Function(n) => Ty::obj(&format!("kotlin/Function{n}")),
-        ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
     }
 }
 
@@ -52383,45 +52375,6 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(expansion, &bindings)
     }
 
-    /// The erased signature key of a function, using the type parameters visible in `scope` plus the
-    /// function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
-    /// formatting belongs in the backend.
-    fn erased_sig_key(&self, scope: &CheckerScope<'_>, f: &FunDecl) -> ErasedSigKey {
-        let tparams =
-            scope
-                .visible_tparams()
-                .extended_with(&f.type_params, &f.type_param_bounds, &|name| {
-                    self.select_classifier(scope, name).found()
-                });
-        // Resolve the complete TypeRef in a declaration-owned rung. Looking only at `TypeRef::name`
-        // collapses every function type to the parser marker `<fun>` and falsely reports
-        // `Box.() -> Unit` (Function1) as colliding with `() -> Unit` (Function0). This is the same
-        // semantic type resolution used by ordinary checking; erasure below merely discards the
-        // distinctions the target ABI cannot retain.
-        let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
-        declaration_scope.declare_tparams(&f.type_params, &tparams, |_| false);
-        let key = |reference: &TypeRef, is_vararg: bool| {
-            let ty = self.type_ref_ty_silent(&declaration_scope, reference);
-            if ty == Ty::Error {
-                ErasedTypeKey::Unresolved(reference.name.clone())
-            } else {
-                // A `vararg` parameter is PASSED as an array (`vararg a: Int` → `[I`), so it keys as
-                // its array type: `of(e: Int)` and `of(vararg a: Int)` have different descriptors and
-                // are legal overloads, while `Array<String>` and `vararg String` still collide.
-                erased_type_key(semantic_value_parameter_ty(ty, is_vararg))
-            }
-        };
-        ErasedSigKey {
-            name: f.name.clone(),
-            receiver: f.receiver.as_ref().map(|receiver| key(receiver, false)),
-            params: f
-                .params
-                .iter()
-                .map(|parameter| key(&parameter.ty, parameter.is_vararg))
-                .collect(),
-        }
-    }
-
     /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
     ///
     /// Keep this as the single checker-level semantic query. The module provider exports its
@@ -52435,28 +52388,6 @@ impl<'a> Checker<'a> {
                 .classifier(name)
                 .is_some_and(|class| class.value_underlying.is_some())
         })
-    }
-
-    /// Report (and thereby skip the file for) functions whose signatures collide: an EXACT
-    /// erased-signature duplicate is always a JVM `ClassFormatError`. Same-name functions with
-    /// DIFFERENT erased signatures are legal overloads — top-level AND class members — dispatched
-    /// at the call site by argument types ([`pick_overload`] / `ClassSig::method_matching`, with
-    /// the member overload lists flowing through `module_symbols` into the `SymbolResolver`).
-    fn check_no_erased_clash(&mut self, scope: &CheckerScope<'_>, funs: &[&FunDecl]) {
-        let mut seen: HashMap<ErasedSigKey, Span> = HashMap::new();
-        for f in funs {
-            // `erased_sig_key` includes the name and (for extensions) the receiver, so distinct names and
-            // same-named extensions on different receivers don't collide.
-            let key = self.erased_sig_key(scope, f);
-            if seen.contains_key(&key) {
-                self.diags.error(
-                    f.span,
-                    format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
-                );
-            } else {
-                seen.insert(key, f.span);
-            }
-        }
     }
 
     fn report_val_reassignment(&mut self, span: Span, message: impl Into<String>) {
@@ -56552,7 +56483,7 @@ impl<'a> Checker<'a> {
             let label_depth = labels.len();
             self.this_labels.extend(labels);
             let methods: Vec<&FunDecl> = cl.methods.iter().collect();
-            self.check_no_erased_clash(scope, &methods);
+            self.check_conflicting_member_overloads(d, current_owner, &methods);
             if let Some(internal) = current_owner {
                 // An `override` member must MATCH a supertype member (same name + arity) —
                 // kotlinc rejects an `override` that overrides nothing. With member overloads a
