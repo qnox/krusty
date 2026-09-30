@@ -669,6 +669,27 @@ fn class_member_and_top_level_with_context() {
 }
 
 #[test]
+fn generic_property_with_context_parameters() {
+    // The property's own type parameters are not the class's. Metadata must name `X` and `Y`
+    // when it records `Entries<X, Y>` and the context parameters, or emission panics.
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        class Entries<K, V>
+        class C<Z> {
+            context(x: X, y: Y)
+            var <X, Y> ctx: Entries<X, Y>
+                get() = Entries<X, Y>()
+                set(value) {}
+        }
+        fun box(): String {
+            val c = C<String>()
+            return "OK"
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
 fn missing_context_names_the_parameter() {
     const SRC: &str = r#"
         // LANGUAGE: +ContextParameters

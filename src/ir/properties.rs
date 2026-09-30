@@ -68,6 +68,9 @@ pub struct IrProperty {
     pub decl_line: u32,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
+    /// Type parameters this property declares (`var <X, Y> ctx: Map<X, Y>`). They are not the
+    /// enclosing class's parameters. Metadata and each accessor's generic signature publish them.
+    pub type_params: Vec<IrTypeParameter>,
     /// Kotlin declaration visibility. Backends consume this semantic fact when choosing the
     /// visibility of an accessor or a target-specific storage realization; they must not recover it
     /// from a rendered owner/property-name key.

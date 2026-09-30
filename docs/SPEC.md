@@ -7745,6 +7745,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generated members follow its declared ones, and enum entries take their declaration position,
   in both the protobuf lists and `d2`, as kotlinc 2.4.20 does; see `docs/METADATA_NOTES.md`.
   Test: `tests/metadata_member_order_e2e.rs`.
+- **A class member property publishes its own type parameters.** `var <X, Y> ctx: Map<X, Y>`
+  inside `class C<Z>` records `X` and `Y` on the property and on each accessor, after the class
+  parameter `Z`. `Map<X, Y>` and the context parameters `x: X`, `y: Y` encode as those ids.
+  Test: `tests/context_parameters_e2e.rs::generic_property_with_context_parameters`.
 
 - **An enum entry body is an anonymous object in metadata.** Its class records an `ENUM_ENTRY`
   kind, LOCAL visibility and no constructor, under the local class id `pkg/Enum.ENTRY`; the classes
