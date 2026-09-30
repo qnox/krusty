@@ -160,6 +160,23 @@ pub struct DumpResponse {
     pub path: PathBuf,
 }
 
+/// A fully rendered dump that has not crossed the filesystem publication boundary yet.
+///
+/// A reused classpath can become stale while analysis is running. Keeping the text in memory lets
+/// the worker validate that snapshot before replacing the stable cache path.
+struct UnpublishedDump {
+    text: String,
+    cache_key: String,
+    cache_root: PathBuf,
+}
+
+impl UnpublishedDump {
+    fn publish(self) -> Option<DumpResponse> {
+        let path = crate::dump_cache::store(&self.cache_root, &self.cache_key, &self.text).ok()?;
+        Some(DumpResponse { path })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct WireDiagnostic {
     lo: u32,
@@ -972,12 +989,13 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 continue;
             }
             OwnedWorkerRequest::Dump { dump } => {
-                let (response, classpath) = render_dump_request(&mut prepared, dump);
+                let (dump, classpath) = render_dump_request(&mut prepared, dump);
                 // A clean EOF makes the supervisor retry the request in a fresh worker.
-                // Publishing the rendered path would accept a dump of the reused snapshot.
+                // Neither the stable cache path nor its response may publish a stale snapshot.
                 if classpath.is_some_and(|classpath| !classpath.snapshot_is_current()) {
                     return Ok(());
                 }
+                let response = dump.and_then(UnpublishedDump::publish);
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
                 write_framed(writer, &encoded.bytes)?;
@@ -1171,18 +1189,17 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
     }
 }
 
-/// Analyze the payload, lower the target file, and store the rendered dump.
+/// Analyze the payload and render the target file without publishing it.
 ///
-/// The response is `None` when the request cannot be interpreted or the dump cannot be written.
-/// The classpath is `Some` only after this request selected one, so the caller can withhold the
-/// frame when that snapshot is no longer current. An uninterpreted request never selected a
-/// classpath and still publishes `None`. Lowering failures are not among those cases: the bail
-/// reason is the most valuable line in the document, so it is rendered into the IR section instead
-/// of discarding the dump.
+/// The dump is `None` when the request cannot be interpreted. The classpath is `Some` only after
+/// this request selected one, so the caller can validate that snapshot before writing the stable
+/// cache path. An uninterpreted request never selected a classpath and still publishes `None`.
+/// Lowering failures are not among those cases: the bail reason is the most valuable line in the
+/// document, so it is rendered into the IR section instead of discarding the dump.
 fn render_dump_request(
     prepared: &mut PreparedClasspath,
     request: OwnedDumpRequest,
-) -> (Option<DumpResponse>, Option<Rc<Classpath>>) {
+) -> (Option<UnpublishedDump>, Option<Rc<Classpath>>) {
     let sources = request.analysis.sources;
     if request.target >= sources.len() {
         return (None, None);
@@ -1239,21 +1256,24 @@ fn render_dump_request(
         platform,
         &features,
     );
-    let response = render_analyzed_dump(
+    let text = render_analyzed_dump(
         &analysis,
         &sources[request.target],
         request.target,
         &request.label,
-        &request.cache_key,
-        &request.cache_root,
     );
     if stub_overlay_set {
         classpath.clear_stub_overlay();
     }
-    (response, Some(classpath))
+    let dump = text.map(|text| UnpublishedDump {
+        text,
+        cache_key: request.cache_key,
+        cache_root: request.cache_root,
+    });
+    (dump, Some(classpath))
 }
 
-/// Render the analyzed target file's document and store it under `cache_root`.
+/// Render the analyzed target file's document in memory.
 ///
 /// Inspection retains syntax and checked editor facts, but executable common IR exists only while
 /// the production streaming compiler consumes checked FIR. Do not reconstruct it from this AST.
@@ -1262,11 +1282,9 @@ fn render_analyzed_dump(
     source: &str,
     target: usize,
     label: &str,
-    cache_key: &str,
-    cache_root: &Path,
-) -> Option<DumpResponse> {
+) -> Option<String> {
     let file_analysis = analysis.files.get(target)?;
-    let text = krusty::dump::render_file_dump_with_limit(
+    Some(krusty::dump::render_file_dump_with_limit(
         &krusty::dump::FileDumpInput {
             label,
             source,
@@ -1276,10 +1294,7 @@ fn render_analyzed_dump(
             ir: Err("common IR was not captured during streaming compilation"),
         },
         crate::dump_cache::MAX_DUMP_BYTES,
-    );
-
-    let path = crate::dump_cache::store(cache_root, cache_key, &text).ok()?;
-    Some(DumpResponse { path })
+    ))
 }
 
 fn json_io(error: serde_json::Error) -> io::Error {
@@ -1546,9 +1561,17 @@ mod tests {
             "krusty-worker-dump-classpath-cache-{unique}-{}",
             std::process::id()
         ));
-        std::fs::create_dir(&directory).expect("create classpath directory");
+        let package = directory.join("hidden");
+        std::fs::create_dir_all(&package).expect("create classpath package");
+        let class =
+            krusty::jvm::classfile::ClassWriter::new("hidden/Only", "java/lang/Object").finish();
+        let class_file = package.join("Only.class");
+        std::fs::write(&class_file, class).expect("write classpath class");
         let classpath = [directory.clone()];
-        let sources = ["fun use() = 1\n".to_string()];
+        let sources = ["fun use(value: hidden.Only) {}\n".to_string()];
+        let cache_key = "file:///workspace/src/Main.kt";
+        let seeded_path = crate::dump_cache::store(&cache_root, cache_key, "retained dump")
+            .expect("seed stable dump path");
         let analysis = encode_request(
             &[SourceInput::kotlin(&sources[0])],
             1,
@@ -1564,7 +1587,7 @@ mod tests {
                 source_kinds: &[SourceKind::Kotlin],
                 target: 0,
                 label: "src/Main.kt",
-                cache_key: "file:///workspace/src/Main.kt",
+                cache_key,
                 cache_root: &cache_root,
                 result_count: 1,
                 inferred_count: 1,
@@ -1579,12 +1602,11 @@ mod tests {
         write_framed(&mut framed, &analysis).unwrap();
         let after_analysis = framed.len() as u64;
         write_framed(&mut framed, &dump).unwrap();
-        let generated = directory.join("generated");
         let mut reader = MutateAfter {
             inner: Cursor::new(framed),
             after: after_analysis,
             mutation: Some(Box::new(move || {
-                std::fs::create_dir(&generated).expect("mutate classpath directory");
+                std::fs::remove_file(&class_file).expect("remove classpath class");
             })),
         };
         let mut output = Vec::new();
@@ -1603,14 +1625,43 @@ mod tests {
             .expect("analysis response");
         let analyses: Vec<AnalysisResponse> = serde_json::from_slice(&analysis).unwrap();
         assert_eq!(analyses.len(), 1);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
         assert!(
             read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
                 .unwrap()
                 .is_none(),
             "stale worker must not publish a dump of the reused classpath"
         );
+        assert_eq!(
+            std::fs::read_to_string(&seeded_path).expect("read retained dump"),
+            "retained dump",
+            "a stale render must not replace the stable cache path"
+        );
+
+        let mut retry = Vec::new();
+        write_framed(&mut retry, &dump).unwrap();
+        let mut retry_output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(retry), &mut retry_output, Vec::new()).unwrap();
+        let refreshed_path = read_dump_path(retry_output);
+        assert_eq!(refreshed_path, seeded_path);
+        let refreshed = std::fs::read_to_string(&refreshed_path).expect("read refreshed dump");
+        let checker = refreshed
+            .split_once("## Checker\n\n```\n")
+            .expect("checker section")
+            .1
+            .split_once("\n```\n")
+            .expect("checker fence")
+            .0;
+        let diagnostics = checker
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            diagnostics,
+            vec!["1:16 error unresolved reference 'hidden'."]
+        );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
-        let _ = std::fs::remove_dir_all(&cache_root);
+        std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
     }
 
     #[test]

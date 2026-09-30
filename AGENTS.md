@@ -198,6 +198,18 @@ review explanation tied to an active migration plan.
 - Compatibility branches are not harmless: if the common path replaces one, delete the branch and
   its helper. Do not retain it behind `#[allow(dead_code)]`.
 
+## Snapshot publication
+
+- A result derived from a filesystem or classpath snapshot must prove that snapshot is current
+  before publishing any externally visible state. Publication includes replacing a stable cache
+  file as well as sending a response; suppressing the response after a write is too late.
+
+Useful audit command:
+
+```text
+rg -n 'snapshot_is_current|dump_cache::store|write_framed' crates/krusty-lsp/src
+```
+
 ## Review-first smell scan
 
 Review these before reading a diff linearly:
