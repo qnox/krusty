@@ -819,9 +819,9 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         parameter: usize,
     ) -> Result<bool, BodyCheckFailure> {
-        let flags = self
+        let commitment = self
             .info
-            .resolved_selected_parameter_defaults
+            .resolved_call_arg_slots
             .get(&expression)
             .ok_or_else(|| {
                 self.failure(
@@ -829,12 +829,16 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
             })?;
-        flags.get(parameter).copied().ok_or_else(|| {
-            self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::UnsupportedCallShape,
-            )
-        })
+        commitment
+            .declares_default
+            .get(parameter)
+            .copied()
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })
     }
 
     fn call_parameter_ordinal(
