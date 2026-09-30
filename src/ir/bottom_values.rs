@@ -5,7 +5,7 @@
 //! [`IrExpr::BottomValue`]. A backend emits the producer according to its own representation and
 //! then realizes the recorded completion mode without re-reading AST shape or logical-type maps.
 
-use super::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
+use super::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
 /// What a discarded use of a checked bottom value does. Value uses always terminate; a substituted
@@ -59,23 +59,40 @@ fn completion_for(ir: &IrFile, mut expression: ExprId) -> Option<IrBottomValueCo
                 value: Some(value), ..
             } => expression = *value,
             IrExpr::NotNullAssert { .. } => return Some(IrBottomValueCompletion::Diverge),
-            IrExpr::MethodCall { .. } => {
-                return Some(if substituted_generic {
-                    IrBottomValueCompletion::FallThroughWhenDiscarded
-                } else {
-                    IrBottomValueCompletion::Diverge
-                });
-            }
+            IrExpr::MethodCall { .. } => return Some(invoked_completion(substituted_generic)),
             IrExpr::Call { callee, .. } if physically_invoked(callee) => {
-                return Some(if substituted_generic {
-                    IrBottomValueCompletion::FallThroughWhenDiscarded
-                } else {
-                    IrBottomValueCompletion::Diverge
-                });
+                return Some(invoked_completion(substituted_generic));
+            }
+            // A property read is still the checked operation here. Realization replaces that node
+            // in place with the accessor call or field load, so the completion has to be chosen
+            // before the producer has a call shape. The accessor's descriptor returns
+            // `java/lang/Void`, one physical word the statement discard would otherwise leave on
+            // the stack.
+            IrExpr::PropertyRead { .. } => return Some(invoked_completion(substituted_generic)),
+            IrExpr::Checked(operation) if property_read(operation) => {
+                return Some(invoked_completion(substituted_generic));
             }
             _ => return None,
         }
     }
+}
+
+fn invoked_completion(substituted_generic: bool) -> IrBottomValueCompletion {
+    if substituted_generic {
+        IrBottomValueCompletion::FallThroughWhenDiscarded
+    } else {
+        IrBottomValueCompletion::Diverge
+    }
+}
+
+fn property_read(operation: &IrCheckedOperation) -> bool {
+    matches!(
+        operation,
+        IrCheckedOperation::PropertyRead { .. }
+            | IrCheckedOperation::ExternalPropertyRead { .. }
+            | IrCheckedOperation::LateinitFieldRead { .. }
+            | IrCheckedOperation::BackingFieldRead { .. }
+    )
 }
 
 fn physically_invoked(callee: &Callee) -> bool {
@@ -186,5 +203,40 @@ mod tests {
         assert!(ir.expr_diverges_by(fallthrough, &no_leaf_diverges));
         assert!(ir.expr_discarding_diverges_by(diverging, &no_leaf_diverges));
         assert!(ir.expr_discarding_diverges_by(consumed, &no_leaf_diverges));
+    }
+
+    #[test]
+    fn a_checked_nothing_property_read_diverges_until_realization() {
+        let mut ir = IrFile::with_package(None);
+        let read = ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
+            target: crate::fir::PropertyId::from_raw(0),
+            dispatch_receiver: None,
+            extension_receiver: None,
+            context_arguments: Vec::new(),
+            substitutions: Vec::new(),
+        }));
+        let completed = complete_bottom_value(&mut ir, read, Ty::Nothing);
+        let IrExpr::BottomValue {
+            producer,
+            completion: IrBottomValueCompletion::Diverge,
+        } = ir.expr(completed)
+        else {
+            panic!("a Nothing property read must select divergent completion")
+        };
+        assert_eq!(*producer, read);
+
+        let coerced = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: read,
+            type_operand: Ty::Nothing,
+        });
+        let substituted = complete_bottom_value(&mut ir, coerced, Ty::Nothing);
+        assert!(matches!(
+            ir.expr(substituted),
+            IrExpr::BottomValue {
+                completion: IrBottomValueCompletion::FallThroughWhenDiscarded,
+                ..
+            }
+        ));
     }
 }
