@@ -1,6 +1,6 @@
 //! A non-null `as` narrows its operand for reads that run only after the cast.
 
-use super::common::expect_box_same_as_kotlinc;
+use super::common::{assert_errors_match_kotlinc, expect_box_same_as_kotlinc};
 
 #[test]
 fn cast_in_an_earlier_conjunct_narrows_an_inferred_equals() {
@@ -44,5 +44,37 @@ fun box(): String {
 }
 "#,
         "CastOperatorOperand",
+    );
+}
+
+#[test]
+fn cast_only_on_the_right_of_and_does_not_narrow_a_later_read() {
+    assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            r#"
+fun later(other: Any): Int {
+    if (false && (other as String).isEmpty()) {}
+    return other.length
+}
+"#,
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn cast_only_on_the_right_of_or_does_not_narrow_a_later_read() {
+    assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            r#"
+fun later(other: Any): Int {
+    if (true || (other as String).isEmpty()) {}
+    return other.length
+}
+"#,
+        )],
+        &[],
     );
 }

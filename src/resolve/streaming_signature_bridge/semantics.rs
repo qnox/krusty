@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod cast_narrowing;
+
 /// Remove solver-local projection captures from an inferred declaration result. A capture is
 /// readable through its upper bound at the result root; inside a generic argument it is exposed as
 /// a star projection so the published signature does not claim an invariant type that callers
@@ -5585,31 +5587,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         operands: &[crate::fir::ResolvedTy],
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let Some(first) = operands.first().copied() else {
-            return Err(Self::failure());
-        };
-        let _ = origin;
-        // Least upper bound is type algebra; only its LOOKUP CONTEXT is caller-specific. Signature
-        // evaluation supplies the module view of the file whose signature is being solved, so no
-        // checker is constructed here. A branch whose type is still undetermined has no common
-        // supertype with anything and declines rather than naming a placeholder.
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let oracle = crate::symbol_resolver::SourceOracle(&source);
-        let joined = operands
-            .iter()
-            .skip(1)
-            .try_fold(first.get(), |left, right| {
-                super::super::semantic_common_supertype(&source, &oracle, left, right.get())
-            })
-            .ok_or_else(Self::failure)?;
-        if joined.mentions_error() || joined.mentions_pending() {
-            return Err(Self::failure());
-        }
-        crate::fir::ResolvedTy::new(joined).map_err(|_| Self::failure())
+        cast_narrowing::least_upper_bound(self.table, scope, origin, operands)
+            .map_err(|_| Self::failure())
     }
 
     fn make_nullable(
@@ -5633,23 +5612,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         original: crate::fir::ResolvedTy,
         target: crate::fir::ResolvedTy,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let oracle = crate::symbol_resolver::SourceOracle(&source);
-        let chosen = if crate::assignable::is_subtype(
-            &crate::assignable::TyCtx::new(),
-            &oracle,
-            original.get(),
-            target.get(),
-        ) {
-            original.get()
-        } else {
-            target.get()
-        };
-        crate::fir::ResolvedTy::new(chosen).map_err(|_| Self::failure())
+        cast_narrowing::narrow_successful_cast(self.table, scope, original, target)
+            .map_err(|_| Self::failure())
     }
 
     fn call_proves_argument_non_null(

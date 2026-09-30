@@ -2724,8 +2724,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `other` as `String`. The same holds for the right operand of `||` and of any eager operator,
   and for an inferred return whose signature is solved before the body check. A cast on the
   right of `&&` or `||` does not narrow code that can skip that operand. The cast never widens a
-  more specific stable type (`x: String` stays `String` after `x as Any`). Test:
-  `tests/cast_evaluation_order_e2e.rs`.
+  more specific stable type (`x: String` stays `String` after `x as Any`). Tests:
+  `tests/cast_evaluation_order_e2e.rs`
+  (`cast_only_on_the_right_of_and_does_not_narrow_a_later_read`,
+  `cast_only_on_the_right_of_or_does_not_narrow_a_later_read`).
 - **Smart casts apply to stable ACCESS PATHS, not only plain names** (`tests/path_smartcast_e2e.rs`).
   `==`/`!=` null checks, `is`/`!is` type tests, and contract conclusions (`returns(false) implies
   (this != null)` — `if (a.p.isNullOrBlank()) … else { a.p.length }`; `require(a.p != null)`) narrow

@@ -63,6 +63,7 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
+mod cast_narrowing;
 mod catch_flow;
 mod checker_symbol_queries;
 mod classifier_associated;
@@ -51852,75 +51853,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// Collect checked-cast facts from subexpressions that certainly ran when `expression` ran.
-    fn as_cast_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        out: &mut Vec<(NarrowPath, Ty)>,
-    ) {
-        match self.file.expr(expression).clone() {
-            Expr::As {
-                operand,
-                ty,
-                nullable,
-            } => {
-                self.as_cast_narrowings(scope, operand, out);
-                if nullable {
-                    return;
-                }
-                let Some(path) = self.expr_access_path(operand) else {
-                    return;
-                };
-                let Some(stable_ty) = self.stable_path_ty(scope, &path, self.span(expression))
-                else {
-                    return;
-                };
-                if let Some(narrowed) = self.proven_narrowed_ty(scope, Some(stable_ty), &ty) {
-                    out.push((path, narrowed));
-                }
-            }
-            Expr::Binary { op, lhs, rhs, .. } => {
-                self.as_cast_narrowings(scope, lhs, out);
-                if !matches!(op, BinOp::And | BinOp::Or) {
-                    self.as_cast_narrowings(scope, rhs, out);
-                }
-            }
-            Expr::Elvis { lhs, .. } => self.as_cast_narrowings(scope, lhs, out),
-            Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Is { operand, .. } => {
-                self.as_cast_narrowings(scope, operand, out)
-            }
-            Expr::Member { receiver, .. } | Expr::SafeCall { receiver, .. } => {
-                self.as_cast_narrowings(scope, receiver, out)
-            }
-            Expr::Index { array, indices } => {
-                self.as_cast_narrowings(scope, array, out);
-                for index in indices {
-                    self.as_cast_narrowings(scope, index, out);
-                }
-            }
-            Expr::Call { callee, args } => {
-                self.as_cast_narrowings(scope, callee, out);
-                for argument in args {
-                    self.as_cast_narrowings(scope, argument, out);
-                }
-            }
-            Expr::InRange {
-                value, start, end, ..
-            } => {
-                self.as_cast_narrowings(scope, value, out);
-                self.as_cast_narrowings(scope, start, out);
-                self.as_cast_narrowings(scope, end, out);
-            }
-            Expr::RangeTo { lo, hi, .. } => {
-                self.as_cast_narrowings(scope, lo, out);
-                self.as_cast_narrowings(scope, hi, out);
-            }
-            Expr::If { cond, .. } => self.as_cast_narrowings(scope, cond, out),
-            _ => {}
-        }
-    }
-
     /// The DECLARED type of a stable access path — `None` when any step can change between a
     /// proof and a later re-read, so no smart cast is sound. kotlinc's stability rules:
     /// * the ROOT is `this` or a local `val`/parameter, or a local `var` that no changing closure
@@ -65743,17 +65675,8 @@ impl<'a> Checker<'a> {
                 Some(ty) => ty,
                 None => self.expr(scope, lhs),
             };
-            // Eager operators evaluate the left operand completely before the right, so a cast
-            // there has run. `&&` / `||` take the short-circuit path above.
-            let mut casts = Vec::new();
-            self.as_cast_narrowings(scope, lhs, &mut casts);
-            let rhs_scope = scope.child(ScopeKind::Block);
-            let scope = if casts.is_empty() {
-                scope
-            } else {
-                self.apply_narrowings(&rhs_scope, &casts, &[], false);
-                &rhs_scope
-            };
+            let eager_rhs = self.evaluated_cast_scope(scope, lhs);
+            let scope = eager_rhs.as_ref().unwrap_or(scope);
             let equality = matches!(op, BinOp::Eq | BinOp::Ne);
             fn contains_bottom_evidence(ty: Ty) -> bool {
                 match ty {
