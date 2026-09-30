@@ -1556,8 +1556,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An ordinary call to a `disable`-compiled interface member is still `invokeinterface` on that
   member. The `$DefaultImpls` static is the body a class forwards to when it does not override
   the member, and the target of `super`; it is not the call an override must replace.
-  `ClosedRange.contains` is that shape in the standard library.
-  Test: `tests/interface_holder_dispatch_e2e.rs`.
+  `ClosedRange.contains` is that shape in the standard library. A `ClosedRange<Double>` or
+  `ClosedRange<Float>` value therefore runs that range's own `contains`, including its NaN and
+  signed-zero results, instead of the holder body.
+  Test: `tests/interface_holder_dispatch_e2e.rs`. Corpus:
+  `ranges/contains/inRangeWithCustomContains.kt`, `ranges/contains/inOptimizableDoubleRange.kt`,
+  `ranges/contains/inOptimizableFloatRange.kt`.
   `$DefaultImpls` holder bytes are differential-tested exactly against kotlinc, including their
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
   synthetic Kotlin metadata.

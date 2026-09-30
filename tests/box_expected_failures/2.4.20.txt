@@ -195,8 +195,6 @@ properties/lateinit/topLevel/uninitializedMemberAccess.kt
 properties/lateinit/topLevel/uninitializedRead.kt
 ranges/contains/generated/doubleRangeUntil.kt
 ranges/contains/inComparableRange.kt
-ranges/contains/inOptimizableDoubleRange.kt
-ranges/contains/inOptimizableFloatRange.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
