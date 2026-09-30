@@ -15,14 +15,15 @@
 //! that archive records the open range for each dump.
 //!
 //! `KRUSTY_RECORD=1` or `KRUSTY_RECORD_CLASS_DUMPS=1` ignores a stored dump and recompiles. A
-//! release or RC with no matching dump fails locally instead of compiling: master has to refresh
-//! the GitHub cache. Pull-request and merge-group CI may compile a missing entry live, but never
-//! writes it into the restored archive. Every recorded run keeps its exit code and kotlinc
-//! diagnostics, whether the build succeeded or failed, so a later assert replays them. A class dump
-//! that has no exit code or diagnostics fails an assert that needs them unless CI is allowed to
-//! compile the missing entry live. A snapshot, dev, or beta build still compiles, because that
-//! version is not an immutable artifact and never reads or writes the archive. Only master CI
-//! publishes an updated cache.
+//! release or RC with no matching dump fails locally instead of compiling. CI compiles that
+//! missing test with kotlinc instead of failing. Master stores the new recording and publishes
+//! that job's archive; a pull request leaves the restored archive unchanged. A restored entry is
+//! replayed, so a run whose tests are already recorded does not call kotlinc. Every recorded run
+//! keeps its exit code and kotlinc diagnostics, whether the build succeeded or failed, so a later
+//! assert replays them. A class dump that has no exit code or diagnostics fails an assert that
+//! needs them unless CI is allowed to compile the missing entry live. A snapshot, dev, or beta
+//! build still compiles, because that version is not an immutable artifact and never reads or
+//! writes the archive.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
@@ -1123,14 +1124,34 @@ pub fn write_replayed_classes(args: &[String], files: &BTreeMap<String, Vec<u8>>
     write_output(&invocation.out, files);
 }
 
-/// Store the class files, exit code, and diagnostics produced while recording is forced. A
-/// successful and a rejected compile are both stored, so a later assert can replay either. A
-/// non-release compiler does not write the archive.
+/// Store the class files, exit code, and diagnostics from a live compile.
+///
+/// A forced re-record stores every compile. A cache miss stores only the invocation that
+/// actually compiled, and only when this run publishes the archive. A pull request compiles
+/// the miss and leaves the restored archive unchanged. A non-release compiler does not write.
 pub fn remember_class_dump(args: &[String], code: i32, stderr: &str) {
-    if !record_forced() || !ci_allows_write() {
+    remember_live_compile(
+        args,
+        code,
+        stderr,
+        &dumps_root(),
+        compiler_dump_version(),
+        ci_allows_write() && (record_forced() || compile_missing_allowed()),
+    );
+}
+
+fn remember_live_compile(
+    args: &[String],
+    code: i32,
+    stderr: &str,
+    root: &Path,
+    compiler: Option<DumpVersion>,
+    store: bool,
+) {
+    if !store {
         return;
     }
-    let Some(compiler) = compiler_dump_version() else {
+    let Some(compiler) = compiler else {
         return;
     };
     let invocation = match parse_invocation(args) {
@@ -1141,7 +1162,7 @@ pub fn remember_class_dump(args: &[String], code: i32, stderr: &str) {
     let mut files = read_output_tree(&invocation.out).unwrap_or_default();
     attach_status(&mut files, code, stderr);
     store_files(
-        &dumps_root(),
+        root,
         INVOCATION_MODULE,
         &hex128(invocation.fingerprint),
         compiler,
@@ -1652,6 +1673,48 @@ mod tests {
                 .get("pkg/A")
                 .unwrap(),
             b"cached bytes"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
+        let root = temp_root("publish-miss");
+        let src = root.join("Naming.kt");
+        std::fs::write(&src, "fun box() = \"OK\"\n").unwrap();
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("NamingKt.class"), b"class-bytes").unwrap();
+        let args = vec![
+            "-d".to_string(),
+            out.display().to_string(),
+            src.display().to_string(),
+        ];
+        let release = version("2.4.20");
+        super::remember_live_compile(&args, 0, "", &root, Some(release), true);
+        let replayed =
+            super::replay_class_dump_with_policy(&args, &root, Some(release), false, false)
+                .expect("a stored miss replays");
+        assert!(replayed.status);
+        assert_eq!(replayed.code, 0);
+        assert_eq!(
+            replayed.files.get("NamingKt.class").unwrap(),
+            b"class-bytes"
+        );
+
+        let other = root.join("Other.kt");
+        std::fs::write(&other, "fun other() = 1\n").unwrap();
+        let unpublished = vec![
+            "-d".to_string(),
+            out.display().to_string(),
+            other.display().to_string(),
+        ];
+        super::remember_live_compile(&unpublished, 0, "", &root, Some(release), false);
+        let missing =
+            super::replay_class_dump_with_policy(&unpublished, &root, Some(release), false, true);
+        assert!(
+            missing.is_none(),
+            "a miss that is not published compiles live instead of failing"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

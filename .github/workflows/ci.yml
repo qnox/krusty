@@ -86,21 +86,17 @@ jobs:
         id: recorded-mode
         env:
           CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
-          MATCHED_KEY: ${{ steps.recorded-bytes.outputs.cache-matched-key }}
           MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
+          # A restored entry is replayed. A test absent from this job's archive compiles
+          # with kotlinc instead of failing. Master publishes the archive, including that
+          # new recording, under this commit. A pull request does not write it.
           record=0
+          compile_missing=1
           write=0
-          compile_missing=0
           if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
-            record=1
             write=1
-          elif [ "$MASTER_PUSH" != true ]; then
-            compile_missing=1
-            if [ -z "$MATCHED_KEY" ]; then
-              record=1
-            fi
           fi
           echo "record=$record" >> "$GITHUB_OUTPUT"
           echo "write=$write" >> "$GITHUB_OUTPUT"
@@ -114,9 +110,7 @@ jobs:
           # fails, a slow runner does not.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
-          # A PR consumes cached entries from its master base and compiles any missing entries live,
-          # including when restore supplied only an older prefix cache. It never changes that cache.
-          # A master push refreshes the archive before publishing its immutable SHA-keyed cache.
+          # This job's archive only. The conformance job publishes a separate one.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
@@ -259,15 +253,31 @@ jobs:
             target/cache/box-corpus/${{ needs.versions.outputs.max }}
             target/cache/ser-corpus/${{ needs.versions.outputs.max }}
           key: kotlin-${{ needs.versions.outputs.max }}-${{ hashFiles('kotlin-versions') }}
-      # Same archive the ci job restores. This job only reads it and may compile a missing
-      # entry live; it does not publish the cache.
+      # This job's archive, separate from the one `ci` publishes. A restored entry is
+      # replayed. A test absent from the archive compiles with kotlinc. Master saves
+      # the archive, including that new recording.
       - name: restore recorded kotlinc bytes
+        id: recorded-bytes
         uses: actions/cache/restore@v6
         with:
           path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-${{ needs.versions.outputs.max }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
-            recorded-kotlinc-bytes-${{ needs.versions.outputs.max }}-
+            recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-
+      - name: select recorded-byte cache mode
+        id: recorded-mode
+        env:
+          CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          compile_missing=1
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+          echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       - name: download conformance test binary
         uses: actions/download-artifact@v8
         with:
@@ -275,11 +285,19 @@ jobs:
       - name: run conformance regressions
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
-          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_RECORD_CLASS_DUMPS: "0"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
           just conformance-regressions "$PWD/conformance-bin" "${{ needs.versions.outputs.max }}"
+      - name: save recorded kotlinc bytes
+        if: steps.recorded-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.sha }}
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
