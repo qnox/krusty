@@ -1,8 +1,78 @@
 //! Applied classifier hierarchy and receiver projection.
 
+use std::cell::{Cell, RefCell};
+
 use super::{ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds};
+use crate::name_tree::FxHashMap;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
+
+thread_local! {
+    /// Owned projection lists. These are hierarchy results, not `Ty::Obj` argument slices, so they
+    /// stay in this map and are freed when the compilation drops it.
+    static PROJECTION_CACHE: RefCell<Option<FxHashMap<Ty, Box<[Ty]>>>> = RefCell::new(None);
+    static PROJECTION_CACHE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Remembers applied supertypes for the enclosing compilation. The map is empty until a
+/// compilation enters it, and it dies with that compilation, so a later source set cannot reuse a
+/// classifier that happened to share a name. Each stored list is owned by the map.
+pub(crate) struct SupertypeProjectionCache;
+
+impl SupertypeProjectionCache {
+    pub(crate) fn enter() -> Self {
+        PROJECTION_CACHE_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                PROJECTION_CACHE.with(|cache| *cache.borrow_mut() = Some(FxHashMap::default()));
+            }
+            depth.set(depth.get().saturating_add(1));
+        });
+        Self
+    }
+}
+
+impl Drop for SupertypeProjectionCache {
+    fn drop(&mut self) {
+        PROJECTION_CACHE_DEPTH.with(|depth| {
+            let next = depth.get().saturating_sub(1);
+            depth.set(next);
+            if next == 0 {
+                PROJECTION_CACHE.with(|cache| *cache.borrow_mut() = None);
+            }
+        });
+    }
+}
+
+fn projection_cache_get(ty: Ty) -> Option<Vec<Ty>> {
+    PROJECTION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()?
+            .get(&ty)
+            .map(|applied| applied.to_vec())
+    })
+}
+
+fn projection_cache_insert(ty: Ty, applied: &[Ty]) {
+    PROJECTION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let Some(cache) = cache.as_mut() else {
+            return;
+        };
+        cache.insert(ty, applied.to_vec().into_boxed_slice());
+    });
+}
+
+#[cfg(test)]
+fn stored_projection_ptr(ty: Ty) -> Option<*const Ty> {
+    PROJECTION_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()?
+            .get(&ty)
+            .map(|applied| applied.as_ptr())
+    })
+}
 
 /// The classifier whose declarations form an expression type's member scope. `Nothing` has no
 /// instances of its own, but Kotlin still exposes the ordinary `Any` members on a bottom-typed
@@ -60,8 +130,17 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     // arity-independent `kotlin.Function<R>`. The normalized `FunctionN` declaration records that
     // second edge; keeping it there makes a missing classifier record a frontend error instead of
     // silently bypassing the provider with a parallel hierarchy path.
-    if matches!(ty.non_null(), Ty::Fun(_)) {
-        return vec![crate::libraries::function_classifiers::supertype_classifier(ty.non_null())];
+    let key = ty.non_null();
+    if matches!(key, Ty::Fun(_)) {
+        if let Some(cached) = projection_cache_get(key) {
+            return cached;
+        }
+        let applied = vec![crate::libraries::function_classifiers::supertype_classifier(key)];
+        projection_cache_insert(key, &applied);
+        return applied;
+    }
+    if let Some(cached) = projection_cache_get(ty) {
+        return cached;
     }
     let Some(internal) = ty.kotlin_class_internal() else {
         return Vec::new();
@@ -69,7 +148,9 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     let Some(classifier) = source.classifier(internal) else {
         return Vec::new();
     };
-    direct_supertypes_from_classifier(&classifier, ty)
+    let applied = direct_supertypes_from_classifier(&classifier, ty);
+    projection_cache_insert(ty, &applied);
+    applied
 }
 
 /// Applied semantic hierarchy in breadth-first order. Providers expose only direct declarations;
@@ -384,6 +465,9 @@ mod tests {
     use crate::symbol_resolver::SourceOracle;
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
     use crate::types::TypeParameters;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
 
     #[test]
     fn a_classifier_without_templates_projects_its_supertype_names() {
@@ -437,6 +521,90 @@ mod tests {
             direct_supertypes_from_classifier(&classifier, Ty::obj("sample/Raw")),
             vec![Ty::obj_args("kotlin/collections/List", &[any])]
         );
+    }
+
+    struct OneClassifier {
+        queries: Cell<usize>,
+        classifier: Arc<LibraryType>,
+    }
+
+    impl SymbolSource for OneClassifier {
+        fn symbols(&self, _namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
+            self.queries.set(self.queries.get() + 1);
+            if name != "CacheProbe" {
+                return Rc::new(ResolvedSymbols::default());
+            }
+            let mut record = ResolvedSymbols::default();
+            record.classifier = Some(Arc::clone(&self.classifier));
+            Rc::new(record)
+        }
+    }
+
+    fn probe(parent: &str) -> (OneClassifier, Ty) {
+        let mut classifier = LibraryType::declaration_header();
+        classifier.supertypes = vec![parent.to_string()].into();
+        (
+            OneClassifier {
+                queries: Cell::new(0),
+                classifier: Arc::new(classifier),
+            },
+            Ty::obj("sample/CacheProbe"),
+        )
+    }
+
+    #[test]
+    fn a_compilation_reuses_one_applied_supertype_projection() {
+        let (source, ty) = probe("kotlin/Any");
+        let _cache = SupertypeProjectionCache::enter();
+        assert_eq!(direct_supertypes(&source, ty), vec![Ty::obj("kotlin/Any")]);
+        assert_eq!(source.queries.get(), 1);
+        assert_eq!(direct_supertypes(&source, ty), vec![Ty::obj("kotlin/Any")]);
+        assert_eq!(source.queries.get(), 1);
+    }
+
+    #[test]
+    fn a_later_compilation_does_not_reuse_the_previous_projection() {
+        let (first, ty) = probe("kotlin/Any");
+        {
+            let _cache = SupertypeProjectionCache::enter();
+            assert_eq!(direct_supertypes(&first, ty), vec![Ty::obj("kotlin/Any")]);
+        }
+        let (second, ty) = probe("kotlin/Number");
+        let _cache = SupertypeProjectionCache::enter();
+        assert_eq!(
+            direct_supertypes(&second, ty),
+            vec![Ty::obj("kotlin/Number")]
+        );
+        assert_eq!(second.queries.get(), 1);
+    }
+
+    #[test]
+    fn a_cached_projection_is_owned_by_the_compilation() {
+        let (source, ty) = probe("kotlin/Any");
+        {
+            let _cache = SupertypeProjectionCache::enter();
+            let applied = direct_supertypes(&source, ty);
+            let stored = stored_projection_ptr(ty).expect("projection stored");
+            let interned = crate::types::intern_tys(&applied);
+            assert_eq!(applied.as_slice(), interned);
+            assert_ne!(
+                stored,
+                interned.as_ptr(),
+                "a hierarchy result must not be the global type-argument slice"
+            );
+        };
+        assert!(stored_projection_ptr(ty).is_none());
+    }
+
+    #[test]
+    fn an_absent_classifier_is_looked_up_again() {
+        let (source, _) = probe("kotlin/Any");
+        let absent = Ty::obj("sample/Absent");
+        let _cache = SupertypeProjectionCache::enter();
+        assert!(direct_supertypes(&source, absent).is_empty());
+        assert_eq!(source.queries.get(), 1);
+        assert!(direct_supertypes(&source, absent).is_empty());
+        assert_eq!(source.queries.get(), 2);
     }
 
     struct FunctionClassifiers;
