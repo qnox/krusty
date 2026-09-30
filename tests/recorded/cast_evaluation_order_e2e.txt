@@ -1,0 +1,10 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[cast_only_on_the_right_of_and_does_not_narrow_a_later_read]
+2.4.20:
+  Main.kt:4:18: unresolved reference 'length' on receiver of type 'Any'.
+
+[cast_only_on_the_right_of_or_does_not_narrow_a_later_read]
+2.4.20:
+  Main.kt:4:18: unresolved reference 'length' on receiver of type 'Any'.
