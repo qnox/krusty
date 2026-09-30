@@ -24,6 +24,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,
+        source_package_ids,
         source_imports,
         class_names,
         file_class_names,
@@ -822,7 +823,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         source_file: Some(i as u32),
                         source_member: None,
                         source_receiver,
-                        package: source_packages[i].replace('.', "/"),
+                        package: source_package_ids[i],
                         contract: None,
                         plugin_expression: None,
                     };
@@ -2751,7 +2752,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 source_file: None,
                                 source_member: None,
                                 source_receiver: None,
-                                package: String::new(),
+                                package: TypeName::ROOT,
                                 contract: None,
                                 plugin_expression: None,
                             });
@@ -2825,7 +2826,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     source_file: None,
                                     source_member: None,
                                     source_receiver: None,
-                                    package: String::new(),
+                                    package: TypeName::ROOT,
                                     contract: None,
                                     plugin_expression: None,
                                 }],
@@ -2879,7 +2880,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 source_file: None,
                                 source_member: None,
                                 source_receiver: None,
-                                package: String::new(),
+                                package: TypeName::ROOT,
                                 contract: None,
                                 plugin_expression: None,
                             }],
@@ -3050,7 +3051,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             source_file: None,
                             source_member: None,
                             source_receiver: None,
-                            package: String::new(),
+                            package: TypeName::ROOT,
                             contract: None,
                             plugin_expression: member.plugin_expression,
                         };
@@ -3894,7 +3895,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             };
                             let key = (receiver_key, property_name.clone());
                             // Equal erased signatures conflict only when they share a facade.
-                            let package = source_packages[i].replace('.', "/");
+                            let package = source_package_ids[i];
                             let signature = ExtPropSig {
                                 formal_names: property_header.type_parameters.clone(),
                                 formals: property_header
@@ -4208,7 +4209,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     ),
                                 })
                                 .collect(),
-                            package: source_packages[i].replace('.', "/"),
+                            package: source_package_ids[i],
                             visibility: property_visibility,
                             setter_visibility: property_header.setter_visibility,
                             setter_parameter_name: property_header.setter_parameter_name.clone(),

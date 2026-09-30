@@ -81,6 +81,9 @@ pub(in crate::resolve) struct SourceTypeUniverse {
     pub(in crate::resolve) file_type_aliases: Vec<Vec<(String, Vec<String>, TypeRef)>>,
     /// Each file's package spelling, empty for the root package.
     pub(in crate::resolve) source_packages: Vec<String>,
+    /// Each file's package identity, parallel to [`Self::source_packages`]. Declaration
+    /// collection copies this identity instead of reparsing the dotted spelling per declaration.
+    pub(in crate::resolve) source_package_ids: Vec<TypeName>,
     /// Each file's imports, normalized away from the two source forms.
     pub(in crate::resolve) source_imports: Vec<Vec<CompactSourceImport>>,
     /// Names visible to every file in the set.
@@ -138,6 +141,25 @@ pub(in crate::resolve) fn source_type_universe(
                         crate::fir::SourceFileId::from_raw(source as u32),
                     )
                     .unwrap_or_default()
+                })
+                .collect()
+        },
+    );
+    let source_package_ids = compact_headers.map_or_else(
+        || {
+            files
+                .iter()
+                .map(|file| super::super::source_package::identity(file.package.as_deref()))
+                .collect::<Vec<_>>()
+        },
+        |headers| {
+            (0..headers.sources.len())
+                .map(|source| {
+                    headers
+                        .sources
+                        .get(crate::fir::SourceFileId::from_raw(source as u32))
+                        .map(|file| file.package)
+                        .unwrap_or(TypeName::ROOT)
                 })
                 .collect()
         },
@@ -282,7 +304,7 @@ pub(in crate::resolve) fn source_type_universe(
                 enclosing_names: &enclosing_names,
                 libraries,
             };
-            let own = type_name(&source_packages[file_index].replace('.', "/"));
+            let own = source_package_ids[file_index];
             let explicit_star = source_imports[file_index]
                 .iter()
                 .filter(|import| import.wildcard)
@@ -539,6 +561,7 @@ pub(in crate::resolve) fn source_type_universe(
     SourceTypeUniverse {
         file_type_aliases,
         source_packages,
+        source_package_ids,
         source_imports,
         class_names,
         file_class_names,

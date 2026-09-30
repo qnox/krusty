@@ -130,6 +130,7 @@ pub(crate) use signature_collection::{
 };
 mod singleton_receivers;
 mod source_constructors;
+mod source_package;
 mod stable_path;
 mod streaming_signature_bridge;
 #[cfg(test)]
@@ -367,7 +368,7 @@ fn resolved_compact_jvm_name(
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TopLevelFunctionConflictKey {
-    package: String,
+    package: TypeName,
     receiver: Option<Ty>,
     name: String,
     params: Vec<Ty>,
@@ -431,7 +432,7 @@ impl TopLevelFunctionConflictKey {
             None => None,
         };
         Some(Self {
-            package: signature.package.clone(),
+            package: signature.package,
             receiver,
             name,
             params: params.iter().copied().map(normalize).collect(),
@@ -1208,8 +1209,8 @@ pub struct Signature {
     pub source_member: Option<crate::libraries::SourceMember>,
     /// Declared extension receiver before lookup-key erasure.
     pub source_receiver: Option<Ty>,
-    /// Declaring package in internal slash form (`pkg/sub`) for source top-level declarations.
-    pub package: String,
+    /// Declaring package of a source top-level declaration. The root is the default package.
+    pub package: TypeName,
     /// The function's decoded `contract { … }`, when it declares one. Filled by the checker
     /// (which confirms the intrinsic identity) after checking, so cross-file call sites and the
     /// `@Metadata` emitter see the same effects the checker's call-site application uses.
@@ -1419,7 +1420,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
         source_file,
         source_member: None,
         source_receiver: function.receiver,
-        package: String::new(),
+        package: TypeName::ROOT,
         contract: None,
         plugin_expression: function.callable.plugin_expression,
     }
@@ -1452,7 +1453,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     .any(|signature| {
                         level
                             .iter()
-                            .any(|candidate| candidate.matches(&signature.package))
+                            .any(|candidate| *candidate == signature.package)
                     })
             })
         });
@@ -1466,7 +1467,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     if let Some(explicit) = scope.explicit_owner(name) {
                         return match explicit {
                             crate::symbol_source::SymbolNamespace::Package(package) => {
-                                package.matches(&signature.package)
+                                package == signature.package
                             }
                             crate::symbol_source::SymbolNamespace::Classifier(_) => false,
                         };
@@ -1474,13 +1475,11 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     selected_import_level.is_some_and(|level| {
                         scope.levels()[level]
                             .iter()
-                            .any(|candidate| candidate.matches(&signature.package))
+                            .any(|candidate| *candidate == signature.package)
                     })
                 }) || (import_scope.is_none()
                     && packages.is_some_and(|packages| {
-                        packages
-                            .iter()
-                            .any(|package| package.matches(&signature.package))
+                        packages.iter().any(|package| *package == signature.package)
                     }))
                     || (import_scope.is_none() && packages.is_none())
             })
@@ -3231,7 +3230,7 @@ pub struct ExtPropSig {
     pub context_params: Vec<Ty>,
     pub accepts_nullable_receiver: bool,
     pub source: (u32, u32),
-    pub package: String,
+    pub package: TypeName,
     pub visibility: Visibility,
     /// Resolved declaration annotation identities. These are semantic header metadata; Pass 2
     /// must not recover them from the original annotation syntax or source coordinates.
@@ -3310,7 +3309,7 @@ pub struct SourcePropertySig {
     pub context_param_names: Vec<String>,
     /// Typed identities parallel to `context_params`, captured while source syntax is live.
     pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub package: String,
+    pub package: TypeName,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
     pub setter_parameter_name: Option<String>,
@@ -5519,10 +5518,7 @@ fn import_levels(
     platform_defaults: &[&str],
     source: &dyn SymbolSource,
 ) -> [Vec<TypeName>; 4] {
-    let own = match &file.package {
-        Some(p) => type_name(&p.replace('.', "/")),
-        None => type_name(""),
-    };
+    let own = source_package::identity(file.package.as_deref());
     let explicit_star: Vec<TypeName> = file
         .import_paths
         .iter()
@@ -5536,13 +5532,11 @@ fn import_levels(
             }
         })
         .collect();
-    let kotlin_defaults: Vec<TypeName> = KOTLIN_DEFAULT_IMPORT_PACKAGES
-        .iter()
-        .map(|s| type_name(&s.replace('.', "/")))
-        .collect();
+    let kotlin_defaults = source_package::kotlin_default_packages().to_vec();
     let platform: Vec<TypeName> = platform_defaults
         .iter()
-        .map(|s| type_name(&s.replace('.', "/")))
+        .copied()
+        .map(|package| source_package::identity(Some(package)))
         .collect();
     [vec![own], explicit_star, kotlin_defaults, platform]
 }
@@ -26530,7 +26524,7 @@ impl<'a> Checker<'a> {
             source_file: None,
             source_member: None,
             source_receiver: receiver,
-            package: String::new(),
+            package: TypeName::ROOT,
             contract: None,
             plugin_expression: None,
         };
@@ -37031,6 +37025,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     let import_levels = function_import_scope.levels().clone();
     let mut checker = Checker {
         file,
+        source_package: source_package::identity(file.package.as_deref()),
         libraries: syms.libraries(),
         native_plugins: syms.native_plugins(),
         compilation_id: syms.compilation_id(),
@@ -39729,6 +39724,8 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
 
 struct Checker<'a> {
     file: &'a File,
+    /// Interned source package of `file`, computed once from its dotted spelling.
+    source_package: TypeName,
     /// External declarations and platform semantics. This provider is independent of the
     /// temporary current-module signature graph and remains valid after that graph is destroyed.
     libraries: &'a dyn SemanticPlatform,
@@ -51381,14 +51378,7 @@ impl<'a> Checker<'a> {
     }
 
     fn source_package_name(&self) -> TypeName {
-        type_name(
-            &self
-                .file
-                .package
-                .as_deref()
-                .unwrap_or_default()
-                .replace('.', "/"),
-        )
+        self.source_package
     }
 
     /// Resolve a bare unbound class-literal receiver through the ordinary type-reference channel,
@@ -74594,7 +74584,7 @@ impl<'a> Checker<'a> {
             source_file: None,
             source_member: member.source_member,
             source_receiver: Some(receiver_ty),
-            package: String::new(),
+            package: TypeName::ROOT,
             contract: None,
             plugin_expression: member.plugin_expression,
         };

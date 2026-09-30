@@ -11,7 +11,7 @@ use krusty::frontend::{
     FrontendSymbols,
 };
 use krusty::libraries::SourceMember;
-use krusty::types::{existing_type_name, Ty, TypeName, Visibility};
+use krusty::types::{existing_type_name, type_name_child, Ty, TypeName, Visibility};
 
 use super::{
     checked_property_type, companion_class,
@@ -101,7 +101,7 @@ enum ImplementationTypeConstructor {
 }
 
 struct ExtensionDefinition {
-    package: String,
+    package: TypeName,
     target: DefinitionTarget,
 }
 
@@ -657,7 +657,7 @@ impl DefinitionSymbols {
                     .entry((*receiver, name.clone()))
                     .or_default()
                     .push(ExtensionDefinition {
-                        package: signature.package.clone(),
+                        package: signature.package,
                         target,
                     });
             }
@@ -1216,7 +1216,7 @@ impl DefinitionSymbols {
             };
             let mut matches = definitions
                 .iter()
-                .filter(|definition| extension_is_in_scope(file, name, &definition.package));
+                .filter(|definition| extension_is_in_scope(file, name, definition.package));
             if let Some(target) = matches.next().map(|definition| definition.target) {
                 return matches.next().is_none().then_some(target);
             }
@@ -1925,19 +1925,26 @@ fn package_key(file: &File) -> String {
         .replace('.', "/")
 }
 
-fn extension_is_in_scope(file: &File, name: &str, package: &str) -> bool {
-    if package_key(file) == package {
+fn package_identity(package: Option<&str>) -> TypeName {
+    let Some(package) = package.filter(|spelling| !spelling.is_empty()) else {
+        return TypeName::ROOT;
+    };
+    package.split('.').fold(TypeName::ROOT, type_name_child)
+}
+
+fn extension_is_in_scope(file: &File, name: &str, package: TypeName) -> bool {
+    if package_identity(file.package.as_deref()) == package {
         return true;
     }
     file.import_paths.iter().any(|import| {
         let path = import.path();
         if import.wildcard {
-            path.replace('.', "/") == package
+            package_identity(Some(&path)) == package
         } else {
             import.imported_name() == Some(name)
-                && path
-                    .rsplit_once('.')
-                    .is_some_and(|(import_package, _)| import_package.replace('.', "/") == package)
+                && path.rsplit_once('.').is_some_and(|(import_package, _)| {
+                    package_identity(Some(import_package)) == package
+                })
         }
     })
 }
