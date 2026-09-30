@@ -323,6 +323,7 @@ pub fn type_descriptor(ty: Ty) -> String {
     // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
     // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
     // `Ty` that reaches bytecode.
+    assert_determined_descriptor_type(ty);
     let mut descriptor = String::new();
     push_descriptor_shape(ty, &mut descriptor);
     descriptor
@@ -334,7 +335,15 @@ pub fn type_descriptor(ty: Ty) -> String {
 /// primitive tags, the interned classfile name, or one array dimension. Equal determined types
 /// return before any of that work; an undetermined type still trips the emission invariant.
 pub(crate) fn same_type_descriptor(left: Ty, right: Ty) -> bool {
-    (left == right && !left.mentions_pending()) || descriptor_shapes_match(left, right)
+    assert_determined_descriptor_type(left);
+    assert_determined_descriptor_type(right);
+    left == right || descriptor_shapes_match(left, right)
+}
+
+fn assert_determined_descriptor_type(ty: Ty) {
+    if ty.mentions_pending() || ty.mentions_error() {
+        unreachable!("a not-determined type reached {}", "a JVM descriptor");
+    }
 }
 
 enum DescriptorShape {
@@ -371,7 +380,9 @@ fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
 
 fn descriptor_shape(ty: Ty) -> DescriptorShape {
     match ty {
-        Ty::Pending => unreachable!("a not-determined type reached {}", "a JVM descriptor"),
+        Ty::Pending | Ty::Error => {
+            unreachable!("a not-determined type reached {}", "a JVM descriptor")
+        }
         Ty::Int | Ty::UInt => DescriptorShape::Primitive(b'I'),
         Ty::Byte | Ty::UByte => DescriptorShape::Primitive(b'B'),
         Ty::Short | Ty::UShort => DescriptorShape::Primitive(b'S'),
@@ -401,9 +412,7 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
         Ty::Nothing => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_void()))
         }
-        Ty::Null | Ty::Error => {
-            DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::any()))
-        }
+        Ty::Null => DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::any())),
         Ty::Fun(signature) => DescriptorShape::Class(function_classfile_name(
             signature.params.len() + usize::from(signature.suspend),
         )),
@@ -805,7 +814,6 @@ mod tests {
             Ty::obj("kotlin/Any"),
             Ty::obj("java/lang/Object"),
             Ty::Null,
-            Ty::Error,
             Ty::Nothing,
             Ty::Unit,
             Ty::nullable(Ty::Unit),
@@ -836,9 +844,61 @@ mod tests {
         }
     }
 
+    fn assert_undetermined_descriptor_rejected(label: &str, action: impl FnOnce()) {
+        let panic = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+            Ok(()) => panic!("{label}: descriptor action did not panic"),
+            Err(panic) => panic,
+        };
+        let message = if let Some(message) = panic.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            panic!("{label}: descriptor action produced a non-string panic");
+        };
+        assert_eq!(
+            message,
+            "internal error: entered unreachable code: a not-determined type reached a JVM descriptor",
+            "{label}"
+        );
+    }
+
     #[test]
-    #[should_panic(expected = "a not-determined type reached a JVM descriptor")]
-    fn descriptor_equality_does_not_accept_an_undetermined_type() {
-        same_type_descriptor(Ty::Pending, Ty::Pending);
+    fn descriptor_apis_reject_direct_and_nested_undetermined_types() {
+        let invalid = [
+            ("direct pending", Ty::Pending),
+            ("direct error", Ty::Error),
+            (
+                "object argument pending",
+                Ty::obj_args("sample/Box", &[Ty::Pending]),
+            ),
+            (
+                "object argument error",
+                Ty::obj_args("sample/Box", &[Ty::Error]),
+            ),
+            (
+                "function parameter pending",
+                Ty::fun(vec![Ty::Pending], Ty::Unit),
+            ),
+            (
+                "function parameter error",
+                Ty::fun(vec![Ty::Error], Ty::Unit),
+            ),
+            ("function return pending", Ty::fun(Vec::new(), Ty::Pending)),
+            ("function return error", Ty::fun(Vec::new(), Ty::Error)),
+        ];
+
+        for (label, ty) in invalid {
+            assert_undetermined_descriptor_rejected(label, || drop(type_descriptor(ty)));
+            assert_undetermined_descriptor_rejected(label, || {
+                let _ = same_type_descriptor(ty, ty);
+            });
+            assert_undetermined_descriptor_rejected(label, || {
+                let _ = same_type_descriptor(ty, Ty::String);
+            });
+            assert_undetermined_descriptor_rejected(label, || {
+                let _ = same_type_descriptor(Ty::String, ty);
+            });
+        }
     }
 }
