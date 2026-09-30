@@ -2646,10 +2646,10 @@ impl KotlincServer {
 /// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
 /// `kotlinc`).
 ///
-/// A release or RC replays class files, the exit code, and kotlinc's diagnostics from
-/// the recorded-byte cache, for a successful build and for a rejected one. A missing dump fails
-/// the test and tells you to refresh the master cache. An assert that reads the
-/// exit code or diagnostics also fails when the dump has class files but no recorded status.
+/// A release or RC replays class files, the exit code, and kotlinc's diagnostics from the
+/// recorded-byte cache, for a successful build and for a rejected one. A missing or incomplete dump
+/// fails locally and tells you to refresh the master cache. Read-only CI may instead compile that
+/// invocation live without changing its restored cache.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {

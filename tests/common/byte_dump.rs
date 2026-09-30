@@ -15,12 +15,14 @@
 //! that archive records the open range for each dump.
 //!
 //! `KRUSTY_RECORD=1` or `KRUSTY_RECORD_CLASS_DUMPS=1` ignores a stored dump and recompiles. A
-//! release or RC with no matching dump fails the test instead of compiling: master has to refresh
-//! the GitHub cache. Every recorded run keeps its exit code and kotlinc diagnostics, whether the build
-//! succeeded or failed, so a later assert replays them. A class dump that has no exit code or
-//! diagnostics fails an assert that needs them. A snapshot, dev, or beta build still compiles,
-//! because that version is not an immutable artifact and never reads or writes the archive. Pull
-//! request CI restores this cache read-only; only master CI publishes an updated cache.
+//! release or RC with no matching dump fails locally instead of compiling: master has to refresh
+//! the GitHub cache. Pull-request and merge-group CI may compile a missing entry live, but never
+//! writes it into the restored archive. Every recorded run keeps its exit code and kotlinc
+//! diagnostics, whether the build succeeded or failed, so a later assert replays them. A class dump
+//! that has no exit code or diagnostics fails an assert that needs them unless CI is allowed to
+//! compile the missing entry live. A snapshot, dev, or beta build still compiles, because that
+//! version is not an immutable artifact and never reads or writes the archive. Only master CI
+//! publishes an updated cache.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
@@ -236,10 +238,10 @@ fn fnv64(mut hash: u64, bytes: &[u8]) -> u64 {
 
 /// Kotlinc's bytes for each of `classes`, from the recorded dump or from `compile`.
 ///
-/// `compile` runs only when recording is forced, or for a compiler that is not a release or RC.
-/// A release or RC with no matching dump fails the test and does not compile. `None` from
-/// `compile` yields `None`. A non-release compiler always takes `compile` and does not touch the
-/// archive.
+/// `compile` runs when recording is forced, when CI explicitly permits a read-only compile for a
+/// missing entry, or for a compiler that is not a release or RC. Otherwise, a release or RC with no
+/// matching dump fails the test. `None` from `compile` yields `None`. A non-release compiler always
+/// takes `compile` and does not touch the archive.
 pub fn kotlinc_class_dumps(
     stem: &str,
     jvm_target: &str,
@@ -258,6 +260,7 @@ pub fn kotlinc_class_dumps(
             compiler: compiler_dump_version(),
             fingerprint,
             force: record_forced(),
+            compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
         },
         |hit| classes.iter().all(|class| hit.contains_key(*class)),
@@ -290,6 +293,7 @@ pub fn kotlinc_class_tree(
             compiler: compiler_dump_version(),
             fingerprint,
             force: record_forced(),
+            compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
         },
         |_| true,
@@ -380,6 +384,7 @@ struct Recall<'a> {
     compiler: Option<DumpVersion>,
     fingerprint: u128,
     force: bool,
+    compile_missing: bool,
     write: bool,
 }
 
@@ -403,10 +408,12 @@ fn recall(
         {
             return Some(hit);
         }
-        refuse_missing_dump(&format!(
-            "module {} key {} fingerprint {:032x}",
-            query.module, query.key, query.fingerprint
-        ));
+        if !query.compile_missing {
+            refuse_missing_dump(&format!(
+                "module {} key {} fingerprint {:032x}",
+                query.module, query.key, query.fingerprint
+            ));
+        }
     }
     let produced = compile()?;
     if query.write {
@@ -999,6 +1006,10 @@ fn record_forced() -> bool {
         .any(|name| std::env::var_os(name).is_some_and(|flag| flag == "1"))
 }
 
+fn compile_missing_allowed() -> bool {
+    std::env::var_os("KRUSTY_CLASS_DUMP_COMPILE_MISSING").is_some_and(|flag| flag == "1")
+}
+
 thread_local! {
     static REQUIRE_DIAGNOSTICS: Cell<bool> = const { Cell::new(false) };
 }
@@ -1042,15 +1053,32 @@ struct Invocation {
 
 /// Class files, exit code, and diagnostics recorded for this `kotlinc` invocation.
 ///
-/// `Some` must not compile. `None` means the caller compiles: recording is forced, or a compiler
-/// that does not use the archive. A release or RC with no matching dump panics. Inside
-/// [`with_recorded_diagnostics`], a dump that has class files but no exit code or diagnostics
-/// panics too: an assert must not treat that as a successful empty report.
+/// `Some` must not compile. `None` means the caller compiles: recording is forced, CI explicitly
+/// permits a read-only compile for a missing entry, or a compiler does not use the archive. A
+/// release or RC with no matching dump otherwise panics. Inside [`with_recorded_diagnostics`], a
+/// dump that has class files but no exit code or diagnostics likewise panics unless CI may compile
+/// that entry live: an assert must not treat the incomplete recording as a successful empty report.
 pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
-    let Some(compiler) = compiler_dump_version() else {
+    replay_class_dump_with_policy(
+        args,
+        &dumps_root(),
+        compiler_dump_version(),
+        record_forced(),
+        compile_missing_allowed(),
+    )
+}
+
+fn replay_class_dump_with_policy(
+    args: &[String],
+    root: &Path,
+    compiler: Option<DumpVersion>,
+    force: bool,
+    compile_missing: bool,
+) -> Option<ReplayedClasses> {
+    let Some(compiler) = compiler else {
         return None;
     };
-    if record_forced() {
+    if force {
         return None;
     }
     let invocation = match parse_invocation(args) {
@@ -1062,7 +1090,7 @@ pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
     };
     let key = hex128(invocation.fingerprint);
     if let Some(files) = load_files(
-        &dumps_root(),
+        root,
         INVOCATION_MODULE,
         &key,
         compiler,
@@ -1070,12 +1098,18 @@ pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
     ) {
         let replayed = split_replay(files);
         if diagnostics_required() && !replayed.status {
+            if compile_missing {
+                return None;
+            }
             refuse_missing_dump(&format!(
                 "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
                 invocation.label, key
             ));
         }
         return Some(replayed);
+    }
+    if compile_missing {
+        return None;
     }
     refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
 }
@@ -1473,6 +1507,7 @@ mod tests {
             compiler,
             fingerprint,
             force,
+            compile_missing: false,
             write: true,
         };
         let first = recall(
@@ -1538,6 +1573,7 @@ mod tests {
                     compiler: Some(version("2.4.20-release-1")),
                     fingerprint,
                     force: false,
+                    compile_missing: false,
                     write: false,
                 },
                 |_| true,
@@ -1558,6 +1594,64 @@ mod tests {
         assert!(
             !archive_path(&root).exists(),
             "a miss that is not recorded leaves no dump"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_read_only_partial_cache_compiles_a_new_fingerprint_without_writing() {
+        let root = temp_root("partial-read-only");
+        let release = version("2.4.20");
+        let key = "case|Stem|default|plain";
+        let cached_fingerprint = fingerprint_parts(&[b"cached source"]);
+        let new_fingerprint = fingerprint_parts(&[b"new source"]);
+        store_files(
+            &root,
+            "mod",
+            key,
+            release,
+            cached_fingerprint,
+            &files(b"cached bytes"),
+        );
+        let archive_before = std::fs::read(archive_path(&root)).expect("partial archive");
+        let mut compiles = 0u32;
+
+        let produced = recall(
+            Recall {
+                root: &root,
+                module: "mod",
+                key,
+                compiler: Some(release),
+                fingerprint: new_fingerprint,
+                force: false,
+                compile_missing: true,
+                write: false,
+            },
+            |_| true,
+            || {
+                compiles += 1;
+                Some(files(b"live bytes"))
+            },
+        )
+        .expect("a read-only cache miss compiles live");
+
+        assert_eq!(compiles, 1);
+        assert_eq!(produced.get("pkg/A").unwrap(), b"live bytes");
+        assert_eq!(
+            std::fs::read(archive_path(&root)).expect("unchanged partial archive"),
+            archive_before,
+            "a read-only live compile must not change the restored archive"
+        );
+        assert!(
+            load_files(&root, "mod", key, release, new_fingerprint).is_none(),
+            "a read-only live compile must not add the new fingerprint"
+        );
+        assert_eq!(
+            load_files(&root, "mod", key, release, cached_fingerprint)
+                .expect("cached entry remains reusable")
+                .get("pkg/A")
+                .unwrap(),
+            b"cached bytes"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1605,6 +1699,7 @@ mod tests {
             compiler: Some(release),
             fingerprint,
             force: false,
+            compile_missing: false,
             write: true,
         };
         let missing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1643,6 +1738,49 @@ mod tests {
         );
         assert_eq!(compiles, 1, "the completed dump is reused");
         assert_eq!(reused.unwrap().get("pkg/A").unwrap(), b"two");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_partial_invocation_cache_yields_a_new_source_to_a_read_only_live_compile() {
+        let root = temp_root("partial-invocation");
+        let source = root.join("Lib.kt");
+        let out = root.join("out");
+        let args = vec![
+            "-d".to_string(),
+            out.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        std::fs::write(&source, "fun cached() = 1\n").unwrap();
+        let cached = parse_invocation(&args)
+            .expect("cached invocation inputs")
+            .expect("cached invocation");
+        let mut cached_files = files(b"cached class bytes");
+        attach_status(&mut cached_files, 0, "");
+        let release = version("2.4.20");
+        store_files(
+            &root,
+            INVOCATION_MODULE,
+            &hex128(cached.fingerprint),
+            release,
+            cached.fingerprint,
+            &cached_files,
+        );
+        let replayed = replay_class_dump_with_policy(&args, &root, Some(release), false, true)
+            .expect("the existing source replays from the partial cache");
+        assert_eq!(replayed.files.get("pkg/A").unwrap(), b"cached class bytes");
+        let archive_before = std::fs::read(archive_path(&root)).expect("partial archive");
+
+        std::fs::write(&source, "fun added() = 2\n").unwrap();
+        assert!(
+            replay_class_dump_with_policy(&args, &root, Some(release), false, true).is_none(),
+            "a new source fingerprint is yielded to the live compiler"
+        );
+        assert_eq!(
+            std::fs::read(archive_path(&root)).expect("unchanged partial archive"),
+            archive_before,
+            "a read-only miss must not change the restored archive"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
