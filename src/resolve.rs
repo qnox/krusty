@@ -122,6 +122,10 @@ mod source_fragment;
 use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
+use selected_argument_commitment::{
+    indexed_operator_argument_parameters, indexed_operator_argument_slots,
+    SelectedArgumentCommitment,
+};
 mod signature_collection;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
@@ -2720,64 +2724,6 @@ fn positional_candidate_score_by(
         std::cmp::Reverse(params.len().saturating_sub(arg_tys.len())),
         true,
     ))
-}
-
-/// Map the written operands of an indexed operator to its declared value-parameter slots.
-///
-/// Indexed syntax is the one Kotlin call form where positional operands may surround a vararg:
-/// `a[i, j] = value` calls `set(vararg indices, value)`. Ordinary call mapping deliberately cannot
-/// admit that shape, because positional arguments after a vararg are otherwise forbidden. Keeping
-/// this mapping explicit lets selection, checking, and lowering agree without weakening normal calls.
-fn indexed_operator_argument_parameters(
-    params: &[Ty],
-    vararg_index: Option<usize>,
-    argument_count: usize,
-    set: bool,
-) -> Option<Vec<usize>> {
-    let Some(vararg) = vararg_index else {
-        if argument_count > params.len() {
-            return None;
-        }
-        if !set {
-            return Some((0..argument_count).collect());
-        }
-        let index_count = argument_count.checked_sub(1)?;
-        if index_count >= params.len() {
-            return None;
-        }
-        let mut parameters = (0..index_count).collect::<Vec<_>>();
-        parameters.push(params.len() - 1);
-        return Some(parameters);
-    };
-    let trailing = usize::from(set);
-    if params.len() != vararg + 1 + trailing {
-        return None;
-    }
-    let packed = argument_count.checked_sub(vararg + trailing)?;
-    let mut parameters = Vec::with_capacity(argument_count);
-    parameters.extend(0..vararg);
-    parameters.extend(std::iter::repeat_n(vararg, packed));
-    if set {
-        parameters.push(params.len() - 1);
-    }
-    Some(parameters)
-}
-
-fn indexed_operator_argument_slots(
-    params: &[Ty],
-    vararg_index: Option<usize>,
-    arguments: &[ExprId],
-    set: bool,
-) -> Option<Vec<Option<ExprId>>> {
-    let parameters =
-        indexed_operator_argument_parameters(params, vararg_index, arguments.len(), set)?;
-    let mut slots = vec![None; params.len()];
-    for (&argument, parameter) in arguments.iter().zip(parameters) {
-        if slots[parameter].is_none() {
-            slots[parameter] = Some(argument);
-        }
-    }
-    Some(slots)
 }
 
 /// Soundness guard shared by `pick_overload` and `pick_member_overloads`: krusty erases generics, so a
@@ -10207,9 +10153,9 @@ pub struct TypeInfo {
     /// Selected enum-entry semantic coordinates keyed by member-read expression. The ordinal is
     /// fixed during resolution so later phases never recover an entry identity from source spelling.
     pub resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
-    /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
-    /// source arguments. `None` means the target default-call ABI fills that slot.
-    pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// Selected argument slots and the declaration-owned default flags of that same mapping.
+    /// `None` means the target default-call ABI fills that slot.
+    pub resolved_call_arg_slots: HashMap<ExprId, SelectedArgumentCommitment>,
     /// The LITERAL a call site passes for an omitted defaulted parameter, for a dependency callable
     /// whose provider states the default as a constant.
     ///
@@ -20829,6 +20775,14 @@ impl<'a> Checker<'a> {
                                 );
                                 return sig.ret;
                             }
+                            let Some(value_defaults) = self.require_value_parameter_defaults(
+                                call,
+                                &sig.param_defaults,
+                                ctx_count,
+                                value_count,
+                            ) else {
+                                return Ty::Error;
+                            };
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
                             let mapped_slots = if arg_names.is_some() || trailing_lambda {
@@ -20838,7 +20792,7 @@ impl<'a> Checker<'a> {
                                     &sig.param_names[ctx_count..],
                                     sig.params.len().saturating_sub(ctx_count),
                                     sig.required.saturating_sub(ctx_count),
-                                    sig.param_defaults.get(ctx_count..).unwrap_or_default(),
+                                    value_defaults,
                                     sig.vararg_index
                                         .and_then(|index| index.checked_sub(ctx_count)),
                                     trailing_lambda,
@@ -20907,7 +20861,10 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             if let Some(slots) = mapped_slots {
-                                self.resolved_call_arg_slots.insert(call, slots);
+                                if !self.commit_selected_argument_slots(call, slots, value_defaults)
+                                {
+                                    return Ty::Error;
+                                }
                             }
                             self.mark_context_extension_receiver_used(scope, call, &sources);
                             self.mark_local_function_call(
@@ -20965,7 +20922,13 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
-                            self.resolved_call_arg_slots.insert(call, slots);
+                            if !self.commit_selected_argument_slots(
+                                call,
+                                slots,
+                                &sig.param_defaults,
+                            ) {
+                                return Ty::Error;
+                            }
                             let ret = sig.ret;
                             self.mark_local_function_call(
                                 call,
@@ -21038,14 +21001,19 @@ impl<'a> Checker<'a> {
                             self.expect_call_arg(scope, p, a, aty);
                         }
                         if omitted_are_optional {
-                            self.resolved_call_arg_slots.insert(
+                            let slots = args
+                                .iter()
+                                .copied()
+                                .map(Some)
+                                .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
+                                .collect();
+                            if !self.commit_selected_argument_slots(
                                 call,
-                                args.iter()
-                                    .copied()
-                                    .map(Some)
-                                    .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
-                                    .collect(),
-                            );
+                                slots,
+                                &sig.param_defaults,
+                            ) {
+                                return Ty::Error;
+                            }
                         }
                     }
                     let ret = sig.ret;
@@ -40033,7 +40001,7 @@ struct Checker<'a> {
     constant_integer_coercion_reads: std::collections::HashSet<ExprId>,
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
-    resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    resolved_call_arg_slots: HashMap<ExprId, SelectedArgumentCommitment>,
     /// See [`TypeInfo::resolved_library_default_literals`].
     resolved_library_default_literals:
         HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
@@ -50733,7 +50701,11 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                (slot.is_none() && visible_vararg != Some(index))
+                // An omitted vararg with no declared default is an empty array, not a mask bit.
+                // A declared default is a real omission: the constructor `$default` stub evaluates it.
+                let implicit_empty_vararg =
+                    visible_vararg == Some(index) && !contextual.call_sig.param_has_default(index);
+                (slot.is_none() && !implicit_empty_vararg)
                     .then(|| contextual.parameter_indices.get(index).copied())
                     .flatten()
             })
@@ -64019,10 +63991,15 @@ impl<'a> Checker<'a> {
                 {
                     return self.set(e, Ty::Error);
                 }
-                if let Some(slots) =
-                    indexed_operator_argument_slots(&params, vararg, &indices, false)
-                {
-                    self.resolved_call_arg_slots.insert(e, slots);
+                if !self.commit_indexed_operator_arguments(
+                    e,
+                    &selected.call_sig.param_defaults,
+                    selected.context_count,
+                    &params,
+                    vararg,
+                    &indices,
+                ) {
+                    return self.set(e, Ty::Error);
                 }
                 let semantic = selected.semantic_signature();
                 let context_count = selected.context_count.min(semantic.params.len());
@@ -71158,10 +71135,10 @@ impl<'a> Checker<'a> {
                 return Err(());
             }
         };
-        let context_count = selected
+        let value_context_count = selected
             .context_count
             .min(selected.call_sig.param_names.len());
-        let value_call_sig = selected.call_sig.suffix(context_count);
+        let value_call_sig = selected.call_sig.suffix(value_context_count);
         if (0..params.len()).any(|parameter| {
             value_call_sig.vararg_index != Some(parameter)
                 && !value_call_sig.param_has_default(parameter)
@@ -71247,12 +71224,28 @@ impl<'a> Checker<'a> {
                 }
                 return Err(());
             }
-            self.record_zero_arg_operator_slots(site, name, value_parameter_count);
+            if !self.record_zero_arg_operator_slots(
+                site,
+                name,
+                value_parameter_count,
+                &selected.call_sig.param_defaults,
+                value_context_count,
+            ) {
+                return Err(());
+            }
             return Ok(Some(ResolvedCall::Member(resolved)));
         }
         let mut callable = selected.callable.clone();
         callable.ret = ret;
-        self.record_zero_arg_operator_slots(site, name, value_parameter_count);
+        if !self.record_zero_arg_operator_slots(
+            site,
+            name,
+            value_parameter_count,
+            &selected.call_sig.param_defaults,
+            value_context_count,
+        ) {
+            return Err(());
+        }
         Ok(Some(ResolvedCall::source_extension(
             callable,
             recv,
@@ -71344,34 +71337,6 @@ impl<'a> Checker<'a> {
             diagnostic_spans,
             &callables,
         )
-    }
-
-    fn record_zero_arg_operator_slots(
-        &mut self,
-        site: Option<IncDecSite>,
-        name: &str,
-        count: usize,
-    ) {
-        if count == 0 {
-            return;
-        }
-        let slots = vec![None; count];
-        match site {
-            Some(IncDecSite::Expression(expression)) => {
-                self.resolved_call_arg_slots.insert(expression, slots);
-            }
-            Some(IncDecSite::Statement(statement)) => {
-                self.resolved_stmt_operator_arg_slots.insert(
-                    (
-                        statement,
-                        SyntheticOperatorCall::from_name(name)
-                            .expect("zero-argument convention has a synthetic-call key"),
-                    ),
-                    slots,
-                );
-            }
-            None => {}
-        }
     }
 
     fn destructure_component_target(

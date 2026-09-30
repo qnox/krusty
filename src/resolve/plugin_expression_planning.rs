@@ -94,7 +94,7 @@ pub(super) fn plan_plugin_expressions(
                 argument_slots: info
                     .resolved_call_arg_slots
                     .get(&expression)
-                    .cloned()
+                    .map(|commitment| commitment.slots.clone())
                     .unwrap_or_default(),
             })
         })

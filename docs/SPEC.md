@@ -4056,10 +4056,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   "unknown, do not reject" exactly as `has_known_required_param` does, rather than as "nothing is
   defaulted". A callable with context parameters is declined outright, since the slots are
   value-parameter-relative while the parameter list is not. Lowering masks exactly the unfilled
-  slots — EXCEPT a vararg: `$default` passes the array straight through and never fills it, so an
-  omitted vararg is an EMPTY array with its mask bit CLEAR (`lower_default_slot_args` /
-  `default_masked_slots`); masking it reached the callee as `null` and tripped its non-null parameter
-  check at runtime.
+  slots — EXCEPT a vararg that does not declare its own default: `$default` passes that array
+  straight through and never fills it, so the omission is an EMPTY array with its mask bit CLEAR
+  (`lower_default_slot_args` / `default_masked_slots`); masking it reached the callee as `null` and
+  tripped its non-null parameter check at runtime. A vararg that declares a default is masked and
+  evaluated like any other defaulted parameter.
   The TRAILING LAMBDA is shaped from its slot the same way. A lambda literal is typed BEFORE overload
   resolution, from the callee's block parameter — that is what gives it its receiver and arity — and
   `top_level_lambda_shape_in_scope` mapped arguments positionally, so `f(budget = 3) { }` aligned the
@@ -8486,17 +8487,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot supply a final vararg and reads
   `passing value as a vararg is allowed only inside a parenthesized argument list.`; normal overload
   selection still takes precedence.
-- **A `vararg` parameter is always omittable in default-argument resolution.** Kotlin metadata never
-  sets `declares_default_value` on a `vararg` — it is implicitly omittable — so
+- **A `vararg` parameter is always omittable in default-argument resolution.** A `vararg` with no
+  declared default leaves `declares_default_value` unset — it is implicitly omittable — so
   `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
   Without this, a classpath function with BOTH a defaulted parameter and a `vararg`
   (`fun f(a: Int = 0, vararg xs: T)`, called as `f()`) rejected its own `$default`
   candidate on a call omitting both, reporting `unresolved function 'f'`. The emit side matches:
   a top-level `$default` callable carries the vararg slot/element to the lowerer (as the extension
   path already did), the shape-based element-pack branch yields to the `default_call` branch, and an
-  omitted vararg lowers as an EMPTY array with NO mask bit — kotlinc's `$default` passes the array
-  straight through, so a null placeholder trips the callee's non-null vararg check
-  (`classpath_default_vararg_call_e2e`, including a JVM box run). Known gap: the named-array form
+  omitted vararg that does not declare its own default lowers as an EMPTY array with NO mask
+  bit — kotlinc's `$default` passes the array straight through, so a null placeholder trips the
+  callee's non-null vararg check (`classpath_default_vararg_call_e2e`, including a JVM box run).
+  A vararg that DOES declare a default (`vararg arr: Int = intArrayOf(1, 2)`) is an ordinary
+  omitted parameter: the call sets that parameter's mask bit and the stub evaluates the default
+  array. Metadata records `declares_default_value` for that explicit default; the flag stays unset
+  only for a vararg that is omittable solely because it is a vararg. Supplying an element still
+  packs it and leaves the bit clear. A constructor call and constructor delegation follow the same
+  rule (`default_args_synthetic_e2e::omitted_vararg_with_a_declared_default_uses_that_array`,
+  `default_args_synthetic_e2e::omitted_constructor_vararg_with_a_declared_default_uses_that_array`,
+  corpus `function/defaultsWithVarArg2.kt`). The selected call records one commitment: its argument
+  slots and the declaration-owned default flags of the same parameter mapping. A default table that
+  does not slice onto those slots is a checking failure; it is not reread as an empty default list
+  or as the unsliced table. Checked FIR reads that one record for a function, a member, an
+  extension, and a member extension, including a dependency whose declaration is not in this
+  module. A missing record or slot is a frontend failure rather than an empty pack
+  (`classpath_vararg_default_extension_e2e`). Known gap: the named-array form
   `f(more = arrayOf(x))` with an omitted default before the vararg still fails to map.
   A NAMED argument that also omits a default (`foo(y = "Y")` skipping `x`) maps through the
   checker's recorded argument→slot mapping at every `$default` emit site — the bare-name path once

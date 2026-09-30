@@ -1,6 +1,10 @@
 //! Final source-argument mapping for already selected calls.
 
 use super::*;
+
+#[cfg(test)]
+#[path = "vararg_default_tests.rs"]
+mod vararg_default_tests;
 use crate::resolve::ResolvedContextArgument;
 
 /// Name kotlinc puts in `checkNotNullExpressionValue` for one property read.
@@ -223,13 +227,12 @@ impl BodyFirChecker<'_> {
             )?);
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
-            checked.push(FirCallArgument::Vararg {
-                parameter: self.call_parameter_ordinal(expression, parameter, parameter_offset)?,
-                origin: self
-                    .origins
-                    .synthetic(cause, SyntheticOriginKind::VarargArray),
-                elements: Box::new([]),
-            });
+            checked.push(self.omitted_vararg_argument(
+                expression,
+                cause,
+                parameter,
+                parameter_offset,
+            )?);
         }
         for (parameter, slot) in slots.iter().enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {
@@ -848,6 +851,63 @@ impl BodyFirChecker<'_> {
         })
     }
 
+    /// An omitted `vararg` with no declared default is an empty array. A declared default is a
+    /// real omission: the `$default` stub evaluates it, and the mask bit for that parameter is set.
+    fn omitted_vararg_argument(
+        &mut self,
+        expression: ExprId,
+        cause: OriginId,
+        parameter: usize,
+        parameter_offset: usize,
+    ) -> Result<FirCallArgument, BodyCheckFailure> {
+        let ordinal = self.call_parameter_ordinal(expression, parameter, parameter_offset)?;
+        if self.omitted_vararg_declares_default(expression, parameter)? {
+            return Ok(FirCallArgument::Default {
+                parameter: ordinal,
+                origin: self
+                    .origins
+                    .synthetic(cause, SyntheticOriginKind::DefaultArgument),
+            });
+        }
+        Ok(FirCallArgument::Vararg {
+            parameter: ordinal,
+            origin: self
+                .origins
+                .synthetic(cause, SyntheticOriginKind::VarargArray),
+            elements: Box::new([]),
+        })
+    }
+
+    /// The declaration-owned default flag recorded for this selected call's parameter.
+    /// A missing call record or slot is a frontend failure: guessing `false` would pack an empty
+    /// array instead of evaluating a declared default.
+    fn omitted_vararg_declares_default(
+        &self,
+        expression: ExprId,
+        parameter: usize,
+    ) -> Result<bool, BodyCheckFailure> {
+        let commitment = self
+            .info
+            .resolved_call_arg_slots
+            .get(&expression)
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?;
+        commitment
+            .declares_default
+            .get(parameter)
+            .copied()
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })
+    }
+
     fn call_parameter_ordinal(
         &self,
         expression: ExprId,
@@ -989,13 +1049,12 @@ impl BodyFirChecker<'_> {
             });
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
-            checked.push(FirCallArgument::Vararg {
-                parameter: self.call_parameter_ordinal(expression, parameter, context.len())?,
-                origin: self
-                    .origins
-                    .synthetic(cause, SyntheticOriginKind::VarargArray),
-                elements: Box::new([]),
-            });
+            checked.push(self.omitted_vararg_argument(
+                expression,
+                cause,
+                parameter,
+                context.len(),
+            )?);
         }
         for (parameter, slot) in slots.iter().take(ordinary_count).enumerate() {
             if slot.is_none() && vararg_index != Some(parameter) {
