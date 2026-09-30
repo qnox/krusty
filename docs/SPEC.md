@@ -5128,6 +5128,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   read the singleton. An abstract member carries those declaration annotations on its JVM method, the
   same attribute a concrete member gets. Test:
   `tests/annotation_emission_e2e.rs::singleton_const_expressions_are_annotation_constants`.
+- **An interface companion's `const val` is stored on both the interface and the companion, except a
+  private one.** A class companion moves every const onto the outer class and leaves the companion
+  class with no const field. An interface cannot host a private field, so a `private const val` stays
+  `private static final` + `ConstantValue` on the companion only. A public or internal const is
+  `public static final` + `ConstantValue` on the interface (after the `Companion` field) and the same
+  field again on the companion. On the companion those const fields interleave with instance backing
+  fields in source order, after `$$INSTANCE`. Reference constants carry `@NotNull`. The companion's
+  `@Metadata` still lists every const; the interface's metadata lists `Companion` and not the const
+  names. Tests: `tests/interface_companion_const_fields_e2e.rs`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a

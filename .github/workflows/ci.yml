@@ -91,14 +91,19 @@ jobs:
           set -euo pipefail
           record=0
           write=0
+          compile_missing=0
           if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
             record=1
             write=1
-          elif [ -z "$MATCHED_KEY" ]; then
-            record=1
+          elif [ "$MASTER_PUSH" != true ]; then
+            compile_missing=1
+            if [ -z "$MATCHED_KEY" ]; then
+              record=1
+            fi
           fi
           echo "record=$record" >> "$GITHUB_OUTPUT"
           echo "write=$write" >> "$GITHUB_OUTPUT"
+          echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       - name: just ci
         env:
           # The instrumented e2e run costs ~2x the normal gate under [profile.coverage] (opt 1
@@ -108,11 +113,12 @@ jobs:
           # fails, a slow runner does not.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
-          # A PR consumes the exact cache produced for its master base. If that cache has not been
-          # seeded yet, compile the reference bytes for this run but keep the cache read-only.
+          # A PR consumes cached entries from its master base and compiles any missing entries live,
+          # including when restore supplied only an older prefix cache. It never changes that cache.
           # A master push refreshes the archive before publishing its immutable SHA-keyed cache.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
         run: just ci
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'

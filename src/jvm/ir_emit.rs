@@ -186,10 +186,11 @@ fn declared_jvm_interface(ir: &IrFile, owner: TypeName) -> bool {
 }
 
 /// A companion of an INTERFACE uses OBJECT-style static storage (kotlinc's interface-companion
-/// layout): its instance lives in a `static final $$INSTANCE` on the companion itself, its
-/// properties back `static` fields there, and the interface's `Companion` field merely aliases
-/// `$$INSTANCE` in the interface `<clinit>` — nothing hoists onto the interface (whose fields
-/// would be forced `public static final`).
+/// layout): its instance lives in a `static final $$INSTANCE` on the companion itself, and its
+/// properties back `static` fields there. A public or internal `const val` is also copied onto the
+/// interface as `public static final` (the only field shape an interface admits). A private const
+/// cannot be an interface field, so it stays on the companion only. The interface's `Companion`
+/// field aliases `$$INSTANCE`.
 fn companion_of_interface(ir: &IrFile, c: &IrClass) -> bool {
     if !c.is_companion {
         return false;
@@ -1285,7 +1286,9 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
     // prefix's fields and other compiler-generated storage are not annotated.
-    if !c.is_interface {
+    // An interface companion's member fields are still deferred at this point. Annotating them
+    // here would intern each name before the field-table visit that pairs it with its descriptor.
+    if !c.is_interface && !companion_of_interface(ir, c) {
         for (index, f) in c.fields.iter().enumerate() {
             if !field_visibility::publishes_field_nullability(c, index) {
                 continue;
@@ -1503,26 +1506,6 @@ fn emit_jvm_interface_companion_surface(
 ) {
     let fq_name = c.fq_name();
 
-    // Ordinary companion constants/values precede the Companion field. A hoisted `@JvmField`
-    // property is visited later because kotlinc places it after Companion.
-    for s in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| s.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32))
-        .map(|(_, s)| s)
-    {
-        let descriptor = ir_type_desc(&s.ty);
-        if let Some(value) = s
-            .init
-            .and_then(|init| static_fields::const_value_idx(ir, init, cw))
-        {
-            cw.add_field_const(0x0019, &s.name, &descriptor, value);
-        } else {
-            cw.add_field(0x0019, &s.name, &descriptor);
-        }
-    }
-
     let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
@@ -1571,6 +1554,32 @@ fn emit_jvm_interface_companion_surface(
     }
 
     add_companion_field(cw, c);
+    // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
+    // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
+    // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
+    // because kotlinc places it after both.
+    for property in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, property)| {
+            property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+        })
+        .map(|(_, property)| property)
+    {
+        let descriptor = ir_type_desc(&property.ty);
+        let value = property
+            .init
+            .and_then(|init| static_fields::constant_value(ir, init));
+        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
+            if property.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
+    }
 
     // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
     // remain owned by the companion in common IR and are copied onto this target field here.

@@ -57,8 +57,10 @@ pub struct IrStatic {
     /// the source said, because every reader goes through the accessor.
     pub is_const: bool,
     /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
-    /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
-    /// `public static final` + `ConstantValue` there), not the facade.
+    /// = a specific class. A class companion's `const val` lives on the OUTER class (`public static
+    /// final` + `ConstantValue`). An interface companion's public or internal const is stored on both
+    /// the interface and the companion; a private const stays on the companion only, because an
+    /// interface field cannot be private.
     pub owner: Option<TypeName>,
     /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
