@@ -1,6 +1,5 @@
 //! Analysis worker for the LSP request loop.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -12,6 +11,7 @@ use super::super::{
     IndexedFile, LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex,
     MAX_WORKSPACE_INDEX_FILES,
 };
+pub use super::analyzed_document::AnalysisBatch;
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
@@ -118,8 +118,9 @@ pub struct AnalysisJob {
 impl AnalysisJob {
     /// Install this job's document lifetimes, then analyze. Both the threaded engine and
     /// `InlineBackend` enter here, so an interactive analysis cannot hash open buffers without
-    /// the lifetime that identifies them.
-    pub fn run<A: Analysis>(&self, analyze: &mut A) -> AnalysisBatch {
+    /// the lifetime that identifies them. The completion owns each document's text, so the
+    /// navigation snapshot does not copy the live buffer again.
+    pub fn run<A: Analysis>(&mut self, analyze: &mut A) -> AnalysisBatch {
         let docs = self
             .documents
             .iter()
@@ -137,57 +138,13 @@ impl AnalysisJob {
             .collect::<Vec<_>>();
         let _versions = crate::open_document_digest::OpenDocumentVersions::install(&versions);
         let (analyses, support_documents) = analyze.analyze_open_documents(&docs, &open);
+        let pending = analyze.analysis_pending();
         drop(_versions);
-        AnalysisBatch {
-            analyzed: self
-                .documents
-                .iter()
-                .map(|(uri, _, version, _)| (uri.clone(), *version))
-                .collect(),
-            analyses,
-            support_documents,
-            pending: analyze.analysis_pending(),
-        }
-    }
-}
-
-pub struct AnalysisBatch {
-    pub analyzed: Vec<(String, i64)>,
-    pub analyses: Vec<DocumentAnalysis>,
-    pub support_documents: Vec<(String, String)>,
-    pub pending: bool,
-}
-
-thread_local! {
-    static ANALYZED_SNAPSHOT_TEXTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Open-document texts the analysis thread already owns for one batch.
-///
-/// Applying a fresh batch used to clone every live editor buffer into the navigation snapshot,
-/// on top of the copy the job held while analysis ran. The engine moves that job copy here so
-/// the snapshot can take it. A batch that did not travel through the engine leaves the slot
-/// empty, and [`AnalyzedSnapshot::next`] clones the live buffer instead.
-pub(crate) struct AnalyzedSnapshot {
-    texts: std::vec::IntoIter<String>,
-}
-
-impl AnalyzedSnapshot {
-    pub(crate) fn install(texts: Vec<String>) {
-        ANALYZED_SNAPSHOT_TEXTS.with(|slot| *slot.borrow_mut() = texts);
-    }
-
-    /// Take whatever the engine installed for this apply, leaving the slot empty.
-    pub(crate) fn take() -> Self {
-        Self {
-            texts: ANALYZED_SNAPSHOT_TEXTS
-                .with(|slot| std::mem::take(&mut *slot.borrow_mut()))
-                .into_iter(),
-        }
-    }
-
-    pub(crate) fn next(&mut self, live: &str) -> String {
-        self.texts.next().unwrap_or_else(|| live.to_string())
+        let documents = std::mem::take(&mut self.documents)
+            .into_iter()
+            .map(|(uri, text, version, _lifetime)| (uri, text, version))
+            .collect();
+        AnalysisBatch::from_job(documents, analyses, support_documents, pending)
     }
 }
 
@@ -259,7 +216,7 @@ pub(crate) enum EngineEvent {
     WatchedGlobs(Vec<String>),
     Project(ProjectFeedback),
     ReanalyzeRequested,
-    AnalysisComplete(AnalysisBatch, Vec<String>),
+    AnalysisComplete(AnalysisBatch),
     /// The project model or its compiler configuration changed. Clear retained workspace results
     /// immediately; waiting for the first batch of the replacement sweep would expose old-model
     /// diagnostics in the interval.
@@ -1164,16 +1121,8 @@ fn run<A: Analysis>(
             Some(EngineCommand::Analyze(mut job)) => {
                 let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                 let batch = job.run(&mut analyze);
-                let document_texts = job
-                    .documents
-                    .into_iter()
-                    .map(|(_uri, text, _version, _lifetime)| text)
-                    .collect::<Vec<_>>();
                 if events
-                    .send(Incoming::Engine(EngineEvent::AnalysisComplete(
-                        batch,
-                        document_texts,
-                    )))
+                    .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
                     .is_err()
                 {
                     break;
@@ -1575,26 +1524,15 @@ mod tests {
         };
         assert_eq!(job.documents[0].2, 3);
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 3)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
-        assert_eq!(batch.analyzed[0].1, 3);
-        assert_eq!(batch.analyses.len(), 1);
-    }
-
-    #[test]
-    fn analyzed_snapshot_reuses_carried_text_and_falls_back_to_live() {
-        AnalyzedSnapshot::install(vec!["fun analyzed() {}".to_string(), "second".to_string()]);
-        let mut snapshot = AnalyzedSnapshot::take();
-        assert_eq!(snapshot.next("fun live() {}"), "fun analyzed() {}");
-        assert_eq!(snapshot.next("other"), "second");
-        assert_eq!(snapshot.next("fun live() {}"), "fun live() {}");
-
-        let mut empty = AnalyzedSnapshot::take();
-        assert_eq!(empty.next("fun live() {}"), "fun live() {}");
+        let batch = AnalysisBatch::from_job(
+            vec![("file:///a.kt".into(), "fun a(){}".into(), 3)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
+        assert_eq!(batch.documents[0].version, 3);
+        assert_eq!(batch.documents[0].text, "fun a(){}");
+        assert!(batch.complete);
     }
 
     #[test]
@@ -1620,10 +1558,10 @@ mod tests {
         let mut found = false;
         for _ in 0..4 {
             match rx.recv().unwrap() {
-                Incoming::Engine(EngineEvent::AnalysisComplete(batch, document_texts)) => {
-                    assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 2)]);
-                    assert_eq!(document_texts, vec!["fun a(){}".to_string()]);
-                    assert_eq!(batch.analyses.len(), 1);
+                Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
+                    assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 2)]);
+                    assert_eq!(batch.documents[0].text, "fun a(){}");
+                    assert!(batch.complete);
                     found = true;
                     break;
                 }
@@ -1740,7 +1678,7 @@ mod tests {
         let mut support = None;
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch, _))) => {
+                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
                     support = Some(batch.support_documents);
                     break;
                 }
@@ -1838,7 +1776,7 @@ mod tests {
         let mut found = false;
         for _ in 0..4 {
             match rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
-                Incoming::Engine(EngineEvent::AnalysisComplete(_, _)) => {
+                Incoming::Engine(EngineEvent::AnalysisComplete(_)) => {
                     found = true;
                     break;
                 }
@@ -2946,7 +2884,7 @@ mod tests {
             }));
             loop {
                 match incoming.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_, _))) => break,
+                    Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_))) => break,
                     Ok(_) => {}
                     Err(error) => panic!("analysis event timed out: {error}"),
                 }
