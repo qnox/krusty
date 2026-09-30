@@ -2663,6 +2663,74 @@ impl FoldedIntegerLiteral {
     }
 }
 
+/// One value whose primitive range is exactly the range shared by every branch value.
+///
+/// `200` does not fit in `Byte` and `-129` does not fit in `Byte`, so a conditional that contains
+/// either value must not adapt to `Byte`. The hardest constituent has that same refusal, and any
+/// constituent works once every one fits.
+fn representative_integer_constant(
+    values: &[FoldedIntegerLiteral],
+) -> Option<FoldedIntegerLiteral> {
+    if values.is_empty() {
+        return None;
+    }
+    let signed = values
+        .iter()
+        .all(|value| matches!(value, FoldedIntegerLiteral::Signed(_)));
+    let unsigned = values
+        .iter()
+        .all(|value| matches!(value, FoldedIntegerLiteral::Unsigned(_)));
+    if signed {
+        let hardest = values
+            .iter()
+            .map(|value| value.value())
+            .find(|value| i16::try_from(*value).is_err())
+            .or_else(|| {
+                values
+                    .iter()
+                    .map(|value| value.value())
+                    .find(|value| i8::try_from(*value).is_err())
+            })
+            .unwrap_or_else(|| values[0].value());
+        Some(FoldedIntegerLiteral::Signed(hardest))
+    } else if unsigned {
+        let hardest = values
+            .iter()
+            .map(|value| value.value())
+            .find(|value| u16::try_from(*value).is_err())
+            .or_else(|| {
+                values
+                    .iter()
+                    .map(|value| value.value())
+                    .find(|value| u8::try_from(*value).is_err())
+            })
+            .unwrap_or_else(|| values[0].value());
+        Some(FoldedIntegerLiteral::Unsigned(hardest))
+    } else {
+        None
+    }
+}
+
+/// Branch values of a conditional integer constant: an `if` that has an `else`, a `when` that has
+/// an `else` arm, or a block through its trailing expression. A missing `else` is not a value.
+fn integer_constant_branches(file: &File, expression: ExprId) -> Option<Vec<ExprId>> {
+    match file.expr(expression) {
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => Some(vec![*then_branch, *else_branch]),
+        Expr::When { arms, .. } if arms.iter().any(|arm| arm.conditions.is_empty()) => {
+            Some(arms.iter().map(|arm| arm.body).collect())
+        }
+        Expr::Block {
+            trailing: Some(trailing),
+            ..
+        } => Some(vec![*trailing]),
+        _ => None,
+    }
+}
+
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
 ///
 /// This is deliberately the one AST walk used by both lightweight signature inference and the full
@@ -2670,7 +2738,9 @@ impl FoldedIntegerLiteral {
 /// wider scratch type: lowering evaluates the same `Int` operations before any call-boundary
 /// coercion, so accepting an expression that overflows here would silently change Kotlin semantics.
 /// Keeping this outside either phase also prevents the two call paths from drifting on which
-/// expressions carry literal provenance.
+/// expressions carry literal provenance. An `if`, `when`, or block is the same kind of constant
+/// when every branch value is: adaptation uses one representative that fits a target only when
+/// every branch does, and the branches themselves still evaluate as `Int`.
 fn folded_integer_literal(file: &File, expression: ExprId) -> Option<FoldedIntegerLiteral> {
     match file.expr(expression) {
         Expr::IntLit(value) => i32::try_from(*value).ok().map(FoldedIntegerLiteral::Signed),
@@ -2735,7 +2805,14 @@ fn folded_integer_literal(file: &File, expression: ExprId) -> Option<FoldedInteg
                 _ => None,
             }
         }
-        _ => None,
+        _ => {
+            let branches = integer_constant_branches(file, expression)?;
+            let folded = branches
+                .into_iter()
+                .map(|branch| folded_integer_literal(file, branch))
+                .collect::<Option<Vec<_>>>()?;
+            representative_integer_constant(&folded)
+        }
     }
 }
 
@@ -69866,15 +69943,24 @@ impl<'a> Checker<'a> {
         }
         // Bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`),
         // resolved via the shared `builtin_bitwise_ret` (also used by signature inference): a
-        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type. A fitting
+        // argument, including an integer constant, keeps this primitive result. A plain `Int`
+        // passed where `Long` is required does not: reporting success here recorded no call, so a
+        // later phase reported an unknown call shape instead of the argument mismatch.
         if let Some(ret) = builtin_bitwise_ret(rt, name, arg_tys.len()) {
-            if let Some(arg0) = arg_tys.first() {
+            if let Some(&arg0) = arg_tys.first() {
                 let expected = if matches!(name, "shl" | "shr" | "ushr") {
                     Ty::Int
                 } else {
                     rt
                 };
-                self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
+                let argument = args[0];
+                let adapts =
+                    call_arg_kind(self.file, argument, arg0).adapts_integer_literal_to(expected);
+                if !self.receiver_is_assignable(arg0, expected) && !adapts {
+                    return None;
+                }
+                self.expect_assignable(expected, arg0, self.span(argument), "argument");
             }
             return Some(ret);
         }
