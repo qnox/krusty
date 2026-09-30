@@ -44,7 +44,7 @@ pub enum DefaultValue {
     Char(u16),
     Str(crate::kt_string::KtString),
     Null,
-    Object(String),
+    Object(TypeName),
 }
 
 impl DefaultValue {

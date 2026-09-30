@@ -1550,10 +1550,10 @@ fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
     if function.is_static {
         return true;
     }
-    let owner_is_interface = function.dispatch_receiver.as_ref().is_some_and(|receiver| {
+    let owner_is_interface = function.dispatch_receiver.is_some_and(|receiver| {
         ir.classes
             .iter()
-            .any(|class| class.fq_name_matches(&receiver.render()) && class.is_interface)
+            .any(|class| class.fq_name == receiver && class.is_interface)
     });
     function.dispatch_receiver.is_some() && !owner_is_interface && !ir.open_methods.contains(&fid)
 }
@@ -2081,7 +2081,7 @@ fn build_state_machine(
             for n in reads {
                 ir.exprs[n as usize] = IrExpr::GetValue(ev);
             }
-            spilled.push((ev, spill_field_ty(Ty::obj(&exc_internal.render()))));
+            spilled.push((ev, spill_field_ty(Ty::obj_name(exc_internal))));
             catch_spills.insert(cbody, ev);
             catch_spill_sources.push((cvar, cbody, ev));
         }
@@ -3702,8 +3702,8 @@ impl Flat<'_> {
                     let mut arms: Branches = Vec::new();
                     let mut full_cover = false;
                     for catch in catches {
-                        let exc_internal = catch.exc_internal.render();
-                        let exc_ty = Ty::obj(&exc_internal);
+                        let exc_internal = catch.exc_internal;
+                        let exc_ty = Ty::obj_name(exc_internal);
                         let arm_suspends = expr_calls_suspend(self.ir, catch.body, self.suspend);
                         let arm_stmts: Vec<ExprId> = if arm_suspends {
                             // The catch body itself suspends, so `r_v` is clobbered by its own
@@ -3748,10 +3748,8 @@ impl Flat<'_> {
                             stmts: arm_stmts,
                             value: None,
                         });
-                        full_cover = matches!(
-                            exc_internal.as_str(),
-                            "kotlin/Throwable" | "java/lang/Throwable"
-                        );
+                        full_cover = exc_internal.matches("kotlin/Throwable")
+                            || exc_internal.matches("java/lang/Throwable");
                         if full_cover {
                             arms.push((None, blk));
                             break; // later arms are dead
@@ -4514,10 +4512,7 @@ fn typed_suspension_operands(
                     params,
                     ..
                 } => {
-                    out.push((
-                        dispatch_receiver.as_ref().copied()?,
-                        Ty::obj(&owner.render()),
-                    ));
+                    out.push((dispatch_receiver.as_ref().copied()?, Ty::obj_name(*owner)));
                     match params {
                         Some((p, _)) => p.clone(),
                         None => crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0,
@@ -4531,10 +4526,7 @@ fn typed_suspension_operands(
                     // A special default call has a descriptor-owned continuation slot but cannot
                     // be safely rebound here; identify it from its operand plan, never its name.
                     (!default_call_operands.contains(point)).then_some(())?;
-                    out.push((
-                        dispatch_receiver.as_ref().copied()?,
-                        Ty::obj(&owner.render()),
-                    ));
+                    out.push((dispatch_receiver.as_ref().copied()?, Ty::obj_name(*owner)));
                     crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
                 }
                 Callee::Intrinsic { .. }

@@ -475,7 +475,7 @@ impl BodyFirChecker<'_> {
                     }
                     DefaultValue::Null => FirAnnotationDefaultValue::Constant(FirConstant::Null),
                     DefaultValue::Object(classifier) => {
-                        FirAnnotationDefaultValue::Singleton(crate::types::type_name(&classifier))
+                        FirAnnotationDefaultValue::Singleton(classifier)
                     }
                 })
             })

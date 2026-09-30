@@ -7195,10 +7195,7 @@ fn full_default_masks(param_count: usize) -> Vec<i32> {
 /// A value class's (erased) underlying JVM type — its single field's type.
 fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
     vc.obj_internal()
-        .and_then(|fq| {
-            let fq = fq.render();
-            ir.classes.iter().find(|c| c.fq_name_matches(&fq))
-        })
+        .and_then(|fq| ir.classes.iter().find(|c| c.fq_name == fq))
         .and_then(|c| c.fields.first())
         .map(|f| jvm_declared_ty(&f.ty))
         .unwrap_or(Ty::obj("java/lang/Object"))

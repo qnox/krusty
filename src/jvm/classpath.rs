@@ -3690,6 +3690,29 @@ impl Classpath {
         })
     }
 
+    /// Existence of an already-interned classifier. A complete catalog answers by identity. An
+    /// incomplete catalog, and a metadata-only function name whose JVM class differs from that
+    /// identity, still need the textual probe.
+    pub(super) fn class_exists_name(&self, internal: TypeName) -> bool {
+        let mapped = super::jvm_class_map::to_jvm_type_name(internal);
+        let needs_textual_erasure =
+            super::jvm_class_map::maps_to_distinct_jvm_internal(internal) && mapped == internal;
+        if needs_textual_erasure {
+            return self.class_exists(&internal.render());
+        }
+        if self.stub_overlay.borrow().contains_key(&mapped) {
+            return true;
+        }
+        let tree = self.package_tree();
+        if !tree.jars_for_class_name(mapped).is_empty() {
+            return true;
+        }
+        if tree.incomplete_entries.is_empty() {
+            return false;
+        }
+        self.class_exists(&mapped.render())
+    }
+
     fn class_entry_indices(&self, tree: &PackageTree, internal: &str) -> Vec<usize> {
         let mut indices = tree.jars_for_class(internal);
         indices.extend(tree.incomplete_entries.iter().copied());
@@ -6191,6 +6214,18 @@ mod fq_tests {
         let cp = Classpath::new(vec![jar.clone()]);
         let owner = cp.owning_jar("kotlin/collections/CollectionsKt");
         assert_eq!(owner.as_deref(), Some(jar.as_path()));
+        let present = type_name("kotlin/collections/CollectionsKt");
+        let absent = type_name("kotlin/collections/NoSuchKt");
+        assert!(cp.class_exists_name(present));
+        assert!(!cp.class_exists_name(absent));
+        assert_eq!(
+            cp.class_exists("kotlin/String"),
+            cp.class_exists_name(type_name("kotlin/String"))
+        );
+        assert_eq!(
+            cp.class_exists("kotlin/Function1"),
+            cp.class_exists_name(type_name("kotlin/Function1"))
+        );
     }
 
     fn write_test_jar_entry(path: &Path, name: &str, contents: &[u8]) {
