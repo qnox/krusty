@@ -1689,6 +1689,10 @@ pub struct ResolvedModuleIndex {
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
+    /// Signature origin of each package function, copied from the compact header before that
+    /// header is released. The JVM platform-clash diagnostic is the only consumer: representation
+    /// selects the physical method after Pass 2, and the message still has to name the `fun`.
+    package_function_signature_spans: HashMap<DeclarationId, crate::diag::Span>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1979,6 +1983,24 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
     ) -> Option<crate::diag::Span> {
         self.declarations.range(declaration)
+    }
+
+    pub(crate) fn publish_package_function_signature_span(
+        &mut self,
+        declaration: DeclarationId,
+        span: crate::diag::Span,
+    ) {
+        self.package_function_signature_spans
+            .insert(declaration, span);
+    }
+
+    pub(crate) fn package_function_signature_span(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<crate::diag::Span> {
+        self.package_function_signature_spans
+            .get(&declaration)
+            .copied()
     }
 
     pub(crate) fn release_source_coordinates(&mut self) {
@@ -3269,6 +3291,8 @@ impl ResolvedModuleIndex {
                 .sum::<usize>()
             + self.source_orders.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
+            + self.package_function_signature_spans.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<crate::diag::Span>())
             + self.declaration_headers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())

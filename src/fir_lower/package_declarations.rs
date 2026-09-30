@@ -159,6 +159,9 @@ pub(super) fn publish(
                     visibility: header.visibility,
                     spellings: index.declaration_spellings_primary_bound_first(declaration),
                     source_order,
+                    signature_span: index
+                        .package_function_signature_span(declaration)
+                        .unwrap_or_else(|| crate::diag::Span::new(0, 0)),
                 });
             }
             DeclarationKind::Property => {

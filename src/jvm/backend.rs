@@ -659,9 +659,10 @@ impl JvmBackend {
             report_backend_pass_failure(reason, diags);
             return Vec::new();
         }
-        if crate::jvm::declaration_collisions::validate(&ir, &pass_facts.override_results, diags)
-            .is_err()
-        {
+        if let Err(messages) = crate::jvm::declaration_collisions::validate(&ir) {
+            for (span, message) in messages {
+                diags.error(span, message);
+            }
             return Vec::new();
         }
         let metadata = facade_package_metadata_from_ir(&ir, module_name, self.param_assertions);
@@ -1569,7 +1570,9 @@ mod tests {
         let mut offenders = Vec::new();
         visit(&root.join("src/fir_lower"), &mut |path, text| {
             for (line, source) in text.lines().enumerate() {
-                if source.contains("barrier_plan") && !source.contains("barrier_plan: None") {
+                if source.contains("type_safe_barrier")
+                    && !source.contains("type_safe_barrier: false")
+                {
                     offenders.push(format!("{}:{}: {source}", path.display(), line + 1));
                 }
             }

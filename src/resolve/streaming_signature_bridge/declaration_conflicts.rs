@@ -82,6 +82,9 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     let mut reserved_diagnostic_bytes = 0usize;
     let mut retained_display_bytes = 0usize;
     for entry in &entries {
+        if let Some(span) = streamed_callable_signature_span(headers, entry.declaration) {
+            index.publish_package_function_signature_span(entry.declaration, span);
+        }
         let Some(key) =
             TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name.clone())
         else {

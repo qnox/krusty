@@ -831,6 +831,8 @@ mod function_typed_property_e2e;
 mod function_value_conversion_e2e;
 #[path = "generic_argument_wildcards_e2e.rs"]
 mod generic_argument_wildcards_e2e;
+#[path = "generic_arity_overload_e2e.rs"]
+mod generic_arity_overload_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
 #[path = "generic_bound_projection_e2e.rs"]

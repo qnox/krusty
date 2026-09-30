@@ -892,11 +892,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             );
                         }
                     } else {
-                        // A platform declaration clash is decided on the emitted JVM NAME, not the
-                        // source name: `g(String)` and `g(String?)` erase to the same descriptor and
-                        // clash only while both are spelled `g`, so an `@JvmName` on either one
-                        // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
-                        // source name still keys `table.funs` above.
+                        // Overload selection and the Kotlin conflict key both use the source name.
+                        // `@JvmName` and erasure change the physical method; that clash is reported
+                        // from JVM validation after representation, not by joining shapes here.
                         if retained {
                             table.funs.entry(function_name).or_default().push(sig);
                         }

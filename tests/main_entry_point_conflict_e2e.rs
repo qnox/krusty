@@ -218,17 +218,11 @@ fn same_file_main_duplicates_still_conflict() {
 
 #[test]
 fn same_file_entry_point_and_ordinary_main_conflict() {
-    let diags = assert_acceptance_matches_kotlinc(
-        "same-file-entry-and-generic-main",
-        &["package p\nfun main() {}\nfun <T> main() {}\n"],
-        false,
-    );
-    assert_diagnostics(
-        diags,
-        &[
-            "conflicting overloads:\nfun <T> main()",
-            "conflicting overloads:\nfun main()",
-        ],
+    // Different type-parameter counts are different Kotlin shapes. kotlinc still rejects the pair
+    // because both erase to `main()V` on the same file facade.
+    common::assert_error_blocks_match_kotlinc(
+        &[("Main.kt", "package p\nfun main() {}\nfun <T> main() {}\n")],
+        &[],
     );
 }
 
