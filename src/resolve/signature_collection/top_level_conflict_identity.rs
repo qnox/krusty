@@ -53,7 +53,11 @@ impl TopLevelFunctionConflictKey {
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| {
-                        let formal = &formals[*index];
+                        // A formal that did not survive as a symbolic type parameter still counts
+                        // toward arity below; it cannot be mentioned by a value parameter.
+                        let Some(formal) = formals.get(*index) else {
+                            return false;
+                        };
                         params.iter().copied().chain(declared_receiver).any(|ty| {
                             crate::types::ty_mentions_param(ty, std::slice::from_ref(formal))
                         })
@@ -72,7 +76,15 @@ impl TopLevelFunctionConflictKey {
             Some(receiver) => Some(normalize(receiver)),
             None => None,
         };
-        let type_parameter_count = u32::try_from(formals.len()).unwrap_or(u32::MAX);
+        // `formal_bounds` keeps one slot per generic-signature parameter. `formals` can be shorter
+        // when a bound is not itself a type-parameter type. Callers that still have the declaration
+        // header replace this count with that header's type-parameter list.
+        let declared_type_parameters = signature
+            .generic_sig
+            .as_ref()
+            .map(|generic| generic.formal_bounds.len().max(generic.formals.len()))
+            .unwrap_or(0);
+        let type_parameter_count = u32::try_from(declared_type_parameters).unwrap_or(u32::MAX);
         Some(Self {
             package: signature.package,
             receiver,
