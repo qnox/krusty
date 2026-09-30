@@ -110,8 +110,9 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
             message: "subroutines are not supported".to_string(),
         });
     }
-    // The handlers each node reaches, with the type each catches.
-    let mut handlers: Vec<Vec<(usize, String)>> = vec![Vec::new(); count];
+    // The handlers each node reaches, with the type each catches. The type is borrowed from the
+    // method: copying it into an owned `String` per covered instruction was pure traffic.
+    let mut handlers: Vec<Vec<(usize, &str)>> = vec![Vec::new(); count];
     let mut tcb_start = vec![false; count];
     for block in &method.try_catch_blocks {
         let catch_type = block.catch_type.as_deref().unwrap_or("java/lang/Throwable");
@@ -121,7 +122,7 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
             tcb_start[start + 1] = true;
         }
         if options.fast_handlers {
-            handlers[start].push((handler, catch_type.to_string()));
+            handlers[start].push((handler, catch_type));
             continue;
         }
         let end = positions.at(block.end);
@@ -130,7 +131,7 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
             .zip(&mut handlers[start..end])
         {
             if matches!(node, Node::Insn(_)) {
-                covered.push((handler, catch_type.to_string()));
+                covered.push((handler, catch_type));
             }
         }
     }
@@ -143,40 +144,76 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
         merge_nodes: merge_nodes(method, &positions),
         fast_merge: options.fast_merge,
     };
-    work.merge(0, &entry, interpreter)?;
+    // Reused for every instruction. Cloning a fresh frame per node allocated the local and stack
+    // buffers again at every visit; these two keep their capacity and are copied into a slot only
+    // when that slot is new or its frame changed.
+    let mut scratch = entry.clone();
+    let mut handler_frame = entry.clone();
+    work.install(0, 0, &entry, interpreter)?;
     while let Some(index) = work.queue.pop() {
         work.queued[index] = false;
-        let before = work.frames[index]
-            .clone()
-            .expect("a queued node has a frame");
         let insn = match &method.nodes[index] {
             Node::Insn(insn) if opcode(insn) != NOP => Some(insn),
             _ => None,
         };
         let op = insn.map(opcode);
-        match insn {
-            None => work.edge(index, index + 1, &before, interpreter)?,
-            Some(insn) => {
-                let mut current = before.clone();
-                if opcode(insn) != RETURN {
-                    executor.execute(&mut current, &At { index, insn }, interpreter)?;
-                }
-                for target in successors(insn, index, &positions) {
-                    work.edge(index, target, &current, interpreter)?;
-                }
-            }
-        }
         let reaches_handlers = !options.prune_exception_edges
             || op.is_some_and(|op| (ISTORE..=ASTORE).contains(&op) || op == IINC)
             || tcb_start[index];
+        // The stored frame is the state BEFORE this node and stays there for the result.
+        match insn {
+            None => {
+                scratch.copy_from(
+                    work.frames[index]
+                        .as_ref()
+                        .expect("a queued node has a frame"),
+                );
+                work.install(index, index + 1, &scratch, interpreter)?;
+            }
+            Some(insn) => {
+                if opcode(insn) != RETURN {
+                    scratch.copy_from(
+                        work.frames[index]
+                            .as_ref()
+                            .expect("a queued node has a frame"),
+                    );
+                    executor.execute(&mut scratch, &At { index, insn }, interpreter)?;
+                    // A straight-line instruction has one successor. Building the successor list
+                    // allocated on every one of those, which is most of a method.
+                    if insn.falls_through()
+                        && !matches!(
+                            insn,
+                            Insn::Jump { .. }
+                                | Insn::TableSwitch { .. }
+                                | Insn::LookupSwitch { .. }
+                        )
+                    {
+                        work.install(index, index + 1, &scratch, interpreter)?;
+                    } else {
+                        let mut targets = successors(insn, index, &positions);
+                        if let Some(last) = targets.pop() {
+                            for target in targets {
+                                work.edge(index, target, &scratch, interpreter)?;
+                            }
+                            work.install(index, last, &scratch, interpreter)?;
+                        }
+                    }
+                }
+            }
+        }
+        // Handlers see the stored pre-instruction frame, not the executed one.
         if reaches_handlers {
-            for (handler, catch_type) in &handlers[index] {
-                let mut state = before.clone();
-                state.stack.clear();
-                state
+            for &(handler, catch_type) in &handlers[index] {
+                handler_frame.copy_from(
+                    work.frames[index]
+                        .as_ref()
+                        .expect("a queued node has a frame"),
+                );
+                handler_frame.stack.clear();
+                handler_frame
                     .stack
                     .push(interpreter.new_exception_value(catch_type));
-                work.merge(*handler, &state, interpreter)?;
+                work.install(index, handler, &handler_frame, interpreter)?;
             }
         }
     }
@@ -247,38 +284,51 @@ impl<V: super::frame::Value> Worklist<V> {
         state: &Frame<V>,
         interpreter: &mut I,
     ) -> Result<(), AnalyzerError> {
-        if to >= self.frames.len() {
+        self.install(from, to, state, interpreter)
+    }
+
+    /// Record `state` as the frame before `dest`. A first arrival copies it into the slot. A
+    /// repeat visit of a non-merge node copies only when the frame differs, and does not requeue
+    /// an identical one: the old walk treated every repeat visit as a change and ran the rest of
+    /// a straight-line block again. `from` is the node the edge leaves, and the index a fall-off
+    /// error reports.
+    fn install<I: Interpreter<V = V>>(
+        &mut self,
+        from: usize,
+        dest: usize,
+        state: &Frame<V>,
+        interpreter: &mut I,
+    ) -> Result<(), AnalyzerError> {
+        if dest >= self.frames.len() {
             return Err(AnalyzerError {
                 index: from,
                 message: "execution falls off the end of the method".to_string(),
             });
         }
-        self.merge(to, state, interpreter)
-    }
-
-    fn merge<I: Interpreter<V = V>>(
-        &mut self,
-        dest: usize,
-        state: &Frame<V>,
-        interpreter: &mut I,
-    ) -> Result<(), AnalyzerError> {
         let is_merge = self.merge_nodes[dest];
-        let changed = match &mut self.frames[dest] {
-            slot @ None => {
-                *slot = Some(state.clone());
-                true
+        let changed = if self.frames[dest].is_none() {
+            self.frames[dest] = Some(state.clone());
+            true
+        } else if self.fast_merge {
+            false
+        } else if !is_merge {
+            let slot = self.frames[dest]
+                .as_mut()
+                .expect("the slot was just observed to hold a frame");
+            let changed = slot != state;
+            if changed {
+                slot.copy_from(state);
             }
-            Some(_) if self.fast_merge => false,
-            Some(old) if !is_merge => {
-                *old = state.clone();
-                true
-            }
-            Some(old) => old
+            changed
+        } else {
+            self.frames[dest]
+                .as_mut()
+                .expect("the slot was just observed to hold a frame")
                 .merge(state, interpreter)
                 .map_err(|message| AnalyzerError {
                     index: dest,
                     message,
-                })?,
+                })?
         };
         if changed && !self.queued[dest] {
             self.queued[dest] = true;
@@ -337,4 +387,134 @@ fn entry_frame<I: Interpreter>(
         stack: Vec::new(),
         return_value: interpreter.new_value(Some(return_type)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{BasicInterpreter, BasicValue};
+    use super::*;
+    use crate::jvm::method_node::{Insn, MethodNode, Node, TryCatchBlock};
+
+    fn frames_of(method: &MethodNode) -> Vec<Option<Frame<BasicValue>>> {
+        analyze(method, "T", &mut BasicInterpreter).expect("the method analyzes")
+    }
+
+    #[test]
+    fn a_straight_line_store_is_the_frame_before_the_load() {
+        let mut method = MethodNode::new(0x0009, "f", "()I");
+        method.max_locals = 1;
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 0,
+            }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let frames = frames_of(&method);
+        let before_store = frames[1].as_ref().expect("istore is reached");
+        assert_eq!(before_store.locals, vec![BasicValue::Uninitialized]);
+        assert_eq!(before_store.stack, vec![BasicValue::Int]);
+        let before_load = frames[2].as_ref().expect("iload is reached");
+        assert_eq!(before_load.locals, vec![BasicValue::Int]);
+        assert_eq!(before_load.stack, Vec::<BasicValue>::new());
+        let before_return = frames[3].as_ref().expect("ireturn is reached");
+        assert_eq!(before_return.stack, vec![BasicValue::Int]);
+    }
+
+    #[test]
+    fn both_arms_of_a_branch_meet_as_int_at_the_join() {
+        let mut method = MethodNode::new(0x0009, "f", "()I");
+        let else_label = method.new_label();
+        let join = method.new_label();
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: else_label,
+            }),
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Insn(Insn::Jump {
+                op: GOTO,
+                target: join,
+            }),
+            Node::Label(else_label),
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Label(join),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let frames = frames_of(&method);
+        let before_return = frames
+            .last()
+            .expect("the method has nodes")
+            .as_ref()
+            .expect("the join is reached");
+        assert_eq!(before_return.stack, vec![BasicValue::Int]);
+    }
+
+    #[test]
+    fn a_loop_back_edge_keeps_the_joined_local_without_revisiting_forever() {
+        let mut method = MethodNode::new(0x0009, "f", "()I");
+        method.max_locals = 1;
+        let head = method.new_label();
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 0,
+            }),
+            Node::Label(head),
+            Node::Insn(Insn::Iinc { slot: 0, delta: 1 }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: head,
+            }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let frames = frames_of(&method);
+        let before_increment = frames[3].as_ref().expect("the loop body is reached");
+        assert_eq!(before_increment.locals, vec![BasicValue::Int]);
+        assert_eq!(before_increment.stack, Vec::<BasicValue>::new());
+        let before_return = frames[7].as_ref().expect("the exit is reached");
+        assert_eq!(before_return.locals, vec![BasicValue::Int]);
+        assert_eq!(before_return.stack, vec![BasicValue::Int]);
+    }
+
+    #[test]
+    fn a_handler_sees_the_frame_from_before_the_throwing_instruction() {
+        let mut method = MethodNode::new(0x0009, "f", "()V");
+        method.max_locals = 1;
+        let start = method.new_label();
+        let end = method.new_label();
+        let handler = method.new_label();
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 0,
+            }),
+            Node::Label(start),
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Op(ATHROW)),
+            Node::Label(end),
+            Node::Label(handler),
+            Node::Insn(Insn::Op(RETURN)),
+        ];
+        method.try_catch_blocks = vec![TryCatchBlock {
+            start,
+            end,
+            handler,
+            catch_type: Some("java/lang/Throwable".to_string()),
+        }];
+        let frames = frames_of(&method);
+        let at_handler = frames[6].as_ref().expect("the handler is reached");
+        assert_eq!(at_handler.locals, vec![BasicValue::Int]);
+        assert_eq!(
+            at_handler.stack,
+            vec![BasicValue::Reference("Ljava/lang/Throwable;".to_string())]
+        );
+    }
 }
