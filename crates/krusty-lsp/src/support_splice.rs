@@ -11,24 +11,26 @@
 /// are visible to the group, but they are not part of the inferred prefix the
 /// worker treats as generated sources.
 pub(super) fn spliced_support<'a>(
-    disk: &'a [(String, String)],
+    disk: &'a [krusty_lsp::DigestedSource],
     inferred_count: usize,
     friends: &[(usize, &'a str, &'a str)],
     dependencies: &[(usize, &'a str, &'a str)],
-) -> (Vec<(&'a str, &'a str)>, usize) {
+) -> (Vec<krusty_lsp::SupportText<'a>>, usize) {
     let (head, tail) = disk.split_at(inferred_count);
     let mut pairs = Vec::with_capacity(disk.len() + friends.len() + dependencies.len());
+    pairs.extend(head.iter().map(krusty_lsp::DigestedSource::as_support));
     pairs.extend(
-        head.iter()
-            .map(|(uri, source)| (uri.as_str(), source.as_str())),
+        friends
+            .iter()
+            .map(|(_, uri, source)| krusty_lsp::SupportText::open_document(uri, source)),
     );
-    pairs.extend(friends.iter().map(|(_, uri, source)| (*uri, *source)));
     let inferred_support_count = pairs.len();
-    pairs.extend(dependencies.iter().map(|(_, uri, source)| (*uri, *source)));
     pairs.extend(
-        tail.iter()
-            .map(|(uri, source)| (uri.as_str(), source.as_str())),
+        dependencies
+            .iter()
+            .map(|(_, uri, source)| krusty_lsp::SupportText::open_document(uri, source)),
     );
+    pairs.extend(tail.iter().map(krusty_lsp::DigestedSource::as_support));
     (pairs, inferred_support_count)
 }
 
@@ -39,8 +41,8 @@ mod tests {
     #[test]
     fn friends_stay_in_the_inferred_prefix_and_dependencies_follow_it() {
         let disk = [
-            ("file:///inferred.kt".into(), "fun inferred() {}".into()),
-            ("file:///rest.kt".into(), "fun rest() {}".into()),
+            krusty_lsp::DigestedSource::kotlin("file:///inferred.kt", "fun inferred() {}"),
+            krusty_lsp::DigestedSource::kotlin("file:///rest.kt", "fun rest() {}"),
         ];
         let friends = [(1, "file:///friend.kt", "fun friend() {}")];
         let dependencies = [(2, "file:///dep.kt", "fun dep() {}")];
@@ -49,13 +51,19 @@ mod tests {
 
         assert_eq!(inferred, 2, "an open friend extends the inferred prefix");
         assert_eq!(
-            pairs,
+            pairs
+                .iter()
+                .map(|source| (source.uri(), source.text(), source.digest()))
+                .collect::<Vec<_>>(),
             [
-                ("file:///inferred.kt", "fun inferred() {}"),
-                ("file:///friend.kt", "fun friend() {}"),
-                ("file:///dep.kt", "fun dep() {}"),
-                ("file:///rest.kt", "fun rest() {}"),
+                disk[0].as_support(),
+                krusty_lsp::SupportText::open_document("file:///friend.kt", "fun friend() {}",),
+                krusty_lsp::SupportText::open_document("file:///dep.kt", "fun dep() {}"),
+                disk[1].as_support(),
             ]
+            .into_iter()
+            .map(|source| (source.uri(), source.text(), source.digest()))
+            .collect::<Vec<_>>()
         );
 
         let (pairs, inferred) = spliced_support(&disk, 1, &[], &[]);
@@ -64,11 +72,11 @@ mod tests {
             "no open friend leaves the disk prefix unchanged"
         );
         assert_eq!(
-            pairs,
-            [
-                ("file:///inferred.kt", "fun inferred() {}"),
-                ("file:///rest.kt", "fun rest() {}"),
-            ]
+            pairs
+                .iter()
+                .map(|source| source.digest())
+                .collect::<Vec<_>>(),
+            vec![disk[0].digest(), disk[1].digest()]
         );
     }
 

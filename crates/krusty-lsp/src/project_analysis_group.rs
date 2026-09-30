@@ -1,9 +1,18 @@
-//! One project's analysis group identity and its cache fingerprint.
+//! One project's analysis-group identity, configuration, fingerprint, and cached result lifecycle.
 
 use super::analysis_group::ProjectAnalysisGroup;
-use krusty_lsp::{LspOptions, ProjectModel};
+use krusty_lsp::{DocumentAnalysis, LspOptions, ProjectModel};
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
+
+pub(super) struct CachedProjectAnalysis {
+    pub(super) module_index: Option<usize>,
+    pub(super) fingerprint: u64,
+    pub(super) document_indices: Vec<usize>,
+    pub(super) analyses: Vec<DocumentAnalysis>,
+    pub(super) retained_bytes: usize,
+}
 
 /// Partition the open documents into the source sets that are analyzed together.
 ///
@@ -58,6 +67,26 @@ pub(super) fn project_group_compiler_config(
     (Some(classpath), language_arguments)
 }
 
+pub(super) fn open_documents_from_modules<'a>(
+    visible_indices: &[usize],
+    documents: &[(&'a str, &'a str)],
+    module_assignments: &[Option<usize>],
+) -> Vec<(usize, &'a str, &'a str)> {
+    let visible: HashSet<usize> = visible_indices.iter().copied().collect();
+    documents
+        .iter()
+        .zip(module_assignments)
+        .enumerate()
+        .filter_map(|(document_index, ((uri, source), assignment))| {
+            if assignment.is_some_and(|index| visible.contains(&index)) {
+                Some((document_index, *uri, *source))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub(super) fn project_group_fingerprint(
     documents: &[(&str, &str)],
     group: &ProjectAnalysisGroup<'_>,
@@ -74,12 +103,65 @@ pub(super) fn project_group_fingerprint(
             krusty_lsp::open_document_digest::text_hash(uri, source).hash(&mut fingerprint);
         }
     }
-    for (uri, source) in &group.support_documents {
-        uri.hash(&mut fingerprint);
-        source.hash(&mut fingerprint);
+    for source in &group.support_documents {
+        source.digest().hash(&mut fingerprint);
     }
-    group.java_sources.hash(&mut fingerprint);
+    for source in &group.java_sources {
+        source.digest().hash(&mut fingerprint);
+    }
     fingerprint.finish()
+}
+
+pub(super) fn retain_analysis_cache_budget(
+    cache: &mut Vec<CachedProjectAnalysis>,
+    incoming_bytes: usize,
+    max_bytes: usize,
+) {
+    let mut retained = cache
+        .iter()
+        .map(|cached| cached.retained_bytes)
+        .sum::<usize>();
+    while !cache.is_empty() && incoming_bytes > max_bytes.saturating_sub(retained) {
+        retained = retained.saturating_sub(cache.remove(0).retained_bytes);
+    }
+}
+
+pub(super) fn source_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Option<usize> {
+    sources
+        .into_iter()
+        .try_fold(0usize, |bytes, source| bytes.checked_add(source.len()))
+}
+
+pub(super) fn project_source_size_limit_message() -> String {
+    format!(
+        "module source set exceeds analysis limit (maximum {} MiB); semantic diagnostics suppressed",
+        krusty_lsp::MAX_SOURCE_SET_BYTES / (1024 * 1024)
+    )
+}
+
+fn project_source_error_analysis(message: &str) -> DocumentAnalysis {
+    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+        span: krusty::diag::Span::new(0, 0),
+        editor_span: None,
+        identity: None,
+        severity: krusty::diag::Severity::Error,
+        kind: krusty::diag::DiagnosticKind::Compiler,
+        msg: message.to_string(),
+        file: 0,
+    }])
+}
+
+pub(super) fn fail_project_group(
+    analyses: &mut [DocumentAnalysis],
+    cache: &mut Vec<CachedProjectAnalysis>,
+    module_index: Option<usize>,
+    document_indices: &[usize],
+    message: &str,
+) {
+    cache.retain(|cached| cached.module_index != module_index);
+    for &index in document_indices {
+        analyses[index] = project_source_error_analysis(message);
+    }
 }
 
 #[cfg(test)]

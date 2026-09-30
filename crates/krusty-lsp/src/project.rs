@@ -12,6 +12,7 @@ pub mod model;
 pub mod provider;
 pub mod report;
 pub mod runner;
+mod source_digest;
 mod sources;
 pub mod sync;
 mod walk;
@@ -31,5 +32,6 @@ pub use model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, Source
 pub use provider::{ProbeError, ProjectProvider};
 pub use report::model_json;
 pub use runner::{Command, CommandOutput, CommandRunner, ProcessRunner};
+pub use source_digest::{DigestedJavaSource, DigestedSource, SupportText};
 pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources};
 pub use sync::{ProjectSync, RefreshOutcome};
