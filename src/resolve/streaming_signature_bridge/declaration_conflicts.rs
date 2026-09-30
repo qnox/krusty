@@ -82,9 +82,16 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     let mut reserved_diagnostic_bytes = 0usize;
     let mut retained_display_bytes = 0usize;
     for entry in &entries {
-        let Some(key) =
-            TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name.clone())
-        else {
+        let span = streamed_callable_signature_span(headers, entry.declaration)
+            .expect("a top-level callable must retain its signature origin");
+        index.publish_package_function_signature_span(entry.declaration, span);
+        let header = streamed_callable_header_by_declaration(headers, entry.declaration)
+            .expect("a top-level function must retain its compact callable header");
+        let Some(key) = TopLevelFunctionConflictKey::from_signature(
+            &entry.signature,
+            entry.name.clone(),
+            header.type_parameters.len(),
+        ) else {
             continue;
         };
         register_top_level_function_conflict(
@@ -95,8 +102,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
                 declaration: TopLevelFunctionConflictDecl {
                     file: entry.source,
                     declaration: TopLevelFunctionConflictDeclaration::Stable(entry.declaration),
-                    diagnostic_span: streamed_callable_signature_span(headers, entry.declaration)
-                        .expect("a top-level callable must retain its signature origin"),
+                    diagnostic_span: span,
                 },
                 private: entry.signature.visibility.is_private(),
                 entry_point: entry.entry_point.is_some(),
@@ -120,8 +126,13 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         let Some(source_declaration) = entry.signature.source_decl else {
             continue;
         };
-        let Some(key) = TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name)
-        else {
+        let header = streamed_callable_header_by_declaration(headers, entry.declaration)
+            .expect("a top-level function must retain its compact callable header");
+        let Some(key) = TopLevelFunctionConflictKey::from_signature(
+            &entry.signature,
+            entry.name,
+            header.type_parameters.len(),
+        ) else {
             continue;
         };
         let local = entry.signature.visibility.is_private() || entry.entry_point.is_some();

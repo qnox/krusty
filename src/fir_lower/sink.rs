@@ -31,6 +31,7 @@ pub enum FirFileLoweringFailure {
     MissingCallable(DeclarationId),
     MissingProperty(DeclarationId),
     MissingSourceOrder(DeclarationId),
+    MissingPackageFunctionSignatureSpan(DeclarationId),
     MissingContinuationOrdinal(DeclarationId),
     MissingClassSourceQualifiedName(DeclarationId),
     MissingSourcePackage(crate::fir::SourceFileId),

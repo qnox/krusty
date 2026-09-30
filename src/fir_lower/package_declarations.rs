@@ -13,6 +13,15 @@ use crate::ir::{
 
 use super::FirFileLoweringFailure;
 
+fn package_function_signature_span<T>(
+    signature_span: Option<T>,
+    declaration: DeclarationId,
+) -> Result<T, FirFileLoweringFailure> {
+    signature_span.ok_or(FirFileLoweringFailure::MissingPackageFunctionSignatureSpan(
+        declaration,
+    ))
+}
+
 fn type_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
@@ -159,6 +168,10 @@ pub(super) fn publish(
                     visibility: header.visibility,
                     spellings: index.declaration_spellings_primary_bound_first(declaration),
                     source_order,
+                    signature_span: package_function_signature_span(
+                        index.package_function_signature_span(declaration),
+                        declaration,
+                    )?,
                 });
             }
             DeclarationKind::Property => {
@@ -298,4 +311,20 @@ pub(super) fn publish(
         })
         .transpose()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_package_function_signature_origin_fails_closed() {
+        let declaration = DeclarationId::from_raw(23);
+        assert_eq!(
+            package_function_signature_span(None::<()>, declaration),
+            Err(FirFileLoweringFailure::MissingPackageFunctionSignatureSpan(
+                declaration
+            ))
+        );
+    }
 }

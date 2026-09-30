@@ -10133,23 +10133,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
   `feature_coverage_q_e2e::value_class_companion_function`.
 
-- **`@JvmName` on a top-level function names the emitted method, and decides the clash.** The
-  annotation's constant string is the bytecode method name; call sites still resolve by the SOURCE
-  name, and each emits the annotated spelling — a same-file call and a callable reference through the
-  resolved function's own name, a CROSS-file call through a module-wide table keyed by declaration,
-  since that caller cannot see the callee's AST. A callable reference keeps the Kotlin name for
-  reflection and targets the JVM name for its invoke. Scope: top-level FUNCTIONS with a constant
-  string argument. A top-level EXTENSION is not renamed (nor is its clash key), and a non-literal
-  argument falls back to the source name — both are ABI divergences from kotlinc, not miscompiles.
-  Because a platform
-  declaration clash is a statement about JVM signatures, the top-level overload-conflict key uses the
-  emitted name rather than the source name: `fun g(x: String)` and `fun g(x: String?)` erase to one
-  descriptor and conflict while both are spelled `g`, but not once `@JvmName("gNullable")` separates
-  them — and, in the other direction, two distinct source names collapsed onto one `@JvmName` DO
-  conflict. Overload selection is unaffected; it still keys on the source name. Tests:
-  `frontend::tests::jvm_name_decides_the_top_level_clash`,
-  `jvm_name_toplevel_e2e::jvm_name_is_emitted_for_every_call_path`,
+- **`@JvmName` on a top-level function names the emitted method.** The annotation's constant
+  string is the bytecode method name; call sites still resolve by the SOURCE name, and each emits
+  the annotated spelling — a same-file call and a callable reference through the resolved function's
+  own name, a CROSS-file call through a module-wide table keyed by declaration, since that caller
+  cannot see the callee's AST. A callable reference keeps the Kotlin name for reflection and targets
+  the JVM name for its invoke. Scope: top-level FUNCTIONS with a constant string argument. A
+  top-level EXTENSION is not renamed, and a non-literal argument falls back to the source name —
+  both are ABI divergences from kotlinc, not miscompiles. Overload selection keys on the source
+  name. Tests: `jvm_name_toplevel_e2e::jvm_name_is_emitted_for_every_call_path`,
   `resolve_parse_deep_coverage_e2e::overload_by_nullability`.
+
+- **Type-parameter arity is part of a top-level overload shape; JVM erasure is not.** `fun <T>
+  id(): Int` and `fun id(): Int` are different Kotlin declarations, as are `fun <T> labeled(): Int`
+  and `fun labeled(): Unit`. The resolver conflict key counts type parameters even when they occur
+  only in the result, and it keeps nullability and generic arguments, so those shapes are not
+  frontend `conflicting overloads`. After representation, package functions in one file whose
+  physical method name and descriptor are equal are a platform declaration clash, with kotlinc's
+  message (`id()I`, both declarations, `defined in root package` or the package name). `@JvmName`
+  changes that physical name, so `g(String)` and `g(String?)` clash while both are spelled `g` and
+  stop clashing once one is renamed. A different erased return (`()I` versus `()V`) does not clash,
+  and the same shapes in different files do not share a facade. Tests:
+  `generic_arity_overload_e2e`, `main_entry_point_conflict_e2e::same_file_entry_point_and_ordinary_main_conflict`.
 
 - **A property reference carries its type arguments.** `::p` / `obj::p` is `KProperty0<V>` (or
   `KMutableProperty0<V>`) and `Type::p` is `KProperty1<T, V>`, not the raw class — so `get()` reports

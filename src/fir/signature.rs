@@ -1689,6 +1689,7 @@ pub struct ResolvedModuleIndex {
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
+    pub(super) package_function_origins: super::source_coordinates::PackageFunctionSourceOrigins,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1972,20 +1973,18 @@ impl ResolvedModuleIndex {
             .copied()
     }
 
-    /// Same-pass source coordinate used only while checking retained inline/default fragments.
-    /// Production finalization destroys this sidecar before Pass 2 starts.
-    pub(crate) fn declaration_range(
+    pub(super) fn temporary_declaration_range(
         &self,
         declaration: DeclarationId,
     ) -> Option<crate::diag::Span> {
         self.declarations.range(declaration)
     }
 
-    pub(crate) fn release_source_coordinates(&mut self) {
+    pub(super) fn release_temporary_source_coordinates(&mut self) {
         self.declarations.release_source_coordinates();
     }
 
-    pub fn retains_source_coordinates(&self) -> bool {
+    pub(super) fn retains_temporary_source_coordinates(&self) -> bool {
         self.declarations.retains_source_coordinates()
     }
 
@@ -3269,6 +3268,7 @@ impl ResolvedModuleIndex {
                 .sum::<usize>()
             + self.source_orders.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
+            + self.package_function_origins.storage_payload_bytes()
             + self.declaration_headers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())

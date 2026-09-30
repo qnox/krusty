@@ -49,6 +49,9 @@ pub struct IrPackageFunction {
     pub visibility: crate::types::Visibility,
     pub spellings: crate::spelling::DeclaredSpellings,
     pub source_order: u32,
+    /// Byte range of the source signature, starting at `fun`. The JVM clash diagnostic points here
+    /// after representation has chosen the physical method name and descriptor.
+    pub signature_span: crate::diag::Span,
 }
 
 /// Backend-neutral package-property declaration metadata. The checked property table retains its
