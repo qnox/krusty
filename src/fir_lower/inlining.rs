@@ -1061,6 +1061,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::ClassConst { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
+        | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }

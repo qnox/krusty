@@ -88,7 +88,7 @@ pub(super) fn source_literal_constant(
 }
 
 /// Checked facts needed to evaluate one `const val` initializer.
-pub(super) struct CheckedConstantExpression<'a> {
+pub(crate) struct CheckedConstantExpression<'a> {
     pub file: &'a File,
     pub expression_types: &'a [Ty],
     pub resolved_constants: &'a HashMap<ExprId, LibraryConst>,
@@ -101,7 +101,7 @@ pub(super) struct CheckedConstantExpression<'a> {
 /// `declared_ty` is authoritative at the root (`const val b: Byte = 1`); nested nodes use the types
 /// assigned by ordinary checking. A result is produced only for operations whose selected callable
 /// carries the corresponding provider-normalized builtin intrinsic.
-pub(super) fn checked_constant_expression(
+pub(crate) fn checked_constant_expression(
     context: CheckedConstantExpression<'_>,
     expression: ExprId,
     declared_ty: Ty,

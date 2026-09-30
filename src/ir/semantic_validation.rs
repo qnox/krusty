@@ -304,6 +304,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::ClassConst { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
+        | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }

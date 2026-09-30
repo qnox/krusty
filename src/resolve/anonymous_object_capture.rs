@@ -1,11 +1,20 @@
 //! What a local class or anonymous object captures at its construction site: the checker's
 //! contract with checked FIR, which turns each capture into a constructor parameter and field.
 
+use super::capture_storage::{
+    anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
+    anonymous_descendants, enclosing_value_visible_beside_member,
+};
 use super::scope::ContextReceiverKind;
-use super::{Checker, CheckerScope};
+use super::{
+    capture_field_order, AnonymousLexicalClassScope, Checker, CheckerScope, ExprLowering,
+    ResolvedCall, StmtLowering,
+};
+use crate::ast::{DeclId, ExprId, File, StmtId};
 use crate::diag::Span;
 use crate::fir::FirCapturedReceiver;
 use crate::types::{CapturedContextKind, Ty};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -28,6 +37,12 @@ pub struct AnonymousObjectCapture {
     /// What a captured receiver was in source, which names the capture's field; `None` for a
     /// captured value.
     pub receiver: Option<FirCapturedReceiver>,
+    /// Receiver-tower coordinate this capture represented before any enclosing anonymous field
+    /// became its physical source. A forwarded super argument is evaluated outside that enclosing
+    /// constructor and therefore rematerializes this semantic receiver rather than reading the
+    /// field. Keep the complete typed coordinate: depth alone cannot distinguish a class receiver
+    /// from an extension/context receiver, and `current` is independent of its numeric depth.
+    pub semantic_receiver: Option<AnonymousObjectReceiverSource>,
     /// Number of distinct same-named lexical bindings nearer than the selected source at this
     /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
     /// consumes it while the active lexical scopes still exist.
@@ -63,6 +78,20 @@ pub enum AnonymousObjectCaptureSource {
         current: bool,
         depth: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnonymousObjectReceiverSource {
+    EnclosingInstance { current: bool, depth: u32 },
+    ImplicitReceiver { current: bool, depth: u32 },
+}
+
+impl AnonymousObjectReceiverSource {
+    pub(crate) const fn depth(self) -> u32 {
+        match self {
+            Self::EnclosingInstance { depth, .. } | Self::ImplicitReceiver { depth, .. } => depth,
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -108,4 +137,236 @@ impl Checker<'_> {
         let (label, _, _) = &self.this_labels[*index];
         FirCapturedReceiver::Callable(label.clone().into_boxed_str())
     }
+}
+
+#[derive(Clone)]
+pub(super) struct AnonymousCaptureCandidate {
+    pub(super) name: String,
+    pub(super) ty: Ty,
+    pub(super) shared_cell: bool,
+    pub(super) source: AnonymousObjectCaptureSource,
+    pub(super) delegate_storage: Option<Ty>,
+    /// The candidate is a function parameter or local, not a top-level or class property.
+    /// That local keeps its unqualified name inside a nested classifier that redeclares it.
+    pub(super) function_local: bool,
+    pub(super) receiver_label: Option<Box<str>>,
+    pub(super) receiver: Option<crate::fir::FirCapturedReceiver>,
+    pub(super) semantic_receiver: Option<AnonymousObjectReceiverSource>,
+    /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
+    /// enough to project a direct nested anonymous object's use onto this class's capture field.
+    pub(super) receiver_identity: Option<(usize, usize)>,
+}
+
+impl Checker<'_> {
+    pub(super) fn refresh_anonymous_receiver_capture_fields(
+        &mut self,
+        declaration: DeclId,
+        candidates: &[AnonymousCaptureCandidate],
+    ) {
+        let Some(captures) = self.discovered_anonymous_captures.get(&declaration) else {
+            self.anonymous_receiver_capture_fields.remove(&declaration);
+            return;
+        };
+        let fields = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let identity = candidate.receiver_identity?;
+                let field = captures
+                    .iter()
+                    .position(|capture| capture.source == candidate.source)?;
+                Some((
+                    identity,
+                    u32::try_from(field).expect("too many anonymous capture fields"),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        if fields.is_empty() {
+            self.anonymous_receiver_capture_fields.remove(&declaration);
+        } else {
+            self.anonymous_receiver_capture_fields
+                .insert(declaration, fields);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SelectedLocalCallableCaptures<'a> {
+    pub(super) calls: &'a HashMap<ExprId, ResolvedCall>,
+    pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
+    pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
+}
+
+fn expression_uses_selected_local_callable_capture(
+    file: &File,
+    expression: ExprId,
+    name: &str,
+    selected: SelectedLocalCallableCaptures<'_>,
+) -> bool {
+    let statement = selected
+        .calls
+        .get(&expression)
+        .and_then(|call| match call {
+            ResolvedCall::LocalFunction(call) => Some(call.stmt_id),
+            _ => None,
+        })
+        .or_else(|| match selected.expressions.get(&expression) {
+            Some(ExprLowering::LocalFunction { stmt_id, .. }) => Some(*stmt_id),
+            _ => None,
+        });
+    if statement.is_some_and(|statement| {
+        matches!(
+            selected.statements.get(&statement),
+            Some(StmtLowering::LocalFunction(function))
+                if function.captures.iter().any(|capture| capture.name == name)
+        )
+    }) {
+        return true;
+    }
+    let mut expressions = Vec::new();
+    let mut statements = Vec::new();
+    file.any_child_expr(
+        expression,
+        &mut |child| {
+            expressions.push(child);
+            false
+        },
+        &mut |statement| {
+            statements.push(statement);
+            false
+        },
+    );
+    expressions
+        .into_iter()
+        .any(|child| expression_uses_selected_local_callable_capture(file, child, name, selected))
+        || statements.into_iter().any(|statement| {
+            let mut children = Vec::new();
+            file.any_child_stmt(statement, &mut |child| {
+                children.push(child);
+                false
+            });
+            children.into_iter().any(|child| {
+                expression_uses_selected_local_callable_capture(file, child, name, selected)
+            })
+        })
+}
+
+fn anonymous_descendant_uses_selected_local_callable_capture(
+    file: &File,
+    declaration: DeclId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    name: &str,
+    selected: SelectedLocalCallableCaptures<'_>,
+) -> bool {
+    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
+        anonymous_body_expressions(file, candidate)
+            .into_iter()
+            .any(|expression| {
+                expression_uses_selected_local_callable_capture(file, expression, name, selected)
+            })
+    })
+}
+
+pub(super) fn record_anonymous_construction_captures(
+    file: &File,
+    construction: ExprId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    candidates: &[AnonymousCaptureCandidate],
+    preserve_missing: bool,
+    selected_local_callables: SelectedLocalCallableCaptures<'_>,
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) -> Vec<Option<u32>> {
+    let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
+        return Vec::new();
+    };
+    crate::trace_compiler!(
+        "resolve",
+        "anonymous capture candidates declaration={declaration:?} construction={construction:?} candidates={:?}",
+        candidates
+            .iter()
+            .map(|candidate| (&candidate.name, candidate.ty, candidate.delegate_storage))
+            .collect::<Vec<_>>(),
+    );
+    // Match ordinary name lookup for name-addressed captures: `visit_bindings` is innermost-first,
+    // so retain the first lexical/storage candidate for each spelling. Direct receiver captures
+    // are coordinate-addressed scope-tower rungs; a receiver already forwarded through class
+    // storage remains name-addressed here even though it also retains its semantic coordinate for
+    // a later super-argument rematerialization.
+    let selected = candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            matches!(
+                candidate.source,
+                AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                    | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            ) || !candidates[..*index]
+                .iter()
+                .any(|earlier| earlier.name == candidate.name)
+        })
+        .filter(|(_, candidate)| candidate.ty != Ty::Error)
+        .filter(|(_, candidate)| match candidate.source {
+            // Enclosing-instance need was decided against the anonymous body's receiver uses.
+            // It has no source variable name, so lexical bound/write/use filters do not apply.
+            AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
+            AnonymousObjectCaptureSource::LexicalValue => {
+                enclosing_value_visible_beside_member(
+                    file,
+                    declaration,
+                    &candidate.name,
+                    candidate.function_local,
+                ) && (candidate.delegate_storage.is_some()
+                    || anonymous_descendant_uses_name(
+                        file,
+                        declaration,
+                        lexical_scope,
+                        &candidate.name,
+                        candidate.ty,
+                        candidate.function_local,
+                    )
+                    || anonymous_descendant_uses_selected_local_callable_capture(
+                        file,
+                        declaration,
+                        lexical_scope,
+                        &candidate.name,
+                        selected_local_callables,
+                    )
+                    || anonymous_descendant_writes_name(
+                        file,
+                        declaration,
+                        lexical_scope,
+                        &candidate.name,
+                        candidate.function_local,
+                    ))
+            }
+        })
+        .map(|(_, candidate)| AnonymousObjectCapture {
+            name: candidate.name.clone(),
+            ty: candidate.ty,
+            shared_cell: candidate.shared_cell,
+            storage_ty: candidate.delegate_storage,
+            source: candidate.source,
+            receiver_label: candidate.receiver_label.clone(),
+            receiver: candidate.receiver.clone(),
+            semantic_receiver: candidate.semantic_receiver,
+            lexical_shadow_depth: 0,
+            capture_dependency: None,
+        })
+        .collect::<Vec<_>>();
+    crate::trace_compiler!(
+        "resolve",
+        "anonymous capture selection declaration={declaration:?} captures={selected:?}",
+    );
+    let (selected, field_remap) = capture_field_order::reconcile(
+        captures.get(&declaration).map(Vec::as_slice),
+        selected,
+        preserve_missing,
+    );
+    crate::trace_compiler!(
+        "resolve",
+        "anonymous captures selected declaration={declaration:?} captures={selected:?}",
+    );
+    captures.insert(declaration, selected);
+    field_remap
 }

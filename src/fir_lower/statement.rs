@@ -360,6 +360,7 @@ impl BodyLowering<'_> {
                 // A captured value is compiler-supplied, never a caller's argument: kotlinc does
                 // not guard it with `checkNotNullParameter`.
                 check: None,
+                anonymous_super_forward: None,
                 capture: Some(crate::ir::IrConstructorCapture {
                     source_name: capture.name.clone(),
                     receiver,

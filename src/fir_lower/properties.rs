@@ -1511,7 +1511,8 @@ fn merge_class_initialization(
     ir: &mut IrFile,
     mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
-    for initializer in &ir.checked_class_initializers {
+    let initializers = ir.checked_class_initializers.clone();
+    for initializer in &initializers {
         initialization
             .entry(initializer.class)
             .or_default()

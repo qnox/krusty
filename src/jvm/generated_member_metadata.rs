@@ -41,8 +41,7 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
                     .parameter_identities
                     .iter()
                     .map(|identity| {
-                        crate::jvm::parameter_names::metadata(identity)
-                            .map(str::to_owned)
+                        crate::jvm::parameter_names::metadata_owned(identity)
                             .expect("generated metadata parameters carry semantic names")
                     })
                     .zip(params.iter().copied())

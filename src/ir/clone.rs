@@ -303,6 +303,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::LocalPropertyReference { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
+        | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::GetStatic(_)
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }

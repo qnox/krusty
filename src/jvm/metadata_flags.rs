@@ -71,7 +71,8 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape
 /// constant. Decoded from kotlinc 2.4.0 (copy 198, componentN 454, hashCode/toString 65750, equals
 /// 66006): bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3, PRIVATE=1) | bits4-5 modality
-/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, SYNTHESIZED=3) | bit8
+/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, DELEGATION=2,
+/// SYNTHESIZED=3) | bit8
 /// isOperator | bit9 isInfix.
 /// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
 /// (already kotlinc-verified) constants.
@@ -104,8 +105,16 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     } else {
         0
     };
+    // `memberKind` (bits 6-7). A source declaration is DECLARATION (0). An `interface by`
+    // forwarder is DELEGATION (2); the override edge names that function.
+    let member_kind = if ir.is_interface_delegation_function(fid) {
+        crate::metadata::function_flags::MEMBER_KIND_DELEGATION
+    } else {
+        0
+    };
     (visibility << 1)
         | (modality << 4)
+        | member_kind
         | operator
         | infix
         | inline

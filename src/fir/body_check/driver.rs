@@ -649,10 +649,10 @@ fn check_and_dispatch_property_body(
             context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
-    // A member property initializer or delegate expression runs inside the constructor, where the primary-constructor
-    // parameters are ordinary locals — that is exactly how the checker types them
-    // (`class A(val y: Int) { var x = y }` reads `y` with `origin = Local`). The body unit therefore
-    // has to carry them, or the checked body has no binding for a name the checker resolved.
+    // A member property initializer or delegate expression runs inside the constructor, where every
+    // primary-constructor parameter — a plain one and a constructor property — keeps its source slot.
+    // The JVM reads a constructor property from its field after that parameter is stored; dropping the
+    // parameter here would erase the source-slot identity the initializer still reads.
     if matches!(work.kind, BodyKind::Initializer | BodyKind::Delegate) {
         if let Some(class) = index
             .declaration_anchor(property_declaration)

@@ -33,6 +33,8 @@ pub(crate) mod function_flags {
     /// A companion-associated function (`companion { fun … }` or `companion fun C.name`), the
     /// function counterpart of [`super::property_flags::IS_COMPANION`].
     pub const IS_COMPANION: u64 = 1 << 18;
+    /// Bits 6-7 are `MemberKind`. DELEGATION (2) is a function realized by `interface by`.
+    pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
 }
 
 pub(crate) mod property_flags {

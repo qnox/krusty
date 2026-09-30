@@ -1020,6 +1020,12 @@ pub enum IrExpr {
         finally: Option<ExprId>,
         result: Ty,
     },
+    /// Anonymous super-constructor operand evaluated at the construction site. Constructor
+    /// finalization binds `slot` to the synthetic constructor parameter. Emission does not
+    /// interpret this node.
+    ForwardedSuperArgument {
+        slot: u32,
+    },
 }
 
 /// A function/method declaration (`IrFunction`).
@@ -1177,6 +1183,10 @@ pub struct IrCtorArg {
     /// `Some(name)` for a non-null reference param the backend guards at `<init>` entry; `None` for a
     /// primitive, nullable or type-parameter param and for synthetic ones (`this$0`, captures).
     pub check: Option<String>,
+    /// 1-based ordinal among an anonymous object's forwarded super-constructor parameters.
+    /// `None` for every source parameter and for every other synthetic parameter. Kotlin metadata
+    /// does not list this parameter; the JVM local-variable table names it `$super_call_param$N`.
+    pub anonymous_super_forward: Option<u32>,
     /// The captured value a local or anonymous class's synthetic constructor prefix carries.
     pub capture: Option<IrConstructorCapture>,
 }
@@ -1652,6 +1662,7 @@ impl IrClass {
                 is_vararg: false,
                 type_param: None,
                 check: None,
+                anonymous_super_forward: None,
                 capture: None,
             })
             .collect::<Vec<_>>();
@@ -1974,6 +1985,12 @@ pub struct IrFile {
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:
         std::collections::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
+    /// Anonymous-object super-constructor arguments evaluated at the construction site.
+    /// Keyed by `(anonymous classifier, super-parameter slot before an outer-instance prefix)`.
+    /// The value is `(anonymous constructor parameter, source type-operator shells that stay in
+    /// the anonymous constructor around the forwarded value)`.
+    pub(crate) anonymous_super_forwards:
+        std::collections::HashMap<(crate::fir::DeclarationId, u32), (u32, u8)>,
     /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
     /// ordinary function marker rather than constructor/value-class markers.
     pub class_static_local_functions: std::collections::HashSet<FunId>,

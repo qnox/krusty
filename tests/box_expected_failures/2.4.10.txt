@@ -70,7 +70,6 @@ dataClasses/components/kt49812.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
-delegation/delegationDifferentModule.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt

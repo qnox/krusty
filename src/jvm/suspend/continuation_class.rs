@@ -209,6 +209,7 @@ pub(super) fn build_continuation_class(
             is_vararg: false,
             type_param: None,
             check: None,
+            anonymous_super_forward: None,
             capture: None,
         });
         arg_idx += 1;
@@ -224,6 +225,7 @@ pub(super) fn build_continuation_class(
         is_vararg: false,
         type_param: None,
         check: None,
+        anonymous_super_forward: None,
         capture: None,
     });
     let super_completion_idx = arg_idx;

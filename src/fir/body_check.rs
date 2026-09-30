@@ -491,6 +491,8 @@ struct BodyFirChecker<'a> {
     /// Constructor delegation and constructor-owned defaults execute before local-class capture
     /// fields are readable from `this`; capture accesses in those regions use prefix parameters.
     constructor_prefix_capture_access: bool,
+    /// Whether an anonymous-super argument is being evaluated in its enclosing scope.
+    hoist_anonymous_super_argument: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -604,9 +606,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver,
                 ..
             } => extension_receiver.or(*dispatch_receiver),
-            // A provider-marked primitive member (`a?.plus(b)`) is already a checked binary
-            // operation. Its left operand is still the exact selected dispatch receiver, so retain
-            // that ownership for the safe-call null guard instead of reconstructing a callable.
+            // `a?.plus(b)` is already a checked binary; its left operand is the safe-call receiver.
             FirExprKind::Binary { lhs, .. } | FirExprKind::Range { start: lhs, .. } => {
                 Some(FirReceiver {
                     value: *lhs,
@@ -624,6 +624,7 @@ impl BodyFirChecker<'_> {
             }),
             FirExprKind::ConstructorCall(call) => call.outer_receiver,
             FirExprKind::Constant(_)
+            | FirExprKind::ForwardedSuperArgument { .. }
             | FirExprKind::AnnotationArray(_)
             | FirExprKind::ArrayLiteral { .. }
             | FirExprKind::ArrayConstruction { .. }
@@ -980,6 +981,7 @@ impl BodyFirChecker<'_> {
             owned_receiver_count: u32::from(has_dispatch_receiver),
             outer_receiver_frames: Vec::new(),
             constructor_prefix_capture_access: false,
+            hoist_anonymous_super_argument: false,
         }
     }
 
@@ -1867,9 +1869,7 @@ impl BodyFirChecker<'_> {
                             target,
                             dispatch_receiver,
                         }
-                    } else if let Some(ExprLowering::ClassStorageRead { field }) =
-                        self.info.expr_lowers.get(&expression)
-                    {
+                    } else if let Some(field) = self.active_class_storage_read(expression) {
                         match self.class_values.get(name).copied() {
                             Some(binding) => {
                                 let origin = self.expression_origin(expression)?;

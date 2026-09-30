@@ -79,6 +79,11 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// Value parameter of an `interface by` forwarding declaration. The JVM backend formats the
+    /// producer-owned ordinal for metadata/debug ABI surfaces.
+    InterfaceDelegationValue {
+        ordinal: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

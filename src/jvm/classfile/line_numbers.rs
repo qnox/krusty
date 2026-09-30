@@ -97,6 +97,55 @@ impl ClassWriter {
         }
     }
 
+    /// Intern an `init` block's local names before the constructor's parameter rows, so a kept
+    /// local's strings precede `this` the way kotlinc visits them.
+    pub fn reserve_ranged_local_names(&mut self, locals: &[(u16, u16, u16, String, String)]) {
+        for (_, _, _, name, descriptor) in locals {
+            self.cp.utf8(name);
+            self.cp.utf8(descriptor);
+        }
+    }
+
+    /// Insert constructor-body locals ahead of the parameter rows [`Self::set_method_debug`] wrote.
+    ///
+    /// kotlinc visits an `init` block's locals before `this` and the constructor parameters. A
+    /// zero-length range stays until the method is written: the store in front of it belongs to
+    /// that local, and an unused local then disappears from the table.
+    pub fn prepend_ranged_locals(
+        &mut self,
+        name: &str,
+        desc: &str,
+        locals: &[(u16, u16, u16, String, String)],
+    ) {
+        if locals.is_empty() {
+            return;
+        }
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        let ranged = locals
+            .iter()
+            .map(|(start, length, slot, local_name, local_desc)| {
+                (
+                    self.cp.utf8(local_name),
+                    self.cp.utf8(local_desc),
+                    *slot,
+                    Some(*start),
+                    Some(*length),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == n && method.desc == d && method.code.is_some())
+        {
+            let mut combined = ranged;
+            combined.append(&mut method.lvt);
+            method.lvt = combined;
+        }
+    }
+
     /// Replace a method's `LineNumberTable` with exact `(start_pc, line)` entries. Lookup-only:
     /// describing a missing method does not perturb the constant pool.
     pub fn set_method_lines(&mut self, name: &str, desc: &str, entries: &[(u16, u32)]) {

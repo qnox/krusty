@@ -1344,7 +1344,11 @@ fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix(
         .fold((0usize, 0usize), |total, counts| {
             (total.0 + counts.0, total.1 + counts.1)
         });
-    assert_eq!([dispatch_captures, forwarded_storage_captures], [1, 1]);
+    assert_eq!(
+        [dispatch_captures, forwarded_storage_captures],
+        [1, 0],
+        "a forwarded super argument executes in B.update and must rematerialize the live receiver instead of reading the enclosing anonymous object's storage"
+    );
 
     fn captured_property_write_count(body: &FirBody, index: &ResolvedModuleIndex) -> usize {
         (0..body.expression_count())

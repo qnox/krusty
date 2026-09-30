@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile, IrTypeOp,
+    Callee, ClassId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile,
+    IrTypeOp,
 };
 use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
@@ -38,6 +39,7 @@ mod comparison_branches;
 mod condition_emission;
 mod constructor_accessors;
 mod constructor_defaults;
+mod constructor_initialization;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod copied_code;
 mod coroutine_machine;
@@ -124,10 +126,12 @@ mod static_accessors;
 mod static_fields;
 mod string_members;
 mod supertype_markers;
+mod synth_debug_tables;
 mod type_operation_emission;
 mod vararg;
 mod when;
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
+use synth_debug_tables::attach_synth_debug_tables;
 
 use super::metadata_flags::{
     class_metadata_flags, declaration_visibility_bits, declared_value_parameters, function_flags,
@@ -949,8 +953,6 @@ fn primary_ctor_annotations(c: &crate::ir::IrClass) -> Vec<crate::ir::AppliedAnn
 }
 
 /// One synthesized value-class member's JVM name, descriptor, and local-variable table entries.
-type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
-
 fn attach_declared_method_debug(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
@@ -960,314 +962,6 @@ fn attach_declared_method_debug(
     let owner = c.fq_name();
     for &fid in &c.methods {
         function_debug::attach_declared_function_debug(ir, override_results, fid, &owner, cw);
-    }
-}
-
-fn attach_synth_debug_tables(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    cw: &mut ClassWriter,
-    param_assertions: bool,
-    // The primary constructor method emission actually produced and the source-mapped body offset
-    // it reached after any parameter guards. Neither the physical descriptor nor the bytecode
-    // position may be reconstructed later from fields or semantic constructor arguments.
-    primary_ctor_debug: Option<(&str, u16)>,
-    // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
-    // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
-    ctor_lines: &[(u16, u32)],
-) {
-    let line = c.decl_line;
-    if line == 0 {
-        return;
-    }
-    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
-    let slot_size = |t: Ty| -> u16 {
-        match desc(t).as_str() {
-            "J" | "D" => 2,
-            _ => 1,
-        }
-    };
-    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2). Synthesized
-    // setter debug still uses this until those accessors carry their own emission provenance too.
-    let aload_len = |slot: u16| -> u16 {
-        if slot <= 3 {
-            1
-        } else if slot <= 255 {
-            2
-        } else {
-            4
-        }
-    };
-    let this_desc = format!("L{};", c.fq_name());
-    // A data class's `copy` parameters are exactly its property-backed constructor parameters.
-    // This is not the primary constructor's physical descriptor (plain parameters may also exist
-    // there), so keep the two identities deliberately separate.
-    // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
-    // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
-    // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
-    let is_enum = c.is_enum;
-    let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
-    let mut slot = 1u16;
-    if is_enum {
-        ctor_locals.push((
-            "$enum$name".to_string(),
-            "Ljava/lang/String;".to_string(),
-            slot,
-        ));
-        ctor_locals.push(("$enum$ordinal".to_string(), "I".to_string(), slot + 1));
-        slot += 2;
-    }
-    // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
-    // reflection/assertion label names the physical constructor local too.
-    let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
-    for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
-        if let Some(name) = name {
-            ctor_locals.push((name, desc(argument.ty), slot));
-        }
-        slot += slot_size(argument.ty);
-    }
-    let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
-    // kotlinc maps the `super()` call to where the DECLARATION starts — annotations included — and
-    // the ctor's trailing `return` (pushed into `ctor_lines` by the emitter) back to the class
-    // HEADER line. The two coincide unless an annotation sits on its own line above the header.
-    let ctor_start_line = if c.decl_start_line == 0 {
-        line
-    } else {
-        c.decl_start_line
-    };
-    if let Some((ctor_desc, ctor_pc)) = primary_ctor_debug {
-        cw.set_method_debug(
-            "<init>",
-            ctor_desc,
-            Some((ctor_pc, ctor_start_line)),
-            &ctor_locals,
-        );
-        if !ctor_lines.is_empty() {
-            let mut entries = vec![(ctor_pc, ctor_start_line)];
-            entries.extend_from_slice(ctor_lines);
-            // kotlinc never emits two consecutive entries for the same line — a run of stores on the
-            // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry.
-            entries.dedup_by_key(|(_, l)| *l);
-            cw.set_method_lines("<init>", ctor_desc, &entries);
-        }
-    }
-    // A marker accessor gets the same locals as the primary constructor plus its synthetic marker.
-    if has_ctor_marker_accessor(ir, c) {
-        const MARKER: &str = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
-        let mut acc_locals = ctor_locals.clone();
-        let marker_slot = c
-            .fields
-            .iter()
-            .take(c.ctor_param_count as usize)
-            .map(|f| slot_size(f.ty))
-            .sum::<u16>()
-            + 1;
-        acc_locals.push((
-            "$constructor_marker".to_string(),
-            MARKER.to_string(),
-            marker_slot,
-        ));
-        let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
-        cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
-    }
-    // Synthesized property setters use the declaration's recorded nullability policy. This is
-    // independent of the constructor's exact `IrCtorArg.check` facts above: a value class may omit
-    // its private-constructor guard while its public mutable-property setter still requires one.
-    let is_nonnull_ref =
-        |name: &str, ty: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, ty) };
-    // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
-    // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
-    for (field_index, f) in c.fields.iter().enumerate() {
-        // An accessor represented as a real function carries its own debug contract. Decide the
-        // getter and setter independently: a `var` can declare one and retain the synthesized other.
-        // The plugin-generated `descriptor` getter intentionally has NO line table, which this
-        // class-level synthesis would otherwise overwrite with the declaration line.
-        let declared_property = c
-            .properties
-            .iter()
-            .find(|property| property.backing_field == Some(field_index as u32));
-        // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
-        // sit on its own `val`/`var` line.
-        let pline = ir
-            .prop_decl_lines
-            .get(&(c.fq_name_id(), f.name.clone()))
-            .copied()
-            .filter(|&l| l != 0)
-            .unwrap_or(line);
-        let (g, s) = accessor_jvm_names(c, &f.name);
-        if declared_property.is_none_or(|property| property.getter.is_none()) {
-            cw.set_method_debug(
-                &g,
-                &format!("(){}", desc(f.ty)),
-                Some((0, pline)),
-                &this_only,
-            );
-        }
-        if !f.is_final() && declared_property.is_none_or(|property| property.setter.is_none()) {
-            let pd = desc(f.ty);
-            // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
-            // `<set-?>` String's real ldc width + invokestatic(3).
-            let set_pc = if param_assertions && is_nonnull_ref(&f.name, f.ty) {
-                aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
-            } else {
-                0
-            };
-            cw.set_method_debug(
-                &s,
-                &format!("({pd})V"),
-                Some((set_pc, pline)),
-                &[
-                    ("this".to_string(), this_desc.clone(), 0),
-                    ("<set-?>".to_string(), pd, 1),
-                ],
-            );
-        }
-    }
-    // HOISTED companion properties: no companion field, but the delegating accessors get the same
-    // debug shape kotlinc gives ordinary accessors (getter: `this` only; a `var` setter also has
-    // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
-    // A `@JvmField` property has NO accessors — nothing to describe.
-    for (property_index, property) in c.properties.iter().enumerate() {
-        if property.backing_field.is_some()
-            || static_fields::jvm_field_static_for(ir, c, property_index)
-        {
-            continue;
-        }
-        let Some(hoisted) = static_fields::hoisted_static_for(ir, c, property_index) else {
-            continue;
-        };
-        let pline = if property.decl_line != 0 {
-            property.decl_line
-        } else {
-            line
-        };
-        let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&hoisted.ty));
-        let (g, s) = accessor_jvm_names(c, &property.name);
-        cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
-        if hoisted.is_var {
-            let set_pc = if param_assertions && is_nonnull_ref(&property.name, hoisted.ty) {
-                aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
-            } else {
-                0
-            };
-            cw.set_method_debug(
-                &s,
-                &format!("({pd})V"),
-                Some((set_pc, pline)),
-                &[
-                    ("this".to_string(), this_desc.clone(), 0),
-                    ("<set-?>".to_string(), pd.clone(), 1),
-                ],
-            );
-        }
-    }
-    // A companion OUTER's `access$…$cp` bridges: kotlinc maps each to the CLASS declaration line
-    // (getter bridges carry only the LineNumberTable; the setter bridge also names its `<set-?>`
-    // value parameter).
-    for s in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| {
-            ir.is_jvm_companion_hoisted_static(*index as u32)
-                && !ir.is_jvm_field_static(*index as u32)
-                && s.owner_matches(&c.fq_name())
-        })
-        .map(|(_, s)| s)
-    {
-        let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&s.ty));
-        let getter_bridge = format!("access${}$cp", crate::names::property_getter_name(&s.name));
-        cw.set_method_debug(&getter_bridge, &format!("(){pd}"), Some((0, line)), &[]);
-        if s.is_var {
-            let setter_bridge =
-                format!("access${}$cp", crate::names::property_setter_name(&s.name));
-            cw.set_method_debug(
-                &setter_bridge,
-                &format!("({pd})V"),
-                Some((0, line)),
-                &[("<set-?>".to_string(), pd.clone(), 0)],
-            );
-        }
-    }
-    // A `@JvmInline value class`'s synthesized members: the static `-impl` family (taking the erased
-    // underlying) and their instance delegators. kotlinc gives each a LocalVariableTable but no
-    // LineNumberTable; the static impls name their parameter positionally (`arg0`/`v`/`p1`/`p2`) except
-    // `constructor-impl`, which keeps the property name.
-    if c.is_value {
-        if let Some(f0) = c.fields.first() {
-            let u = desc(f0.ty);
-            let obj = "Ljava/lang/Object;".to_string();
-            let w = slot_size(f0.ty);
-            let one = |n: &str, d: &String, slot: u16| vec![(n.to_string(), d.clone(), slot)];
-            let vc_methods: Vec<VcDebugMethod> = vec![
-                (
-                    "toString-impl".into(),
-                    format!("({u})Ljava/lang/String;"),
-                    one("arg0", &u, 0),
-                ),
-                (
-                    "toString".into(),
-                    "()Ljava/lang/String;".into(),
-                    one("this", &this_desc, 0),
-                ),
-                (
-                    "hashCode-impl".into(),
-                    format!("({u})I"),
-                    one("arg0", &u, 0),
-                ),
-                ("hashCode".into(), "()I".into(), one("this", &this_desc, 0)),
-                (
-                    "equals-impl".into(),
-                    format!("({u}Ljava/lang/Object;)Z"),
-                    vec![
-                        ("arg0".to_string(), u.clone(), 0),
-                        ("other".to_string(), obj.clone(), w),
-                    ],
-                ),
-                (
-                    "equals".into(),
-                    "(Ljava/lang/Object;)Z".into(),
-                    vec![
-                        ("this".to_string(), this_desc.clone(), 0),
-                        ("other".to_string(), obj.clone(), 1),
-                    ],
-                ),
-                (
-                    "constructor-impl".into(),
-                    format!("({u}){u}"),
-                    one(&f0.name, &u, 0),
-                ),
-                (
-                    "box-impl".into(),
-                    format!("({u}){this_desc}"),
-                    one("v", &u, 0),
-                ),
-                (
-                    "unbox-impl".into(),
-                    format!("(){u}"),
-                    one("this", &this_desc, 0),
-                ),
-                (
-                    "equals-impl0".into(),
-                    format!("({u}{u})Z"),
-                    vec![
-                        (
-                            crate::jvm::parameter_names::value_class_equals_operand(1).to_string(),
-                            u.clone(),
-                            0,
-                        ),
-                        (
-                            crate::jvm::parameter_names::value_class_equals_operand(2).to_string(),
-                            u.clone(),
-                            w,
-                        ),
-                    ],
-                ),
-            ];
-            for (name, d, locals) in &vc_methods {
-                cw.set_method_debug(name, d, None, locals);
-            }
-        }
     }
 }
 
@@ -2259,7 +1953,8 @@ fn emit_pass(
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
-    for c in &ir.classes {
+    for (class_id, c) in ir.classes.iter().enumerate() {
+        let class_id = class_id as ClassId;
         let fq_name = c.fq_name();
         // A function whose suspension points all turned out to be tail calls has no machine.
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
@@ -2271,7 +1966,7 @@ fn emit_pass(
         let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         out.push((
             fq_name,
-            emit_class(ir, c, facade, env, opts, cm.as_ref(), &mut extra),
+            emit_class(ir, class_id, c, facade, env, opts, cm.as_ref(), &mut extra),
         ));
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
@@ -3271,6 +2966,7 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &crate::ir::IrClass) {
 
 fn emit_class(
     ir: &IrFile,
+    class_id: ClassId,
     c: &crate::ir::IrClass,
     facade: &str,
     env: &EmitEnv,
@@ -3567,6 +3263,9 @@ fn emit_class(
     // `(start_pc, line)` for the ctor's LineNumberTable — one per body-property initializer, plus the
     // trailing `return`. Empty when the class has no body properties (kotlinc emits a single entry).
     let mut ctor_lines: Vec<(u16, u32)> = Vec::new();
+    // `init`-block locals, with the ranges emission recorded. Empty ranges stay until the method
+    // is written so an unused local's store is not removed as a temporary.
+    let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
     let mut primary_ctor_debug = None;
     let param_tys = class_ctor_jvm_tys(c);
     crate::trace_compiler!(
@@ -3750,6 +3449,12 @@ fn emit_class(
             let super_init = e.cw.methodref(&superclass, "<init>", &super_descriptor);
             ctor.invokespecial(super_init, aw, 0);
             e.this_uninitialized = false;
+            // Interface delegation runs after `super(…)` and before constructor-property stores.
+            // The delegate expression sees parameters, not the properties those parameters become.
+            let initializer = c.init_body.filter(|_| !static_storage(ir, c));
+            let initializer_rest = initializer
+                .map(|body| e.emit_interface_delegation_initializers(class_id, body, &mut ctor))
+                .unwrap_or_default();
             // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
             // stored to its field (the property fields are `fields[0..]` in declaration order among params);
             // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
@@ -3784,8 +3489,25 @@ fn emit_class(
                     slot += slot_words(*t);
                 }
             }
-            if let Some(init_body) = c.init_body.filter(|_| !static_storage(ir, c)) {
-                e.emit_constructor_init_body(c, init_body, &mut ctor, &mut ctor_lines);
+            if !initializer_rest.is_empty() {
+                let marks_before = ctor.line_marks().len();
+                e.record_locals = true;
+                e.constructor_initializer_class = Some(class_id);
+                e.emit_initializer_statements(&initializer_rest, &mut ctor);
+                e.constructor_initializer_class = None;
+                e.record_locals = false;
+                ctor_lines.extend(
+                    ctor.line_marks()[marks_before..]
+                        .iter()
+                        .map(|&(pc, line)| (pc, u32::from(line))),
+                );
+                init_locals.extend(ctor.local_entries().iter().filter_map(
+                    |&(start, length, slot, ref name, ref desc)| {
+                        length.map(|length| (start, length, slot, name.clone(), desc.clone()))
+                    },
+                ));
+            }
+            if let Some(init_body) = initializer {
                 init_diverges = e.discarding_diverges(init_body);
             }
             max_slot = e.frame.max();
@@ -4091,6 +3813,7 @@ fn emit_class(
                 .as_ref()
                 .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
             &ctor_lines,
+            &init_locals,
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
@@ -4752,7 +4475,7 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, env.override_results, c, opts))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[]);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -5505,6 +5228,7 @@ fn emit_enum_class(
             &mut cw,
             opts.param_assertions,
             emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+            &[],
             &[],
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
@@ -7341,6 +7065,10 @@ struct Emitter<'a> {
     comparison_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
+    /// The source class whose primary-constructor property initializers and `init` blocks are
+    /// currently being emitted. The checked class identity keeps physical field realization from
+    /// recovering the class through its rendered JVM owner name.
+    constructor_initializer_class: Option<ClassId>,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
@@ -7420,6 +7148,7 @@ impl<'a> Emitter<'a> {
             statement_line: None,
             comparison_line: None,
             record_locals: false,
+            constructor_initializer_class: None,
             inside_condition: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
@@ -9215,15 +8944,8 @@ impl<'a> Emitter<'a> {
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
                 IrConst::Int(v) => code.push_int(*v, self.cw),
-                // THE representation decision for a narrow unsigned constant, and it is this
-                // backend's to make. `UByte` is a value class over `Byte`, so the JVM carries
-                // it in a `B`: the value 200 is pushed as the byte -56, which is what kotlinc
-                // emits (`bipush -56`) and what a `(B)` parameter and `constructor-impl` both
-                // expect. Pushing the untruncated 200 made two equal `UByte` values compare
-                // unequal, because only one side had been through a narrowing.
-                //
-                // Common IR hands over the VALUE and the unsigned identity; the carrier is
-                // chosen here, and another backend is free to choose differently.
+                // `UByte` rides in a JVM `B`: 200 is `bipush -56`, matching kotlinc. The
+                // untruncated value made equal `UByte`s compare unequal.
                 IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
                 IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
                 IrConst::UInt(v) => code.push_int(*v as i32, self.cw),
@@ -9237,6 +8959,12 @@ impl<'a> Emitter<'a> {
                 IrConst::String(s) => super::string_constant::push_string(s, code, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
+            IrExpr::ForwardedSuperArgument { .. } => {
+                self.run.set_emit_error(
+                    "anonymous super forward was not bound to its constructor parameter"
+                        .to_string(),
+                );
+            }
             IrExpr::ClassConst { internal } => {
                 let name = internal
                     .as_ref()
@@ -9292,7 +9020,7 @@ impl<'a> Emitter<'a> {
                     );
                     return;
                 };
-                load(jt, slot, code);
+                self.load_constructor_value(*i, jt, slot, code);
             }
             IrExpr::PropertyRead {
                 receiver,
@@ -10921,7 +10649,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 if !self.ir.callable_scopes.contains(&e) {
-                    self.close_scope_locals(code);
+                    self.close_scope_locals(code, false);
                 }
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
