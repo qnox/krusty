@@ -207,9 +207,7 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-pub(crate) use crate::types::{
-    ty_subst, ty_subst_all, ty_subst_applied_arguments, ty_subst_keep_unbound,
-};
+pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 
 /// Specialize the selected member's lambda-parameter slots from concrete non-lambda arguments.
 ///
