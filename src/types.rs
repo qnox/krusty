@@ -267,6 +267,11 @@ impl TypeName {
         type_names().jvm_binary_name(self.name_id())
     }
 
+    /// JVM classfile spelling for a nested classifier below this identity, without interning it.
+    pub(crate) fn jvm_nested_binary_name(self, nested: &str) -> String {
+        type_names().jvm_nested_binary_name(self.name_id(), nested)
+    }
+
     /// Lexicographic path ordering for deterministic internal traversal without boundary rendering.
     pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
         type_names().path_cmp(self.name_id(), other.name_id())
