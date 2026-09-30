@@ -2811,7 +2811,7 @@ impl<'a> SymbolResolver<'a> {
                 .filter_map(|property| {
                     property_applicable(&property).map(|priority| (priority, property))
                 })
-                .max_by_key(|(priority, property)| (*priority, !property.accessor_derived));
+                .max_by_key(|(priority, property)| (*priority, !property.accessor_derived()));
             if let Some(((accessible, _), mut property)) = local_property {
                 crate::trace_compiler!(
                     "resolve",
@@ -2855,7 +2855,7 @@ impl<'a> SymbolResolver<'a> {
                     .src
                     .classifier(property.owner)
                     .is_some_and(|owner| owner.is_interface());
-                let accessor_derived = property.accessor_derived;
+                let accessor_derived = property.accessor_derived();
                 let selected = SelectedMemberProperty {
                     owner: property.owner,
                     ty,

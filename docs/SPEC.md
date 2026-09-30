@@ -1971,10 +1971,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   per-position emitter.
 
   The failure message is derived from the checked expression, as kotlinc's is: a call of any linkage
-  renders as `<jvm-name>(...)` (a property read of a Java getter is its ACCESSOR, `getName(...)`), and a
-  read resolved to a physical field renders as the bare field name. Where the callee's erased result
-  carries a `checkcast` (a generic Java return), the guard goes UNDER the cast — kotlinc checks what the
-  call produced, then casts the checked value.
+  renders as `<jvm-name>(...)` (a property read of a Java getter is its ACCESSOR, `getName(...)`; an
+  index is that call, `get(...)`). A declared Kotlin property renders as `<get-name>(...)`. A read
+  resolved to a physical field renders as the bare field name. A custom getter's expression body is
+  the getter function's result, so a platform value there is guarded inside the getter. Where the
+  callee's erased result carries a `checkcast` (a generic Java return), the guard goes UNDER the
+  cast — kotlinc checks what the call produced, then casts the checked value.
 
   A CONDITIONAL value is checked per branch, not once at the merge: a DECLARED type propagates into an
   `if`/`when`/elvis, so kotlinc guards inside the branch that produced the platform value, before the
@@ -1984,9 +1986,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checked in the branch; a single-expression block is the expression itself and is.
 
   A public Java INSTANCE field read is guarded like any other platform value and names the field
-  (`value must not be null`), matching kotlinc. Not yet guarded, because the value is not modeled as
-  `T!` today (a front-end gap, not an emitter one): a Java STATIC field read (`System.out` types as
-  `PrintStream`, not `PrintStream!`) and an index-operator result (`javaList[0]`). Also unimplemented:
+  (`value must not be null`), matching kotlinc. An index `javaList[0]` is the `get` call and is guarded
+  as `get(...)`. Not yet guarded, because the value is not modeled as `T!` today (a front-end gap, not
+  an emitter one): a Java STATIC field read (`System.out` types as `PrintStream`, not `PrintStream!`).
+  Also unimplemented:
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
   narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
   a `try` value, the merged value of a conditional in argument position; and the guard on a non-null

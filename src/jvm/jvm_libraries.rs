@@ -36,7 +36,7 @@ use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
     LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
-    PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -1234,7 +1234,7 @@ impl JvmLibraries {
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
-                accessor_derived: false,
+                producer: PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::Unstable,
             });
         }
@@ -3893,7 +3893,7 @@ impl JvmLibraries {
                         getter_declaration: None,
                         setter_declaration: None,
                         source_member: None,
-                        accessor_derived: false,
+                        producer: PropertyProducer::KotlinAccessor,
                         read_stability: crate::libraries::PropertyReadStability::Unstable,
                     });
                     continue;
@@ -4040,7 +4040,7 @@ impl JvmLibraries {
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
-                    accessor_derived: false,
+                    producer: PropertyProducer::KotlinAccessor,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
@@ -4146,14 +4146,14 @@ impl JvmLibraries {
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
-                    accessor_derived: false,
+                    producer: PropertyProducer::Field,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }
         if !overloads
             .iter()
-            .any(|property| property.getter.descriptor.starts_with('('))
+            .any(|property| property.producer != PropertyProducer::Field)
             && (self.cp.builtin_member_is_property_name(cn, name)
                 || mapped_builtin_property(cn, name)
                 || mapped_property.is_some())
@@ -4205,7 +4205,7 @@ impl JvmLibraries {
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
-                    accessor_derived: false,
+                    producer: PropertyProducer::KotlinAccessor,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
@@ -4289,7 +4289,7 @@ impl JvmLibraries {
                         source_member: None,
                         // Derived from Java bean accessors, not a declared property: a same-named
                         // instance field selected by the hierarchy walk overrides it when accessible.
-                        accessor_derived: true,
+                        producer: PropertyProducer::JavaAccessor,
                         read_stability: crate::libraries::PropertyReadStability::Unstable,
                     });
                 }
@@ -5846,7 +5846,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     getter_declaration,
                     setter_declaration,
                     source_member: None,
-                    accessor_derived: true,
+                    producer: PropertyProducer::JavaAccessor,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
