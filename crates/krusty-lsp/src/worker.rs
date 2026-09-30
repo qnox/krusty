@@ -972,7 +972,12 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 continue;
             }
             OwnedWorkerRequest::Dump { dump } => {
-                let response = render_dump_request(&mut prepared, dump);
+                let (response, classpath) = render_dump_request(&mut prepared, dump);
+                // A clean EOF makes the supervisor retry the request in a fresh worker.
+                // Publishing the rendered path would accept a dump of the reused snapshot.
+                if classpath.is_some_and(|classpath| !classpath.snapshot_is_current()) {
+                    return Ok(());
+                }
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
                 write_framed(writer, &encoded.bytes)?;
@@ -1168,16 +1173,19 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
 
 /// Analyze the payload, lower the target file, and store the rendered dump.
 ///
-/// Returns `None` when the request cannot be interpreted or the dump cannot be written. Lowering
-/// failures are not among those cases: the bail reason is the most valuable line in the document, so
-/// it is rendered into the IR section instead of discarding the dump.
+/// The response is `None` when the request cannot be interpreted or the dump cannot be written.
+/// The classpath is `Some` only after this request selected one, so the caller can withhold the
+/// frame when that snapshot is no longer current. An uninterpreted request never selected a
+/// classpath and still publishes `None`. Lowering failures are not among those cases: the bail
+/// reason is the most valuable line in the document, so it is rendered into the IR section instead
+/// of discarding the dump.
 fn render_dump_request(
     prepared: &mut PreparedClasspath,
     request: OwnedDumpRequest,
-) -> Option<DumpResponse> {
+) -> (Option<DumpResponse>, Option<Rc<Classpath>>) {
     let sources = request.analysis.sources;
     if request.target >= sources.len() {
-        return None;
+        return (None, None);
     }
     // Kinds decode exactly as they do for analysis. Parsing a `.java` or `.kts` document as Kotlin
     // would put a garbage AST's declarations into the symbol table the dumped file is checked
@@ -1185,14 +1193,18 @@ fn render_dump_request(
     let kinds = if request.analysis.source_kinds.is_empty() {
         vec![SourceKind::Kotlin; sources.len()]
     } else if request.analysis.source_kinds.len() == sources.len() {
-        request
+        let Some(kinds) = request
             .analysis
             .source_kinds
             .iter()
             .map(|code| SourceKind::from_wire_code(*code))
-            .collect::<Option<Vec<_>>>()?
+            .collect::<Option<Vec<_>>>()
+        else {
+            return (None, None);
+        };
+        kinds
     } else {
-        return None;
+        return (None, None);
     };
     let inputs = sources
         .iter()
@@ -1238,7 +1250,7 @@ fn render_dump_request(
     if stub_overlay_set {
         classpath.clear_stub_overlay();
     }
-    response
+    (response, Some(classpath))
 }
 
 /// Render the analyzed target file's document and store it under `cache_root`.
@@ -1315,6 +1327,43 @@ mod tests {
     impl BufRead for MutatingReader {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
             self.mutate();
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount);
+        }
+    }
+
+    /// Runs `mutation` once the cursor reaches `after`, so a later frame sees a disk change the
+    /// earlier frame did not.
+    struct MutateAfter {
+        inner: Cursor<Vec<u8>>,
+        after: u64,
+        mutation: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl MutateAfter {
+        fn maybe_mutate(&mut self) {
+            if self.inner.position() < self.after {
+                return;
+            }
+            if let Some(mutation) = self.mutation.take() {
+                mutation();
+            }
+        }
+    }
+
+    impl Read for MutateAfter {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.maybe_mutate();
+            self.inner.read(buffer)
+        }
+    }
+
+    impl BufRead for MutateAfter {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.maybe_mutate();
             self.inner.fill_buf()
         }
 
@@ -1481,6 +1530,87 @@ mod tests {
             "stale worker must not produce an analysis response"
         );
         std::fs::remove_dir_all(directory).expect("remove classpath directory");
+    }
+
+    #[test]
+    fn worker_discards_dump_when_reused_classpath_contents_change() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-worker-dump-classpath-{unique}-{}",
+            std::process::id()
+        ));
+        let cache_root = std::env::temp_dir().join(format!(
+            "krusty-worker-dump-classpath-cache-{unique}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create classpath directory");
+        let classpath = [directory.clone()];
+        let sources = ["fun use() = 1\n".to_string()];
+        let analysis = encode_request(
+            &[SourceInput::kotlin(&sources[0])],
+            1,
+            1,
+            &LangFeatures::new(),
+            &[],
+            Some(&classpath),
+        )
+        .unwrap();
+        let dump = encode_dump_request(
+            &DumpTarget {
+                sources: &sources,
+                source_kinds: &[SourceKind::Kotlin],
+                target: 0,
+                label: "src/Main.kt",
+                cache_key: "file:///workspace/src/Main.kt",
+                cache_root: &cache_root,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &[],
+                language_arguments: None,
+                classpath: Some(&classpath),
+            },
+            &LangFeatures::new(),
+        )
+        .unwrap();
+        let mut framed = Vec::new();
+        write_framed(&mut framed, &analysis).unwrap();
+        let after_analysis = framed.len() as u64;
+        write_framed(&mut framed, &dump).unwrap();
+        let generated = directory.join("generated");
+        let mut reader = MutateAfter {
+            inner: Cursor::new(framed),
+            after: after_analysis,
+            mutation: Some(Box::new(move || {
+                std::fs::create_dir(&generated).expect("mutate classpath directory");
+            })),
+        };
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut reader, &mut output, Vec::new()).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let analysis = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("analysis response");
+        let analyses: Vec<AnalysisResponse> = serde_json::from_slice(&analysis).unwrap();
+        assert_eq!(analyses.len(), 1);
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_none(),
+            "stale worker must not publish a dump of the reused classpath"
+        );
+        std::fs::remove_dir_all(&directory).expect("remove classpath directory");
+        let _ = std::fs::remove_dir_all(&cache_root);
     }
 
     #[test]
