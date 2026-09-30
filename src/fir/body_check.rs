@@ -62,6 +62,7 @@ mod receiver_tests;
 #[cfg(test)]
 mod reference_tests;
 mod references;
+mod safe_index;
 #[cfg(test)]
 mod test_support;
 mod try_expressions;
@@ -2293,6 +2294,27 @@ impl BodyFirChecker<'_> {
                         }
                     }
                 }
+                Expr::SafeIndex {
+                    receiver, element, ..
+                } => self.safe_index_read(expression, *receiver, *element)?,
+                Expr::SafeIndexIncDec {
+                    receiver,
+                    access,
+                    element,
+                    indices,
+                    updated,
+                    dec,
+                    prefix,
+                } => self.safe_index_inc_dec(safe_index::SafeIndexIncDec {
+                    expression,
+                    receiver: *receiver,
+                    access: *access,
+                    element: *element,
+                    indices,
+                    updated: *updated,
+                    dec: *dec,
+                    prefix: *prefix,
+                })?,
                 Expr::Index { array, indices } => {
                     if self.info.resolved_index_get_call(expression).is_some() {
                         self.source_member_operator_call(expression, "get", *array, indices)?
@@ -2447,6 +2469,8 @@ impl BodyFirChecker<'_> {
                     | Expr::IncDec { .. }
                     | Expr::ExtensionAccess { .. }
                     | Expr::Index { .. }
+                    | Expr::SafeIndex { .. }
+                    | Expr::SafeIndexIncDec { .. }
                     | Expr::Call { .. }
                     | Expr::CallableRef { .. } => {
                         return Err(self.failure(
@@ -2845,6 +2869,7 @@ impl BodyFirChecker<'_> {
             | Stmt::IncDec { .. }
             | Stmt::AssignMember { .. }
             | Stmt::AssignIndex { .. }
+            | Stmt::AssignSafeIndex { .. }
             | Stmt::CompoundAssign { .. }
             | Stmt::Return(..)
             | Stmt::While { .. }
@@ -3557,6 +3582,18 @@ impl BodyFirChecker<'_> {
                         },
                     })
                 };
+                FirStatementKind::Expression(expression)
+            }
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                indices,
+                value,
+                ..
+            } => {
+                let expression = self.safe_index_assignment(
+                    statement, origin, *receiver, *access, indices, *value,
+                )?;
                 FirStatementKind::Expression(expression)
             }
             Stmt::Return(value, label) => {

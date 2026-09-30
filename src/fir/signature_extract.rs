@@ -1672,6 +1672,31 @@ impl SignatureConstraintExtractor {
                 }
                 self.member_call(receiver, "get", arguments, scope, node_origin)
             }
+            Expr::SafeIndex {
+                receiver,
+                access,
+                indices,
+                ..
+            }
+            | Expr::SafeIndexIncDec {
+                receiver,
+                access,
+                indices,
+                ..
+            } => {
+                let receiver = self.expression(file, *receiver, scope, origin)?;
+                let Expr::Member { name, .. } = file.expr(*access) else {
+                    unreachable!("a safe index selector is a member access");
+                };
+                let name = name.clone();
+                let member = self.member(receiver, &name, scope, node_origin);
+                let mut arguments = Vec::with_capacity(indices.len());
+                for index in indices {
+                    arguments.push(self.expression(file, *index, scope, origin)?);
+                }
+                let indexed = self.member_call(member, "get", arguments, scope, node_origin);
+                self.graph.add_expr(SigExpr::Nullable(indexed))
+            }
             Expr::RangeTo { lo, hi, kind } => {
                 let receiver = self.expression(file, *lo, scope, origin)?;
                 let argument = self.expression(file, *hi, scope, origin)?;
@@ -1977,6 +2002,8 @@ impl SignatureConstraintExtractor {
                     | Expr::Binary { .. }
                     | Expr::ExtensionAccess { .. }
                     | Expr::Index { .. }
+                    | Expr::SafeIndex { .. }
+                    | Expr::SafeIndexIncDec { .. }
                     | Expr::Call { .. }
                     | Expr::If { .. }
                     | Expr::Block { .. }
@@ -2210,6 +2237,18 @@ impl SignatureConstraintExtractor {
                             value,
                         } => {
                             effects.push(self.expression(file, *array, scope, origin)?);
+                            for index in indices {
+                                effects.push(self.expression(file, *index, scope, origin)?);
+                            }
+                            effects.push(self.expression(file, *value, scope, origin)?);
+                        }
+                        Stmt::AssignSafeIndex {
+                            receiver,
+                            indices,
+                            value,
+                            ..
+                        } => {
+                            effects.push(self.expression(file, *receiver, scope, origin)?);
                             for index in indices {
                                 effects.push(self.expression(file, *index, scope, origin)?);
                             }

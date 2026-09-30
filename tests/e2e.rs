@@ -1558,6 +1558,8 @@ mod package_qualified_type_no_import_e2e;
 mod pair_triple_e2e;
 #[path = "paren_condition_newline_e2e.rs"]
 mod paren_condition_newline_e2e;
+#[path = "parenthesized_safe_call_e2e.rs"]
+mod parenthesized_safe_call_e2e;
 #[path = "parser_errors_coverage_e2e.rs"]
 mod parser_errors_coverage_e2e;
 #[path = "path_smartcast_e2e.rs"]

@@ -10,6 +10,10 @@ impl BodyFirChecker<'_> {
         target: CompoundAssignmentTarget,
         origin: OriginId,
     ) -> Result<FirStatementId, BodyCheckFailure> {
+        let safe_receiver = match self.file.stmt(statement) {
+            Stmt::AssignSafeIndex { receiver, .. } => Some(*receiver),
+            _ => None,
+        };
         let (receiver_source, argument_source) = match self.file.stmt(statement) {
             Stmt::Assign { value, .. }
             | Stmt::AssignMember { value, .. }
@@ -23,6 +27,15 @@ impl BodyFirChecker<'_> {
                 (*lhs, *rhs)
             }
             Stmt::CompoundAssign { target, value, .. } => (*target, *value),
+            Stmt::AssignSafeIndex { value, .. } => {
+                let Expr::Binary { lhs, rhs, .. } = self.file.expr(*value) else {
+                    return Err(self.failure(
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                        BodyCheckFailureKind::UnsupportedStatement(StatementForm::CompoundAssign),
+                    ));
+                };
+                (*lhs, *rhs)
+            }
             Stmt::Local { .. }
             | Stmt::LocalLateinit { .. }
             | Stmt::LocalDelegate { .. }
@@ -45,6 +58,49 @@ impl BodyFirChecker<'_> {
                 ));
             }
         };
+        let call = if let Some(receiver) = safe_receiver {
+            let kind = self.guard_safe_index(
+                receiver,
+                origin,
+                ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                |checker| {
+                    checker.in_place_assignment_expression(
+                        statement,
+                        receiver_source,
+                        argument_source,
+                        target,
+                        origin,
+                    )
+                },
+            )?;
+            self.body.add_expr(FirExpr {
+                origin,
+                ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                kind,
+            })
+        } else {
+            self.in_place_assignment_expression(
+                statement,
+                receiver_source,
+                argument_source,
+                target,
+                origin,
+            )?
+        };
+        Ok(self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(call),
+        }))
+    }
+
+    pub(super) fn in_place_assignment_expression(
+        &mut self,
+        statement: StmtId,
+        receiver_source: ExprId,
+        argument_source: ExprId,
+        target: CompoundAssignmentTarget,
+        origin: OriginId,
+    ) -> Result<FirExprId, BodyCheckFailure> {
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
         let receiver = self.expression(receiver_source)?;
         if let crate::resolve::ResolvedCall::LocalFunction(selected) = target.call.as_ref() {
@@ -55,14 +111,10 @@ impl BodyFirChecker<'_> {
                 receiver,
                 std::slice::from_ref(&argument_source),
             )?;
-            let call = self.body.add_expr(FirExpr {
+            return Ok(self.body.add_expr(FirExpr {
                 origin,
                 ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                 kind: call,
-            });
-            return Ok(self.body.add_statement(FirStatement {
-                origin,
-                kind: FirStatementKind::Expression(call),
             }));
         }
         // Provider origin is linkage only: the selected `plusAssign`/`plus` may be declared in this
@@ -113,7 +165,7 @@ impl BodyFirChecker<'_> {
             value: receiver,
             conversion: None,
         };
-        let call = self.body.add_expr(FirExpr {
+        Ok(self.body.add_expr(FirExpr {
             origin,
             ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
             kind: FirExprKind::Call(FirCall {
@@ -124,10 +176,6 @@ impl BodyFirChecker<'_> {
                 arguments: arguments.into_boxed_slice(),
                 substitutions: Box::new([]),
             }),
-        });
-        Ok(self.body.add_statement(FirStatement {
-            origin,
-            kind: FirStatementKind::Expression(call),
         }))
     }
 

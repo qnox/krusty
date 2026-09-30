@@ -5304,7 +5304,7 @@ impl<'a> Parser<'a> {
                             receiver,
                             name,
                             args: None,
-                        } => {
+                        } if !self.parenthesized_expressions.contains(&e.0) => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
@@ -5315,6 +5315,28 @@ impl<'a> Parser<'a> {
                                     name,
                                     value,
                                     safe: true,
+                                },
+                                start,
+                                target_span,
+                            );
+                        }
+                        Expr::SafeIndex {
+                            receiver,
+                            access,
+                            element,
+                            indices,
+                        } => {
+                            let operator = self.bump().span; // '='
+                            self.skip_newlines();
+                            let value = self.parse_unlabelled_expr();
+                            self.file.value_operator_spans.insert(value.0, operator);
+                            return self.finish_assignment_stmt(
+                                Stmt::AssignSafeIndex {
+                                    receiver,
+                                    access,
+                                    element,
+                                    indices,
+                                    value,
                                 },
                                 start,
                                 target_span,
@@ -5385,7 +5407,7 @@ impl<'a> Parser<'a> {
                             receiver,
                             name,
                             args: None,
-                        } => {
+                        } if !self.parenthesized_expressions.contains(&e.0) => {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_unlabelled_expr();
@@ -5412,6 +5434,36 @@ impl<'a> Parser<'a> {
                                     name,
                                     value,
                                     safe: true,
+                                },
+                                start,
+                                target_span,
+                            );
+                        }
+                        Expr::SafeIndex {
+                            receiver,
+                            access,
+                            element,
+                            indices,
+                        } => {
+                            self.bump();
+                            self.skip_newlines();
+                            let rhs = self.parse_unlabelled_expr();
+                            let value = self.file.add_expr(
+                                Expr::Binary {
+                                    op,
+                                    lhs: element,
+                                    rhs,
+                                    operator_span: op_span,
+                                },
+                                Span::new(target_span.lo, self.file.expr_spans[rhs.0 as usize].hi),
+                            );
+                            return self.finish_assignment_stmt(
+                                Stmt::AssignSafeIndex {
+                                    receiver,
+                                    access,
+                                    element,
+                                    indices,
+                                    value,
                                 },
                                 start,
                                 target_span,
@@ -5548,6 +5600,10 @@ impl<'a> Parser<'a> {
                     let span = self.file.expr_spans[expression.0 as usize];
                     Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
                 }),
+            Expr::SafeIndex { access, .. } | Expr::SafeIndexIncDec { access, .. } => {
+                let access = *access;
+                self.assignment_target_span(access)
+            }
             _ => self.file.expr_spans[expression.0 as usize],
         }
     }

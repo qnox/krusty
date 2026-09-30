@@ -326,6 +326,24 @@ impl File {
                     expr(self, *array, &label)?;
                     exprs(self, indices.iter().copied(), &label)?;
                 }
+                Expr::SafeIndex {
+                    receiver,
+                    access,
+                    element,
+                    indices,
+                }
+                | Expr::SafeIndexIncDec {
+                    receiver,
+                    access,
+                    element,
+                    indices,
+                    ..
+                } => {
+                    expr(self, *receiver, &label)?;
+                    expr(self, *access, &label)?;
+                    expr(self, *element, &label)?;
+                    exprs(self, indices.iter().copied(), &label)?;
+                }
                 Expr::Call { callee, args } => {
                     expr(self, *callee, &label)?;
                     exprs(self, args.iter().copied(), &label)?;
@@ -401,6 +419,19 @@ impl File {
                     value,
                 } => {
                     expr(self, *array, &label)?;
+                    exprs(self, indices.iter().copied(), &label)?;
+                    expr(self, *value, &label)?;
+                }
+                Stmt::AssignSafeIndex {
+                    receiver,
+                    access,
+                    element,
+                    indices,
+                    value,
+                } => {
+                    expr(self, *receiver, &label)?;
+                    expr(self, *access, &label)?;
+                    expr(self, *element, &label)?;
                     exprs(self, indices.iter().copied(), &label)?;
                     expr(self, *value, &label)?;
                 }

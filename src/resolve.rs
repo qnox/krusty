@@ -123,6 +123,7 @@ mod receiver_uses;
 mod reflection_locals;
 mod resolved_type_occurrences;
 mod safe_call_flow;
+mod safe_index;
 mod sam_constructors;
 mod source_fragment;
 use source_fragment::SourceFragmentMode;
@@ -5728,6 +5729,18 @@ fn collect_lambda_outer_writes(
                 ce(file, *array, active, out);
                 for &i in indices {
                     ce(file, i, active, out);
+                }
+                ce(file, *value, active, out);
+            }
+            Stmt::AssignSafeIndex {
+                receiver,
+                indices,
+                value,
+                ..
+            } => {
+                ce(file, *receiver, active, out);
+                for &index in indices {
+                    ce(file, index, active, out);
                 }
                 ce(file, *value, active, out);
             }
@@ -24147,6 +24160,13 @@ impl<'a> Checker<'a> {
                 indices,
                 value,
             } => self.stmt_assign_index(scope, s, array, indices, value),
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                indices,
+                value,
+                ..
+            } => self.stmt_assign_safe_index(scope, s, receiver, access, indices, value),
             Stmt::Break(label) | Stmt::Continue(label) => {
                 self.check_loop_jump(self.file.stmt_spans[s.0 as usize], label.as_deref())
             }
@@ -25763,7 +25783,10 @@ impl<'a> Checker<'a> {
             return;
         }
         // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
-        let at = self.expr(scope, array);
+        let at = match self.prepared_index_receiver {
+            Some((prepared, ty)) if prepared == array => ty,
+            _ => self.expr(scope, array),
+        };
         let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
         // Array access is the built-in member rung only when its `Int` index is applicable. An
         // inapplicable built-in does not hide a user operator extension such as
@@ -37097,6 +37120,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_stmt_operator_calls: HashMap::new(),
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
+        prepared_index_receiver: None,
         resolved_inc_dec: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
         resolved_destructure_components: HashMap::new(),
@@ -39786,6 +39810,9 @@ struct Checker<'a> {
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
+    /// Receiver type already selected for a safe-index member. Index resolution consumes it
+    /// instead of re-checking that member against the still-nullable source receiver.
+    prepared_index_receiver: Option<(ExprId, Ty)>,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
@@ -54548,6 +54575,8 @@ impl<'a> Checker<'a> {
             // then resolves this read through the provisional SourceMember overlay.
             Expr::Member { .. }
             | Expr::SafeCall { .. }
+            | Expr::SafeIndex { .. }
+            | Expr::SafeIndexIncDec { .. }
             | Expr::Call { .. }
             | Expr::Index { .. }
             | Expr::CallableRef { .. }
@@ -62871,6 +62900,35 @@ impl<'a> Checker<'a> {
             Expr::Index { array, indices } => {
                 return self.expr_inner_index(scope, e, array, indices)
             }
+            Expr::SafeIndex {
+                receiver,
+                access,
+                element,
+                ..
+            } => return self.expr_inner_safe_index(scope, e, receiver, access, element),
+            Expr::SafeIndexIncDec {
+                receiver,
+                access,
+                element,
+                indices,
+                updated,
+                dec,
+                prefix,
+            } => {
+                return self.expr_inner_safe_index_inc_dec(
+                    scope,
+                    safe_index::SafeIndexIncDec {
+                        expression: e,
+                        receiver,
+                        access,
+                        element,
+                        indices,
+                        updated,
+                        dec,
+                        prefix,
+                    },
+                )
+            }
             Expr::Try {
                 body,
                 catches,
@@ -63337,7 +63395,10 @@ impl<'a> Checker<'a> {
             // `a[i]` / `recv[i, j, …]` — a subscript. A SINGLE index over an array is element access
             // (or `String.get`); otherwise (and for two-or-more indices) it is a `get(i, j, …)`
             // operator — a user member, a same-module extension, or a library member.
-            let at = self.expr(scope, array);
+            let at = match self.prepared_index_receiver {
+                Some((prepared, ty)) if prepared == array => ty,
+                _ => self.expr(scope, array),
+            };
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
                 // A read consumes the projection rather than exposing it as an expression type.

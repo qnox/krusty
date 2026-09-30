@@ -37,6 +37,8 @@ pub(super) fn not_null_assertions_after(file: &File, statement: StmtId) -> Vec<&
             }
             collect_expression(file, *value, &mut names);
         }
+        // The index and the assigned value run only when the receiver is non-null.
+        Stmt::AssignSafeIndex { receiver, .. } => collect_expression(file, *receiver, &mut names),
         Stmt::While { cond, .. } => collect_expression(file, *cond, &mut names),
         Stmt::For { range, .. } => {
             collect_expression(file, range.start, &mut names);
@@ -102,7 +104,9 @@ fn collect_expression<'a>(file: &'a File, expression: ExprId, names: &mut Vec<&'
             }
         }
         // A null receiver skips both member dispatch and argument evaluation.
-        Expr::SafeCall { receiver, .. } => collect_expression(file, *receiver, names),
+        Expr::SafeCall { receiver, .. }
+        | Expr::SafeIndex { receiver, .. }
+        | Expr::SafeIndexIncDec { receiver, .. } => collect_expression(file, *receiver, names),
         // No following statement is reachable when these expressions transfer control.
         Expr::Throw { .. } | Expr::Return { .. } => {}
         Expr::Is { operand, .. }
