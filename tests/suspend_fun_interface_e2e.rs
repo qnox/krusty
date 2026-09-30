@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn suspend_function_supertype_is_not_resolved_as_a_classifier_spelling() {

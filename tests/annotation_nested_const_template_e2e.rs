@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn nested_class_const_folds_inside_annotation_string_template() {

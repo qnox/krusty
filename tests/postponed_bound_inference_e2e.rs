@@ -1,4 +1,4 @@
-mod common;
+use super::common;
 
 #[test]
 fn inner_generic_bound_constrains_an_outer_postponed_receiver_type() {

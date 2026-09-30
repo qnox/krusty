@@ -159,6 +159,30 @@ fails instead of recording.
 `KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
 output is ever recorded, so a recorded value stays an oracle for krusty.
 
+Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`,
+`compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
+same rule with one class-file archive in `KRUSTY_CLASS_DUMP_DIR`, which defaults to
+`target/cache/class-dumps/`. The archive is a single zlib stream: a text index, then each distinct
+output once. An index entry is an open version range plus a content fingerprint and a blob id:
+`2.4.20..` covers that release and every newer one until a
+later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
+release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
+still matches the fixture and the compiler's version falls in the range. A release
+(`2.4.20`, `2.4.20-release-482`) or an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no
+matching dump fails the test and does not run kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and
+rewrites the ranges the run reaches. GitHub restores an immutable cache for the PR's master base;
+PR jobs never save it. A successful master job refreshes and saves the cache under the supported
+Kotlin version and master commit. If that exact base cache has not been seeded yet, CI compiles the
+reference bytes for that run without publishing them. A snapshot, dev, or beta build never reads
+or writes dumps — that version string is not a stable artifact, so it still compiles. Class-file kotlinc calls go through the same
+archive. A successful build and a rejected one both keep the exit code and kotlinc's
+diagnostics, and an assert replays them. A dump that has class files but no exit code or
+diagnostics fails that assert instead of compiling. The text ledger in `tests/recorded/` is still
+the committed oracle for a diagnostic test; filling it reads kotlinc through this archive. The
+archive is read at runtime and is not compiled into the test binary or committed to the repository.
+The corpus byte-diff cache under `target/cache/ref-classes/` follows
+the same release/RC rule and stays uncached for any other compiler.
+
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
 defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.

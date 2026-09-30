@@ -142,7 +142,9 @@ fn kotlinc_paths_result(
         .collect::<Vec<_>>();
     args.extend(["-d".to_string(), output.to_string_lossy().into_owned()]);
     args.extend_from_slice(extra_args);
-    common::kotlinc_compile(&args).expect("reference compiler unavailable")
+    common::byte_dump::with_recorded_diagnostics(|| {
+        common::kotlinc_compile(&args).expect("reference compiler unavailable")
+    })
 }
 
 /// Compile named sources with both compiler CLIs and retain their diagnostic streams.
