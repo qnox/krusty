@@ -142,6 +142,13 @@ impl<V: Value> Frame<V> {
         Ok(())
     }
 
+    /// Replace this frame with `other`, keeping the local and stack allocations.
+    pub(crate) fn copy_from(&mut self, other: &Frame<V>) {
+        self.locals.clone_from(&other.locals);
+        self.stack.clone_from(&other.stack);
+        self.return_value.clone_from(&other.return_value);
+    }
+
     /// Meet with an edge arriving in `other`; `true` when anything changed (ASM's `Frame.merge`).
     pub(crate) fn merge<I: Interpreter<V = V>>(
         &mut self,

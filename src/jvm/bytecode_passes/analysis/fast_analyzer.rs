@@ -144,7 +144,12 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
         merge_nodes: merge_nodes(method, &positions),
         fast_merge: options.fast_merge,
     };
-    work.install(0, 0, entry, interpreter)?;
+    // Reused for every instruction. Cloning a fresh frame per node allocated the local and stack
+    // buffers again at every visit; these two keep their capacity and are copied into a slot only
+    // when that slot is new or its frame changed.
+    let mut scratch = entry.clone();
+    let mut handler_frame = entry.clone();
+    work.install(0, 0, &entry, interpreter)?;
     while let Some(index) = work.queue.pop() {
         work.queued[index] = false;
         let insn = match &method.nodes[index] {
@@ -155,49 +160,61 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
         let reaches_handlers = !options.prune_exception_edges
             || op.is_some_and(|op| (ISTORE..=ASTORE).contains(&op) || op == IINC)
             || tcb_start[index];
-        // Snapshot before `work` is borrowed mutably. The pairs are `Copy`; the vec is empty on
-        // the straight-line path that this walk is built to keep cheap.
-        let handler_edges: Vec<(usize, &str)> = if reaches_handlers {
-            handlers[index].clone()
-        } else {
-            Vec::new()
-        };
-        // The stored frame is the state BEFORE this node and stays there for the result. One
-        // clone is the working copy; a single successor receives it by move. The old walk cloned
-        // the stored frame out, cloned that again to execute, then cloned the result into the
-        // successor — three full frames per straight-line instruction.
+        // The stored frame is the state BEFORE this node and stays there for the result.
         match insn {
             None => {
-                let current = work.frames[index]
-                    .clone()
-                    .expect("a queued node has a frame");
-                work.install(index, index + 1, current, interpreter)?;
+                scratch.copy_from(
+                    work.frames[index]
+                        .as_ref()
+                        .expect("a queued node has a frame"),
+                );
+                work.install(index, index + 1, &scratch, interpreter)?;
             }
             Some(insn) => {
                 if opcode(insn) != RETURN {
-                    let mut current = work.frames[index]
-                        .clone()
-                        .expect("a queued node has a frame");
-                    executor.execute(&mut current, &At { index, insn }, interpreter)?;
-                    let mut targets = successors(insn, index, &positions);
-                    if let Some(last) = targets.pop() {
-                        for target in targets {
-                            work.edge(index, target, &current, interpreter)?;
+                    scratch.copy_from(
+                        work.frames[index]
+                            .as_ref()
+                            .expect("a queued node has a frame"),
+                    );
+                    executor.execute(&mut scratch, &At { index, insn }, interpreter)?;
+                    // A straight-line instruction has one successor. Building the successor list
+                    // allocated on every one of those, which is most of a method.
+                    if insn.falls_through()
+                        && !matches!(
+                            insn,
+                            Insn::Jump { .. }
+                                | Insn::TableSwitch { .. }
+                                | Insn::LookupSwitch { .. }
+                        )
+                    {
+                        work.install(index, index + 1, &scratch, interpreter)?;
+                    } else {
+                        let mut targets = successors(insn, index, &positions);
+                        if let Some(last) = targets.pop() {
+                            for target in targets {
+                                work.edge(index, target, &scratch, interpreter)?;
+                            }
+                            work.install(index, last, &scratch, interpreter)?;
                         }
-                        work.install(index, last, current, interpreter)?;
                     }
                 }
             }
         }
-        for (handler, catch_type) in handler_edges {
-            let mut state = work.frames[index]
-                .clone()
-                .expect("a queued node has a frame");
-            state.stack.clear();
-            state
-                .stack
-                .push(interpreter.new_exception_value(catch_type));
-            work.install(index, handler, state, interpreter)?;
+        // Handlers see the stored pre-instruction frame, not the executed one.
+        if reaches_handlers {
+            for &(handler, catch_type) in &handlers[index] {
+                handler_frame.copy_from(
+                    work.frames[index]
+                        .as_ref()
+                        .expect("a queued node has a frame"),
+                );
+                handler_frame.stack.clear();
+                handler_frame
+                    .stack
+                    .push(interpreter.new_exception_value(catch_type));
+                work.install(index, handler, &handler_frame, interpreter)?;
+            }
         }
     }
     Ok(work.frames)
@@ -267,23 +284,19 @@ impl<V: super::frame::Value> Worklist<V> {
         state: &Frame<V>,
         interpreter: &mut I,
     ) -> Result<(), AnalyzerError> {
-        if to >= self.frames.len() {
-            return Err(AnalyzerError {
-                index: from,
-                message: "execution falls off the end of the method".to_string(),
-            });
-        }
-        self.install(from, to, state.clone(), interpreter)
+        self.install(from, to, state, interpreter)
     }
 
-    /// Record `state` as the frame before `dest`. The caller owns `state`, so a first arrival or
-    /// a non-merge replacement moves it into the slot instead of cloning it again. `from` is the
-    /// node the edge leaves, and the index a fall-off error reports.
+    /// Record `state` as the frame before `dest`. A first arrival copies it into the slot. A
+    /// repeat visit of a non-merge node copies only when the frame differs, and does not requeue
+    /// an identical one: the old walk treated every repeat visit as a change and ran the rest of
+    /// a straight-line block again. `from` is the node the edge leaves, and the index a fall-off
+    /// error reports.
     fn install<I: Interpreter<V = V>>(
         &mut self,
         from: usize,
         dest: usize,
-        state: Frame<V>,
+        state: &Frame<V>,
         interpreter: &mut I,
     ) -> Result<(), AnalyzerError> {
         if dest >= self.frames.len() {
@@ -294,18 +307,24 @@ impl<V: super::frame::Value> Worklist<V> {
         }
         let is_merge = self.merge_nodes[dest];
         let changed = if self.frames[dest].is_none() {
-            self.frames[dest] = Some(state);
+            self.frames[dest] = Some(state.clone());
             true
         } else if self.fast_merge {
             false
         } else if !is_merge {
-            self.frames[dest] = Some(state);
-            true
+            let slot = self.frames[dest]
+                .as_mut()
+                .expect("the slot was just observed to hold a frame");
+            let changed = slot != state;
+            if changed {
+                slot.copy_from(state);
+            }
+            changed
         } else {
             self.frames[dest]
                 .as_mut()
                 .expect("the slot was just observed to hold a frame")
-                .merge(&state, interpreter)
+                .merge(state, interpreter)
                 .map_err(|message| AnalyzerError {
                     index: dest,
                     message,
@@ -431,6 +450,36 @@ mod tests {
             .expect("the method has nodes")
             .as_ref()
             .expect("the join is reached");
+        assert_eq!(before_return.stack, vec![BasicValue::Int]);
+    }
+
+    #[test]
+    fn a_loop_back_edge_keeps_the_joined_local_without_revisiting_forever() {
+        let mut method = MethodNode::new(0x0009, "f", "()I");
+        method.max_locals = 1;
+        let head = method.new_label();
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 0,
+            }),
+            Node::Label(head),
+            Node::Insn(Insn::Iinc { slot: 0, delta: 1 }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: head,
+            }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let frames = frames_of(&method);
+        let before_increment = frames[3].as_ref().expect("the loop body is reached");
+        assert_eq!(before_increment.locals, vec![BasicValue::Int]);
+        assert_eq!(before_increment.stack, Vec::<BasicValue>::new());
+        let before_return = frames[7].as_ref().expect("the exit is reached");
+        assert_eq!(before_return.locals, vec![BasicValue::Int]);
         assert_eq!(before_return.stack, vec![BasicValue::Int]);
     }
 
