@@ -68,7 +68,6 @@ delegatedProperty/local/localDelegatedPropertyCall.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt
-evaluate/intrinsicConst/enumNameWithInit.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 extensionProperties/extensionPropertyWithInline.kt

@@ -29,6 +29,7 @@ mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
 mod bridge_emission;
+mod builtin_member_emission;
 mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
@@ -126,7 +127,6 @@ mod secondary_constructor;
 mod static_accessors;
 mod static_fields;
 mod string_concatenation;
-mod string_members;
 mod supertype_markers;
 mod synth_debug_tables;
 mod type_operation_emission;
@@ -9671,16 +9671,12 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::ArraySet => {
                         self.emit_array_set(dispatch_receiver.unwrap(), args[0], args[1], code)
                     }
-                    crate::ir::IrIntrinsic::ArraySize => {
-                        self.emit_value(dispatch_receiver.unwrap(), code);
-                        code.arraylength();
-                    }
-                    op @ (crate::ir::IrIntrinsic::StringGet
-                    | crate::ir::IrIntrinsic::StringLength) => {
-                        self.emit_string_member(e, op, dispatch_receiver.unwrap(), args, code)
-                    }
-                    crate::ir::IrIntrinsic::NullableAnyToString => {
-                        self.emit_string_conversion(e, dispatch_receiver.unwrap(), code)
+                    op @ (crate::ir::IrIntrinsic::ArraySize
+                    | crate::ir::IrIntrinsic::StringGet
+                    | crate::ir::IrIntrinsic::StringLength
+                    | crate::ir::IrIntrinsic::EnumName
+                    | crate::ir::IrIntrinsic::NullableAnyToString) => {
+                        self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
                         // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows

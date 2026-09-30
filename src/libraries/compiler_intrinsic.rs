@@ -64,6 +64,9 @@ pub enum CompilerIntrinsic {
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
+    /// The exact `kotlin.Enum.name` declaration published by the core provider. A direct enum entry
+    /// folds to that entry's declaration name; any other receiver stays an ordinary property call.
+    EnumName,
     /// `kotlin.reflect.typeOf<T>()`. The stdlib body only throws: the selected type argument is
     /// the whole operand, and each target builds its runtime `KType` from that semantic type.
     TypeOf,
