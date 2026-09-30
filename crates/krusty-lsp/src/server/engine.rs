@@ -7,9 +7,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::super::{
-    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
-    IndexedFile, LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex,
-    MAX_WORKSPACE_INDEX_FILES,
+    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, IndexedFile,
+    LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex, MAX_WORKSPACE_INDEX_FILES,
 };
 pub use super::analyzed_document::AnalysisBatch;
 use super::implementation::{
@@ -1401,6 +1400,7 @@ fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<()
 mod tests {
     use super::super::super::IndexOutcome;
     use super::*;
+    use crate::DocumentAnalysis;
 
     #[test]
     fn command_queue_bounds_project_change_bursts() {

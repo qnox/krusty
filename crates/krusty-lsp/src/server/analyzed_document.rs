@@ -7,7 +7,6 @@
 use crate::DocumentAnalysis;
 
 /// The open document an analysis completion is about.
-#[derive(Debug)]
 pub struct AnalyzedDocument {
     pub uri: String,
     pub version: i64,
@@ -18,7 +17,6 @@ pub struct AnalyzedDocument {
 }
 
 /// A completed analysis of one open-document set.
-#[derive(Debug)]
 pub struct AnalysisBatch {
     pub documents: Vec<AnalyzedDocument>,
     /// `false` when `analyses` and `documents` had different lengths. Every analysis is then absent.
