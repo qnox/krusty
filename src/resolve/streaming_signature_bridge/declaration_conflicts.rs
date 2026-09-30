@@ -82,17 +82,18 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     let mut reserved_diagnostic_bytes = 0usize;
     let mut retained_display_bytes = 0usize;
     for entry in &entries {
-        if let Some(span) = streamed_callable_signature_span(headers, entry.declaration) {
-            index.publish_package_function_signature_span(entry.declaration, span);
-        }
-        let Some(mut key) =
-            TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name.clone())
-        else {
-            continue;
-        };
+        let span = streamed_callable_signature_span(headers, entry.declaration)
+            .expect("a top-level callable must retain its signature origin");
+        index.publish_package_function_signature_span(entry.declaration, span);
         let header = streamed_callable_header_by_declaration(headers, entry.declaration)
             .expect("a top-level function must retain its compact callable header");
-        key.type_parameter_count = u32::try_from(header.type_parameters.len()).unwrap_or(u32::MAX);
+        let Some(key) = TopLevelFunctionConflictKey::from_signature(
+            &entry.signature,
+            entry.name.clone(),
+            header.type_parameters.len(),
+        ) else {
+            continue;
+        };
         register_top_level_function_conflict(
             TopLevelFunctionConflictDisplaySource::Compact(headers),
             &mut groups,
@@ -101,8 +102,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
                 declaration: TopLevelFunctionConflictDecl {
                     file: entry.source,
                     declaration: TopLevelFunctionConflictDeclaration::Stable(entry.declaration),
-                    diagnostic_span: streamed_callable_signature_span(headers, entry.declaration)
-                        .expect("a top-level callable must retain its signature origin"),
+                    diagnostic_span: span,
                 },
                 private: entry.signature.visibility.is_private(),
                 entry_point: entry.entry_point.is_some(),
@@ -126,14 +126,15 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         let Some(source_declaration) = entry.signature.source_decl else {
             continue;
         };
-        let Some(mut key) =
-            TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name)
-        else {
-            continue;
-        };
         let header = streamed_callable_header_by_declaration(headers, entry.declaration)
             .expect("a top-level function must retain its compact callable header");
-        key.type_parameter_count = u32::try_from(header.type_parameters.len()).unwrap_or(u32::MAX);
+        let Some(key) = TopLevelFunctionConflictKey::from_signature(
+            &entry.signature,
+            entry.name,
+            header.type_parameters.len(),
+        ) else {
+            continue;
+        };
         let local = entry.signature.visibility.is_private() || entry.entry_point.is_some();
         let retained_for_recovery = table
             .conflicting_top_level_candidates

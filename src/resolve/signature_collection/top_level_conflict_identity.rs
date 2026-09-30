@@ -13,16 +13,20 @@ use super::*;
 /// appears only in the result.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::resolve) struct TopLevelFunctionConflictKey {
-    pub(in crate::resolve) package: TypeName,
-    pub(in crate::resolve) receiver: Option<Ty>,
-    pub(in crate::resolve) name: String,
-    pub(in crate::resolve) params: Vec<Ty>,
-    pub(in crate::resolve) formal_bounds: Vec<(u32, Vec<Ty>)>,
-    pub(in crate::resolve) type_parameter_count: u32,
+    package: TypeName,
+    receiver: Option<Ty>,
+    name: String,
+    params: Vec<Ty>,
+    formal_bounds: Vec<(u32, Vec<Ty>)>,
+    type_parameter_count: usize,
 }
 
 impl TopLevelFunctionConflictKey {
-    pub(in crate::resolve) fn from_signature(signature: &Signature, name: String) -> Option<Self> {
+    pub(in crate::resolve) fn from_signature(
+        signature: &Signature,
+        name: String,
+        declared_type_parameter_count: usize,
+    ) -> Option<Self> {
         let formals = signature
             .generic_sig
             .as_ref()
@@ -76,22 +80,13 @@ impl TopLevelFunctionConflictKey {
             Some(receiver) => Some(normalize(receiver)),
             None => None,
         };
-        // `formal_bounds` keeps one slot per generic-signature parameter. `formals` can be shorter
-        // when a bound is not itself a type-parameter type. Callers that still have the declaration
-        // header replace this count with that header's type-parameter list.
-        let declared_type_parameters = signature
-            .generic_sig
-            .as_ref()
-            .map(|generic| generic.formal_bounds.len().max(generic.formals.len()))
-            .unwrap_or(0);
-        let type_parameter_count = u32::try_from(declared_type_parameters).unwrap_or(u32::MAX);
         Some(Self {
             package: signature.package,
             receiver,
             name,
             params: params.iter().copied().map(normalize).collect(),
             formal_bounds,
-            type_parameter_count,
+            type_parameter_count: declared_type_parameter_count,
         })
     }
 }

@@ -855,28 +855,26 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         };
                         let private = function_visibility.is_private();
                         let entry_point = is_kotlin_main_entry_point(f, &sig.params, sig.ret);
-                        TopLevelFunctionConflictKey::from_signature(&sig, function_name.clone())
-                            .map(|mut key| {
-                                key.type_parameter_count =
-                                    u32::try_from(callable_header.type_parameters.len())
-                                        .unwrap_or(u32::MAX);
-                                key
-                            })
-                            .is_none_or(|key| {
-                                register_top_level_function_conflict(
-                                    TopLevelFunctionConflictDisplaySource::Legacy(files),
-                                    &mut top_level_fun_groups,
-                                    TopLevelFunctionConflictRegistration {
-                                        key,
-                                        declaration: current,
-                                        private,
-                                        entry_point,
-                                    },
-                                    &mut pending_conflict_diagnostics,
-                                    &mut reserved_conflict_diagnostic_bytes,
-                                    &mut retained_conflict_display_bytes,
-                                )
-                            })
+                        TopLevelFunctionConflictKey::from_signature(
+                            &sig,
+                            function_name.clone(),
+                            callable_header.type_parameters.len(),
+                        )
+                        .is_none_or(|key| {
+                            register_top_level_function_conflict(
+                                TopLevelFunctionConflictDisplaySource::Legacy(files),
+                                &mut top_level_fun_groups,
+                                TopLevelFunctionConflictRegistration {
+                                    key,
+                                    declaration: current,
+                                    private,
+                                    entry_point,
+                                },
+                                &mut pending_conflict_diagnostics,
+                                &mut reserved_conflict_diagnostic_bytes,
+                                &mut retained_conflict_display_bytes,
+                            )
+                        })
                     };
                     if callable_header.receiver.is_some() {
                         let recv_ty = sig
@@ -4521,91 +4519,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             reserved_conflict_diagnostic_bytes,
             diags,
         );
-        for (name, signatures) in &table.funs {
-            for signature in signatures {
-                let Some((file, declaration)) = signature.source_file.zip(signature.source_decl)
-                else {
-                    continue;
-                };
-                let Some(mut key) =
-                    TopLevelFunctionConflictKey::from_signature(signature, name.clone())
-                else {
-                    continue;
-                };
-                if let Some(declared) =
-                    files
-                        .get(file as usize)
-                        .and_then(|source| match source.decl(declaration) {
-                            Decl::Fun(function) => Some(function.type_params.len()),
-                            _ => None,
-                        })
-                {
-                    key.type_parameter_count = u32::try_from(declared).unwrap_or(u32::MAX);
-                }
-                let source_is_local = signature.visibility.is_private()
-                    || files
-                        .get(file as usize)
-                        .and_then(|source| match source.decl(declaration) {
-                            Decl::Fun(function) => Some(is_kotlin_main_entry_point(
-                                function,
-                                &signature.params,
-                                signature.ret,
-                            )),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                let retained_for_recovery = table
-                    .conflicting_top_level_candidates
-                    .get(&key)
-                    .is_some_and(|candidates| {
-                        !source_is_local || candidates.by_file.contains_key(&file)
-                    });
-                if retained_for_recovery {
-                    table
-                        .conflicting_top_level_key_by_source
-                        .insert((file, declaration.0), key);
-                }
-            }
-        }
-        for (name, receivers) in &table.ext_funs {
-            for signatures in receivers.values() {
-                for signature in signatures {
-                    let Some((file, declaration, _receiver)) = signature
-                        .source_file
-                        .zip(signature.source_decl)
-                        .zip(signature.source_receiver)
-                        .map(|((file, declaration), receiver)| (file, declaration, receiver))
-                    else {
-                        continue;
-                    };
-                    let Some(mut key) =
-                        TopLevelFunctionConflictKey::from_signature(signature, name.clone())
-                    else {
-                        continue;
-                    };
-                    if let Some(declared) = files.get(file as usize).and_then(|source| match source
-                        .decl(declaration)
-                    {
-                        Decl::Fun(function) => Some(function.type_params.len()),
-                        _ => None,
-                    }) {
-                        key.type_parameter_count = u32::try_from(declared).unwrap_or(u32::MAX);
-                    }
-                    let retained_for_recovery = table
-                        .conflicting_top_level_candidates
-                        .get(&key)
-                        .is_some_and(|candidates| {
-                            !signature.visibility.is_private()
-                                || candidates.by_file.contains_key(&file)
-                        });
-                    if retained_for_recovery {
-                        table
-                            .conflicting_top_level_key_by_source
-                            .insert((file, declaration.0), key);
-                    }
-                }
-            }
-        }
+        publish_legacy_top_level_conflict_recovery_keys(&mut table, files);
     }
 
     if let Some(headers) = compact_headers {
