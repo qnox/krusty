@@ -1,6 +1,6 @@
 //! Source roots, classpath, module graph, and JDK for one worktree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -478,24 +478,30 @@ impl ProjectModel {
     }
 
     /// Classpath handed to the compiler for `module`, deduplicated in build-tool order.
+    ///
+    /// Membership is a set so a long classpath stays linear. The vector keeps the first occurrence.
     pub fn compile_classpath(&self, module: &Module) -> Vec<PathBuf> {
-        let mut entries: Vec<PathBuf> = Vec::new();
-        let push = |entry: &Path, entries: &mut Vec<PathBuf>| {
-            if !entries.iter().any(|existing| existing == entry) {
-                entries.push(entry.to_path_buf());
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push = |entry: &Path| {
+            if seen.contains(entry) {
+                return;
             }
+            let owned = entry.to_path_buf();
+            seen.insert(owned.clone());
+            entries.push(owned);
         };
         for entry in &module.classpath {
-            push(entry, &mut entries);
+            push(entry);
         }
         for entry in &module.friend_paths {
-            push(entry, &mut entries);
+            push(entry);
         }
         for dependency in &module.depends_on {
             if let Some(dependency) = self.module(dependency) {
                 for output in &dependency.outputs {
                     if let Some(entry) = output.classpath_entry() {
-                        push(entry, &mut entries);
+                        push(entry);
                     }
                 }
             }
@@ -536,6 +542,31 @@ mod tests {
 
         ProjectModel::new("/p", ProviderKind::Gradle)
             .with_modules(vec![core, generated, app, app_test])
+    }
+
+    #[test]
+    fn compile_classpath_keeps_the_first_copy_of_a_repeated_entry() {
+        let mut model = model();
+        let app = model
+            .modules
+            .iter_mut()
+            .find(|module| module.id.as_ref() == Some(&ModuleId::new(":app", "main")))
+            .unwrap();
+        app.classpath
+            .insert(0, PathBuf::from("/m2/kotlin-stdlib.jar"));
+        app.classpath
+            .push(PathBuf::from("/p/core/build/classes/java/main"));
+        app.friend_paths
+            .push(PathBuf::from("/m2/kotlin-stdlib.jar"));
+        let app = model.module(&ModuleId::new(":app", "main")).unwrap();
+        assert_eq!(
+            model.compile_classpath(app),
+            vec![
+                PathBuf::from("/m2/kotlin-stdlib.jar"),
+                PathBuf::from("/p/core/build/classes/java/main"),
+                PathBuf::from("/p/core/build/classes/kotlin/main"),
+            ]
+        );
     }
 
     #[test]
