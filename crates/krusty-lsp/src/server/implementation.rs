@@ -5,6 +5,7 @@
 //! completion, navigation, and highlighting data for each open document; full compiler analysis is
 //! dropped after every open/change notification.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::{
@@ -24,6 +25,8 @@ use super::super::{
     MAX_RETAINED_ANALYSIS_BYTES, MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS,
     SEMANTIC_TOKEN_TYPES,
 };
+pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
+use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::analysis::serialized_json_wire_bytes;
 use crate::compiler_analysis::LibraryRef;
@@ -626,98 +629,6 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Position {
-    line: u32,
-    character: u32,
-}
-
-/// Translate an LSP UTF-16 position into a source byte offset.
-pub fn position_to_byte_offset(text: &str, target: Position) -> Option<u32> {
-    let mut scan_budget = usize::MAX;
-    position_to_byte_offset_with_budget(text, target, &mut scan_budget)
-}
-
-fn position_to_byte_offset_with_budget(
-    text: &str,
-    target: Position,
-    scan_budget: &mut usize,
-) -> Option<u32> {
-    let mut line = 0u32;
-    let mut character = 0u32;
-    let mut previous_was_cr = false;
-    for (byte, ch) in text.char_indices() {
-        if !(previous_was_cr && ch == '\n') && line == target.line && character == target.character
-        {
-            return u32::try_from(byte).ok();
-        }
-        *scan_budget = scan_budget.checked_sub(ch.len_utf8())?;
-        match ch {
-            '\r' => {
-                line = line.checked_add(1)?;
-                character = 0;
-                previous_was_cr = true;
-            }
-            '\n' => {
-                if !previous_was_cr {
-                    line = line.checked_add(1)?;
-                }
-                character = 0;
-                previous_was_cr = false;
-            }
-            _ => {
-                character = character.checked_add(ch.len_utf16() as u32)?;
-                previous_was_cr = false;
-            }
-        }
-        if line > target.line || (line == target.line && character > target.character) {
-            return None;
-        }
-    }
-    (line == target.line && character == target.character)
-        .then(|| u32::try_from(text.len()).ok())
-        .flatten()
-}
-
-impl Position {
-    pub const fn new(line: u32, character: u32) -> Self {
-        Self { line, character }
-    }
-}
-
-/// Translate a compiler byte offset into the UTF-16 code-unit position required by LSP.
-pub fn byte_offset_to_position(text: &str, offset: usize) -> Position {
-    let limit = offset.min(text.len());
-    let mut line = 0u32;
-    let mut character = 0u32;
-    let mut previous_was_cr = false;
-
-    for (byte, ch) in text.char_indices() {
-        if byte >= limit || byte + ch.len_utf8() > limit {
-            break;
-        }
-        match ch {
-            '\r' => {
-                line = line.saturating_add(1);
-                character = 0;
-                previous_was_cr = true;
-            }
-            '\n' => {
-                if !previous_was_cr {
-                    line = line.saturating_add(1);
-                }
-                character = 0;
-                previous_was_cr = false;
-            }
-            _ => {
-                character = character.saturating_add(ch.len_utf16() as u32);
-                previous_was_cr = false;
-            }
-        }
-    }
-    Position::new(line, character)
-}
-
 pub struct Dispatch {
     pub messages: Vec<Value>,
     pub exit: bool,
@@ -959,6 +870,8 @@ fn resolve_span_positions(
 
 struct OpenDocument {
     text: String,
+    /// Filled on the first position query for `text` and dropped when `text` changes.
+    lines: RefCell<Option<LineIndex>>,
     version: i64,
     diagnostics: DiagnosticIndex,
     hover: HoverIndex,
@@ -975,6 +888,68 @@ struct OpenDocument {
 }
 
 impl OpenDocument {
+    fn new(
+        text: String,
+        version: i64,
+        diagnostics: DiagnosticIndex,
+        analysis_blocked: bool,
+    ) -> Self {
+        Self {
+            text,
+            lines: RefCell::new(None),
+            version,
+            diagnostics,
+            hover: HoverIndex::default(),
+            completion: CompletionIndex::default(),
+            signature_help: SignatureHelpIndex::default(),
+            semantic_tokens: SemanticTokenIndex::default(),
+            definitions: DefinitionIndex::default(),
+            type_definitions: DefinitionIndex::default(),
+            implementations: DefinitionIndex::default(),
+            library_definitions: LibraryDefinitionIndex::default(),
+            document_symbols: DocumentSymbolIndex::default(),
+            folding_ranges: FoldingRangeIndex::default(),
+            analysis_blocked,
+        }
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.text = text;
+        *self.lines.borrow_mut() = None;
+    }
+
+    fn clear_text(&mut self) {
+        self.text.clear();
+        *self.lines.borrow_mut() = None;
+    }
+
+    fn ensure_line_index(&self) {
+        if self.lines.borrow().is_none() {
+            let index = LineIndex::new(&self.text);
+            *self.lines.borrow_mut() = Some(index);
+        }
+    }
+
+    fn offset_at(&self, position: Position) -> Option<u32> {
+        self.ensure_line_index();
+        self.lines
+            .borrow()
+            .as_ref()
+            .expect("line index filled above")
+            .position_to_offset(&self.text, position.line, position.character)
+    }
+
+    fn position_at(&self, offset: usize) -> Position {
+        self.ensure_line_index();
+        let (line, character) = self
+            .lines
+            .borrow()
+            .as_ref()
+            .expect("line index filled above")
+            .offset_to_position(&self.text, offset);
+        Position::new(line, character)
+    }
+
     fn clear_analysis(&mut self) {
         self.hover = HoverIndex::default();
         self.completion = CompletionIndex::default();
@@ -1999,22 +1974,7 @@ where
     fn open_document_for_test(&mut self, uri: &str, text: &str, version: i64) {
         self.documents.insert(
             uri.to_string(),
-            OpenDocument {
-                text: text.to_string(),
-                version,
-                diagnostics: DiagnosticIndex::default(),
-                hover: HoverIndex::default(),
-                completion: CompletionIndex::default(),
-                signature_help: SignatureHelpIndex::default(),
-                semantic_tokens: SemanticTokenIndex::default(),
-                definitions: DefinitionIndex::default(),
-                type_definitions: DefinitionIndex::default(),
-                implementations: DefinitionIndex::default(),
-                library_definitions: LibraryDefinitionIndex::default(),
-                document_symbols: DocumentSymbolIndex::default(),
-                folding_ranges: FoldingRangeIndex::default(),
-                analysis_blocked: false,
-            },
+            OpenDocument::new(text.to_string(), version, DiagnosticIndex::default(), false),
         );
     }
 
@@ -2026,7 +1986,7 @@ where
     #[cfg(test)]
     pub(super) fn block_document_text_for_test(&mut self, uri: &str) {
         let open = self.documents.get_mut(uri).unwrap();
-        open.text.clear();
+        open.clear_text();
         open.analysis_blocked = true;
     }
 
@@ -2120,22 +2080,7 @@ where
             if self.documents.contains_key(&uri) || self.documents.len() < MAX_OPEN_DOCUMENTS {
                 self.documents.insert(
                     uri.clone(),
-                    OpenDocument {
-                        text: String::new(),
-                        version,
-                        diagnostics: analysis_limit_diagnostics(),
-                        hover: HoverIndex::default(),
-                        completion: CompletionIndex::default(),
-                        signature_help: SignatureHelpIndex::default(),
-                        semantic_tokens: SemanticTokenIndex::default(),
-                        definitions: DefinitionIndex::default(),
-                        type_definitions: DefinitionIndex::default(),
-                        implementations: DefinitionIndex::default(),
-                        library_definitions: LibraryDefinitionIndex::default(),
-                        document_symbols: DocumentSymbolIndex::default(),
-                        folding_ranges: FoldingRangeIndex::default(),
-                        analysis_blocked: true,
-                    },
+                    OpenDocument::new(String::new(), version, analysis_limit_diagnostics(), true),
                 );
             }
             self.analysis_dirty |= replaced_analyzed_document;
@@ -2154,22 +2099,12 @@ where
         }
         self.documents.insert(
             uri.clone(),
-            OpenDocument {
-                text: params.text_document.text,
+            OpenDocument::new(
+                params.text_document.text,
                 version,
-                diagnostics: DiagnosticIndex::default(),
-                hover: HoverIndex::default(),
-                completion: CompletionIndex::default(),
-                signature_help: SignatureHelpIndex::default(),
-                semantic_tokens: SemanticTokenIndex::default(),
-                definitions: DefinitionIndex::default(),
-                type_definitions: DefinitionIndex::default(),
-                implementations: DefinitionIndex::default(),
-                library_definitions: LibraryDefinitionIndex::default(),
-                document_symbols: DocumentSymbolIndex::default(),
-                folding_ranges: FoldingRangeIndex::default(),
-                analysis_blocked: false,
-            },
+                DiagnosticIndex::default(),
+                false,
+            ),
         );
         self.analysis_dirty = true;
         if !defer_analysis {
@@ -2206,7 +2141,7 @@ where
         let text = match apply_content_changes(original, params.content_changes) {
             Ok(text) => text,
             Err(original) => {
-                self.documents.get_mut(&uri).unwrap().text = original;
+                self.documents.get_mut(&uri).unwrap().set_text(original);
                 return invalid_params(id);
             }
         };
@@ -2219,7 +2154,7 @@ where
             let open = self.documents.get_mut(&uri).unwrap();
             let was_analyzed = !open.analysis_blocked;
             open.version = params.text_document.version;
-            open.text.clear();
+            open.clear_text();
             open.clear_analysis();
             open.diagnostics = analysis_limit_diagnostics();
             open.analysis_blocked = true;
@@ -2238,7 +2173,7 @@ where
         }
         let open = self.documents.get_mut(&uri).unwrap();
         open.version = params.text_document.version;
-        open.text = text;
+        open.set_text(text);
         open.analysis_blocked = false;
         self.analysis_dirty = true;
         if !defer_analysis {
@@ -2284,7 +2219,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let Some(hover) = open.hover.get(offset) else {
@@ -2299,8 +2234,8 @@ where
             json!({
                 "contents": contents,
                 "range": {
-                    "start": byte_offset_to_position(&open.text, hover.span.lo as usize),
-                    "end": byte_offset_to_position(&open.text, hover.span.hi as usize),
+                    "start": open.position_at(hover.span.lo as usize),
+                    "end": open.position_at(hover.span.hi as usize),
                 }
             }),
         )])
@@ -2410,7 +2345,7 @@ where
             json!([{
                 "range": {
                     "start": {"line": 0, "character": 0},
-                    "end": byte_offset_to_position(&open.text, open.text.len()),
+                    "end": open.position_at(open.text.len()),
                 },
                 "newText": formatted,
             }]),
@@ -2446,7 +2381,7 @@ where
                 json!({"isIncomplete": false, "items": []}),
             )]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let is_incomplete =
@@ -2496,7 +2431,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         Dispatch::messages(vec![rpc_result(
@@ -2515,7 +2450,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let locations = self.navigation_locations(&open.definitions, offset);
@@ -2625,7 +2560,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let locations = self.navigation_locations(&open.type_definitions, offset);
@@ -2649,7 +2584,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let locations = self.navigation_locations(&open.implementations, offset);
@@ -2699,7 +2634,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let targets = open.definitions.get(offset).collect::<Vec<_>>();
@@ -2769,7 +2704,7 @@ where
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+        let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
         let targets = open.definitions.get(offset).collect::<HashSet<_>>();

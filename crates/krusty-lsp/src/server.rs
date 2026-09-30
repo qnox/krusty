@@ -1,5 +1,6 @@
 mod engine;
 mod implementation;
+mod line_index;
 mod status;
 mod workspace_index;
 pub use engine::{AnalysisBatch, AnalysisJob, DumpResult};
