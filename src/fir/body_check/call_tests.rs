@@ -3719,27 +3719,6 @@ fn source_call_varargs_keep_source_order_and_spread_decisions() {
 }
 
 #[test]
-fn omitted_source_call_vararg_with_a_declared_default_uses_that_default() {
-    let (body, _) = checked_function_body_with_platform(
-        "fun join(vararg values: String = arrayOf(\"O\", \"K\")): Int = 0\n\
-         fun read(): Int = join()\n",
-        "read",
-        jvm_stdlib_semantics(),
-    );
-    let FirExprKind::Call(call) = &body
-        .expr(root_expression(&body))
-        .expect("defaulted vararg call")
-        .kind
-    else {
-        panic!("omitted vararg with a declared default must become checked call FIR")
-    };
-    assert!(matches!(
-        call.arguments.as_ref(),
-        [FirCallArgument::Default { parameter: 0, .. }]
-    ));
-}
-
-#[test]
 fn omitted_source_call_vararg_is_an_explicit_empty_pack() {
     let (body, _) = checked_function_body(
         "fun join(vararg values: String): Int = 0\nfun read(): Int = join()\n",

@@ -129,14 +129,15 @@ fun box(): String {\n\
 
 #[test]
 fn omitted_extension_vararg_with_a_declared_default_uses_that_array() {
-    const SRC: &str = "fun String.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
+    const SRC: &str = "class Payload\n\
+fun Payload.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
     var sum = 0\n\
     for (value in arr) sum += value\n\
     return sum\n\
 }\n\
 fun box(): String {\n\
-    val omitted = \"x\".pack()\n\
-    val given = \"y\".pack(42)\n\
+    val omitted = Payload().pack()\n\
+    val given = Payload().pack(42)\n\
     return if (omitted == 3 && given == 42) \"OK\" else \"omitted=$omitted given=$given\"\n\
 }\n";
     assert_eq!(run(SRC).expect("extension vararg default omitted"), "OK");
@@ -144,15 +145,16 @@ fun box(): String {\n\
 
 #[test]
 fn omitted_member_extension_vararg_with_a_declared_default_uses_that_array() {
-    const SRC: &str = "class Host {\n\
-    fun String.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
+    const SRC: &str = "class Payload\n\
+class Host {\n\
+    fun Payload.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
         var sum = 0\n\
         for (value in arr) sum += value\n\
         return sum\n\
     }\n\
     fun test(): String {\n\
-        val omitted = \"x\".pack()\n\
-        val given = \"y\".pack(42)\n\
+        val omitted = Payload().pack()\n\
+        val given = Payload().pack(42)\n\
         return if (omitted == 3 && given == 42) \"OK\" else \"omitted=$omitted given=$given\"\n\
     }\n\
 }\n\

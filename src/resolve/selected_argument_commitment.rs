@@ -6,6 +6,9 @@
 
 use super::*;
 
+const SELECTED_INDEXED_ARGUMENT_MISMATCH: &str =
+    "selected indexed operator's arguments do not match its parameters";
+
 /// Argument slots and the declaration-owned default flags of the mapping that produced them.
 ///
 /// The two travel together: a slot vector without its flags, or flags of a different length, is
@@ -215,8 +218,12 @@ impl Checker<'_> {
         vararg: Option<usize>,
         indices: &[ExprId],
     ) -> bool {
-        let Some(slots) = indexed_operator_argument_slots(params, vararg, indices, false) else {
-            return true;
+        let slots = match required_indexed_operator_argument_slots(params, vararg, indices) {
+            Ok(slots) => slots,
+            Err(message) => {
+                self.diags.error(self.span(expression), message.to_string());
+                return false;
+            }
         };
         let Some(defaults) = value_parameter_defaults(param_defaults, context_count, slots.len())
         else {
@@ -383,9 +390,20 @@ pub(super) fn indexed_operator_argument_slots(
     Some(slots)
 }
 
+fn required_indexed_operator_argument_slots(
+    params: &[Ty],
+    vararg_index: Option<usize>,
+    arguments: &[ExprId],
+) -> Result<Vec<Option<ExprId>>, &'static str> {
+    indexed_operator_argument_slots(params, vararg_index, arguments, false)
+        .ok_or(SELECTED_INDEXED_ARGUMENT_MISMATCH)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::value_parameter_defaults;
+    use super::{required_indexed_operator_argument_slots, value_parameter_defaults};
+    use crate::ast::ExprId;
+    use crate::types::Ty;
 
     #[test]
     fn a_short_default_table_is_not_reread_as_value_parameter_flags() {
@@ -396,6 +414,14 @@ mod tests {
         assert_eq!(
             value_parameter_defaults(&[false, true], 1, 1),
             Some(&[true][..])
+        );
+    }
+
+    #[test]
+    fn an_impossible_indexed_shape_fails_with_the_commitment_diagnostic() {
+        assert_eq!(
+            required_indexed_operator_argument_slots(&[Ty::Int], None, &[ExprId(1), ExprId(2)],),
+            Err("selected indexed operator's arguments do not match its parameters")
         );
     }
 }

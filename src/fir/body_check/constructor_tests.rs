@@ -1150,7 +1150,9 @@ fn constructor_vararg_elements_keep_source_order_and_spread_decisions() {
 #[test]
 fn omitted_constructor_vararg_with_a_declared_default_uses_that_default() {
     let (body, _) = checked_function_body(
-        "class Box(vararg values: String = arrayOf(\"O\", \"K\"))\nfun make(): Box = Box()\n",
+        "class Element\n\
+         class Box(vararg values: Element = arrayOf(Element(), Element()))\n\
+         fun make(): Box = Box()\n",
         "make",
     );
     let FirExprKind::ConstructorCall(call) = &body

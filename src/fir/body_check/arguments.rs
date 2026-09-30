@@ -1,6 +1,10 @@
 //! Final source-argument mapping for already selected calls.
 
 use super::*;
+
+#[cfg(test)]
+#[path = "vararg_default_tests.rs"]
+mod vararg_default_tests;
 use crate::resolve::ResolvedContextArgument;
 
 impl BodyFirChecker<'_> {
