@@ -25,6 +25,11 @@
 //! build still compiles, because that version is not an immutable artifact and never reads or
 //! writes the archive.
 //!
+//! The fingerprint is the sources kotlinc compiles and the class files compiled from those sources.
+//! Stdlib and the rest of the selected distribution's `lib/` are the version range, so those jars
+//! are not read. The JDK image is not part of the key: it does not change the class files kotlinc
+//! writes.
+//!
 //! The archive is read at runtime and is not compiled into the test binary.
 
 use std::cell::Cell;
@@ -136,10 +141,11 @@ fn split_leading_digits(text: &str) -> (&str, &str) {
 
 /// Inputs that decide which dump a fixture uses, with no absolute paths in either field.
 ///
-/// Every classpath entry contributes its bytes in declaration order. A directory entry contributes
-/// a content hash of the files under it and not the directory's own name, so a scratch classpath
-/// invalidates the dump when its bytes change and still hits on the next run. File-valued options
-/// likewise contribute bytes rather than scratch paths.
+/// The fingerprint covers the source, the JVM target, the normalized flags, and class files
+/// compiled from the fixture's own sources. A scratch classpath directory contributes those file
+/// bytes and not the directory's name, so the next run still hits and a changed class file misses.
+/// The Kotlin distribution and the JDK image contribute nothing. File-valued options contribute
+/// bytes rather than scratch paths.
 pub struct ClassDumpInputs {
     pub fingerprint: u128,
     pub variant: String,
@@ -1299,9 +1305,18 @@ fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
     Ok(format!("{name}={}", hashed.join(",")))
 }
 
+/// Classpath entries the compiler version does not already identify.
+///
+/// Jars from that distribution — stdlib, reflect, test, annotations, and anything under its
+/// `lib/` — are the version range, so their bytes are not read. `lib/modules` and `lib/ct.sym`
+/// are the JDK image; they do not change the class files kotlinc writes. A dependency directory
+/// or any other jar stays in the fingerprint, in declaration order.
 fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
     let mut rows = Vec::new();
     for path in paths {
+        if is_versioned_platform(path) {
+            continue;
+        }
         if path.is_dir() {
             rows.push(format!("dir:{:016x}", hash_tree(path)?));
         } else {
@@ -1311,6 +1326,44 @@ fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
         }
     }
     Ok(rows.join("\n"))
+}
+
+fn is_versioned_platform(path: &Path) -> bool {
+    is_jdk_image(path) || is_kotlinc_dist_entry(path) || is_kotlin_runtime_jar(path)
+}
+
+fn is_jdk_image(path: &Path) -> bool {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str());
+    matches!((parent, name), (Some("lib"), Some("modules" | "ct.sym")))
+}
+
+fn is_kotlinc_dist_entry(path: &Path) -> bool {
+    krusty::toolchain::kotlinc_lib_dir().is_some_and(|lib| path.starts_with(lib))
+}
+
+fn is_kotlin_runtime_jar(path: &Path) -> bool {
+    let Some(stem) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jar"))
+    else {
+        return false;
+    };
+    [
+        "kotlin-stdlib",
+        "kotlin-reflect",
+        "kotlin-test",
+        "kotlin-annotations",
+    ]
+    .into_iter()
+    .any(|prefix| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    })
 }
 
 fn read_output_tree(out: &Path) -> Option<BTreeMap<String, Vec<u8>>> {
@@ -2158,6 +2211,87 @@ mod tests {
         let left_cp = class_dump_inputs("src", "default", &[], &[left_dir.join("plugin.jar")]);
         let right_cp = class_dump_inputs("src", "default", &[], &[right_dir.join("plugin.jar")]);
         assert_ne!(left_cp.fingerprint, right_cp.fingerprint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_stdlib_and_jdk_image_are_not_part_of_the_dump_key() {
+        let root = temp_root("platform-cp");
+        let stdlib = root.join("kotlin-stdlib.jar");
+        let versioned = root.join("dist").join("kotlin-stdlib-2.4.20.jar");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        std::fs::write(&stdlib, b"stdlib-a").unwrap();
+        std::fs::write(&versioned, b"stdlib-b").unwrap();
+        std::fs::write(root.join("kotlin-stdlib-jdk8.jar"), b"jdk8").unwrap();
+        std::fs::write(root.join("kotlin-reflect.jar"), b"reflect").unwrap();
+        std::fs::write(root.join("kotlin-test-junit.jar"), b"test").unwrap();
+        std::fs::write(root.join("kotlin-annotations-jvm.jar"), b"annotations").unwrap();
+        let modules = root.join("jdk").join("lib").join("modules");
+        std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
+        std::fs::write(&modules, vec![7u8; 64]).unwrap();
+        let symbols = root.join("jdk").join("lib").join("ct.sym");
+        std::fs::write(&symbols, b"symbols").unwrap();
+        let platform = [
+            stdlib,
+            versioned,
+            root.join("kotlin-stdlib-jdk8.jar"),
+            root.join("kotlin-reflect.jar"),
+            root.join("kotlin-test-junit.jar"),
+            root.join("kotlin-annotations-jvm.jar"),
+            modules,
+            symbols,
+            root.join("kotlin-stdlib.jar"),
+        ];
+        let bare = class_dump_inputs("src", "default", &[], &[]);
+        let with_platform = class_dump_inputs("src", "default", &[], &platform);
+        assert_eq!(bare.fingerprint, with_platform.fingerprint);
+        assert_eq!(
+            classpath_content_fingerprint(&[root.join("no-such").join("kotlin-stdlib.jar")])
+                .unwrap(),
+            ""
+        );
+
+        let compiled = root.join("libout");
+        std::fs::create_dir_all(&compiled).unwrap();
+        std::fs::write(compiled.join("A.class"), b"class-v1").unwrap();
+        let with_compiled = class_dump_inputs("src", "default", &[], &[compiled.clone()]);
+        assert_ne!(bare.fingerprint, with_compiled.fingerprint);
+        std::fs::write(compiled.join("A.class"), b"class-v2").unwrap();
+        let recompiled = class_dump_inputs("src", "default", &[], &[compiled]);
+        assert_ne!(with_compiled.fingerprint, recompiled.fingerprint);
+
+        let coroutines = root.join("kotlinx-coroutines-core-jvm.jar");
+        std::fs::write(&coroutines, b"coroutines-a").unwrap();
+        let with_coroutines = class_dump_inputs("src", "default", &[], &[coroutines.clone()]);
+        std::fs::write(&coroutines, b"coroutines-b").unwrap();
+        let other_coroutines = class_dump_inputs("src", "default", &[], &[coroutines]);
+        assert_ne!(bare.fingerprint, with_coroutines.fingerprint);
+        assert_ne!(with_coroutines.fingerprint, other_coroutines.fingerprint);
+
+        let source = root.join("Main.kt");
+        std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+        let out = root.join("out").to_string_lossy().into_owned();
+        let args = |classpath: Option<String>| {
+            let mut args = vec!["-d".to_string(), out.clone()];
+            if let Some(classpath) = classpath {
+                args.push("-cp".to_string());
+                args.push(classpath);
+            }
+            args.push(source.to_string_lossy().into_owned());
+            args
+        };
+        let sources_only = parse_invocation(&args(None)).unwrap().unwrap();
+        let platform_cp = std::env::join_paths([
+            root.join("kotlin-stdlib.jar"),
+            root.join("jdk").join("lib").join("modules"),
+            root.join("kotlin-test.jar"),
+        ])
+        .unwrap();
+        let with_platform_cp =
+            parse_invocation(&args(Some(platform_cp.to_string_lossy().into_owned())))
+                .unwrap()
+                .unwrap();
+        assert_eq!(sources_only.fingerprint, with_platform_cp.fingerprint);
         let _ = std::fs::remove_dir_all(&root);
     }
 
