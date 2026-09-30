@@ -218,6 +218,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LocalPropertyReference { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
+        | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::GetStatic(_)
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
@@ -258,7 +259,11 @@ pub fn read_values(ir: &IrFile, root: ExprId) -> std::collections::HashSet<u32> 
 pub fn expr_runs_no_code(ir: &IrFile, expr: ExprId) -> bool {
     matches!(
         ir.expr(expr),
-        IrExpr::Const(_) | IrExpr::ClassConst { .. } | IrExpr::GetValue(_) | IrExpr::UnitInstance
+        IrExpr::Const(_)
+            | IrExpr::ClassConst { .. }
+            | IrExpr::GetValue(_)
+            | IrExpr::ForwardedSuperArgument { .. }
+            | IrExpr::UnitInstance
     )
 }
 

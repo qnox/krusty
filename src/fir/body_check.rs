@@ -607,9 +607,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver,
                 ..
             } => extension_receiver.or(*dispatch_receiver),
-            // A provider-marked primitive member (`a?.plus(b)`) is already a checked binary
-            // operation. Its left operand is still the exact selected dispatch receiver, so retain
-            // that ownership for the safe-call null guard instead of reconstructing a callable.
+            // `a?.plus(b)` is already a checked binary; its left operand is the safe-call receiver.
             FirExprKind::Binary { lhs, .. } | FirExprKind::Range { start: lhs, .. } => {
                 Some(FirReceiver {
                     value: *lhs,
@@ -627,6 +625,7 @@ impl BodyFirChecker<'_> {
             }),
             FirExprKind::ConstructorCall(call) => call.outer_receiver,
             FirExprKind::Constant(_)
+            | FirExprKind::ForwardedSuperArgument { .. }
             | FirExprKind::AnnotationArray(_)
             | FirExprKind::ArrayLiteral { .. }
             | FirExprKind::ArrayConstruction { .. }

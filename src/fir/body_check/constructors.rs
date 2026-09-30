@@ -666,12 +666,15 @@ impl BodyFirChecker<'_> {
                 let parameter_ty = parameters.get(parameter).copied().ok_or_else(|| {
                     self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let parameter_slot = parameter;
                 let parameter = u32::try_from(parameter).map_err(|_| {
                     self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
-                let forwarded = forwarded.contains(argument);
+                // A vararg is packed in this constructor. The construction site skips that slot,
+                // so treating it as a forward would leave an unbound parameter record.
+                let forwarded = forwarded.contains(argument) && vararg != Some(parameter_slot);
                 let value = if forwarded {
-                    self.forwarded_super_argument(*argument, parameter_ty)?
+                    self.forwarded_super_argument(*argument, parameter_ty, parameter)?
                 } else {
                     self.expression(*argument)?
                 };
@@ -750,12 +753,13 @@ impl BodyFirChecker<'_> {
         Ok(checked_arguments.into_boxed_slice())
     }
 
-    /// A forwarded super argument contributes no names to this constructor. A null stands in for
-    /// the value the construction site passes; source casts stay around that null.
+    /// A forwarded super argument contributes no names to this constructor. The node names the
+    /// selected superclass parameter; source casts stay around that record.
     fn forwarded_super_argument(
         &mut self,
         argument: ExprId,
         parameter_ty: Ty,
+        slot: u32,
     ) -> Result<FirExprId, BodyCheckFailure> {
         let span = self
             .file
@@ -764,7 +768,7 @@ impl BodyFirChecker<'_> {
         let ty = self.resolved_type(span, parameter_ty)?;
         let origin = self.expression_origin(argument)?;
         let (core, shells) = super::local_classes::peel_super_type_operators(self.file, argument);
-        self.forwarded_super_shell(argument, core, shells, ty, origin)
+        self.forwarded_super_shell(argument, core, shells, slot, ty, origin)
     }
 
     fn forwarded_super_shell(
@@ -772,6 +776,7 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         core: ExprId,
         shells: u8,
+        slot: u32,
         ty: ResolvedTy,
         origin: OriginId,
     ) -> Result<FirExprId, BodyCheckFailure> {
@@ -779,7 +784,7 @@ impl BodyFirChecker<'_> {
             return Ok(self.body.add_expr(FirExpr {
                 origin,
                 ty,
-                kind: FirExprKind::Constant(FirConstant::Null),
+                kind: FirExprKind::ForwardedSuperArgument { slot },
             }));
         }
         match self.file.expr(expression) {
@@ -796,7 +801,7 @@ impl BodyFirChecker<'_> {
                 })?;
                 let target = self.resolved_type(type_ref.span, target_ty)?;
                 let operand =
-                    self.forwarded_super_shell(*operand, core, shells - 1, target, origin)?;
+                    self.forwarded_super_shell(*operand, core, shells - 1, slot, target, origin)?;
                 let origin = self.expression_origin(expression)?;
                 Ok(self.body.add_expr(FirExpr {
                     origin,
@@ -813,7 +818,8 @@ impl BodyFirChecker<'_> {
                 }))
             }
             Expr::NotNull { operand } => {
-                let operand = self.forwarded_super_shell(*operand, core, shells - 1, ty, origin)?;
+                let operand =
+                    self.forwarded_super_shell(*operand, core, shells - 1, slot, ty, origin)?;
                 let origin = self.expression_origin(expression)?;
                 Ok(self.body.add_expr(FirExpr {
                     origin,
@@ -828,7 +834,7 @@ impl BodyFirChecker<'_> {
             _ => Ok(self.body.add_expr(FirExpr {
                 origin,
                 ty,
-                kind: FirExprKind::Constant(FirConstant::Null),
+                kind: FirExprKind::ForwardedSuperArgument { slot },
             })),
         }
     }
@@ -1034,25 +1040,30 @@ fn add_constructor_delegation(
     let previous_capture_access =
         std::mem::replace(&mut checker.constructor_prefix_capture_access, true);
     let checked_sources = (|| {
-        // A non-constant, non-name super argument is evaluated outside this constructor. Resolving
-        // it here looks up locals that belong to the construction site.
-        let forwarded = arguments
-            .iter()
-            .copied()
-            .filter(|argument| {
-                transient.is_some() && {
-                    let (core, _) =
-                        super::local_classes::peel_super_type_operators(checker.file, *argument);
-                    !matches!(checker.file.expr(core), crate::ast::Expr::Name(_))
-                        && !super::local_classes::anonymous_super_core_stays(
-                            checker.file,
-                            checker.info,
-                            core,
-                            |_| false,
-                        )
-                }
-            })
-            .collect::<Vec<_>>();
+        // Arguments the resolver recorded as construction-site forwards name that parameter.
+        // Everything else, including ordinary local-class super arguments and lexical captures,
+        // is checked here as the real expression.
+        let anonymous = checker
+            .index
+            .declaration_header(class)
+            .is_some_and(|header| {
+                header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+            });
+        let forwarded = if anonymous {
+            transient
+                .and_then(|transient| {
+                    checker
+                        .info
+                        .anonymous_forwarded_super_arguments
+                        .get(&transient)
+                        .cloned()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let arguments = checker.checked_constructor_arguments_forwarding(
             span,
             arguments,
@@ -1078,17 +1089,7 @@ fn add_constructor_delegation(
         Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;
-    let (mut checked_arguments, outer_receiver) = checked_sources?;
-    if let Some(transient) = transient {
-        placeholder_anonymous_super_forwards(
-            checker,
-            class,
-            transient,
-            arguments,
-            &mut checked_arguments,
-            resolved,
-        );
-    }
+    let (checked_arguments, outer_receiver) = checked_sources?;
     if resolved.outer_receiver.is_some() != outer_receiver.is_some() {
         return Err(checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
     }
@@ -1125,139 +1126,6 @@ fn add_constructor_delegation(
     });
     checker.body.push_root(statement);
     Ok(())
-}
-
-/// Arguments kotlinc moves to the construction site must not be evaluated in the anonymous
-/// constructor: a property read there needs the enclosing instance, which that constructor does
-/// not have. The call site evaluates them and passes the result. A null stands in until
-/// constructor finalization rewrites the delegation argument to that parameter. Source casts and
-/// not-null assertions stay around the placeholder, matching the shells the call site records.
-fn placeholder_anonymous_super_forwards(
-    checker: &mut BodyFirChecker<'_>,
-    class: DeclarationId,
-    transient: DeclId,
-    source_arguments: &[ExprId],
-    arguments: &mut [FirCallArgument],
-    resolved: &ResolvedCtorDelegation,
-) {
-    let anonymous = checker
-        .index
-        .declaration_header(class)
-        .is_some_and(|header| {
-            header
-                .flags
-                .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
-        });
-    if !anonymous {
-        return;
-    }
-    let captures = checker
-        .info
-        .anonymous_object_captures_by_class
-        .get(&transient)
-        .cloned()
-        .unwrap_or_default();
-    for (index, argument) in source_arguments.iter().copied().enumerate() {
-        let Some(&slot) = resolved.argument_slots.get(index) else {
-            continue;
-        };
-        if resolved.vararg == Some(slot) {
-            continue;
-        }
-        let (core, shells) =
-            super::local_classes::peel_super_type_operators(checker.file, argument);
-        if super::local_classes::anonymous_super_core_stays(
-            checker.file,
-            checker.info,
-            core,
-            |name| {
-                captures
-                    .iter()
-                    .any(|capture| capture.receiver.is_none() && capture.name == name)
-            },
-        ) {
-            continue;
-        }
-        let slot = u32::try_from(slot).unwrap_or(u32::MAX);
-        let matched = arguments
-            .iter()
-            .enumerate()
-            .filter_map(|(ordinal, candidate)| match candidate {
-                FirCallArgument::Expression {
-                    parameter, value, ..
-                } if *parameter == slot => Some((ordinal, *value)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for (ordinal, value) in matched {
-            let installed = install_forward_placeholder(checker, value, shells);
-            let FirCallArgument::Expression {
-                value, conversion, ..
-            } = &mut arguments[ordinal]
-            else {
-                continue;
-            };
-            *value = installed;
-            if shells == 0 {
-                *conversion = None;
-            }
-        }
-    }
-}
-
-fn install_forward_placeholder(
-    checker: &mut BodyFirChecker<'_>,
-    expression: FirExprId,
-    shells: u8,
-) -> FirExprId {
-    if shells == 0 {
-        return null_placeholder(checker, expression);
-    }
-    let kind = checker.body.expr(expression).map(|expr| expr.kind.clone());
-    match kind {
-        Some(FirExprKind::ImplicitConversion { value, conversion }) => {
-            let value = install_forward_placeholder(checker, value, shells);
-            if let Some(expr) = checker.body.expr_mut(expression) {
-                expr.kind = FirExprKind::ImplicitConversion { value, conversion };
-            }
-            expression
-        }
-        Some(FirExprKind::TypeOperation {
-            operation,
-            operand,
-            target,
-        }) if matches!(
-            operation,
-            FirTypeOperation::Cast
-                | FirTypeOperation::SafeCast
-                | FirTypeOperation::NotNullAssertion
-        ) =>
-        {
-            let operand = install_forward_placeholder(checker, operand, shells.saturating_sub(1));
-            if let Some(expr) = checker.body.expr_mut(expression) {
-                expr.kind = FirExprKind::TypeOperation {
-                    operation,
-                    operand,
-                    target,
-                };
-            }
-            expression
-        }
-        _ => null_placeholder(checker, expression),
-    }
-}
-
-fn null_placeholder(checker: &mut BodyFirChecker<'_>, expression: FirExprId) -> FirExprId {
-    let Some(existing) = checker.body.expr(expression) else {
-        return expression;
-    };
-    let origin = existing.origin;
-    let ty = existing.ty;
-    checker.body.add_expr(FirExpr {
-        origin,
-        ty,
-        kind: FirExprKind::Constant(FirConstant::Null),
-    })
 }
 
 fn checked_constructor_parameters<'a>(

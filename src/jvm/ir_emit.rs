@@ -9355,15 +9355,8 @@ impl<'a> Emitter<'a> {
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
                 IrConst::Int(v) => code.push_int(*v, self.cw),
-                // THE representation decision for a narrow unsigned constant, and it is this
-                // backend's to make. `UByte` is a value class over `Byte`, so the JVM carries
-                // it in a `B`: the value 200 is pushed as the byte -56, which is what kotlinc
-                // emits (`bipush -56`) and what a `(B)` parameter and `constructor-impl` both
-                // expect. Pushing the untruncated 200 made two equal `UByte` values compare
-                // unequal, because only one side had been through a narrowing.
-                //
-                // Common IR hands over the VALUE and the unsigned identity; the carrier is
-                // chosen here, and another backend is free to choose differently.
+                // `UByte` rides in a JVM `B`: 200 is `bipush -56`, matching kotlinc. The
+                // untruncated value made equal `UByte`s compare unequal.
                 IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
                 IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
                 IrConst::UInt(v) => code.push_int(*v as i32, self.cw),
@@ -9377,6 +9370,12 @@ impl<'a> Emitter<'a> {
                 IrConst::String(s) => super::string_constant::push_string(s, code, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
+            IrExpr::ForwardedSuperArgument { .. } => {
+                self.run.set_emit_error(
+                    "anonymous super forward was not bound to its constructor parameter"
+                        .to_string(),
+                );
+            }
             IrExpr::ClassConst { internal } => {
                 let name = internal
                     .as_ref()

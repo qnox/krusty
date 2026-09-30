@@ -128,6 +128,9 @@ impl BodyLowering<'_> {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
                 self.ir.add_expr(IrExpr::Const(constant))
             }
+            FirExprKind::ForwardedSuperArgument { slot } => self
+                .ir
+                .add_expr(IrExpr::ForwardedSuperArgument { slot: *slot }),
             FirExprKind::ArrayLiteral {
                 array_type,
                 elements,

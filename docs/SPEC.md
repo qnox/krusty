@@ -11298,10 +11298,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
-  Base(side())`, `object : Base(initialCapacity, loadFactor, true)`). A constant (`1 + 2`,
-  `true`) stays in the anonymous constructor. A captured local used by the object stays a capture
-  parameter and is what `super` loads. A cast or `!!` of a constant or capture stays inside; a
-  cast of anything else stays inside around the forwarded operand. A property read that exists
+  Base(side())`, `object : Base(initialCapacity, loadFactor, true)`). The resolver publishes
+  those argument identities while the lexical bindings still exist. Checked FIR records each one
+  as `ForwardedSuperArgument` naming the selected superclass parameter; lowering binds that
+  record to the synthetic constructor parameter and does not rewrite any other expression, so a
+  null is never a stand-in for a missing value. A non-anonymous constructor, including a local
+  class, checks the real argument. A constant (`1 + 2`, `true`) stays in the anonymous
+  constructor. A captured local used by the object stays a capture parameter and is what `super`
+  loads. A cast or `!!` of a constant or capture stays inside; a cast of anything else stays
+  inside around the forwarded operand. A vararg slot is packed in the constructor and is not a
+  forward. A property read that exists
   only in such a forwarded argument does not capture the enclosing instance. Each forwarded
   parameter is named `$super_call_param$N` in the anonymous constructor's `LocalVariableTable`
   (1-based among those forwards) and is absent from Kotlin metadata.
@@ -11315,7 +11321,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DELEGATION (`Function.flags` bits 6-7 = 2), public and open, in addition to the bytecode
   forwarder. It is not a source callable of the class; the override edge's implementation
   function is its identity. A forwarded property stays a `Property` record.
-  Tests: `tests/constructor_initialization_order_e2e.rs`.
+  Tests: `tests/constructor_initialization_order_e2e.rs` and
+  `fir::body_check::local_class_tests::anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument`.
 - **A checked `Nothing` value carries its completion contract into common IR.** Non-null `Nothing`
   is semantically divergent, but a target can still have to realize a physical fallthrough path.
   On the JVM, a declared `Nothing` call has a `java.lang.Void` result slot, while `null!!` retains

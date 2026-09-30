@@ -1053,6 +1053,12 @@ pub enum FirConstant {
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirExprKind {
     Constant(FirConstant),
+    /// Super-constructor operand evaluated at an anonymous object's construction site.
+    /// `slot` is the selected superclass parameter. Lowering binds it once to the synthetic
+    /// constructor parameter for that slot. It is not a value, and it is not a null stand-in.
+    ForwardedSuperArgument {
+        slot: u32,
+    },
     AnnotationArray(Box<[FirExprId]>),
     ArrayLiteral {
         array_type: ResolvedTy,
@@ -1477,6 +1483,7 @@ impl FirExprKind {
             | FirExprKind::EnumEntry { .. }
             | FirExprKind::ClassifierPropertyRead { .. }
             | FirExprKind::ValueRead(_)
+            | FirExprKind::ForwardedSuperArgument { .. }
             | FirExprKind::CapturedValueRead { .. }
             | FirExprKind::ClassStorageRead { .. }
             | FirExprKind::ConstructorCaptureRead { .. }

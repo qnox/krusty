@@ -439,8 +439,13 @@ pub(super) fn finalize_constructors(
                         .super_args
                         .get(index)
                         .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-                    let replacement =
-                        rewrite_anonymous_super_forward(ir, current, shells, parameter);
+                    let replacement = rewrite_anonymous_super_forward(
+                        ir,
+                        current,
+                        shells,
+                        parameter,
+                        declaration,
+                    )?;
                     ir.classes[class_index].super_args[index] = replacement;
                 }
             }
@@ -598,18 +603,23 @@ fn push_secondary_constructor(
     Ok(())
 }
 
-/// Replace a hoisted anonymous super-constructor argument with the forwarded parameter.
+/// Bind one frontend-recorded anonymous super forward to its synthetic constructor parameter.
 /// Source casts and not-null assertions stay in the anonymous constructor; implicit coercions are
-/// not source operators and are descended through without consuming a shell.
+/// not source operators and are descended through without consuming a shell. Any other expression
+/// is a real argument and is left untouched by failing the bind instead of being replaced.
 fn rewrite_anonymous_super_forward(
     ir: &mut IrFile,
     expression: crate::ir::ExprId,
     shells: u8,
     parameter: u32,
-) -> crate::ir::ExprId {
+    declaration: crate::fir::DeclarationId,
+) -> Result<crate::ir::ExprId, FirFileLoweringFailure> {
     let forward = |ir: &mut IrFile| ir.add_expr(IrExpr::GetValue(parameter + 1));
     if shells == 0 {
-        return forward(ir);
+        return match ir.expr(expression) {
+            IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
+            _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
+        };
     }
     let node = ir.expr(expression).clone();
     match node {
@@ -623,19 +633,25 @@ fn rewrite_anonymous_super_forward(
             } else {
                 shells.saturating_sub(1)
             };
-            let arg = rewrite_anonymous_super_forward(ir, arg, next, parameter);
-            ir.add_expr(IrExpr::TypeOp {
+            let arg = rewrite_anonymous_super_forward(ir, arg, next, parameter, declaration)?;
+            Ok(ir.add_expr(IrExpr::TypeOp {
                 op,
                 arg,
                 type_operand,
-            })
+            }))
         }
         IrExpr::NotNullAssert { operand, message } => {
-            let operand =
-                rewrite_anonymous_super_forward(ir, operand, shells.saturating_sub(1), parameter);
-            ir.add_expr(IrExpr::NotNullAssert { operand, message })
+            let operand = rewrite_anonymous_super_forward(
+                ir,
+                operand,
+                shells.saturating_sub(1),
+                parameter,
+                declaration,
+            )?;
+            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, message }))
         }
-        _ => forward(ir),
+        IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
+        _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
     }
 }
 

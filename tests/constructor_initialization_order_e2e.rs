@@ -131,6 +131,23 @@ fn assert_identical(stem: &str, source: &str, classes: &[&str]) {
 }
 
 #[test]
+fn anonymous_and_local_super_arguments_keep_their_values() {
+    let source = r#"
+open class Base(val value: String)
+fun box(): String {
+    val ok = "O"
+    class Local(n: String) : Base(n + "K")
+    val anon = object : Base(ok + "K") {}
+    return Local(ok).value + anon.value
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "AnonSuperForward"),
+        Some("OKOK".to_string())
+    );
+}
+
+#[test]
 fn constructor_properties_and_anonymous_super_arguments_match_kotlinc() {
     assert_identical(
         "CtorInit",

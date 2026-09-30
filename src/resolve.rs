@@ -157,10 +157,8 @@ pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
 use capture_storage::{
-    anonymous_body_bound_value_names, anonymous_body_expressions, anonymous_descendant_uses_name,
-    anonymous_descendant_writes_name, anonymous_descendants,
-    anonymous_super_argument_constructor_use, enclosing_value_visible_beside_member,
-    local_class_capture_expressions,
+    anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
+    anonymous_descendants, enclosing_value_visible_beside_member, local_class_capture_expressions,
 };
 use collection_literals::{default_factory, standard_factory};
 use constant_evaluation::source_literal_constant;
@@ -10048,6 +10046,10 @@ pub struct TypeInfo {
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
+    /// Anonymous-object super-constructor arguments the resolver evaluated at the construction
+    /// site. The constructor body consumes these expression identities directly and does not
+    /// rediscover them from source spelling.
+    pub anonymous_forwarded_super_arguments: HashMap<DeclId, Vec<ExprId>>,
     /// The enclosing bindings a statement-position local class reads, keyed by its hoisted
     /// declaration — the resolution the scope chain performed, in declaration order. What a capture
     /// costs to represent is lowering's decision, not this one's.
@@ -24468,6 +24470,10 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>();
                 let mut captures =
                     self.local_class_captures(scope, &cl, self.file.is_anonymous_object_class(d));
+                if !captures.forwarded_super_arguments.is_empty() {
+                    self.discovered_anonymous_super_forwards
+                        .insert(d, std::mem::take(&mut captures.forwarded_super_arguments));
+                }
                 // Capture representability is an emission concern. The frontend records the
                 // semantic value even when it is read during construction; lowering either realizes
                 // that field/constructor flow or reports its own capability failure.
@@ -37201,6 +37207,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovers_captures_at_construction: false,
         finalized_anonymous_captures: std::collections::HashSet::new(),
         discovered_anonymous_captures: HashMap::new(),
+        discovered_anonymous_super_forwards: HashMap::new(),
         discovered_local_class_captures: HashMap::new(),
         discovered_local_class_capture_bindings: HashMap::new(),
         local_function_capture_bindings: HashMap::new(),
@@ -38784,6 +38791,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
+        discovered_anonymous_super_forwards,
         discovered_local_class_captures,
         checked_local_class_declarations,
         checked_local_classifier_identities,
@@ -39073,6 +39081,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         applied_annotations,
         anonymous_object_captures_by_class,
         anonymous_object_captures_by_construction,
+        anonymous_forwarded_super_arguments: discovered_anonymous_super_forwards,
         local_class_captures_by_class: discovered_local_class_captures,
         checked_local_class_declarations,
         checked_local_classifier_identities,
@@ -40119,6 +40128,7 @@ struct Checker<'a> {
     /// a revisit cannot see those methods select a receiver again.
     finalized_anonymous_captures: std::collections::HashSet<DeclId>,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    discovered_anonymous_super_forwards: HashMap<DeclId, Vec<ExprId>>,
     discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// Resolver-only binding identities parallel to each local classifier's capture vector.
     /// These let a selected closure dependency be remapped into the caller's lexical tower without
@@ -40161,6 +40171,8 @@ struct LocalClassCaptures {
     values: Vec<AnonymousObjectCapture>,
     /// The first reference that is NOT modelled, if any. Its presence rejects the class.
     unsupported: Option<String>,
+    /// Super-constructor arguments of an anonymous object that run at the construction site.
+    forwarded_super_arguments: Vec<ExprId>,
 }
 
 /// The checker state scoped to ONE function/property body, saved across a nested classifier check.
@@ -40696,413 +40708,6 @@ impl<'a> Checker<'a> {
         self.fn_closure_reassigned = saved.fn_closure_reassigned;
         self.lexical_class_context = saved.lexical_class_context;
         self.exact_anonymous_class_roots = saved.exact_anonymous_class_roots;
-    }
-
-    /// What a statement-position local class reads from its enclosing scope.
-    ///
-    /// Deliberately syntactic and conservative: a name the class also declares is not a capture,
-    /// unless an enclosing function local already owns that spelling — the local wins inside the
-    /// class, so the class must capture it (`objects/flist.kt`). A name that merely *looks* like a
-    /// capture is treated as such. Over-reporting costs an unused constructor parameter (or a
-    /// skipped file, when the name is one of the unmodelled kinds); under-reporting emits a class
-    /// without the constructor parameter its capture needs.
-    fn local_class_captures(
-        &self,
-        scope: &CheckerScope<'_>,
-        cl: &ClassDecl,
-        anonymous_object: bool,
-    ) -> LocalClassCaptures {
-        let mut result = LocalClassCaptures::default();
-        let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
-        scope.visit_bindings(Ns::Value, |name, _| {
-            outer.insert(name.to_string());
-        });
-        // A local FUNCTION carries captures of its own; reaching one from a local class would have
-        // to compose the two, which is not modelled.
-        let mut unsupported: std::collections::HashSet<String> = std::collections::HashSet::new();
-        scope.visit_bindings(Ns::Function, |name, _| {
-            unsupported.insert(name.to_string());
-        });
-        // Reaching the enclosing INSTANCE is the second capture kind: the receiver itself, not a
-        // binding in the chain. It is carried as ONE capture however many of its members are read,
-        // so only the INNERMOST receiver contributes names — that is the object lowering supplies,
-        // and reading a member of a further-out receiver would need a CHAIN of captures that is not
-        // modelled.
-        //
-        // It contributes nothing unless that receiver is the DISPATCH receiver, which is what the
-        // innermost label being a CLASS label says: lowering supplies the capture from `$dispatch`,
-        // so with an extension receiver or a receiver lambda nearer than the enclosing class the
-        // checker's `this` and the object handed to the constructor are two different values. Every
-        // name then falls through to the value channel, finds no binding, and the class is rejected.
-        let innermost_label = self.this_labels.last();
-        let enclosing_instance = scope
-            .this_ty()
-            .filter(|_| innermost_label.is_some_and(|label| label.2));
-        let implicit_receiver_capture = scope
-            .implicit_receivers_with_declarations()
-            .into_iter()
-            .next()
-            .filter(|(_, _, identity, _)| {
-                scope.innermost_class_receiver_identity() != Some(*identity)
-            })
-            .map(|(ty, extension, identity, class_receiver)| {
-                (
-                    ty,
-                    self.captured_receiver(scope, identity, extension, class_receiver),
-                )
-            });
-        if implicit_receiver_capture.is_some() {
-            // Receiver properties are reached through the captured receiver coordinate below; they
-            // are not independent lexical values. Keeping both creates an impossible constructor
-            // capture for `Receiver.() -> Unit { class Local { val x = receiverProperty } }`.
-            outer.retain(|name| {
-                !self.lookup(scope, name).is_some_and(|binding| {
-                    matches!(
-                        binding.origin,
-                        ReceiverFnValueOrigin::DispatchProperty { .. }
-                    )
-                })
-            });
-        }
-        let mut through_outer: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Some(internal) = enclosing_instance.and_then(Ty::obj_internal) {
-            if let Some(class) = self.resolver().classifier(internal) {
-                through_outer.extend(class.declared_callables.keys().cloned());
-            }
-            if let Some(label) = innermost_label {
-                through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
-            }
-        }
-        // A property shadows an enclosing class member of the same spelling, not an enclosing
-        // function local. `fun f(head: T) { object { val head get() = head } }` captures `head`.
-        for name in cl
-            .props
-            .iter()
-            .map(|p| &p.name)
-            .chain(cl.body_props.iter().map(|p| &p.name))
-        {
-            if self
-                .lookup(scope, name)
-                .is_some_and(|binding| matches!(binding.origin, ReceiverFnValueOrigin::Local))
-            {
-                unsupported.remove(name);
-                through_outer.remove(name);
-                continue;
-            }
-            outer.remove(name);
-            unsupported.remove(name);
-            through_outer.remove(name);
-        }
-        // A member function shadows an enclosing-instance member function, but not a lexical value
-        // or local function. Those earlier scope-tower rungs still win call syntax when applicable;
-        // in particular an outer receiver-function parameter named `encode` is captured by an
-        // anonymous override also named `encode`.
-        for name in cl.methods.iter().map(|method| &method.name) {
-            through_outer.remove(name);
-        }
-        // Before a constructor property is stored, and for a plain parameter, the lexical local is
-        // nearer than the property. A nested class there captures that value. After the store the
-        // nearer binding is the property, so the nested class captures the enclosing instance.
-        through_outer.retain(|name| {
-            !self
-                .lookup(scope, name)
-                .is_some_and(|binding| binding.origin == ReceiverFnValueOrigin::Local)
-        });
-        // Each name belongs to exactly one channel; the nearer binding wins.
-        for name in unsupported.iter().chain(&through_outer) {
-            outer.remove(name);
-        }
-        for name in &unsupported {
-            through_outer.remove(name);
-        }
-        // Construction-time reads must travel through the local class constructor just like member
-        // reads travel through its fields. This includes an anonymous object written in a super-call:
-        // its declaration body is parser-hoisted, so inspect that body's expressions explicitly and
-        // make the enclosing local class carry every lexical value the anonymous constructor needs.
-        let mut construction_bodies: Vec<ExprId> = Vec::new();
-        for p in &cl.body_props {
-            construction_bodies.extend(p.init);
-        }
-        for step in &cl.init_order {
-            if let ClassInit::Block(b) = step {
-                construction_bodies.push(*b);
-            }
-        }
-        construction_bodies.extend(cl.base_args.iter().copied());
-        construction_bodies.extend(
-            cl.interface_delegations
-                .iter()
-                .map(|delegation| delegation.value),
-        );
-        construction_bodies.extend(cl.props.iter().filter_map(|p| p.default));
-        let mut everything = outer.clone();
-        everything.extend(unsupported.iter().cloned());
-        everything.extend(through_outer.iter().cloned());
-        let narrows = scope.local_narrowings();
-        let mut captured: Vec<String> = Vec::new();
-        let mut needs_outer = false;
-        let mut record_construction_uses =
-            |body: ExprId,
-             visible: &std::collections::HashSet<String>,
-             anonymous_super_argument: bool| {
-                let body = if anonymous_super_argument {
-                    // The forwarded expression runs outside this constructor. A bare captured name
-                    // still does not: it is read here, after the value has been passed in.
-                    let Some(observed) = anonymous_super_argument_constructor_use(self.file, body)
-                    else {
-                        return;
-                    };
-                    observed
-                } else {
-                    body
-                };
-                for name in used_names(self.file, body, visible) {
-                    if unsupported.contains(&name) {
-                        result.unsupported.get_or_insert(name);
-                    } else if through_outer.contains(&name) {
-                        // An anonymous object's super-constructor argument is evaluated at the
-                        // construction site and forwarded. A property read there does not capture
-                        // the enclosing instance; the same name in the object body does.
-                        if !anonymous_super_argument {
-                            needs_outer = true;
-                        }
-                    } else if !captured.contains(&name) {
-                        captured.push(name);
-                    }
-                }
-            };
-        for ctor in &cl.secondary_ctors {
-            let mut visible = everything.clone();
-            for p in &ctor.params {
-                visible.remove(&p.name);
-            }
-            let delegation_args = match &ctor.delegation {
-                CtorDelegation::None => &[][..],
-                CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
-            };
-            for body in ctor
-                .body
-                .into_iter()
-                .chain(ctor.params.iter().filter_map(|p| p.default))
-                .chain(delegation_args.iter().copied())
-            {
-                record_construction_uses(body, &visible, false);
-            }
-        }
-        let anonymous_targets = self
-            .file
-            .anonymous_object_classes
-            .keys()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        for &body in &construction_bodies {
-            record_construction_uses(
-                body,
-                &everything,
-                anonymous_object && cl.base_args.contains(&body),
-            );
-            let mut constructions = std::collections::HashSet::new();
-            record_expression_targets(self.file, &anonymous_targets, [body], &mut constructions);
-            for construction in constructions {
-                let Some(&anonymous) = self.file.anonymous_object_classes.get(&construction) else {
-                    continue;
-                };
-                let mut visible = everything.clone();
-                for bound in anonymous_body_bound_value_names(self.file, anonymous) {
-                    visible.remove(&bound);
-                }
-                for nested_body in anonymous_body_expressions(self.file, anonymous) {
-                    record_construction_uses(nested_body, &visible, false);
-                }
-            }
-        }
-        // A classifier nested in a local class is parser-hoisted, but it is still lexically inside
-        // that local class. Any enclosing local used by the nested declaration must first be
-        // carried by the outer local classifier; an `inner class Inner : Base({ value })` reaches
-        // `value` through its captured outer instance. Scan the parser's explicit ownership edge,
-        // never internal-name prefixes, so sibling local classes cannot leak captures into one
-        // another.
-        let local_statement =
-            self.file
-                .local_class_decls
-                .iter()
-                .find_map(
-                    |(statement, declaration)| match self.file.decl(*declaration) {
-                        Decl::Class(candidate) if candidate.span == cl.span => Some(*statement),
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    },
-                );
-        if let Some(nested) =
-            local_statement.and_then(|statement| self.file.local_class_nested.get(&statement))
-        {
-            for declaration in nested {
-                let Decl::Class(nested) = self.file.decl(*declaration) else {
-                    continue;
-                };
-                let bodies =
-                    nested
-                        .base_args
-                        .iter()
-                        .copied()
-                        .chain(
-                            nested
-                                .interface_delegations
-                                .iter()
-                                .map(|delegation| delegation.value),
-                        )
-                        .chain(nested.props.iter().filter_map(|property| property.default))
-                        .chain(
-                            nested
-                                .methods
-                                .iter()
-                                .filter_map(|method| match method.body {
-                                    FunBody::Expr(body) | FunBody::Block(body) => Some(body),
-                                    FunBody::None => None,
-                                }),
-                        )
-                        .chain(
-                            nested
-                                .body_props
-                                .iter()
-                                .filter_map(|property| property.init),
-                        )
-                        .chain(nested.body_props.iter().filter_map(
-                            |property| match property.getter {
-                                Some(FunBody::Expr(body) | FunBody::Block(body)) => Some(body),
-                                Some(FunBody::None) | None => None,
-                            },
-                        ))
-                        .chain(nested.init_order.iter().filter_map(|step| match step {
-                            ClassInit::Block(body) => Some(*body),
-                            ClassInit::PropInit(_) => None,
-                        }));
-                for body in bodies {
-                    record_construction_uses(body, &everything, false);
-                }
-            }
-        }
-        // A mutable enclosing local written from any parser-hoisted class body is shared storage,
-        // even when the outer function's direct AST walk cannot reach that member expression.
-        let mut class_reassigned = std::collections::HashSet::new();
-        for body in local_class_capture_expressions(cl) {
-            collect_all_reassigned(self.file, body, &mut class_reassigned);
-        }
-        // Member bodies (including a computed property's accessors, which are methods) may capture.
-        let mut member_bodies: Vec<(Vec<String>, ExprId)> = Vec::new();
-        for m in &cl.methods {
-            if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
-                member_bodies.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
-            }
-        }
-        for p in &cl.body_props {
-            if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
-                member_bodies.push((Vec::new(), e));
-            }
-        }
-        for (params, body) in member_bodies {
-            let mut visible = everything.clone();
-            for p in &params {
-                visible.remove(p);
-            }
-            for name in used_names(self.file, body, &visible) {
-                if unsupported.contains(&name) {
-                    result.unsupported.get_or_insert(name);
-                } else if through_outer.contains(&name) {
-                    needs_outer = true;
-                } else if !captured.contains(&name) {
-                    captured.push(name);
-                }
-            }
-        }
-        // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
-        // what both an outer member read and a `this@Outer` go through.
-        if needs_outer {
-            match enclosing_instance {
-                Some(outer) => result.values.push(AnonymousObjectCapture {
-                    name: "this$0".to_string(),
-                    ty: outer,
-                    shared_cell: false,
-                    storage_ty: None,
-                    source: AnonymousObjectCaptureSource::EnclosingInstance {
-                        current: true,
-                        depth: 0,
-                    },
-                    receiver_label: None,
-                    receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
-                    lexical_shadow_depth: 0,
-                    capture_dependency: None,
-                }),
-                None => {
-                    result.unsupported.get_or_insert("this".to_string());
-                }
-            }
-        }
-        // A local classifier is emitted as a separate body unit, so an enclosing receiver-lambda
-        // or extension receiver must cross the same constructor/field boundary as a lexical value.
-        // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
-        // conservatively is harmless when no member ultimately reads it and prevents a later body
-        // callback from attempting source-scope lookup after the enclosing body has been dropped.
-        if let Some((receiver, receiver_name)) = implicit_receiver_capture {
-            result.values.push(AnonymousObjectCapture {
-                name: "this$receiver".to_string(),
-                ty: receiver,
-                shared_cell: false,
-                storage_ty: None,
-                source: AnonymousObjectCaptureSource::ImplicitReceiver {
-                    current: true,
-                    depth: 0,
-                },
-                receiver_label: innermost_label
-                    .filter(|(_, _, is_class)| !*is_class)
-                    .map(|(label, _, _)| label.clone().into_boxed_str()),
-                receiver: Some(receiver_name),
-                lexical_shadow_depth: 0,
-                capture_dependency: None,
-            });
-        }
-        captured.sort();
-        for name in captured {
-            let Some(local) = self.lookup(scope, &name) else {
-                result.unsupported.get_or_insert(name);
-                continue;
-            };
-            let source = match local.origin {
-                ReceiverFnValueOrigin::ClassStorage(field)
-                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
-                    AnonymousObjectCaptureSource::ClassStorage { field }
-                }
-                ReceiverFnValueOrigin::Local
-                | ReceiverFnValueOrigin::DispatchProperty { .. }
-                | ReceiverFnValueOrigin::TopLevelProperty => {
-                    AnonymousObjectCaptureSource::LexicalValue
-                }
-            };
-            result.values.push(AnonymousObjectCapture {
-                // Smart-cast state is a fact about this control-flow point, not the type of a
-                // mutable cell captured by a separately checked classifier body.
-                ty: if local.is_var {
-                    local.ty
-                } else {
-                    narrows.get(&name).copied().unwrap_or(local.ty)
-                },
-                shared_cell: capture_storage::CapturedBinding {
-                    delegated: local.delegate_storage_ty.is_some(),
-                    mutable: local.is_var,
-                    already_shared: local.shared_storage_cell,
-                    written_here: self.fn_reassigned.contains(&name)
-                        || class_reassigned.contains(&name),
-                }
-                .is_shared_cell(),
-                storage_ty: local.delegate_storage_ty,
-                name,
-                source,
-                receiver_label: None,
-                receiver: None,
-                lexical_shadow_depth: 0,
-                capture_dependency: None,
-            });
-        }
-        result
     }
 
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
@@ -57935,6 +57540,9 @@ impl<'a> Checker<'a> {
                                 }
                                 c.suppress_receiver_capture_accounting = previous_capture_accounting;
                             }
+                        }
+                        if is_anonymous_object {
+                            c.publish_anonymous_super_forwards(scope, d, &cl.base_args);
                         }
                     });
                     self.static_companion_this = previous_static_this;

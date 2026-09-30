@@ -1020,6 +1020,12 @@ pub enum IrExpr {
         finally: Option<ExprId>,
         result: Ty,
     },
+    /// Anonymous super-constructor operand evaluated at the construction site. Constructor
+    /// finalization binds `slot` to the synthetic constructor parameter. Emission does not
+    /// interpret this node.
+    ForwardedSuperArgument {
+        slot: u32,
+    },
 }
 
 /// A function/method declaration (`IrFunction`).

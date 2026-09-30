@@ -1259,7 +1259,7 @@ impl BodyFirChecker<'_> {
                 value: self.value_at_selected_boundary(delegation.value, resolved.interface)?,
             });
         }
-        let super_arguments = self.anonymous_super_arguments(transient, class, &captures)?;
+        let super_arguments = self.anonymous_super_arguments(transient, class)?;
         Ok(FirExprKind::AnonymousObject(FirAnonymousObject {
             declaration,
             captures,
@@ -1276,7 +1276,6 @@ impl BodyFirChecker<'_> {
         &mut self,
         transient: DeclId,
         class: &crate::ast::ClassDecl,
-        captures: &[FirLocalClassCapture],
     ) -> Result<Box<[FirAnonymousSuperArgument]>, BodyCheckFailure> {
         let delegation = self
             .info
@@ -1289,16 +1288,18 @@ impl BodyFirChecker<'_> {
                     resolved.vararg,
                 )
             });
+        let forwarded = self
+            .info
+            .anonymous_forwarded_super_arguments
+            .get(&transient)
+            .cloned()
+            .unwrap_or_default();
         let mut forwards = Vec::new();
         for (index, argument) in class.base_args.iter().copied().enumerate() {
-            let (core, shells) = peel_super_type_operators(self.file, argument);
-            if anonymous_super_core_stays(self.file, self.info, core, |name| {
-                captures
-                    .iter()
-                    .any(|capture| capture.receiver.is_none() && capture.name.as_ref() == name)
-            }) {
+            if !forwarded.contains(&argument) {
                 continue;
             }
+            let (core, shells) = peel_super_type_operators(self.file, argument);
             let slot = delegation
                 .as_ref()
                 .and_then(|(slots, _, _)| slots.get(index).copied())
@@ -1518,38 +1519,4 @@ pub(super) fn peel_super_type_operators(
             _ => return (expression, shells),
         }
     }
-}
-
-/// A constant, or a bare name of a value already captured by the anonymous object, is evaluated
-/// inside the anonymous constructor. Everything else is evaluated at the construction site.
-pub(super) fn anonymous_super_core_stays(
-    file: &crate::ast::File,
-    info: &crate::resolve::TypeInfo,
-    expression: crate::ast::ExprId,
-    is_lexical_capture: impl Fn(&str) -> bool,
-) -> bool {
-    let ty = info
-        .expr_types
-        .get(expression.0 as usize)
-        .copied()
-        .unwrap_or(crate::types::Ty::Error);
-    if crate::resolve::checked_constant_expression(
-        crate::resolve::CheckedConstantExpression {
-            file,
-            expression_types: &info.expr_types,
-            resolved_constants: &info.resolved_constants,
-            resolved_calls: &info.resolved_calls,
-            resolved_operator_calls: &info.resolved_operator_calls,
-        },
-        expression,
-        ty,
-    )
-    .is_some()
-    {
-        return true;
-    }
-    let crate::ast::Expr::Name(name) = file.expr(expression) else {
-        return false;
-    };
-    is_lexical_capture(name.as_str())
 }
