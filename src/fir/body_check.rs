@@ -3729,7 +3729,7 @@ impl BodyFirChecker<'_> {
                 });
                 let iteration_ty = self.info.semantic_ty(*iterable).platform_lower_bound();
                 let element_ty = iteration_ty
-                    .array_elem()
+                    .array_read_elem()
                     .or((iteration_ty == Ty::String).then_some(Ty::Char))
                     .or_else(|| {
                         self.info

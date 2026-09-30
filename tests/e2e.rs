@@ -1604,6 +1604,8 @@ mod private_constructor_access_e2e;
 mod private_set_e2e;
 #[path = "projected_receiver_extension_e2e.rs"]
 mod projected_receiver_extension_e2e;
+#[path = "projected_smart_cast_e2e.rs"]
+mod projected_smart_cast_e2e;
 #[path = "property_accessor_e2e.rs"]
 mod property_accessor_e2e;
 #[path = "property_accessor_increment_e2e.rs"]
