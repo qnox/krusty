@@ -66,3 +66,27 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("generic SAM slot keeps the box"), "OK");
 }
+
+#[test]
+fn same_name_same_arity_sam_keeps_the_abstract_value_class_slot() {
+    // `take(Left)` and `take(Right)` share an owner, a name, and an arity. Their value-class
+    // hashes differ. The lambda implements the abstract `take(Left)` slot; binding the concrete
+    // sibling's hash makes the first call throw AbstractMethodError.
+    const SRC: &str = "@JvmInline\n\
+value class Left(val n: Int)\n\
+@JvmInline\n\
+value class Right(val n: Int)\n\
+fun interface Pick {\n\
+    fun take(value: Left): Int\n\
+    fun take(value: Right): Int = value.n\n\
+}\n\
+fun feed(pick: Pick): Int = pick.take(Left(3))\n\
+fun box(): String {\n\
+    val seen = feed { it.n + 1 }\n\
+    return if (seen == 4) \"OK\" else \"fail: $seen\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("abstract value-class SAM among same-arity siblings"),
+        "OK"
+    );
+}

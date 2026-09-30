@@ -1085,3 +1085,121 @@ fn a_nullable_function_value_conversion_names_the_dependency_method() {
         )
     );
 }
+
+/// A provider fun interface whose only abstract member publishes neither a module declaration nor
+/// an external callable. The checker cannot name that method, so the conversion fails closed.
+struct UnidentifiedSam {
+    action: crate::types::TypeName,
+    classifier: std::sync::Arc<crate::libraries::LibraryType>,
+}
+
+impl crate::symbol_source::SymbolSource for UnidentifiedSam {
+    fn package_exists(&self, parent: crate::types::TypeName, name: &str) -> bool {
+        parent == crate::types::TypeName::ROOT && name == "test"
+    }
+
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let package =
+            crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("test"));
+        if namespace == package && name == "Action" {
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                classifier_name: Some(self.action),
+                classifier: Some(std::sync::Arc::clone(&self.classifier)),
+                ..crate::libraries::ResolvedSymbols::default()
+            })
+        } else {
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols::default())
+        }
+    }
+}
+
+impl crate::libraries::SemanticPlatform for UnidentifiedSam {}
+
+fn unidentified_action() -> UnidentifiedSam {
+    let mut member = crate::libraries::LibraryMember::new(
+        "run".to_string(),
+        Vec::new(),
+        crate::types::Ty::Int,
+        String::new(),
+    );
+    member.set_is_abstract(true);
+    let mut classifier = crate::libraries::LibraryType::declaration_header();
+    classifier.is_kotlin = true;
+    classifier.kind = crate::libraries::TypeKind::Interface;
+    classifier.sam_eligible = true;
+    classifier.members = vec![member];
+    UnidentifiedSam {
+        action: crate::types::type_name("test/Action"),
+        classifier: std::sync::Arc::new(classifier),
+    }
+}
+
+struct DiscardBodies;
+
+impl CheckedBodySink for DiscardBodies {
+    fn accept_finalized(&mut self, _owner: BodyOwnerId, _body: FirBody) {}
+}
+
+#[test]
+fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
+    const SOURCE: &str = "fun feed(action: test.Action) {}\nfun use() { feed { 1 } }\n";
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[crate::source::SourceInput::kotlin(SOURCE).with_file_stem("UnidentifiedSam")],
+        Box::new(unidentified_action()),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(
+        diagnostics.diags.is_empty(),
+        "pass 1 accepts the provider shape: {:?}",
+        diagnostics.diags
+    );
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    let mut sink = DiscardBodies;
+    let failures = ordinary
+        .into_iter()
+        .filter_map(|work| {
+            check_and_dispatch_body(
+                &analysis.files[0],
+                info,
+                SourceFileId::from_raw(0),
+                work,
+                &index,
+                sources.origins_mut(),
+                &mut inline_bodies,
+                &mut sink,
+            )
+            .err()
+        })
+        .collect::<Vec<_>>();
+    let [CheckedBodyDriverFailure::Check(failure)] = &failures[..] else {
+        panic!("one body-check failure, got {failures:?}")
+    };
+    let file = &analysis.files[0];
+    let lambda_spans = (0..file.expr_arena.len())
+        .filter_map(|raw| {
+            let id = crate::ast::ExprId(raw as u32);
+            matches!(file.expr(id), crate::ast::Expr::Lambda { .. })
+                .then(|| file.expr_span(id))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let [lambda_span] = lambda_spans[..] else {
+        panic!("one lambda, got {lambda_spans:?}")
+    };
+    assert_eq!(
+        (failure.span, &failure.kind),
+        (
+            Some(lambda_span),
+            &BodyCheckFailureKind::MissingStableCallTarget
+        )
+    );
+}

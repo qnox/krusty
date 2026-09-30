@@ -1211,44 +1211,29 @@ pub(crate) fn lower_value_classes(
                         .unwrap_or_else(|| erase_descriptor(descriptor, &under));
                 }
             }
-            // A SAM conversion names the interface method at the `invokedynamic` call site. When that
-            // method mangled (its signature mentions a value class), the closure must implement the
-            // MANGLED name — `LambdaMetafactory` binding the original spelling produces a class that
-            // implements nothing the interface declares (`AbstractMethodError` at the first call).
-            if let IrExpr::Lambda {
-                sam: Some(target),
-                arity,
-                ..
-            } = e
-            {
-                if let Some(mangled) =
-                    mangle_map.get(&(target.classifier, target.method.clone(), *arity as usize))
-                {
-                    target.method = mangled.clone();
-                }
-            }
         }
     }
-    // A SAM declaration may live in a sibling source file, so it is absent from this file's
-    // `mangle_map`. The checker/lowerer handoff records the selected SAM's declared signature on the
-    // lambda implementation; realize the call-site method name from that exact declaration here,
-    // where value-class JVM naming belongs. This is deliberately not a classifier lookup: overload
-    // selection is already complete and the implementation id identifies the recorded signature.
+    // The checker already selected one SAM declaration. Its declared signature and suspend fact
+    // travel on the lambda, so the physical slot is realized from those, not from a
+    // `(classifier, name, arity)` map. Two methods of one fun interface can share a name and an
+    // arity while their value-class hashes differ; the map keeps only one of them.
     if !callable_under.is_empty() {
         for expression in &mut ir.exprs {
             let IrExpr::Lambda {
-                impl_fn,
-                sam: Some(target),
-                ..
+                sam: Some(target), ..
             } = expression
             else {
                 continue;
             };
-            let Some((params, ret)) = ir.lambda_sam_signature.get(impl_fn) else {
-                continue;
-            };
-            target.method =
-                vc_mangle_once(&target.method, params, ret, &callable_under, false, false);
+            let method = vc_mangle_once(
+                &target.method,
+                &target.declared_parameters,
+                &target.declared_result,
+                &callable_under,
+                false,
+                target.suspend,
+            );
+            target.method = method;
         }
     }
     // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
