@@ -10223,7 +10223,13 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
-                                inline_only: inline.must_inline(),
+                                inline_only: bytecode_inline_call::declaration_is_inline_only(
+                                    self.bodies,
+                                    &owner,
+                                    &name,
+                                    &descriptor,
+                                    inline,
+                                ),
                                 allow_owner_bridge: true,
                             };
                             self.try_inline_static_as(e, target, &all, 1, code, &reified)
@@ -10238,7 +10244,13 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
-                                inline_only: inline.must_inline(),
+                                inline_only: bytecode_inline_call::declaration_is_inline_only(
+                                    self.bodies,
+                                    &owner,
+                                    &name,
+                                    &descriptor,
+                                    inline,
+                                ),
                                 allow_owner_bridge: inline.must_inline() || has_lambda_arg,
                             };
                             self.try_inline_static_as(e, target, &args, 0, code, &reified)

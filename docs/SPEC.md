@@ -4025,12 +4025,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   direct call is legal, so it now applies to non-reified callees only. The guard meant to catch this
   class of miscompile (`ir_emit`: bail rather than fall back) was itself keyed on the absent
   substitution, which is why a wrong program compiled silently.
-  **Not spliceable, and refused rather than approximated:** a body calling
-  `Intrinsics.needClassReification` (kotlinc's marker for "this materializes a class whose shape
-  depends on `T` — regenerate it per call site", emitted for e.g. a default lambda typed on `T`).
-  krusty splices instructions and does not regenerate a dependency's compiled inner classes, so
-  `splice_unified` returns `None` and the backend reports an inline-splice error. `mockk<T>(…)` is
-  this shape. Tests: `tests/classpath_reified_inline_toplevel_e2e.rs`.
+  **A body calling `Intrinsics.needClassReification` copies the anonymous class that marker guards.**
+  The marker means the inline body materializes a class whose shape depends on a reified parameter
+  (`Sequence.filterIsInstance<String>()`, whose predicate is the stdlib singleton
+  `SequencesKt___SequencesKt$filterIsInstance$1`). That class is regenerated for the call site the
+  same way any other anonymous object is — including one the body loads with `getstatic INSTANCE`
+  rather than `new`, and including the singleton's `<clinit>` — and each of the copy's methods is
+  specialized with the call's reified arguments before the class is written, so
+  `reifiedOperationMarker` plus `instanceof Object` becomes `instanceof java/lang/String`. The
+  marker itself is then removed. When the copy still names a reified parameter of an enclosing
+  inline function, the marker is put back immediately before the `new` or `getstatic` for that
+  caller to specialize. A body that still names a class whose methods contain
+  `reifiedOperationMarker` after this copy is refused, rather than emitted as a call that throws.
+  Whether the splice is mandatory is separate from `@InlineOnly`: a public reified function such
+  as `filterIsInstance` keeps the callee's lines, `$i$f$` marker, and source map, and stores an
+  argument that already lives in a local. Only a method the class file marks private — the
+  bytecode shape of `@InlineOnly` — drops that debug information and reads such a local in place.
+  Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
 - **A named argument binds by LABEL, including when it skips a defaulted parameter.** A classpath call
   that names a parameter and omits an earlier one (`mockk(relaxed = true)`, `runTest(timeout = …)`) was

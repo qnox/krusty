@@ -27,6 +27,19 @@ pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
 
+/// kotlinc's `IrDeclaration.isInlineOnly`: the `@InlineOnly` annotation, which the class file
+/// records by making the method private. A public reified function is still mandatory to splice
+/// and keeps the lines and locals an `@InlineOnly` body drops.
+pub(super) fn declaration_is_inline_only(
+    bodies: &dyn crate::jvm::inline::MethodBodies,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+    inline: crate::libraries::InlineKind,
+) -> bool {
+    inline.must_inline() && bodies.member_is_private(owner, name, descriptor)
+}
+
 /// The clean failure of a reified inline body whose call shape only the byte splice handles: only
 /// the MethodNode inliner specializes reified type parameters.
 pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =

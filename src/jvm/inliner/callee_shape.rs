@@ -16,16 +16,14 @@ const NEW: u8 = 0xbb;
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnsupportedShape {
-    /// It constructs or loads an anonymous object or SAM wrapper, which kotlinc regenerates as a
-    /// `$$inlined$` class for the call site (`AnonymousObjectTransformer`).
+    /// It constructs a SAM wrapper, which kotlinc regenerates as a `$$inlined$` class for the call
+    /// site (`AnonymousObjectTransformer`). An anonymous object is regenerated instead, including
+    /// one a `getstatic INSTANCE` loads.
     AnonymousObject,
     /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
     WhenMappings,
     /// It reads `$assertionsDisabled`, a field kotlinc moves to the calling class.
     AssertionsStatus,
-    /// It materializes a class whose shape depends on a reified parameter. The anonymous-object
-    /// regeneration stage must copy that class before the marker can be removed.
-    ClassReification,
 }
 
 /// The first shape in `callee` that needs a later stage of the port, if any. The anonymous objects
@@ -49,28 +47,16 @@ pub(crate) fn unsupported_shape(
             name,
             desc,
         } => {
-            if name == "INSTANCE" && classes.is_anonymous_object(owner) {
-                Some(UnsupportedShape::AnonymousObject)
-            } else if name.starts_with("$EnumSwitchMapping$") && owner.ends_with("$WhenMappings") {
+            // `getstatic INSTANCE` of an anonymous object is regenerated with the object, and
+            // `needClassReification` is removed once that copy exists. Neither is a shape this
+            // gate refuses.
+            if name.starts_with("$EnumSwitchMapping$") && owner.ends_with("$WhenMappings") {
                 Some(UnsupportedShape::WhenMappings)
             } else if name == "$assertionsDisabled" && desc == "Z" {
                 Some(UnsupportedShape::AssertionsStatus)
             } else {
                 None
             }
-        }
-        Insn::Method {
-            op: INVOKESTATIC,
-            owner,
-            name,
-            desc,
-            interface,
-        } if owner == "kotlin/jvm/internal/Intrinsics"
-            && !interface
-            && name == "needClassReification"
-            && desc == "()V" =>
-        {
-            Some(UnsupportedShape::ClassReification)
         }
         _ => None,
     })

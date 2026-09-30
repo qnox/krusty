@@ -12,9 +12,10 @@ use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::ClassNode;
 use crate::jvm::inliner::{
     regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError, ObjectLambda,
-    Regeneration, RegenerationError,
+    RegeneratedObject, Regeneration, RegenerationError,
 };
 use crate::jvm::ir_emit::JvmSignatureFormatter;
+use crate::jvm::reified_arguments::ReifiedArguments;
 use crate::jvm::source_map::SourceMap;
 
 /// The method whose inline calls regenerate objects: its JVM identity, the name of the Kotlin
@@ -85,6 +86,7 @@ pub(super) struct CallObjects<'a> {
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
     caller_lines: SourceMap,
     value_classes: Rc<ValueClassDescriptors>,
+    reified: ReifiedArguments,
 }
 
 impl<'a> Emitter<'a> {
@@ -97,6 +99,12 @@ impl<'a> Emitter<'a> {
         commit: bool,
         caller_lines: SourceMap,
     ) -> CallObjects<'a> {
+        let reified = crate::jvm::reified_operations::splice_arguments(
+            self.ir,
+            call_expression,
+            &self.facade,
+            &|ty| self.rendered_inlined_cast_target(ty),
+        );
         CallObjects {
             ir: self.ir,
             bodies: self.bodies,
@@ -109,6 +117,7 @@ impl<'a> Emitter<'a> {
             commit,
             caller_lines,
             value_classes: self.cw.value_classes(),
+            reified,
         }
     }
 }
@@ -137,7 +146,7 @@ impl AnonymousObjects for CallObjects<'_> {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
-    ) -> Result<(String, String), InlineError> {
+    ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
             |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
         let site = self
@@ -184,6 +193,7 @@ impl AnonymousObjects for CallObjects<'_> {
             caller_lines: &self.caller_lines,
             classes: &self.bodies,
             value_classes: &self.value_classes,
+            reified: &self.reified,
         })
         .map_err(InlineError::Regeneration)?;
         if self.commit {
@@ -192,6 +202,32 @@ impl AnonymousObjects for CallObjects<'_> {
                 .borrow_mut()
                 .push((new_class.clone(), regenerated.bytes));
         }
-        Ok((new_class, regenerated.constructor_desc))
+        Ok(RegeneratedObject {
+            name: new_class,
+            constructor_desc: regenerated.constructor_desc,
+            reified_parameters_remain: regenerated.reified_parameters_remain,
+        })
+    }
+
+    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
+        let unsupported =
+            |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
+        let bytes = self.bodies.class_file(class).ok_or(unsupported(
+            "an object whose class file is not on the classpath",
+        ))?;
+        let original = ClassNode::read(&bytes)
+            .map_err(|_| unsupported("an object class that does not read"))?;
+        let mut constructors = original
+            .methods
+            .iter()
+            .filter(|method| method.name == "<init>");
+        let constructor = constructors
+            .next()
+            .ok_or(unsupported("a class without a constructor"))?;
+        if constructors.next().is_some() {
+            return Err(unsupported("more than one constructor"));
+        }
+        let descriptor = constructor.desc.clone();
+        self.regenerate(class, &descriptor, &[])
     }
 }

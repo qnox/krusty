@@ -4840,9 +4840,12 @@ regress.
     through `SourceMapCopier`, `EnclosingMethod` naming the caller, `InnerClasses` in visited order,
     and the call's type arguments written into generic signatures (`TypeParameterMappings`). Names
     come from kotlinc's per-class name generators
-    (`<caller>$<function>$$inlined$<callee>$<n>`). Declined for now, leaving an ordinary call: coroutine
-    objects, a `<clinit>`, nested objects, captured-field reads outside `aload 0; getfield`, and
-    call sites in constructors, accessors, lambdas, suspend or inline functions.
+    (`<caller>$<function>$$inlined$<callee>$<n>`). A `getstatic INSTANCE` of an anonymous object is
+    the same copy, including the singleton's `<clinit>`, and `needClassReification` is removed once
+    the copy's `reifiedOperationMarker`s are specialized with the call's reified arguments. Declined
+    for now, leaving an ordinary call: coroutine objects, nested objects, captured-field reads
+    outside `aload 0; getfield`, and call sites in constructors, accessors, lambdas, suspend or
+    inline functions.
   - ◐ 4b. Crossinline lambdas captured by a regenerated object (the `$$inlined$Continuation$1` of
     `runBlocking`). ✅ Lambdas of an inline call whose value is used, passed to the constructor of an
     object the body creates, are inlined into the copy's methods (`anonymous_object::lambda_inlining`):

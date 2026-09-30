@@ -97,6 +97,8 @@ pub(crate) struct Regeneration<'a> {
     pub call_site: CallSite<'a>,
     /// The inline function's type arguments at the call, each as `(parameter name, signature)`.
     pub type_arguments: &'a [(String, String)],
+    /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
+    pub(in crate::jvm) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The caller's class-file major version.
     pub major: u16,
     /// The `@Metadata` version the caller writes.
@@ -117,6 +119,8 @@ pub(crate) struct Regenerated {
     pub bytes: Vec<u8>,
     /// The regenerated constructor's descriptor, which the call site now calls.
     pub constructor_desc: String,
+    /// A method of the copy still calls `reifiedOperationMarker`.
+    pub reified_parameters_remain: bool,
 }
 
 /// `isCapturedFieldName`: a field an object's constructor fills from a captured value.
@@ -220,6 +224,9 @@ pub(crate) fn regenerate(
             "a constructor called through another descriptor",
         ));
     }
+    let mut constructor_code = constructor_code.clone();
+    let mut reified_parameters_remain =
+        specialize_copied(&mut constructor_code, regeneration.reified)?;
     let declared: Vec<DeclaredCapture<'_>> = original
         .fields
         .iter()
@@ -230,7 +237,7 @@ pub(crate) fn regenerate(
         })
         .collect();
     let mut plan = constructor::extract(
-        constructor_code,
+        &constructor_code,
         old,
         &declared,
         regeneration.constructor_desc,
@@ -273,6 +280,9 @@ pub(crate) fn regenerate(
 
     for method in methods {
         let mut method = method.clone();
+        if let Some(code) = &mut method.code {
+            reified_parameters_remain |= specialize_copied(code, regeneration.reified)?;
+        }
         check_captured_field_accesses(&method, old, &declared)?;
         if let Some(code) = method
             .code
@@ -338,7 +348,19 @@ pub(crate) fn regenerate(
     Ok(Regenerated {
         bytes: cw.finish(),
         constructor_desc: plan.desc,
+        reified_parameters_remain,
     })
+}
+
+/// Specialize `body`'s reified markers. `true` when a marker remains for an enclosing inline
+/// function to specialize in turn.
+fn specialize_copied(
+    body: &mut MethodNode,
+    reified: &crate::jvm::reified_arguments::ReifiedArguments,
+) -> Result<bool, RegenerationError> {
+    super::reified::specialize(body, reified)
+        .map_err(|error| RegenerationError::Inlining(Box::new(error)))?;
+    Ok(super::reified::has_reified_markers(body))
 }
 
 /// A method's descriptor, signature and annotations as the copy declares them.
@@ -467,13 +489,10 @@ fn check_supported(
         ));
     }
     for method in &original.methods {
-        if method.name == "<clinit>" {
-            return Err(RegenerationError::Unsupported("a static initializer"));
-        }
         let Some(code) = &method.code else { continue };
         if code
             .instructions()
-            .any(|insn| creates_anonymous_object(insn, classes))
+            .any(|insn| references_other_regenerated_class(insn, classes, &original.name))
         {
             return Err(RegenerationError::Unsupported("a nested anonymous object"));
         }
@@ -481,22 +500,29 @@ fn check_supported(
     Ok(())
 }
 
-/// Whether `insn` constructs or loads an object a copy would regenerate in turn.
-fn creates_anonymous_object(insn: &Insn, classes: &dyn ClassRoles) -> bool {
+/// Whether `insn` constructs or loads an object other than `self_name` that a copy would
+/// regenerate in turn. The class's own `<clinit>` constructs itself; that is the singleton, not a
+/// nested object.
+fn references_other_regenerated_class(
+    insn: &Insn,
+    classes: &dyn ClassRoles,
+    self_name: &str,
+) -> bool {
+    let other = |name: &str| name != self_name && classes.is_regenerated(name);
     match insn {
-        Insn::Type { op: NEW, class } => classes.is_regenerated(class),
+        Insn::Type { op: NEW, class } => other(class),
         Insn::Method {
             op: INVOKESPECIAL,
             owner,
             name,
             ..
-        } => name == "<init>" && classes.is_regenerated(owner),
+        } => name == "<init>" && other(owner),
         Insn::Field {
             op: GETSTATIC,
             owner,
             name,
             ..
-        } => name == "INSTANCE" && classes.is_regenerated(owner),
+        } => name == "INSTANCE" && other(owner),
         _ => false,
     }
 }
@@ -696,13 +722,19 @@ fn write_metadata(
             .map(|value| value.as_strings().ok_or(malformed.clone()))
             .transpose()
     };
-    let original = MetadataStrings {
-        d1: strings("d1")?.ok_or(malformed.clone())?,
-        d2: strings("d2")?.ok_or(malformed.clone())?,
+    // A synthetic class can carry only `k`/`mv`/`xi` (`filterIsInstance`'s singleton). kotlinc
+    // still writes that header on the copy and records an origin only when `d1`/`d2` are present.
+    let (d1, d2) = match (strings("d1")?, strings("d2")?) {
+        (Some(d1), Some(d2)) => {
+            let original = MetadataStrings { d1, d2 };
+            let copy = record_origin_name(kind, &original, old)
+                .map_err(RegenerationError::Metadata)?
+                .unwrap_or(original);
+            (copy.d1, copy.d2)
+        }
+        (None, None) => (Vec::new(), Vec::new()),
+        _ => return Err(malformed),
     };
-    let copy = record_origin_name(kind, &original, old)
-        .map_err(RegenerationError::Metadata)?
-        .unwrap_or(original);
     let mut flags = extra & !METADATA_PUBLIC_ABI_FLAG;
     if regeneration.call_site.public_inline_scope {
         flags |= METADATA_PUBLIC_ABI_FLAG;
@@ -712,12 +744,6 @@ fn write_metadata(
             "@Metadata without extra flags",
         ));
     }
-    cw.set_kotlin_metadata(
-        kind,
-        regeneration.metadata_version,
-        flags,
-        &copy.d1,
-        &copy.d2,
-    );
+    cw.set_kotlin_metadata(kind, regeneration.metadata_version, flags, &d1, &d2);
     Ok(())
 }
