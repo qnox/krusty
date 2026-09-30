@@ -460,17 +460,6 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
     remap_value_indices(ir, e, threshold, &|index| index + by);
 }
 
-/// Remap every value index `>= threshold` by `map`. A nested lambda's own body is left in its
-/// numbering; only captures that read this namespace move. `map` sees each index once per node.
-pub(crate) fn map_value_indices(
-    ir: &mut IrFile,
-    e: ExprId,
-    threshold: u32,
-    map: &dyn Fn(u32) -> u32,
-) {
-    remap_value_indices(ir, e, threshold, map);
-}
-
 /// Move every value index `>= threshold` down by `by`, the inverse of [`shift_value_indices`]: a
 /// pass that turns leading parameters into something else (fields of a generated class) closes the
 /// gap they leave.

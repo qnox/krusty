@@ -35,6 +35,16 @@ impl RequiredConstructorCapture {
 }
 
 impl BodyFirChecker<'_> {
+    /// A construction-site super forward cannot use the anonymous constructor's capture field.
+    pub(super) fn active_class_storage_read(&self, expression: ExprId) -> Option<&u32> {
+        (!self.hoist_anonymous_super_argument)
+            .then(|| match self.info.expr_lowers.get(&expression) {
+                Some(ExprLowering::ClassStorageRead { field }) => Some(field),
+                _ => None,
+            })
+            .flatten()
+    }
+
     /// Publish the capture prefix for a local-class construction that crosses a streamed body
     /// boundary. Inside the declaring body the checked `LocalDeclaration` already owns the
     /// capture sources. A member of that class (or a nested class) instead sees the same captures
@@ -941,19 +951,21 @@ impl BodyFirChecker<'_> {
                             ));
                         }
                     }
-                    context.record_value(
-                        capture.name.clone(),
-                        ClassCaptureBinding {
-                            owner: declaration,
-                            field,
-                            ty,
-                            shared_cell: capture.shared_cell,
-                            enclosing_depth: 0,
-                            semantic_receiver_depth: None,
-                            receiver_source: None,
-                            capture_identity,
-                        },
-                    );
+                    let captured_binding = ClassCaptureBinding {
+                        owner: declaration,
+                        field,
+                        ty,
+                        shared_cell: capture.shared_cell,
+                        enclosing_depth: 0,
+                        semantic_receiver_depth: capture.semantic_receiver_depth,
+                        receiver_source: None,
+                        capture_identity,
+                    };
+                    if capture.semantic_receiver_depth.is_some() {
+                        context.receivers.push(captured_binding);
+                    } else {
+                        context.record_value(capture.name.clone(), captured_binding);
+                    }
                     if let Some(binding) = source_binding {
                         if self.reads_constructor_prefix_capture(
                             binding.owner,
@@ -1294,20 +1306,25 @@ impl BodyFirChecker<'_> {
             .get(&transient)
             .cloned()
             .unwrap_or_default();
+        if forwarded.is_empty() {
+            return Ok(Box::new([]));
+        }
+        let (argument_slots, argument_types, vararg) = delegation.ok_or_else(|| {
+            self.failure(
+                Some(class.span),
+                BodyCheckFailureKind::MissingStableCallTarget,
+            )
+        })?;
         let mut forwards = Vec::new();
         for (index, argument) in class.base_args.iter().copied().enumerate() {
             if !forwarded.contains(&argument) {
                 continue;
             }
             let (core, shells) = peel_super_type_operators(self.file, argument);
-            let slot = delegation
-                .as_ref()
-                .and_then(|(slots, _, _)| slots.get(index).copied())
-                .unwrap_or(index);
-            if delegation
-                .as_ref()
-                .is_some_and(|(_, _, vararg)| *vararg == Some(slot))
-            {
+            let slot = argument_slots.get(index).copied().ok_or_else(|| {
+                self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
+            })?;
+            if vararg == Some(slot) {
                 continue;
             }
             let slot = u32::try_from(slot).map_err(|_| {
@@ -1316,20 +1333,16 @@ impl BodyFirChecker<'_> {
             let previous = self.hoist_anonymous_super_argument;
             self.hoist_anonymous_super_argument = true;
             let value = if shells == 0 {
-                if let Some(expected) = delegation
-                    .as_ref()
-                    .and_then(|(_, types, _)| types.get(index).copied())
-                {
-                    let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
-                        self.failure(
-                            self.file.expr_span(argument),
-                            BodyCheckFailureKind::UnpublishableType(error),
-                        )
-                    })?;
-                    self.value_at_selected_boundary(argument, target)
-                } else {
-                    self.expression(argument)
-                }
+                let expected = argument_types.get(index).copied().ok_or_else(|| {
+                    self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
+                })?;
+                let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(argument),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })?;
+                self.value_at_selected_boundary(argument, target)
             } else {
                 self.expression(core)
             };

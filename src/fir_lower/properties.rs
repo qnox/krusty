@@ -1507,74 +1507,12 @@ fn top_level_accessors(
     crate::ir::IrStaticAccessors { getter, setter }
 }
 
-/// Class-initializer units number plain parameters and locals in their own value space. A primary
-/// constructor's value space also contains property parameters, which are stored before those
-/// initializers run and are not bindings of the initializer unit. Move each initializer value onto
-/// the constructor's value index so a local does not reuse a property parameter's slot.
-fn align_primary_initializer_values(ir: &mut IrFile, class_id: crate::ir::ClassId, root: ExprId) {
-    let class = &ir.classes[class_id as usize];
-    if class.ctor_args.is_empty() {
-        return;
-    }
-    let prefix = class.constructor_prefix_count;
-    let context = class
-        .ctor_args
-        .iter()
-        .filter(|argument| argument.context_kind != crate::types::ContextParameterKind::None)
-        .count() as u32;
-    let parameter_start = 1 + prefix + context;
-    let physical_plain = class
-        .ctor_args
-        .iter()
-        .enumerate()
-        .skip(prefix as usize)
-        .filter(|(_, argument)| {
-            !argument.is_field && argument.context_kind == crate::types::ContextParameterKind::None
-        })
-        .map(|(index, _)| index as u32 + 1)
-        .collect::<Vec<_>>();
-    let plain_len = physical_plain.len() as u32;
-    let physical_count = class.ctor_args.len() as u32;
-    let local_start = parameter_start + plain_len;
-    let identity = physical_plain
-        .iter()
-        .enumerate()
-        .all(|(ordinal, physical)| *physical == parameter_start + ordinal as u32)
-        && physical_count + 1 == local_start;
-    if identity {
-        return;
-    }
-    crate::ir::map_value_indices(ir, root, parameter_start, &|index| {
-        if index < local_start {
-            physical_plain[(index - parameter_start) as usize]
-        } else {
-            physical_count + 1 + (index - local_start)
-        }
-    });
-}
-
 fn merge_class_initialization(
     ir: &mut IrFile,
     mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
-    let property_steps = initialization
-        .iter()
-        .flat_map(|(&class, steps)| {
-            steps
-                .iter()
-                .map(move |&(_, expression)| (class, expression))
-        })
-        .collect::<Vec<_>>();
-    for (class_id, expression) in property_steps {
-        if ir.classes[class_id as usize].has_primary_ctor {
-            align_primary_initializer_values(ir, class_id, expression);
-        }
-    }
     let initializers = ir.checked_class_initializers.clone();
     for initializer in &initializers {
-        if ir.classes[initializer.class as usize].has_primary_ctor {
-            align_primary_initializer_values(ir, initializer.class, initializer.body);
-        }
         initialization
             .entry(initializer.class)
             .or_default()

@@ -16,7 +16,6 @@
 //! by read and write discovery on purpose: a body form left out of it records immutable or missing
 //! storage, and checked FIR is then unable to represent the source capture at all.
 
-use super::scope::PathRoot;
 use super::*;
 
 /// What the checker knows about a binding when it decides how a capture of it is represented.
@@ -372,9 +371,10 @@ impl Checker<'_> {
     pub(super) fn local_class_captures(
         &self,
         scope: &CheckerScope<'_>,
+        declaration: crate::ast::DeclId,
         cl: &ClassDecl,
-        anonymous_object: bool,
     ) -> LocalClassCaptures {
+        let anonymous_object = self.file.is_anonymous_object_class(declaration);
         let mut result = LocalClassCaptures::default();
         let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
         scope.visit_bindings(Ns::Value, |name, _| {
@@ -677,6 +677,20 @@ impl Checker<'_> {
                 }
             }
         }
+        if anonymous_object {
+            for argument in &cl.base_args {
+                match self.anonymous_super_argument_disposition(declaration, *argument) {
+                    AnonymousSuperDisposition::Forward => {
+                        result.forwarded_super_arguments.push(*argument);
+                    }
+                    AnonymousSuperDisposition::StayImplicitReceiver(_) => needs_outer = true,
+                    AnonymousSuperDisposition::StayLexical
+                    | AnonymousSuperDisposition::StayClosure
+                    | AnonymousSuperDisposition::StayConstant
+                    | AnonymousSuperDisposition::Unresolved => {}
+                }
+            }
+        }
         // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
         // what both an outer member read and a `this@Outer` go through.
         if needs_outer {
@@ -692,6 +706,7 @@ impl Checker<'_> {
                     },
                     receiver_label: None,
                     receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
+                    semantic_receiver_depth: Some(1),
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                 }),
@@ -719,21 +734,12 @@ impl Checker<'_> {
                     .filter(|(_, _, is_class)| !*is_class)
                     .map(|(label, _, _)| label.clone().into_boxed_str()),
                 receiver: Some(receiver_name),
+                semantic_receiver_depth: Some(1),
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
         }
         captured.sort();
-        if anonymous_object {
-            let capturable = self.capturable_lexical_identities(scope);
-            for argument in &cl.base_args {
-                if self.anonymous_super_argument_disposition(*argument, &capturable)
-                    == AnonymousSuperDisposition::Forward
-                {
-                    result.forwarded_super_arguments.push(*argument);
-                }
-            }
-        }
         for name in captured {
             let Some(local) = self.lookup(scope, &name) else {
                 result.unsupported.get_or_insert(name);
@@ -771,6 +777,7 @@ impl Checker<'_> {
                 source,
                 receiver_label: None,
                 receiver: None,
+                semantic_receiver_depth: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
             });
@@ -778,39 +785,16 @@ impl Checker<'_> {
         result
     }
 
-    /// Flow identities of the lexical values an anonymous constructor can read. A narrowing shadow
-    /// keeps the identity of the value it narrows; a same-spelled declaration does not.
-    fn capturable_lexical_identities(
-        &self,
-        scope: &CheckerScope<'_>,
-    ) -> std::collections::HashSet<u32> {
-        let mut identities = std::collections::HashSet::new();
-        scope.visit_bindings(Ns::Value, |_name, binding| {
-            let Some(local) = binding.value() else {
-                return;
-            };
-            if matches!(
-                local.origin,
-                ReceiverFnValueOrigin::Local
-                    | ReceiverFnValueOrigin::ClassStorage(_)
-                    | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
-            ) {
-                identities.insert(local.flow_identity);
-            }
-        });
-        identities
-    }
-
     /// Whether an anonymous super-constructor argument stays in that constructor.
     ///
-    /// A cast or `!!` peels to the value that was checked. That value stays when its resolved
-    /// flow identity is one of the capturable bindings, or when checking has already accepted it
-    /// as a compile-time constant. A missing type or `Ty::Error` is not a forward: the frontend
-    /// error stands, and the argument is not rewritten into a constructor parameter.
+    /// A cast or `!!` peels to the value that was checked. That value stays when resolution recorded
+    /// an exact capturable lexical binding for this expression, or when checking has already
+    /// accepted it as a compile-time constant. A missing type or `Ty::Error` is not a forward: the
+    /// frontend error stands, and the argument is not rewritten into a constructor parameter.
     fn anonymous_super_argument_disposition(
         &self,
+        declaration: DeclId,
         argument: ExprId,
-        capturable: &std::collections::HashSet<u32>,
     ) -> AnonymousSuperDisposition {
         let core = peel_super_type_operators(self.file, argument);
         let Some(ty) = self.expr_types.get(core.0 as usize).copied() else {
@@ -819,10 +803,12 @@ impl Checker<'_> {
         if ty == Ty::Error || ty.mentions_error() {
             return AnonymousSuperDisposition::Unresolved;
         }
-        if let Some(PathRoot::Value(identity)) = self.read_flow_roots.get(&core) {
-            if capturable.contains(identity) {
-                return AnonymousSuperDisposition::Stay;
-            }
+        // A checked lambda is a deferred closure value constructed in the anonymous constructor.
+        // Forwarding its literal to the call site would bind captured receivers outside that
+        // constructor and bypass the exact capture fields selected for its body. Consume the
+        // checker-owned expression decision rather than rediscovering the syntax shape here.
+        if matches!(self.expr_lowers.get(&core), Some(ExprLowering::Lambda(_))) {
+            return AnonymousSuperDisposition::StayClosure;
         }
         if checked_constant_expression(
             CheckedConstantExpression {
@@ -837,9 +823,30 @@ impl Checker<'_> {
         )
         .is_some()
         {
-            AnonymousSuperDisposition::Stay
-        } else {
-            AnonymousSuperDisposition::Forward
+            return AnonymousSuperDisposition::StayConstant;
+        }
+        match self.anonymous_super_read_provenance.get(&core) {
+            Some(AnonymousSuperReadProvenance::LexicalBinding(_)) => {
+                AnonymousSuperDisposition::StayLexical
+            }
+            Some(AnonymousSuperReadProvenance::ImplicitReceiver {
+                identity,
+                current,
+                receiver_depth,
+            }) if self
+                .resolved_primary_ctor_delegations
+                .get(&declaration)
+                .and_then(|delegation| delegation.outer_receiver.as_ref())
+                .is_some_and(|outer| {
+                    outer.current == *current && outer.receiver_depth == *receiver_depth
+                }) =>
+            {
+                AnonymousSuperDisposition::StayImplicitReceiver(*identity)
+            }
+            Some(AnonymousSuperReadProvenance::ImplicitReceiver { .. }) => {
+                AnonymousSuperDisposition::Forward
+            }
+            None => AnonymousSuperDisposition::Forward,
         }
     }
 
@@ -847,13 +854,18 @@ impl Checker<'_> {
     /// already reported for this file, including a silent one pinned to the expression, stands.
     fn report_unresolved_anonymous_super_argument(&mut self, argument: ExprId) {
         let core = peel_super_type_operators(self.file, argument);
-        if self.silent_error_exprs.contains(&core) || self.diags.has_errors() {
+        let span = self.span(argument);
+        let has_argument_error = self.diags.diags.iter().any(|diagnostic| {
+            diagnostic.severity == crate::diag::Severity::Error
+                && diagnostic.file == self.file_index
+                && diagnostic.span.lo >= span.lo
+                && diagnostic.span.hi <= span.hi
+        });
+        if self.silent_error_exprs.contains(&core) || has_argument_error {
             return;
         }
-        self.diags.error(
-            self.span(argument),
-            "anonymous super argument has no resolved type",
-        );
+        self.diags
+            .error(span, "anonymous super argument has no resolved type");
     }
 
     /// Publish super-constructor arguments of an expression-position anonymous object after its
@@ -861,16 +873,22 @@ impl Checker<'_> {
     /// walk; both use the same stay rule while the lexical bindings are still in scope.
     pub(super) fn publish_anonymous_super_forwards(
         &mut self,
-        scope: &CheckerScope<'_>,
         declaration: DeclId,
         arguments: &[ExprId],
     ) {
-        let capturable = self.capturable_lexical_identities(scope);
         let mut forwarded = Vec::new();
         for argument in arguments {
-            match self.anonymous_super_argument_disposition(*argument, &capturable) {
+            match self.anonymous_super_argument_disposition(declaration, *argument) {
                 AnonymousSuperDisposition::Forward => forwarded.push(*argument),
-                AnonymousSuperDisposition::Stay => {}
+                AnonymousSuperDisposition::StayImplicitReceiver(identity) => {
+                    // Only a bare selected property stays in the anonymous constructor. Its exact
+                    // receiver is therefore a constructor capture use; complex expressions remain
+                    // construction-site forwards and never reach this accounting path.
+                    self.implicit_receiver_identity_uses.record(identity);
+                }
+                AnonymousSuperDisposition::StayLexical
+                | AnonymousSuperDisposition::StayClosure
+                | AnonymousSuperDisposition::StayConstant => {}
                 AnonymousSuperDisposition::Unresolved => {
                     self.report_unresolved_anonymous_super_argument(*argument);
                 }
@@ -919,9 +937,27 @@ impl Checker<'_> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AnonymousSuperDisposition {
-    Stay,
+    StayLexical,
+    StayImplicitReceiver((usize, usize)),
+    StayClosure,
+    StayConstant,
     Forward,
     Unresolved,
+}
+
+/// Binding-time provenance of a bare value read considered for anonymous-super forwarding.
+///
+/// The payload is an exact scope identity, never source spelling. A receiver property remains in
+/// the anonymous constructor and makes that receiver an explicit capture use; a lexical binding
+/// remains because its value already crosses the constructor boundary through capture storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AnonymousSuperReadProvenance {
+    LexicalBinding(u32),
+    ImplicitReceiver {
+        identity: (usize, usize),
+        current: bool,
+        receiver_depth: usize,
+    },
 }
 
 /// The expression a cast or not-null assertion wraps. The anonymous constructor keeps that

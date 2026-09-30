@@ -133,57 +133,61 @@ fn assert_identical(stem: &str, source: &str, classes: &[&str]) {
 #[test]
 fn anonymous_and_local_super_arguments_keep_their_values() {
     let source = r#"
-open class Base(val value: String)
+open class Base(val value: Int)
 fun box(): String {
-    val ok = "O"
-    class Local(n: String) : Base(n + "K")
-    val anon = object : Base(ok + "K") {}
-    return Local(ok).value + anon.value
+    val one = 1
+    class Local(n: Int) : Base(n + 1)
+    val anon = object : Base(one + 1) {}
+    return if (Local(one).value == 2 && anon.value == 2) "OK" else "fail"
 }
 "#;
     assert_eq!(
         common::compile_and_run_with_stdlib(source, "AnonSuperForward"),
-        Some("OKOK".to_string())
+        Some("OK".to_string())
     );
 }
 
 #[test]
 fn shadowed_super_argument_uses_the_resolved_binding() {
     let source = r#"
-open class Base(val value: String)
+open class Base(val value: Int)
+fun forwarded(value: Int): Int = value + 1
 fun box(): String {
-    val ok = "OUTER"
-    class Holder(val ok: String) {
-        fun make(): String {
+    val ok = 100
+    class Holder(val ok: Int) {
+        fun make(): Int {
             val anon = object : Base(ok) {}
             return anon.value
         }
     }
-    fun nested(): String {
-        val ok = "INNER"
+    fun nested(): Int {
+        val ok = 10
         val stayed = object : Base(ok) {}
-        val forwarded = object : Base(ok + "!") {}
-        val casted = object : Base(ok as String) {}
+        val forwarded = object : Base(forwarded(ok)) {}
+        val casted = object : Base(ok as Int) {}
         return stayed.value + forwarded.value + casted.value
     }
-    return Holder("PARAM").make() + nested() + ok
+    val result = Holder(200).make() + nested() + ok
+    return if (result == 231) "OK" else "fail"
 }
 "#;
     assert_eq!(
         common::compile_and_run_with_stdlib(source, "ShadowedSuperArgument"),
-        Some("OUTERINNERINNER!INNEROUTER".to_string())
+        Some("OK".to_string())
     );
 }
 
 #[test]
 fn object_super_call_evaluates_named_arguments_in_source_order() {
     let source = r#"
-var result = "fail"
-open class Base(val o: String, val k: String)
+var order = 0
+open class Base(val first: Int, val second: Int)
 fun box(): String {
-    val obj1 = object : Base(k = { result = "O"; "K" }(), o = { result += "K"; "O" }()) {}
-    if (result != "OK") return "fail $result"
-    return obj1.o + obj1.k
+    val value = object : Base(
+        second = { order = order * 10 + 1; 20 }(),
+        first = { order = order * 10 + 2; 10 }(),
+    ) {}
+    return if (order == 12 && value.first == 10 && value.second == 20) "OK" else "fail"
 }
 "#;
     assert_eq!(common::expect_box_run_with_stdlib(source, "ArgOrder"), "OK");
@@ -192,12 +196,11 @@ fun box(): String {
 #[test]
 fn local_function_in_init_reads_the_constructor_property() {
     let source = r#"
-lateinit var result1: String
-lateinit var result2: String
-class Test(val x: String) {
-    fun test(a: String) {
-        if (result1 != a) throw AssertionError("result1: $result1")
-        result2 = a
+var result1 = 0
+var result2 = 0
+class Test(val x: Int) {
+    fun test(expected: Int) {
+        result2 = if (result1 == expected) expected else -1
     }
     init {
         fun test() {
@@ -210,9 +213,9 @@ class Test(val x: String) {
     }
 }
 fun box(): String {
-    val t = Test("OK")
-    t.test("OK")
-    return result2
+    val value = Test(7)
+    value.test(7)
+    return if (result2 == 7) "OK" else "fail"
 }
 "#;
     assert_eq!(
@@ -224,109 +227,112 @@ fun box(): String {
 #[test]
 fn value_class_init_reads_its_property() {
     let source = r#"
+class Payload(val value: Int)
+class Element
 @JvmInline
-value class SingleInitBlock(val s: String) {
+value class SingleInitBlock(val payload: Payload) {
     init {
-        res = s
+        result = payload.value
     }
 }
 @JvmInline
-value class MultipleInitBlocks(val a: Any?) {
+value class MultipleInitBlocks(val element: Element?) {
     init {
-        res = "O"
+        result = 3
     }
     init {
-        res += "K"
+        result += 4
     }
 }
 @JvmInline
-value class Getter(val s: String) {
+value class Getter(val payload: Payload) {
     init {
-        res = ok
+        result = current.value
     }
-    val ok: String
-        get() = s
+    val current: Payload
+        get() = payload
 }
 @JvmInline
-value class Method(val s: String) {
+value class Method(val payload: Payload) {
     init {
-        res = ok(this)
+        result = current(this).value
     }
-    fun ok(m: Method): String = m.s
+    fun current(value: Method): Payload = value.payload
 }
 @JvmInline
-value class InlineFun(val s: String) {
+value class InlineFun(val payload: Payload) {
     init {
-        res = ok()
+        result = current().value
     }
-    inline fun ok(): String = s
+    inline fun current(): Payload = payload
 }
 @JvmInline
-value class Lambda(val s: String) {
+value class Lambda(val payload: Payload) {
     init {
-        val lambda = { res = s }
+        val lambda = { result = payload.value }
         lambda()
     }
 }
 @JvmInline
-value class LocalFunction(val s: String) {
+value class LocalFunction(val payload: Payload) {
     init {
         fun local() {
-            res = s
+            result = payload.value
         }
         local()
     }
 }
 @JvmInline
-value class ObjectLiteral(val s: String) {
+value class ObjectLiteral(val payload: Payload) {
     init {
         val objectLiteral = object {
             fun run() {
-                res = s
+                result = payload.value
             }
         }
         objectLiteral.run()
     }
 }
 @JvmInline
-value class LocalClass(val s: String) {
+value class LocalClass(val payload: Payload) {
     init {
         class Local {
             fun run() {
-                res = s
+                result = payload.value
             }
         }
         Local().run()
     }
 }
-var res: String = "FAIL"
+var result = 0
 fun box(): String {
-    SingleInitBlock("OK")
-    if (res != "OK") return "fail1 $res"
-    res = "FAIL"
+    val payload = Payload(7)
+    SingleInitBlock(payload)
+    if (result != 7) return "fail1"
+    result = 0
     MultipleInitBlocks(null)
-    if (res != "OK") return "fail1b $res"
-    res = "FAIL"
-    Getter("OK")
-    if (res != "OK") return "fail1c $res"
-    res = "FAIL"
-    Method("OK")
-    if (res != "OK") return "fail1d $res"
-    res = "FAIL"
-    InlineFun("OK")
-    if (res != "OK") return "fail1e $res"
-    res = "FAIL"
-    Lambda("OK")
-    if (res != "OK") return "fail2 $res"
-    res = "FAIL"
-    LocalFunction("OK")
-    if (res != "OK") return "fail3 $res"
-    res = "FAIL"
-    ObjectLiteral("OK")
-    if (res != "OK") return "fail4 $res"
-    res = "FAIL"
-    LocalClass("OK")
-    return res
+    if (result != 7) return "fail1b"
+    result = 0
+    Getter(payload)
+    if (result != 7) return "fail1c"
+    result = 0
+    Method(payload)
+    if (result != 7) return "fail1d"
+    result = 0
+    InlineFun(payload)
+    if (result != 7) return "fail1e"
+    result = 0
+    Lambda(payload)
+    if (result != 7) return "fail2"
+    result = 0
+    LocalFunction(payload)
+    if (result != 7) return "fail3"
+    result = 0
+    ObjectLiteral(payload)
+    if (result != 7) return "fail4"
+    result = 0
+    LocalClass(payload)
+    return if (result == 7) "OK" else "fail5"
 }
 "#;
     assert_eq!(
@@ -338,17 +344,18 @@ fun box(): String {
 #[test]
 fn interface_delegation_across_modules_forwards_the_member() {
     let lib = r#"
+class Payload(val value: Int)
 interface A {
-    fun foo(): String
+    fun payload(): Payload
 }
 abstract class B(a: A) : A by a
 "#;
     let main = r#"
 class AImpl : A {
-    override fun foo(): String = "OK"
+    override fun payload(): Payload = Payload(7)
 }
 class C : B(AImpl())
-fun box(): String = C().foo()
+fun box(): String = if (C().payload().value == 7) "OK" else "fail"
 "#;
     let dir = common::scratch_dir().expect("scratch directory");
     let emitted =
@@ -385,19 +392,21 @@ fun box(): String = C().foo()
 fn generic_value_class_init_reads_its_property() {
     let source = r#"
 // LANGUAGE: +GenericInlineClassParameter
-@JvmInline
-value class LocalFunction<T : String>(val s: T) {
+open class Payload(val value: Int)
+class Element(value: Int) : Payload(value)
+@JvmInline value class LocalFunction<T : Payload>(val payload: T) {
     init {
         fun local() {
-            res = s
+            result = payload
         }
         local()
     }
 }
-var res: String = "FAIL"
+var result: Payload? = null
 fun box(): String {
-    LocalFunction("OK")
-    return res
+    val element = Element(7)
+    LocalFunction(element)
+    return if (result === element && result?.value == 7) "OK" else "fail"
 }
 "#;
     assert_eq!(
@@ -421,16 +430,16 @@ class Program {
         open fun visit(operand: Uniform): E = default
     }
 }
-open class Uniform(val result: String) : Variable()
+open class Uniform(val accepted: Boolean) : Variable()
 fun box(): String {
-    val out = ArrayList<Uniform>()
+    var out: Uniform? = null
     val visitor = object : Program.Visitor<Unit>(Unit) {
         override fun visit(operand: Uniform): Unit {
-            out.add(operand)
+            out = operand
         }
     }
-    visitor.visit(Uniform("OK"))
-    return out[0].result
+    visitor.visit(Uniform(true))
+    return if (out?.accepted == true) "OK" else "fail"
 }
 "#;
     assert_eq!(common::expect_box_run_with_stdlib(source, "AnonUnit"), "OK");

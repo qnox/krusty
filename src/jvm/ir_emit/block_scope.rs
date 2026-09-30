@@ -40,7 +40,7 @@ impl Emitter<'_> {
 
     /// The `init` keyword line and the block's closing brace, when this block is that initializer.
     fn constructor_initializer_block_lines(&self, block: u32) -> Option<(u32, u32)> {
-        if !self.in_constructor_initializer {
+        if self.constructor_initializer_class.is_none() {
             return None;
         }
         let start = self

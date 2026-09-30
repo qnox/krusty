@@ -1161,12 +1161,12 @@ fn inherited_body_local_call_keeps_the_subclass_dispatch_receiver_for_protected_
 #[test]
 fn anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument() {
     let (index, owned) = checked_streamed_owned_bodies(
-        "open class Base(val value: String)\n\
+        "open class Base(val value: Int)\n\
          fun box(): String {\n\
-             val ok = \"O\"\n\
-             class Local(n: String) : Base(n + \"K\")\n\
-             val anon = object : Base(ok + \"K\") {}\n\
-             return Local(ok).value + anon.value\n\
+             val one = 1\n\
+             class Local(n: Int) : Base(n + 1)\n\
+             val anon = object : Base(one + 1) {}\n\
+             return if (Local(one).value == 2 && anon.value == 2) \"OK\" else \"fail\"\n\
          }\n",
     );
     let mut saw_local = false;

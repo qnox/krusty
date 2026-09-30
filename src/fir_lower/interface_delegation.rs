@@ -132,14 +132,13 @@ pub(super) fn finalize_interface_delegations(
             continue;
         };
         for (ordinal, delegation) in header.interface_delegations.iter().enumerate() {
-            materialize_delegation(index, declaration, class, ordinal, delegation, ir)?;
+            materialize_delegation(declaration, class, ordinal, delegation, ir)?;
         }
     }
     Ok(())
 }
 
 fn materialize_delegation(
-    index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     class: crate::ir::ClassId,
     delegation_ordinal: usize,
@@ -230,7 +229,7 @@ fn materialize_delegation(
                     .overridden
                     .parameter_identities
                     .iter()
-                    .map(super::resolved_parameter_identity)
+                    .map(delegation_parameter_identity)
                     .collect::<Vec<_>>();
                 if parameter_identities.len() != params.len() {
                     return Err(FirFileLoweringFailure::MissingClassifier(declaration));
@@ -488,6 +487,24 @@ fn materialize_delegation(
     }
     stamp_generated(ir, first_generated);
     Ok(())
+}
+
+/// Parameter identity of a generated `interface by` function.
+///
+/// A Kotlin declaration contributes its source identity unchanged. A Java declaration can expose
+/// no source parameter name; the delegation producer nevertheless creates a Kotlin declaration and
+/// owns kotlinc's stable `p0`, `p1`, … semantic names for that declaration. Publishing those names
+/// here keeps common IR authoritative and prevents metadata or reflection emission from inventing
+/// identities from a JVM descriptor.
+fn delegation_parameter_identity(
+    identity: &crate::fir::ResolvedParameterIdentity,
+) -> crate::ir::IrParameterIdentity {
+    match identity {
+        crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+            crate::ir::IrParameterIdentity::producer_value(format!("p{ordinal}"))
+        }
+        identity => super::resolved_parameter_identity(identity),
+    }
 }
 
 fn prepend_parameter_initializer(

@@ -4,6 +4,7 @@
 //! imports, or source spellings used for lookup.
 
 mod annotation_constructions;
+mod anonymous_objects;
 mod array_references;
 mod arrays;
 mod assertions;

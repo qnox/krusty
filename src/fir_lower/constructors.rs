@@ -628,7 +628,10 @@ fn rewrite_anonymous_super_forward(
     parameter: u32,
     declaration: crate::fir::DeclarationId,
 ) -> Result<crate::ir::ExprId, FirFileLoweringFailure> {
-    let forward = |ir: &mut IrFile| ir.add_expr(IrExpr::GetValue(parameter + 1));
+    let parameter_value = parameter
+        .checked_add(1)
+        .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
+    let forward = |ir: &mut IrFile| ir.add_expr(IrExpr::GetValue(parameter_value));
     if shells == 0 {
         return match ir.expr(expression) {
             IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
