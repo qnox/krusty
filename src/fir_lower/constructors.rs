@@ -603,6 +603,20 @@ fn push_secondary_constructor(
     Ok(())
 }
 
+/// A construction-site forward is already a value. Spilling it inside the anonymous constructor
+/// would replace the parameter record with a temporary and leave the bind with nothing to rewrite.
+pub(super) fn is_forwarded_super_argument(ir: &IrFile, mut expression: crate::ir::ExprId) -> bool {
+    loop {
+        match ir.expr(expression) {
+            IrExpr::ForwardedSuperArgument { .. } => return true,
+            IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg, .. } => {
+                expression = *arg;
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Bind one frontend-recorded anonymous super forward to its synthetic constructor parameter.
 /// Source casts and not-null assertions stay in the anonymous constructor; implicit coercions are
 /// not source operators and are descended through without consuming a shell. Any other expression

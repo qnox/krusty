@@ -884,6 +884,37 @@ impl Checker<'_> {
                 .insert(declaration, forwarded);
         }
     }
+
+    /// Names a lifted local function may capture as values.
+    ///
+    /// The nearest binding of a spelling wins. A dispatch property, class-storage capture, or enum
+    /// entry is reached through its receiver, so an outer local of that spelling is not a second
+    /// capture. After a constructor property is stored, that property hides the parameter.
+    pub(super) fn capturable_local_names(
+        scope: &CheckerScope<'_>,
+        own_parameters: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        scope.visit_bindings(Ns::Value, |name, binding| {
+            if !seen.insert(name.to_string()) {
+                return;
+            }
+            let member = binding.value().is_some_and(|local| {
+                matches!(
+                    local.origin,
+                    ReceiverFnValueOrigin::DispatchProperty { .. }
+                        | ReceiverFnValueOrigin::ClassStorage(_)
+                        | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
+                )
+            });
+            if member || own_parameters.contains(name) {
+                return;
+            }
+            names.insert(name.to_string());
+        });
+        names
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

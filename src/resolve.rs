@@ -26233,26 +26233,9 @@ impl<'a> Checker<'a> {
         // Collect outer local names (everything currently in scope that isn't one of f's params).
         let own_params: std::collections::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
-        let mut outer_names: std::collections::HashSet<String> = Default::default();
-        scope.visit_bindings(Ns::Value, |name, binding| {
-            // A MEMBER of the enclosing classifier is present in the value scope for shadowing, but
-            // it is not a value to capture: the lifted function reaches it through the captured
-            // receiver, exactly as a lambda in the same position does. Listing it as a value capture
-            // gives the lifted callable a leading parameter with nothing to pass.
-            if binding.value().is_some_and(|local| {
-                matches!(
-                    local.origin,
-                    ReceiverFnValueOrigin::DispatchProperty { .. }
-                        | ReceiverFnValueOrigin::ClassStorage(_)
-                        | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
-                )
-            }) {
-                return;
-            }
-            if !own_params.contains(name) {
-                outer_names.insert(name.to_string());
-            }
-        });
+        // The nearest binding wins. A member reached through the receiver hides an outer local of
+        // the same spelling, including the constructor parameter a stored property shadows.
+        let outer_names = Self::capturable_local_names(scope, &own_params);
 
         // Captured outer locals: lifted to extra leading parameters. Parameter defaults execute in
         // the lifted callable's `$default` body, so they are declaration bodies for capture purposes

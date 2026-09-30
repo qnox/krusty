@@ -11294,11 +11294,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   { val y = x; init { val z = x } }` loads `x` with `getfield` after `putfield`. The same name in
   `super(x)` or `: I by mk(x)` is still the parameter (`iload`) because those expressions run
   before the store. A plain parameter stays a local everywhere. A parameter default still sees the
-  earlier parameter.
+  earlier parameter. A local function, lambda, or object in an initializer reads the property
+  through the instance. The constructor parameter of the same spelling is hidden and is not a
+  capture.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
-  Base(side())`, `object : Base(initialCapacity, loadFactor, true)`). The resolver publishes
+  Base(side())`, `object : Base(initialCapacity, loadFactor, true)`). Named arguments are
+  evaluated in source order at that site; the anonymous constructor receives the values and does
+  not spill a forward again when the names are out of parameter order. A forwarded `Unit` is the
+  `kotlin.Unit` singleton, so its JVM parameter descriptor is `Lkotlin/Unit;`. The resolver publishes
   that choice from the flow identity of the binding the argument resolved to, while those
   bindings are still in scope. Equal source spellings do not alias: an inner local is not the
   outer local it shadows, and a constructor property is not an enclosing local of the same
@@ -11325,7 +11330,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   forwarder. It is not a source callable of the class; the override edge's implementation
   function is its identity. A forwarded property stays a `Property` record.
   Tests: `tests/constructor_initialization_order_e2e.rs`, including
-  `shadowed_super_argument_uses_the_resolved_binding`, and
+  `shadowed_super_argument_uses_the_resolved_binding`,
+  `object_super_call_evaluates_named_arguments_in_source_order`,
+  `local_function_in_init_reads_the_constructor_property`,
+  `value_class_init_reads_its_property`,
+  `generic_value_class_init_reads_its_property`,
+  `anonymous_object_forwards_a_unit_super_argument`,
+  `interface_delegation_across_modules_forwards_the_member`, and
   `fir::body_check::local_class_tests::anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument`.
 - **A checked `Nothing` value carries its completion contract into common IR.** Non-null `Nothing`
   is semantically divergent, but a target can still have to realize a physical fallthrough path.

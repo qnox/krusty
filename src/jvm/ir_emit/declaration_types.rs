@@ -107,16 +107,22 @@ pub(in crate::jvm) fn ir_method_desc(parameters: &[Ty], result: &Ty) -> String {
 }
 
 pub(in crate::jvm) fn class_ctor_jvm_tys(class: &IrClass) -> Vec<Ty> {
+    // A constructor parameter is a value slot. `Unit` is the `kotlin.Unit` singleton there;
+    // `V` is only a method result and is not a legal parameter descriptor.
     if class.ctor_args.is_empty() {
-        class.fields[..class.ctor_param_count as usize]
-            .iter()
-            .map(|field| jvm_declared_ty(&field.ty))
-            .collect()
+        jvm_tys(
+            &class.fields[..class.ctor_param_count as usize]
+                .iter()
+                .map(|field| field.ty)
+                .collect::<Vec<_>>(),
+        )
     } else {
-        class
-            .ctor_args
-            .iter()
-            .map(|argument| jvm_declared_ty(&argument.ty))
-            .collect()
+        jvm_tys(
+            &class
+                .ctor_args
+                .iter()
+                .map(|argument| argument.ty)
+                .collect::<Vec<_>>(),
+        )
     }
 }

@@ -1023,7 +1023,7 @@ fn attach_synth_debug_tables(
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(&c.ctor_args);
     for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
         if let Some(name) = name {
-            ctor_locals.push((name, desc(argument.ty), slot));
+            ctor_locals.push((name, local_variable_desc(argument.ty), slot));
         }
         slot += slot_size(argument.ty);
     }
