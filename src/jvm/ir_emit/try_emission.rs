@@ -271,10 +271,11 @@ impl Emitter<'_> {
             if let Some(line) = c.line {
                 code.mark_line(line);
             }
-            let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
+            let exc_name = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(c.exc_internal);
+            let exc_internal = exc_name.jvm_binary_name();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
-            let exc_ty = Ty::obj(&exc_internal);
+            let exc_ty = Ty::obj_name(exc_name);
             // kotlinc's `visitTryWithInfo` enters the catch parameter at the handler, above the
             // result temporary, and leaves it at the end of the catch body, before that catch's
             // copy of the finalizer: every catch, and the catch-all after them, starts from the
