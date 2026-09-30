@@ -2541,6 +2541,45 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let owner = member.owner.ok_or_else(Self::failure)?;
         let Some(class) = self.table.class_by_type_name(owner) else {
+            // Library constructors such as `java.util.HashMap` are selected from the symbol
+            // source, not from the frontend class table. The empty constructor carries no
+            // `generic_sig` of its own: `K` and `V` belong to the classifier. Selection has
+            // already substituted those arguments with their bounds (`HashMap<Any?, Any?>`).
+            // The expected type is the only remaining evidence (`{ HashMap() }` inside
+            // `() -> MutableMap<Int, String>`).
+            if explicit_type_arguments.is_empty() {
+                let module =
+                    crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+                let source = crate::symbol_source::CompositeSource::new(vec![
+                    &module as &dyn crate::symbol_source::SymbolSource,
+                    &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+                ]);
+                if let Some(classifier) =
+                    crate::symbol_source::SymbolSource::classifier(&source, owner)
+                {
+                    let formals = classifier.type_parameters.type_params.as_slice();
+                    let bounds = classifier.type_parameters.type_param_bounds.as_slice();
+                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+                        &source,
+                        owner,
+                        formals,
+                        bounds,
+                        expected,
+                        &mut bindings,
+                    );
+                    if !formals.is_empty()
+                        && formals.iter().all(|formal| bindings.contains_key(formal))
+                    {
+                        let arguments = formals
+                            .iter()
+                            .map(|formal| bindings.get(formal).copied().ok_or_else(Self::failure))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        return crate::fir::ResolvedTy::new(Ty::obj_args_name(owner, &arguments))
+                            .map_err(|_| Self::failure());
+                    }
+                }
+            }
             let result = if member.ret.obj_internal() == Some(owner) {
                 member.ret
             } else {

@@ -2153,7 +2153,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source diagnostic — the module reported `internal error: module signatures were not finalized`.
   The result expression, including each branch of a conditional, is now evaluated under that
   return type. `Unit` stays a coercion, and an open type parameter is not yet a concrete
-  expectation. This is the companion-object shape in `PerformanceCounter.getCallStack`. Test:
+  expectation. A library constructor that is not in the frontend class table — `java.util.HashMap`'s
+  empty constructor has no `generic_sig`; `K` and `V` belong to the classifier — still takes those
+  arguments from the expected type instead of keeping the default bounds. This is the
+  companion-object shape in `PerformanceCounter.getCallStack`. Test:
   `tests/contextual_lambda_expected_return_e2e.rs`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
