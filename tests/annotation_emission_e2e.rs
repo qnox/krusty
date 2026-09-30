@@ -669,6 +669,64 @@ fn concatenated_string_constant_matches_kotlinc() {
     );
 }
 
+/// A singleton `const val` is a compile-time constant of the same expressions a top-level one is.
+///
+/// Literal companion constants already fold. An object or companion initializer that is a
+/// concatenation, an arithmetic expression, or a read of another constant must publish the same
+/// payload, including when the annotation is written before the companion and when a top-level
+/// constant reads the singleton afterward.
+#[test]
+fn singleton_const_expressions_are_annotation_constants() {
+    const SOURCE: &str = "package q\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Mark(val message: String, val n: Int)\n\
+         const val PREFIX = \"pre\" + \"fix\"\n\
+         interface Logger {\n\
+         \x20   @Deprecated(FATAL, ReplaceWith(REPLACEMENT))\n\
+         \x20   @Mark(FULL, N)\n\
+         \x20   fun fatal(message: String): String\n\
+         \x20   companion object {\n\
+         \x20     const val FATAL = \"do not \" + \"call\"\n\
+         \x20     const val REPLACEMENT = \"error(\" + \"message)\"\n\
+         \x20     const val N = 1 + 2\n\
+         \x20     const val FULL = FATAL + \" now\"\n\
+         \x20     const val TAGGED = PREFIX + \"-tag\"\n\
+         \x20   }\n\
+         }\n\
+         object Service {\n\
+         \x20   @Deprecated(Logger.FULL, ReplaceWith(Logger.REPLACEMENT))\n\
+         \x20   @Mark(TAG, Logger.N)\n\
+         \x20   fun marked(message: String): String = message\n\
+         \x20   const val TAG = \"svc\" + \"tag\"\n\
+         }\n\
+         const val OUTER = Logger.TAGGED + \"!\"\n\
+         @Deprecated(OUTER, ReplaceWith(Service.TAG))\n\
+         @Mark(OUTER, Logger.N)\n\
+         fun forwarded(message: String): String = message\n";
+    require_same_annotations(
+        "singleton_const_iface",
+        "SingletonConst.kt",
+        "q/Logger",
+        &["fatal(java.lang.String)"],
+        SOURCE,
+    );
+    require_same_annotations(
+        "singleton_const_object",
+        "SingletonConst.kt",
+        "q/Service",
+        &["marked(java.lang.String)"],
+        SOURCE,
+    );
+    require_same_annotations(
+        "singleton_const_forward",
+        "SingletonConst.kt",
+        "q/SingletonConstKt",
+        &["forwarded(java.lang.String)"],
+        SOURCE,
+    );
+}
+
 #[test]
 fn hidden_deprecation_matches_kotlinc() {
     // The whole shape a consumer reads back: the annotation with its NAMED `level` argument, the

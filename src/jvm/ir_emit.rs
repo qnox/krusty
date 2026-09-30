@@ -57,6 +57,7 @@ mod field_read;
 mod field_visibility;
 mod field_write;
 mod frame_map;
+mod function_annotations;
 mod function_debug;
 mod function_invocation;
 mod function_reference_class;
@@ -3173,13 +3174,10 @@ fn emit_scheduled_member(
             env,
         );
     } else {
-        cw.add_abstract_method_sig(
-            0x0001 | 0x0400,
-            &f.name,
-            &declared_method_desc(ir, env.override_results, fid),
-            declared_method_signature(signature_formatter, ir, env.override_results, fid)
-                .as_deref(),
-        );
+        // An abstract member is still a source declaration. Its annotations are the same payload a
+        // concrete member writes from `emit_method`; omitting them drops `@Deprecated` on an
+        // interface or abstract-class member.
+        function_annotations::add_abstract(ir, cw, fid, signature_formatter, env.override_results);
     }
     // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
     // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
@@ -4603,13 +4601,12 @@ fn emit_interface_class(
                 });
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
-            let desc = declared_method_desc(ir, env.override_results, fid);
-            cw.add_abstract_method_sig(
-                0x0001 | 0x0400,
-                &f.name,
-                &desc,
-                declared_method_signature(&signature_formatter, ir, env.override_results, fid)
-                    .as_deref(),
+            let desc = function_annotations::add_abstract(
+                ir,
+                &mut cw,
+                fid,
+                &signature_formatter,
+                env.override_results,
             );
             // An abstract method still carries kotlinc's nullability annotations.
             let (result, params) = super::abstract_method_nullability::annotations(ir, fid, f);
@@ -5180,12 +5177,12 @@ fn emit_enum_class(
             } else {
                 // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
                 // entry subclasses override it.
-                cw.add_abstract_method_sig(
-                    0x0001 | 0x0400,
-                    &f.name,
-                    &declared_method_desc(ir, env.override_results, fid),
-                    declared_method_signature(&signature_formatter, ir, env.override_results, fid)
-                        .as_deref(),
+                function_annotations::add_abstract(
+                    ir,
+                    &mut *cw,
+                    fid,
+                    &signature_formatter,
+                    env.override_results,
                 );
             }
         }
@@ -6781,15 +6778,7 @@ fn emit_method_inner_with_holder(
     // User annotations declared on the function. A HIDDEN-deprecated declaration additionally gets
     // `ACC_SYNTHETIC`: kotlinc keeps it only for binary compatibility, and a consumer reads both
     // facts (the annotation for resolution, the flag for the JVM) off this realization.
-    if let Some(annotations) = ir.function_annotations.get(&fid) {
-        e.cw.set_method_annotations(&f.name, &desc, annotations);
-        if annotations.deprecated() {
-            e.cw.mark_method_deprecated(&f.name, &desc);
-        }
-        if annotations.deprecated_hidden() {
-            e.cw.set_method_synthetic(&f.name, &desc);
-        }
-    }
+    function_annotations::emit_recorded(ir, e.cw, fid, &f.name, &desc);
 }
 
 fn jvm_method_signature(

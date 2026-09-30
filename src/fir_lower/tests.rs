@@ -1,16 +1,15 @@
 use crate::fir::{
-    BodyOwnerId, CallableId, DeclarationId, ExternalCallableId, FirAnnotationConstruction,
-    FirBinaryOperation, FirBody, FirCall, FirCallArgument, FirCallTarget,
-    FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant,
-    FirConstructorCall, FirConstructorTarget, FirConversion, FirConversionKind, FirExpr,
-    FirExprKind, FirIntrinsic, FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget,
-    FirPropertyTarget, FirRangeOperation, FirReceiver, FirStatement, FirStatementKind,
-    FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation, FirVarargElement, OriginId,
-    ResolvedModuleIndex, ResolvedTy,
+    BodyOwnerId, CallableId, DeclarationId, ExternalCallableId, FirAnnotationConstruction, FirBody,
+    FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
+    FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant, FirConstructorCall,
+    FirConstructorTarget, FirConversion, FirConversionKind, FirExpr, FirExprKind, FirIntrinsic,
+    FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget, FirPropertyTarget,
+    FirRangeOperation, FirReceiver, FirStatement, FirStatementKind, FirTypeParameterRef,
+    FirTypeSubstitution, FirVarargElement, OriginId, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
     Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrNodeOrigin, IrTypeOp,
+    IrTypeOp,
 };
 use crate::types::Ty;
 
@@ -1878,7 +1877,7 @@ fn consuming_lowering_materializes_object_const_as_owned_static() {
 }
 
 #[test]
-fn consuming_lowering_keeps_object_const_access_semantic_until_target_realization() {
+fn consuming_lowering_receives_folded_object_const_accesses() {
     let ir = lower_single_source(
         "object Left { const val marker = \"$\"; const val answer = \"1234$marker\" }\n\
          object Right { const val marker = \"$\"; const val answer = \"1234$marker\" }\n\
@@ -1889,14 +1888,25 @@ fn consuming_lowering_keeps_object_const_access_semantic_until_target_realizatio
         "ObjectConstRead",
     );
 
-    assert!(ir.exprs.iter().any(|expression| matches!(
+    assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
         IrExpr::Checked(IrCheckedOperation::PropertyRead { .. })
     )));
     assert!(ir
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::SingletonValue { .. })));
+        .all(|expression| !matches!(expression, IrExpr::SingletonValue { .. })));
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(
+                expression,
+                IrExpr::Const(IrConst::String(value)) if value.to_lossy() == "1234$"
+            ))
+            .count(),
+        4,
+        "the two declarations and both qualified reads should carry the folded payload",
+    );
 }
 
 #[test]

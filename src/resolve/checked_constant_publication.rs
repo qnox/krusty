@@ -40,15 +40,15 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
         })
         .collect::<Vec<_>>();
     table.begin_module_mutation();
-    for (file_index, owner, property) in member_literals {
+    for (file_index, owner, property) in &member_literals {
         let Some(ty) = table
-            .class_by_type_name(owner)
+            .class_by_type_name(*owner)
             .and_then(|class| class.declared_props.get(&property.name))
             .map(|property| property.ty)
         else {
             continue;
         };
-        publish_member_constant(&files[file_index as usize], table, owner, property, ty);
+        publish_member_constant(&files[*file_index as usize], table, *owner, property, ty);
     }
     let declarations = files
         .iter()
@@ -69,7 +69,10 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
     // A later constant may depend on a payload published earlier in this fixpoint. Disable the
     // derived module cache for the bounded evaluation so every checker observes the latest stable
     // declaration payload instead of a snapshot from before the preceding publication.
-    for _ in 0..declarations.len() {
+    // A singleton constant may read a top-level constant, and a top-level constant may read a
+    // singleton constant. Repeat both publications until neither can fold another payload.
+    let rounds = declarations.len().saturating_add(member_literals.len());
+    for _ in 0..rounds {
         let mut changed = false;
         for &(file_index, declaration, initializer) in &declarations {
             let source = (file_index, declaration.0);
@@ -100,9 +103,86 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
                 changed = true;
             }
         }
+        if publish_pending_member_constants(files, table, &member_literals) {
+            changed = true;
+        }
         if !changed {
             break;
         }
     }
     table.finish_module_mutation();
+}
+
+/// Fold object and companion `const val` initializers that are not bare literals.
+///
+/// `publish_member_constant` records only a literal or a unary plus/minus of one. A concatenation,
+/// an arithmetic expression, or a read of another constant is the same compile-time expression a
+/// top-level `const val` folds, and annotation arguments need that payload before body checking.
+fn publish_pending_member_constants(
+    files: &[File],
+    table: &mut SymbolTable,
+    members: &[(u32, TypeName, &PropDecl)],
+) -> bool {
+    let mut changed = false;
+    for &(file_index, owner, property) in members {
+        let Some(initializer) = property.init else {
+            continue;
+        };
+        let published = table
+            .class_by_type_name(owner)
+            .is_some_and(|class| class.constants.contains_key(&property.name));
+        if published {
+            continue;
+        }
+        let Some(declared_ty) = table
+            .class_by_type_name(owner)
+            .and_then(|class| class.declared_props.get(&property.name))
+            .map(|property| property.ty)
+            .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
+        else {
+            continue;
+        };
+        let Some(folded) =
+            fold_member_constant(files, table, file_index, owner, initializer, declared_ty)
+        else {
+            continue;
+        };
+        if let Some(class) = table.class_by_type_name_mut(owner) {
+            class.constants.insert(property.name.clone(), folded);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn fold_member_constant(
+    files: &[File],
+    table: &SymbolTable,
+    file_index: u32,
+    owner: TypeName,
+    initializer: ExprId,
+    declared_ty: Ty,
+) -> Option<crate::libraries::LibraryConst> {
+    let file = files.get(file_index as usize)?;
+    let mut diagnostics = DiagSink::new();
+    let mut checker = make_checker(file, file_index, Some(files), table, &mut diagnostics);
+    let root = CheckerScope::root();
+    // The initializer is checked as a member of its singleton, so an unqualified sibling const is
+    // a read of that object and a top-level const remains visible on the file scope above it.
+    let scope = root.child(super::scope::ScopeKind::Class {
+        ty: Ty::obj_name(owner),
+        carries_outer: false,
+    });
+    let _ = checker.expr_expected(&scope, initializer, declared_ty);
+    checked_constant_expression(
+        CheckedConstantExpression {
+            file,
+            expression_types: &checker.expr_types,
+            resolved_constants: &checker.resolved_constants,
+            resolved_calls: &checker.resolved_calls,
+            resolved_operator_calls: &checker.resolved_operator_calls,
+        },
+        initializer,
+        declared_ty,
+    )
 }

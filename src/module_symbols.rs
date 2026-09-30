@@ -733,6 +733,11 @@ impl<'a> ModuleSymbols<'a> {
                         *parameter = template;
                     }
                 }
+                // A singleton `const val` publishes its folded payload on the classifier, the same
+                // channel a top-level `const val` uses for `compile_time_constant`. Member lookup
+                // has to carry that payload or a later constant (`FULL = FATAL + " now"`) and an
+                // annotation argument see only the property and cannot fold the read.
+                declaration.compile_time_constant = class.constants.get(name).cloned();
                 declaration
             })
             .into_iter()
