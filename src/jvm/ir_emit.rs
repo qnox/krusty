@@ -2692,7 +2692,7 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
         Ty::String => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
         Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => {
-            Some(crate::jvm::names::classfile_internal_name_of(n))
+            Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
         _ => None,
     }
@@ -12069,7 +12069,7 @@ impl<'a> Emitter<'a> {
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
             t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
             Ty::Obj(n, _) => {
-                VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n))
+                VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
             Ty::Nullable(_) | Ty::PlatformNullable(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))

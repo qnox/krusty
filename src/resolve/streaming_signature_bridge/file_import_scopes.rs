@@ -96,26 +96,24 @@ impl ProductionSignatureSemantics<'_> {
                 crate::symbol_resolver::CallableImport::new(owner, declared_name.to_owned()),
             );
         }
-        let own_package = path(file.package).ok_or_else(Self::failure)?;
-        let kotlin_defaults = super::super::KOTLIN_DEFAULT_IMPORT_PACKAGES
-            .iter()
-            .map(|package| crate::types::type_name(&package.replace('.', "/")))
-            .collect();
+        let own_package = self
+            .headers
+            .sources
+            .get(source_id)
+            .map(|source| source.package)
+            .ok_or_else(Self::failure)?;
+        let kotlin_defaults = super::super::source_package::kotlin_default_packages().to_vec();
         let platform_defaults = self
             .table
             .libraries
             .platform_default_import_packages()
             .iter()
-            .map(|package| crate::types::type_name(&package.replace('.', "/")))
+            .copied()
+            .map(|package| super::super::source_package::identity(Some(package)))
             .collect();
         Ok(FunctionImportScope::new(
             explicit,
-            [
-                vec![crate::types::type_name(&own_package)],
-                stars,
-                kotlin_defaults,
-                platform_defaults,
-            ],
+            [vec![own_package], stars, kotlin_defaults, platform_defaults],
         ))
     }
 }

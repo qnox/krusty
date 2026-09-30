@@ -355,7 +355,7 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
                                     && (class.is_interface || class.is_annotation)
                             })
                         })
-                        .unwrap_or_else(|| "java/lang/Object".to_string());
+                        .unwrap_or("java/lang/Object");
                     let hc = cw.methodref(&owner, "hashCode", "()I");
                     cb.invokevirtual(hc, 0, 1);
                 }
