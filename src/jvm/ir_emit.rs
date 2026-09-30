@@ -12568,19 +12568,13 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
             if let Some(carrier) = crate::jvm::array_representation::prim_array_carrier(fq_name) {
                 return carrier;
             }
-            match () {
-                _ if fq_name.matches("kotlin/Int") => Ty::Int,
-                _ if fq_name.matches("kotlin/Long") => Ty::Long,
-                _ if fq_name.matches("kotlin/Short") => Ty::Short,
-                _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
-                _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
-                _ if fq_name.matches("kotlin/Char") => Ty::Char,
-                _ if fq_name.matches("kotlin/Double") => Ty::Double,
-                _ if fq_name.matches("kotlin/Float") => Ty::Float,
-                _ if fq_name.matches("kotlin/String") => Ty::String,
-                // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
-                // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
-                _ if fq_name.matches("kotlin/Array") => Ty::array(
+            if let Some(scalar) = crate::types::jvm_builtin_scalar(fq_name) {
+                return scalar;
+            }
+            // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
+            // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
+            if fq_name == crate::types::KOTLIN_ARRAY {
+                return Ty::array(
                     type_args
                         .first()
                         .map(|e| {
@@ -12605,9 +12599,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                             }
                         })
                         .unwrap_or(Ty::obj("java/lang/Object")),
-                ),
-                _ => Ty::obj(crate::jvm::names::classfile_name(fq_name)),
+                );
             }
+            Ty::obj(crate::jvm::names::classfile_name(fq_name))
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.

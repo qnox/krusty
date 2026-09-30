@@ -92,8 +92,11 @@ const KOTLIN_USHORT: TypeName = TypeName(NameId(11));
 const KOTLIN_UINT: TypeName = TypeName(NameId(12));
 const KOTLIN_ULONG: TypeName = TypeName(NameId(13));
 const KOTLIN_STRING: TypeName = TypeName(NameId(14));
+const KOTLIN_UNIT: TypeName = TypeName(NameId(15));
+const KOTLIN_NOTHING: TypeName = TypeName(NameId(16));
+pub(crate) const KOTLIN_ARRAY: TypeName = TypeName(NameId(17));
 
-const BUILTIN_TYPE_NAMES: [(&str, TypeName); 13] = [
+const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
     ("kotlin/Boolean", KOTLIN_BOOLEAN),
     ("kotlin/Byte", KOTLIN_BYTE),
     ("kotlin/Short", KOTLIN_SHORT),
@@ -107,7 +110,44 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 13] = [
     ("kotlin/UInt", KOTLIN_UINT),
     ("kotlin/ULong", KOTLIN_ULONG),
     ("kotlin/String", KOTLIN_STRING),
+    ("kotlin/Unit", KOTLIN_UNIT),
+    ("kotlin/Nothing", KOTLIN_NOTHING),
+    ("kotlin/Array", KOTLIN_ARRAY),
 ];
+
+/// Semantic type of a pre-interned builtin classifier, compared by identity.
+///
+/// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
+/// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
+pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+    Some(match name {
+        KOTLIN_BOOLEAN => Ty::Boolean,
+        KOTLIN_BYTE => Ty::Byte,
+        KOTLIN_SHORT => Ty::Short,
+        KOTLIN_INT => Ty::Int,
+        KOTLIN_LONG => Ty::Long,
+        KOTLIN_CHAR => Ty::Char,
+        KOTLIN_FLOAT => Ty::Float,
+        KOTLIN_DOUBLE => Ty::Double,
+        KOTLIN_UBYTE => Ty::UByte,
+        KOTLIN_USHORT => Ty::UShort,
+        KOTLIN_UINT => Ty::UInt,
+        KOTLIN_ULONG => Ty::ULong,
+        KOTLIN_STRING => Ty::String,
+        KOTLIN_UNIT => Ty::Unit,
+        KOTLIN_NOTHING => Ty::Nothing,
+        _ => return None,
+    })
+}
+
+/// Signed scalar or `String` classifier, the subset `ir_ty_to_jvm` rewrites in its object arm.
+/// Unsigned classifiers, `Unit`, and `Nothing` are left to that function's other arms.
+pub(crate) fn jvm_builtin_scalar(name: TypeName) -> Option<Ty> {
+    match builtin_semantic(name) {
+        Some(ty) if !ty.is_unsigned() && ty != Ty::Unit && ty != Ty::Nothing => Some(ty),
+        _ => None,
+    }
+}
 
 /// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
 /// `segment` must be a single path segment; a multi-segment suffix falls back to the full insert.
@@ -1321,39 +1361,7 @@ impl Ty {
     pub fn canonical_semantic(self) -> Ty {
         match self {
             Ty::Obj(name, arguments) if arguments.is_empty() => {
-                if name.matches("kotlin/Int") {
-                    Ty::Int
-                } else if name.matches("kotlin/Byte") {
-                    Ty::Byte
-                } else if name.matches("kotlin/Short") {
-                    Ty::Short
-                } else if name.matches("kotlin/Long") {
-                    Ty::Long
-                } else if name.matches("kotlin/Float") {
-                    Ty::Float
-                } else if name.matches("kotlin/Double") {
-                    Ty::Double
-                } else if name.matches("kotlin/Boolean") {
-                    Ty::Boolean
-                } else if name.matches("kotlin/Char") {
-                    Ty::Char
-                } else if name.matches("kotlin/UByte") {
-                    Ty::UByte
-                } else if name.matches("kotlin/UShort") {
-                    Ty::UShort
-                } else if name.matches("kotlin/UInt") {
-                    Ty::UInt
-                } else if name.matches("kotlin/ULong") {
-                    Ty::ULong
-                } else if name.matches("kotlin/String") {
-                    Ty::String
-                } else if name.matches("kotlin/Unit") {
-                    Ty::Unit
-                } else if name.matches("kotlin/Nothing") {
-                    Ty::Nothing
-                } else {
-                    Ty::obj_name(name)
-                }
+                builtin_semantic(name).unwrap_or_else(|| Ty::obj_name(name))
             }
             Ty::Obj(name, arguments) => Ty::obj_args_name(
                 name,
@@ -2491,6 +2499,24 @@ mod tests {
         assert_eq!(Ty::obj("kotlin/String").canonical_semantic(), Ty::String);
         assert_eq!(Ty::obj("kotlin/Unit").canonical_semantic(), Ty::Unit);
         assert_eq!(Ty::obj("kotlin/Nothing").canonical_semantic(), Ty::Nothing);
+        assert_eq!(builtin_semantic(type_name("kotlin/UInt")), Some(Ty::UInt));
+        assert_eq!(builtin_semantic(type_name("kotlin/Unit")), Some(Ty::Unit));
+        assert_eq!(
+            builtin_semantic(type_name("kotlin/Nothing")),
+            Some(Ty::Nothing)
+        );
+        assert_eq!(builtin_semantic(type_name("sample/NotABuiltin")), None);
+        assert_eq!(type_name("kotlin/Array"), KOTLIN_ARRAY);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Int")), Some(Ty::Int));
+        assert_eq!(
+            jvm_builtin_scalar(type_name("kotlin/String")),
+            Some(Ty::String)
+        );
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/UInt")), None);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Unit")), None);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Nothing")), None);
+        let user = Ty::obj("sample/NotABuiltin");
+        assert_eq!(user.canonical_semantic(), user);
     }
 
     #[test]
