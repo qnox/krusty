@@ -469,6 +469,106 @@ impl Parser<'_> {
     }
 }
 
+impl Parser<'_> {
+    /// `receiver?.name[indices] = value`. The index stays inside the safe selector.
+    pub(super) fn finish_safe_index_assignment(
+        &mut self,
+        expression: ExprId,
+        start: Span,
+        target_span: Span,
+    ) -> StmtId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        } = self.file.expr(expression).clone()
+        else {
+            unreachable!("a safe index assignment target is a safe index");
+        };
+        let operator = self.bump().span;
+        self.skip_newlines();
+        let value = self.parse_unlabelled_expr();
+        self.file.value_operator_spans.insert(value.0, operator);
+        self.finish_assignment_stmt(
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                element,
+                indices,
+                value,
+            },
+            start,
+            target_span,
+        )
+    }
+
+    /// `receiver?.name[indices] op= value` reuses the index read as the operator's left operand.
+    pub(super) fn finish_compound_safe_index_assignment(
+        &mut self,
+        expression: ExprId,
+        op: BinOp,
+        op_span: Span,
+        start: Span,
+        target_span: Span,
+    ) -> StmtId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        } = self.file.expr(expression).clone()
+        else {
+            unreachable!("a compound safe index assignment target is a safe index");
+        };
+        self.bump();
+        self.skip_newlines();
+        let rhs = self.parse_unlabelled_expr();
+        let value = self.file.add_expr(
+            Expr::Binary {
+                op,
+                lhs: element,
+                rhs,
+                operator_span: op_span,
+            },
+            Span::new(target_span.lo, self.file.expr_spans[rhs.0 as usize].hi),
+        );
+        self.finish_assignment_stmt(
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                element,
+                indices,
+                value,
+            },
+            start,
+            target_span,
+        )
+    }
+
+    pub(super) fn assignment_target_span(&self, expression: ExprId) -> Span {
+        match self.file.expr(expression) {
+            Expr::Member { name, .. }
+            | Expr::SafeCall {
+                name, args: None, ..
+            } => self
+                .file
+                .exact_member_name_spans
+                .get(&expression.0)
+                .copied()
+                .unwrap_or_else(|| {
+                    let span = self.file.expr_spans[expression.0 as usize];
+                    Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+                }),
+            Expr::SafeIndex { access, .. } | Expr::SafeIndexIncDec { access, .. } => {
+                let access = *access;
+                self.assignment_target_span(access)
+            }
+            _ => self.file.expr_spans[expression.0 as usize],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

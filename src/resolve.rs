@@ -24159,7 +24159,7 @@ impl<'a> Checker<'a> {
                 array,
                 indices,
                 value,
-            } => self.stmt_assign_index(scope, s, array, indices, value),
+            } => self.stmt_assign_index(scope, s, array, indices, value, None),
             Stmt::AssignSafeIndex {
                 receiver,
                 access,
@@ -24277,7 +24277,7 @@ impl<'a> Checker<'a> {
             Stmt::CompoundAssign {
                 target, value, op, ..
             } => {
-                if !self.try_in_place_assignment_operands(scope, s, op, target, value) {
+                if !self.try_in_place_assignment_operands(scope, s, op, target, value, None) {
                     self.diags.error(
                         self.file.stmt_spans[s.0 as usize],
                         "compound assignment to this target is not supported",
@@ -25783,131 +25783,6 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
-        }
-    }
-
-    fn stmt_assign_index(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        s: StmtId,
-        array: ExprId,
-        indices: Vec<ExprId>,
-        value: ExprId,
-    ) {
-        // Try `opAssign` on the value returned by `get` before requiring `set`.
-        if self.try_in_place_assignment(scope, s, value) {
-            return;
-        }
-        // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
-        let at = match self.prepared_index_receiver {
-            Some((prepared, ty)) if prepared == array => ty,
-            _ => self.expr(scope, array),
-        };
-        let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
-        // Array access is the built-in member rung only when its `Int` index is applicable. An
-        // inapplicable built-in does not hide a user operator extension such as
-        // `operator fun IntArray.set(Long, Int)`.
-        let builtin_array_element = matches!(indices.as_slice(), [_])
-            .then(|| at.array_elem())
-            .flatten()
-            .filter(|_| self.receiver_is_assignable(its[0], Ty::Int));
-        let vt = match builtin_array_element {
-            Some(expected) => self.expr_expected(scope, value, expected),
-            None => {
-                let mut arguments = indices.clone();
-                arguments.push(value);
-                match self
-                    .selected_operator_params(scope, at, "set", &arguments)
-                    .and_then(|params| params.last().copied())
-                {
-                    Some(expected) => {
-                        self.check_argument_expected(scope, value, expected, false, None)
-                    }
-                    None => self.expr(scope, value),
-                }
-            }
-        };
-        let span = self.file.stmt_spans[s.0 as usize];
-        let single_index = matches!(indices.as_slice(), [_]);
-        if single_index {
-            if let Some(elem) = builtin_array_element {
-                self.expect_assignable(Ty::Int, its[0], span, "array index");
-                self.expect_assignable(elem, vt, span, "array element assignment");
-                return;
-            }
-        }
-        if at == Ty::Error {
-            return;
-        }
-        let mut set_args = its.clone();
-        set_args.push(vt);
-        let mut set_exprs = indices.clone();
-        set_exprs.push(value);
-        // Resolve `set` as a member, same-module extension, or library member. A single-index Map
-        // store may resolve to `put`. Record the selected target so lowering does not choose again.
-        let set_selected = self
-            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span, None)
-            .map(|(_, call)| (SyntheticOperatorCall::Set, call));
-        if self.indexed_operator_ambiguous {
-            return;
-        }
-        let selected = set_selected.or_else(|| {
-            single_index
-                .then(|| {
-                    self.operator_call_ret(
-                        scope, array, at, "put", &set_args, &set_exprs, span, None,
-                    )
-                })
-                .flatten()
-                .map(|(_, call)| (SyntheticOperatorCall::Put, call))
-        });
-        let ok = if let Some((op, call)) = selected {
-            if single_index && matches!(&call, ResolvedCall::Member(_)) {
-                if let Some(get) = self.select_instance_member(at, "get", &[its[0]]) {
-                    self.resolved_index_store_get_returns.insert(s, get.ret);
-                }
-            }
-            let selected_shape = match &call {
-                ResolvedCall::Member(member) => Some((
-                    member.member.params.as_slice(),
-                    member.member.call_sig.vararg_index,
-                )),
-                ResolvedCall::Extension(extension) => {
-                    Some((extension.params.as_slice(), extension.vararg_index))
-                }
-                _ => None,
-            };
-            if let Some((params, vararg)) = selected_shape {
-                if let Some(slots) = indexed_operator_argument_slots(
-                    params,
-                    vararg,
-                    &set_exprs,
-                    op == SyntheticOperatorCall::Set,
-                ) {
-                    self.resolved_stmt_operator_arg_slots.insert((s, op), slots);
-                }
-            }
-            self.resolved_stmt_operator_calls.insert((s, op), call);
-            true
-        } else {
-            false
-        };
-        if !ok && at != Ty::Error {
-            self.diags.error(
-                span,
-                if single_index {
-                    format!(
-                        "'{}' is not an array (cannot index-assign)",
-                        at.source_name()
-                    )
-                } else {
-                    format!(
-                        "no 'set' operator taking {} indices on '{}'",
-                        its.len(),
-                        at.source_name()
-                    )
-                },
-            );
         }
     }
 
@@ -37136,8 +37011,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_stmt_operator_calls: HashMap::new(),
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
-        prepared_index_receiver: None,
-        prepared_member_read: None,
         resolved_inc_dec: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
         resolved_destructure_components: HashMap::new(),
@@ -39827,11 +39700,6 @@ struct Checker<'a> {
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
-    /// Receiver type already selected for a safe-index member. Index resolution consumes it
-    /// instead of re-checking that member against the still-nullable source receiver.
-    prepared_index_receiver: Option<(ExprId, Ty)>,
-    /// Member read already selected on the non-null receiver of a safe compound assignment.
-    prepared_member_read: Option<(ExprId, Ty)>,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
@@ -62917,7 +62785,7 @@ impl<'a> Checker<'a> {
                 return self.expr_inner_lambda(scope, e, expected, params, body, None)
             }
             Expr::Index { array, indices } => {
-                return self.expr_inner_index(scope, e, array, indices)
+                return self.expr_inner_index(scope, e, array, indices, None)
             }
             Expr::SafeIndex {
                 receiver,
@@ -63229,7 +63097,20 @@ impl<'a> Checker<'a> {
                 lhs,
                 rhs,
                 operator_span,
-            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span, expected),
+            } => {
+                return self.expr_inner_binary(
+                    scope,
+                    e,
+                    safe_index::BinaryCheck {
+                        op,
+                        lhs,
+                        rhs,
+                        operator_span,
+                        prepared_lhs: None,
+                    },
+                    expected,
+                )
+            }
             Expr::Member { receiver, name } => {
                 return self.expr_inner_member(scope, e, receiver, name)
             }
@@ -63409,14 +63290,15 @@ impl<'a> Checker<'a> {
         e: ExprId,
         array: ExprId,
         indices: Vec<ExprId>,
+        selected_receiver: Option<Ty>,
     ) -> Ty {
         let t = {
             // `a[i]` / `recv[i, j, …]` — a subscript. A SINGLE index over an array is element access
             // (or `String.get`); otherwise (and for two-or-more indices) it is a `get(i, j, …)`
             // operator — a user member, a same-module extension, or a library member.
-            let at = match self.prepared_index_receiver {
-                Some((prepared, ty)) if prepared == array => ty,
-                _ => self.expr(scope, array),
+            let at = match selected_receiver {
+                Some(ty) => ty,
+                None => self.expr(scope, array),
             };
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
@@ -65884,15 +65766,22 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         e: ExprId,
-        op: BinOp,
-        lhs: ExprId,
-        rhs: ExprId,
-        operator_span: Span,
+        operands: safe_index::BinaryCheck,
         expected: Option<Ty>,
     ) -> Ty {
+        let safe_index::BinaryCheck {
+            op,
+            lhs,
+            rhs,
+            operator_span,
+            prepared_lhs,
+        } = operands;
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
-                let lt = self.expr(scope, lhs);
+                let lt = match prepared_lhs {
+                    Some(ty) => ty,
+                    None => self.expr(scope, lhs),
+                };
                 let (casts, declined) = self.condition_narrowings(scope, lhs, op == BinOp::And);
                 let rt = {
                     let rhs_scope = scope.child(ScopeKind::Block);
@@ -65906,7 +65795,10 @@ impl<'a> Checker<'a> {
                 let bt = self.check_binary(op, lt, rt, self.span(e));
                 return self.set(e, bt);
             }
-            let lt = self.expr(scope, lhs);
+            let lt = match prepared_lhs {
+                Some(ty) => ty,
+                None => self.expr(scope, lhs),
+            };
             let equality = matches!(op, BinOp::Eq | BinOp::Ne);
             fn contains_bottom_evidence(ty: Ty) -> bool {
                 match ty {
@@ -66287,11 +66179,6 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: String,
     ) -> Ty {
-        if let Some((prepared, ty)) = self.prepared_member_read {
-            if prepared == e {
-                return self.set(e, ty);
-            }
-        }
         let t = {
             // `super.prop` / `super<I>.prop` is a non-virtual accessor call on the current `this`.
             // Resolve it before treating `super` as an expression: it is a dispatch qualifier, never a

@@ -5320,27 +5320,8 @@ impl<'a> Parser<'a> {
                                 target_span,
                             );
                         }
-                        Expr::SafeIndex {
-                            receiver,
-                            access,
-                            element,
-                            indices,
-                        } => {
-                            let operator = self.bump().span; // '='
-                            self.skip_newlines();
-                            let value = self.parse_unlabelled_expr();
-                            self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_assignment_stmt(
-                                Stmt::AssignSafeIndex {
-                                    receiver,
-                                    access,
-                                    element,
-                                    indices,
-                                    value,
-                                },
-                                start,
-                                target_span,
-                            );
+                        Expr::SafeIndex { .. } => {
+                            return self.finish_safe_index_assignment(e, start, target_span);
                         }
                         _ => self
                             .diags
@@ -5444,32 +5425,11 @@ impl<'a> Parser<'a> {
                                 target_span,
                             );
                         }
-                        Expr::SafeIndex {
-                            receiver,
-                            access,
-                            element,
-                            indices,
-                        } => {
-                            self.bump();
-                            self.skip_newlines();
-                            let rhs = self.parse_unlabelled_expr();
-                            let value = self.file.add_expr(
-                                Expr::Binary {
-                                    op,
-                                    lhs: element,
-                                    rhs,
-                                    operator_span: op_span,
-                                },
-                                Span::new(target_span.lo, self.file.expr_spans[rhs.0 as usize].hi),
-                            );
-                            return self.finish_assignment_stmt(
-                                Stmt::AssignSafeIndex {
-                                    receiver,
-                                    access,
-                                    element,
-                                    indices,
-                                    value,
-                                },
+                        Expr::SafeIndex { .. } => {
+                            return self.finish_compound_safe_index_assignment(
+                                e,
+                                op,
+                                op_span,
                                 start,
                                 target_span,
                             );
@@ -5589,28 +5549,6 @@ impl<'a> Parser<'a> {
     fn finish_stmt(&mut self, s: Stmt, start: Span) -> StmtId {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_stmt(s, Span::new(start.lo, end.hi))
-    }
-
-    fn assignment_target_span(&self, expression: ExprId) -> Span {
-        match self.file.expr(expression) {
-            Expr::Member { name, .. }
-            | Expr::SafeCall {
-                name, args: None, ..
-            } => self
-                .file
-                .exact_member_name_spans
-                .get(&expression.0)
-                .copied()
-                .unwrap_or_else(|| {
-                    let span = self.file.expr_spans[expression.0 as usize];
-                    Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
-                }),
-            Expr::SafeIndex { access, .. } | Expr::SafeIndexIncDec { access, .. } => {
-                let access = *access;
-                self.assignment_target_span(access)
-            }
-            _ => self.file.expr_spans[expression.0 as usize],
-        }
     }
 
     fn finish_assignment_stmt(&mut self, statement: Stmt, start: Span, target: Span) -> StmtId {

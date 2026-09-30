@@ -1791,6 +1791,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   proves the original local non-null, so an index or assigned value that names it
   (`arg?.alias[42] = arg`) is checked at the non-null type and the member `set` stays applicable.
   A prefix index update reads `get` again after the write; a postfix update keeps the first read.
+  Each spill restores the substitution it replaced, so an enclosing `when` subject that is also an
+  index operand is still that one value after the update.
   Parentheses end the selector: `(arg?.alias)[i]`, `(arg?.alias) += x`, and `(arg?.alias[i])++`
   are operators on the nullable result, so a `Foo?` extension wins over `Foo`'s member.
   (`tests/parenthesized_safe_call_e2e.rs`. Corpus:

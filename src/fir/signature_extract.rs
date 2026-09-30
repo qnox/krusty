@@ -4,6 +4,7 @@
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
 mod definitely_evaluated;
+mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
 use crate::types::Ty;
@@ -1672,30 +1673,8 @@ impl SignatureConstraintExtractor {
                 }
                 self.member_call(receiver, "get", arguments, scope, node_origin)
             }
-            Expr::SafeIndex {
-                receiver,
-                access,
-                indices,
-                ..
-            }
-            | Expr::SafeIndexIncDec {
-                receiver,
-                access,
-                indices,
-                ..
-            } => {
-                let receiver = self.expression(file, *receiver, scope, origin)?;
-                let Expr::Member { name, .. } = file.expr(*access) else {
-                    unreachable!("a safe index selector is a member access");
-                };
-                let name = name.clone();
-                let member = self.member(receiver, &name, scope, node_origin);
-                let mut arguments = Vec::with_capacity(indices.len());
-                for index in indices {
-                    arguments.push(self.expression(file, *index, scope, origin)?);
-                }
-                let indexed = self.member_call(member, "get", arguments, scope, node_origin);
-                self.graph.add_expr(SigExpr::Nullable(indexed))
+            Expr::SafeIndex { .. } | Expr::SafeIndexIncDec { .. } => {
+                self.safe_index_read(file, expression, scope, origin, node_origin)?
             }
             Expr::RangeTo { lo, hi, kind } => {
                 let receiver = self.expression(file, *lo, scope, origin)?;
@@ -2242,17 +2221,12 @@ impl SignatureConstraintExtractor {
                             }
                             effects.push(self.expression(file, *value, scope, origin)?);
                         }
-                        Stmt::AssignSafeIndex {
-                            receiver,
-                            indices,
-                            value,
-                            ..
-                        } => {
-                            effects.push(self.expression(file, *receiver, scope, origin)?);
-                            for index in indices {
-                                effects.push(self.expression(file, *index, scope, origin)?);
-                            }
-                            effects.push(self.expression(file, *value, scope, origin)?);
+                        Stmt::AssignSafeIndex { .. } => {
+                            effects.extend(
+                                self.safe_index_assignment_effects(
+                                    file, *statement, scope, origin,
+                                )?,
+                            );
                         }
                         Stmt::CompoundAssign { target, value, .. } => {
                             effects.push(self.expression(file, *target, scope, origin)?);

@@ -2297,24 +2297,7 @@ impl BodyFirChecker<'_> {
                 Expr::SafeIndex {
                     receiver, element, ..
                 } => self.safe_index_read(expression, *receiver, *element)?,
-                Expr::SafeIndexIncDec {
-                    receiver,
-                    access,
-                    element,
-                    indices,
-                    updated,
-                    dec,
-                    prefix,
-                } => self.safe_index_inc_dec(safe_index::SafeIndexIncDec {
-                    expression,
-                    receiver: *receiver,
-                    access: *access,
-                    element: *element,
-                    indices,
-                    updated: *updated,
-                    dec: *dec,
-                    prefix: *prefix,
-                })?,
+                Expr::SafeIndexIncDec { .. } => self.safe_index_inc_dec_expr(expression)?,
                 Expr::Index { array, indices } => {
                     if self.info.resolved_index_get_call(expression).is_some() {
                         self.source_member_operator_call(expression, "get", *array, indices)?
@@ -2817,27 +2800,6 @@ impl BodyFirChecker<'_> {
             statements: checked?.into_boxed_slice(),
             result: result?,
         })
-    }
-
-    /// The parser represents `receiver[indices] op= rhs` as a write whose value contains the
-    /// matching indexed read and reuses every operand identity. Checked FIR binds those operands
-    /// once before publishing the read-modify-write, just as it does for compound member access.
-    fn is_compound_index_assignment(
-        &self,
-        receiver: ExprId,
-        indices: &[ExprId],
-        value: ExprId,
-    ) -> bool {
-        let Expr::Binary { lhs, .. } = self.file.expr(value) else {
-            return false;
-        };
-        matches!(
-            self.file.expr(*lhs),
-            Expr::Index {
-                array: read_receiver,
-                indices: read_indices,
-            } if *read_receiver == receiver && read_indices == indices
-        )
     }
 
     fn statement(&mut self, statement: StmtId) -> Result<FirStatementId, BodyCheckFailure> {
@@ -3584,17 +3546,8 @@ impl BodyFirChecker<'_> {
                 };
                 FirStatementKind::Expression(expression)
             }
-            Stmt::AssignSafeIndex {
-                receiver,
-                access,
-                indices,
-                value,
-                ..
-            } => {
-                let expression = self.safe_index_assignment(
-                    statement, origin, *receiver, *access, indices, *value,
-                )?;
-                FirStatementKind::Expression(expression)
+            Stmt::AssignSafeIndex { .. } => {
+                FirStatementKind::Expression(self.safe_index_assignment_stmt(statement, origin)?)
             }
             Stmt::Return(value, label) => {
                 let target = self
