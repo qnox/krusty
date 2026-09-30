@@ -10,6 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtins_validation;
 mod candidate_union;
 mod ct_sym_index;
 mod mapped_builtin_realizations;
@@ -34,7 +35,7 @@ use self::value_class_erasure::{
     metadata_value_class_underlying, value_class_param_types, value_class_return_type,
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
@@ -1795,11 +1796,10 @@ pub struct Classpath {
     resolved_types: RefCell<
         crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
     >,
-    /// Parsed `.kotlin_builtins` fragments, keyed by package-name id (e.g. `kotlin`,
-    /// `kotlin/collections`), each mapping class internal name → its supertypes + members. Built once
-    /// per file on first use — the single source for BOTH the collection read-only/mutable hierarchy AND
-    /// every builtin type's API. Empty if no stdlib is on the classpath.
+    /// Parsed `.kotlin_builtins` fragments by package name.
     builtins: RefCell<HashMap<TypeName, std::sync::Arc<BuiltinsFile>>>,
+    /// Complete-catalog validation succeeded once. Failures stay unset and are retried.
+    builtins_validated: Cell<bool>,
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
     /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
     /// allocates descriptors. Classifier metadata reads ask for these repeatedly during member/subtype lookup.
@@ -2020,6 +2020,7 @@ impl Classpath {
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
             builtins: RefCell::new(HashMap::new()),
+            builtins_validated: Cell::new(false),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
@@ -2934,22 +2935,6 @@ impl Classpath {
     fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
         self.try_builtins_file_for_package(package)
             .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
-    }
-
-    pub(super) fn validate_builtins(&self) -> Result<(), std::sync::Arc<BuiltinsLoadError>> {
-        let tree = self.package_tree();
-        let mut packages = tree
-            .packages
-            .iter()
-            .filter(|(_, node)| !node.builtins_jars.is_empty())
-            .map(|(&package, _)| crate::types::type_name_from(&tree.names, package))
-            .collect::<Vec<_>>();
-        packages.sort_by(|left, right| left.path_cmp(*right));
-        drop(tree);
-        for package in packages {
-            self.try_builtins_file_for_package(package)?;
-        }
-        Ok(())
     }
 
     pub(super) fn builtin_package_functions(
