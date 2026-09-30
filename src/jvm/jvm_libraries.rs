@@ -635,7 +635,7 @@ impl JvmLibraries {
             if Ty::obj_name(internal).scalar_value_repr().is_none() {
                 for field in &class.fields {
                     if field.access & 0x0008 == 0 {
-                        push(field.name.to_owned());
+                        push(field.name.to_string());
                     }
                 }
             }
@@ -1048,7 +1048,7 @@ impl JvmLibraries {
             if function.is_suspend() {
                 continue;
             }
-            let Some(desc) = function.jvm_desc else {
+            let Some(desc) = function.jvm_desc.as_deref() else {
                 continue;
             };
             let Some(bytecode_public) = bytecode_public(&function.jvm_name, desc) else {
@@ -1083,7 +1083,7 @@ impl JvmLibraries {
                 singleton_dispatch: Some(Box::new(singleton.clone())),
                 ..LibraryCallable::library(
                     owner,
-                    function.jvm_name,
+                    function.jvm_name.as_ref(),
                     params,
                     ret,
                     physical_ret,
@@ -1283,7 +1283,7 @@ impl JvmLibraries {
             .filter_map(|f| {
                 let ty = ty(f)?;
                 let value = Self::library_const(f.const_value.as_ref()?);
-                Some((f.name.to_owned(), LibraryConst { ty, value }))
+                Some((f.name.to_string(), LibraryConst { ty, value }))
             })
             .collect()
     }
@@ -1340,7 +1340,7 @@ impl JvmLibraries {
                 .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets
-                .get(f.name)
+                .get(f.name.as_ref())
                 .map(|&ret| kotlin_type_name_to_ty(ret))
         })
     }
@@ -1378,7 +1378,7 @@ impl JvmLibraries {
                     .map(|ty| (property.name.as_str(), kotlin_type_name_to_ty(ty)))
             })
             .collect();
-        Self::const_fields(&ci.fields, |field| declared.get(field.name).copied())
+        Self::const_fields(&ci.fields, |f| declared.get(&*f.name).copied())
     }
 
     fn builtin_members_for_type_name(&self, internal: TypeName) -> Vec<LibraryMember> {
@@ -1650,7 +1650,7 @@ impl JvmLibraries {
                     .iter()
                     .filter(|declaration| !declaration.deprecated_hidden())
                     .filter_map(|declaration| {
-                        let descriptor = declaration.jvm_desc?;
+                        let descriptor = declaration.jvm_desc.clone()?;
                         ci.methods
                             .iter()
                             .find(|method| {
@@ -1663,7 +1663,7 @@ impl JvmLibraries {
                         if declaration.deprecated_hidden {
                             return None;
                         }
-                        let descriptor = declaration.jvm_desc?;
+                        let descriptor = declaration.jvm_desc.clone()?;
                         ci.methods
                             .iter()
                             .find(|method| {
@@ -1735,7 +1735,7 @@ impl JvmLibraries {
                         .collect::<Vec<_>>()
                 });
                 let mut member =
-                    LibraryMember::new(m.name.to_owned(), params, ret, m.descriptor.to_owned());
+                    LibraryMember::new(m.name.to_string(), params, ret, m.descriptor.to_string());
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(
                         "member_slots",
@@ -1763,9 +1763,9 @@ impl JvmLibraries {
                         );
                         continue;
                     };
-                    member.name = declaration.kotlin_name.to_owned();
+                    member.name = declaration.kotlin_name.to_string();
                     if declaration.jvm_name != declaration.kotlin_name {
-                        member.physical_name = Some(declaration.jvm_name.to_owned());
+                        member.physical_name = Some(declaration.jvm_name.to_string());
                     }
                     let mut logical_params = signature.params.clone();
                     if declaration.is_extension() {
@@ -2068,7 +2068,7 @@ impl JvmLibraries {
                         )
                     {
                         if source != member.name {
-                            member.physical_name = Some(m.name.to_owned());
+                            member.physical_name = Some(m.name.to_string());
                             member.name = source.to_string();
                             // The convention check above saw the classfile spelling (`charAt`).
                             // A realization that publishes that method as Kotlin `get` is the same
@@ -2269,7 +2269,7 @@ impl JvmLibraries {
                         )
                         .then(|| {
                             (
-                                f.name.to_owned(),
+                                f.name.to_string(),
                                 crate::types::type_name_nested_child(internal_name, &f.name),
                             )
                         })
@@ -2369,7 +2369,7 @@ impl JvmLibraries {
                             && declaration.params.types == constructor.params
                     });
                     let expected_real_params = metadata
-                        .and_then(|declaration| declaration.jvm_desc)
+                        .and_then(|declaration| declaration.jvm_desc.as_deref())
                         .or_else(|| {
                             (!constructor.descriptor.is_empty())
                                 .then_some(constructor.descriptor.as_str())
@@ -2416,7 +2416,7 @@ impl JvmLibraries {
                         .then(|| {
                             Box::new(crate::libraries::ConstructorCallRealization {
                                 owner: internal_name,
-                                descriptor: method.descriptor.to_owned(),
+                                descriptor: method.descriptor.to_string(),
                             })
                         })
                     });
@@ -2436,7 +2436,7 @@ impl JvmLibraries {
                             Box::new(crate::libraries::DefaultCallRealization {
                                 owner: internal_name,
                                 name: "<init>".to_string(),
-                                descriptor: method.descriptor.to_owned(),
+                                descriptor: method.descriptor.to_string(),
                                 declaration_owner: internal_name,
                                 real_params: params[real_start..real_end].to_vec(),
                                 mask_count: if has_defaults { mask_count } else { 0 },
@@ -2578,7 +2578,7 @@ impl JvmLibraries {
                         f.access & ACC_STATIC != 0
                             && super::names::descriptor_is_classifier(&f.descriptor, internal_name)
                     })
-                    .map(|f| f.name.to_owned())
+                    .map(|f| f.name.to_string())
                     .collect()
             } else {
                 Vec::new()
@@ -2643,7 +2643,7 @@ impl JvmLibraries {
                 .fields
                 .iter()
                 .filter(|field| field.access & ACC_STATIC != 0)
-                .map(|field| field.name.to_owned())
+                .map(|field| field.name.to_string())
                 .collect();
             let inheritance = crate::libraries::ClassifierInheritance {
                 is_abstract: ci.is_abstract() || ci.is_interface(),
@@ -3307,7 +3307,7 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
                 }
                 Some(_) | None => erased,
             };
-            (ty != Ty::Error).then(|| (method.name.to_owned(), ty, method.has_annotation_default))
+            (ty != Ty::Error).then(|| (method.name.to_string(), ty, method.has_annotation_default))
         })
         .collect::<Option<Vec<_>>>()?;
     let value_index = elements.iter().position(|(name, _, _)| name == "value");
@@ -3403,7 +3403,7 @@ fn interface_holder_method(
                 &method.descriptor,
             )
     })?;
-    Some((holder, method.descriptor.to_owned()))
+    Some((holder, method.descriptor.to_string()))
 }
 
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
@@ -4090,11 +4090,11 @@ impl JvmLibraries {
                 };
                 let mut getter = LibraryCallable::library(
                     cn,
-                    field.name,
+                    field.name.as_ref(),
                     Vec::new(),
                     field_ty,
                     erased_ty,
-                    field.descriptor,
+                    field.descriptor.as_ref(),
                 );
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
@@ -4103,11 +4103,11 @@ impl JvmLibraries {
                 let setter = (field.access & 0x0010 == 0).then(|| {
                     let mut setter = LibraryCallable::library(
                         cn,
-                        field.name,
+                        field.name.as_ref(),
                         vec![erased_ty],
                         Ty::Unit,
                         Ty::Unit,
-                        field.descriptor,
+                        field.descriptor.as_ref(),
                     );
                     setter.params = vec![field_ty];
                     setter.external_identity = Some(self.cp.intern_external_callable(
@@ -4617,14 +4617,14 @@ impl JvmLibraries {
                     )
                 };
                 // Match the bytecode method to recover its descriptor and inline implementation details.
-                let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
-                    (mf.jvm_name.to_owned(), d.to_string(), by_name(&mf.jvm_name))
+                let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc.as_ref() {
+                    (mf.jvm_name.as_ref().into(), d.into(), by_name(&mf.jvm_name))
                 } else if let Some(c) = by_name(&mf.jvm_name) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_string(), c.descriptor.to_string(), Some(c))
                 } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_string(), c.descriptor.to_string(), Some(c))
                 } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                    (c.name.to_string(), c.descriptor.to_string(), Some(c))
                 } else {
                     continue;
                 };
@@ -4717,7 +4717,7 @@ impl JvmLibraries {
                     // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
                     // recoverable from the spelling, so the provider publishes both, as a
                     // classifier member does (`LibraryCallable::classifier_member`).
-                    reflection_name: Some(mf.kotlin_name.to_owned()),
+                    reflection_name: Some(mf.kotlin_name.to_string()),
                     ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
                 callable.physical_params = physical_params;
@@ -4926,7 +4926,7 @@ impl JvmLibraries {
                     .methods
                     .iter()
                     .filter(|method| method.name == bridge_name)
-                    .map(|method| method.descriptor)
+                    .map(|method| method.descriptor.as_ref())
                     .collect::<Vec<_>>(),
             );
             if let Some(realization) = class.methods.iter().find_map(|method| {
@@ -4957,7 +4957,7 @@ impl JvmLibraries {
                 Some(crate::libraries::DefaultCallRealization {
                     owner: callable.owner,
                     name: bridge_name.clone(),
-                    descriptor: method.descriptor.to_owned(),
+                    descriptor: method.descriptor.to_string(),
                     declaration_owner: current,
                     real_params: callable.physical_params.clone(),
                     mask_count,
@@ -5035,7 +5035,7 @@ impl JvmLibraries {
                     Some(crate::libraries::DefaultCallRealization {
                         owner: class_name,
                         name: bridge_name.clone(),
-                        descriptor: method.descriptor.to_owned(),
+                        descriptor: method.descriptor.to_string(),
                         declaration_owner: class_name,
                         real_params: real_params.clone(),
                         mask_count,

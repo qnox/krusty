@@ -87,7 +87,7 @@ pub(super) fn constructor_default_realization(
         matches.then(|| DefaultCallRealization {
             owner,
             name: bridge_name.clone(),
-            descriptor: method.descriptor.to_owned(),
+            descriptor: method.descriptor.to_string(),
             declaration_owner: owner,
             real_params: real_params.clone(),
             mask_count,

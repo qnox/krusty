@@ -359,9 +359,9 @@ fn retained_dispatching_reference_shapes_run() {
                     .iter()
                     .map(|field| {
                         (
-                            field.name.to_owned(),
+                            field.name.to_string(),
                             field.access,
-                            field.descriptor.to_owned(),
+                            field.descriptor.to_string(),
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -369,9 +369,9 @@ fn retained_dispatching_reference_shapes_run() {
                     .iter()
                     .map(|method| {
                         (
-                            method.name.to_owned(),
+                            method.name.to_string(),
                             method.access,
-                            method.descriptor.to_owned(),
+                            method.descriptor.to_string(),
                         )
                     })
                     .collect::<Vec<_>>(),

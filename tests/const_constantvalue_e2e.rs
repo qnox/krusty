@@ -41,8 +41,8 @@ fn field_table(ci: &krusty::jvm::classreader::ClassInfo) -> Vec<(u16, String, St
         .map(|field| {
             (
                 field.access,
-                field.name.to_owned(),
-                field.descriptor.to_owned(),
+                field.name.to_string(),
+                field.descriptor.to_string(),
             )
         })
         .collect()
@@ -105,7 +105,7 @@ fn a_const_val_field_carries_its_declarations_visibility() {
             .iter()
             .find(|field| field.name == name)
             .unwrap_or_else(|| {
-                let names: Vec<&str> = ci.fields.iter().map(|field| field.name).collect();
+                let names: Vec<&str> = ci.fields.iter().map(|field| field.name.as_ref()).collect();
                 panic!("no {name} field; facade has {names:?}")
             })
             .access

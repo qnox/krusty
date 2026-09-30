@@ -1272,11 +1272,11 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == name)
-                .map(|field| field.descriptor)
+                .map(|field| field.descriptor.as_ref())
         };
 
-        assert_eq!(field("value"), Some("Ljava/lang/Number;"));
-        assert_eq!(field("values"), Some("[Ljava/lang/Number;"));
+        assert_eq!(field("value").as_deref(), Some("Ljava/lang/Number;"));
+        assert_eq!(field("values").as_deref(), Some("[Ljava/lang/Number;"));
         assert!(class.method("value", "()Ljava/lang/Number;").is_some());
         assert!(class.method("values", "()[Ljava/lang/Number;").is_some());
         assert!(class
@@ -1665,15 +1665,15 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == name)
-                .map(|field| field.descriptor)
+                .map(|field| field.descriptor.as_ref())
         };
-        assert_eq!(field("number"), Some("Ljava/lang/Number;"));
-        assert_eq!(field("numbers"), Some("[Ljava/lang/Number;"));
+        assert_eq!(field("number").as_deref(), Some("Ljava/lang/Number;"));
+        assert_eq!(field("numbers").as_deref(), Some("[Ljava/lang/Number;"));
         let descriptors = |name: &str| {
             class
                 .methods_named(name)
                 .into_iter()
-                .map(|method| method.descriptor)
+                .map(|method| method.descriptor.as_ref())
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -1788,7 +1788,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == "outer")
-                .map(|field| field.descriptor),
+                .map(|field| field.descriptor.as_ref()),
             Some("Ljava/lang/Number;")
         );
         assert_eq!(
@@ -1796,7 +1796,7 @@ mod tests {
                 .fields
                 .iter()
                 .find(|field| field.name == "inner")
-                .map(|field| field.descriptor),
+                .map(|field| field.descriptor.as_ref()),
             Some("Ljava/lang/Number;")
         );
         assert!(inner
@@ -1811,7 +1811,7 @@ mod tests {
             deep.fields
                 .iter()
                 .find(|field| field.name == "value")
-                .map(|field| field.descriptor),
+                .map(|field| field.descriptor.as_ref()),
             Some("Ljava/lang/CharSequence;")
         );
     }

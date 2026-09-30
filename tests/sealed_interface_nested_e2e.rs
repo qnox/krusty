@@ -54,7 +54,11 @@ fn data_object_has_no_copy() {
     let meta = krusty::jvm::classreader::parse_class(&bytes)
         .expect("Origin$Owned parses")
         .meta;
-    let functions: Vec<&str> = meta.class_functions.iter().map(|f| f.kotlin_name).collect();
+    let functions: Vec<&str> = meta
+        .class_functions
+        .iter()
+        .map(|f| f.kotlin_name.as_ref())
+        .collect();
     assert_eq!(
         functions,
         ["equals", "hashCode", "toString"],

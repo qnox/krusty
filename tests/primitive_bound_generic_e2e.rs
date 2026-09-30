@@ -26,7 +26,7 @@ fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
         "expected idi descriptor (I)I (specialized), methods: {:?}",
         pkt.methods
             .iter()
-            .map(|m| (m.name, m.descriptor))
+            .map(|m| (m.name.as_ref(), m.descriptor.as_ref()))
             .collect::<Vec<_>>()
     );
     // And it runs.

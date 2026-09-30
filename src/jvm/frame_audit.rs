@@ -99,8 +99,8 @@ pub fn audit_class(bytes: &[u8]) -> ClassAudit {
             Some(code) => audit_method(&code, method.access, &method.name, &method.descriptor),
         };
         audits.push(MethodAudit {
-            name: method.name.to_owned(),
-            descriptor: method.descriptor.to_owned(),
+            name: method.name.to_string(),
+            descriptor: method.descriptor.to_string(),
             outcome,
         });
     }

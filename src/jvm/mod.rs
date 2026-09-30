@@ -49,6 +49,7 @@ mod local_classifiers;
 mod local_properties;
 mod mapped_builtin_declarations;
 mod member_spelling;
+pub use member_spelling::MemberSpelling;
 pub mod metadata;
 mod metadata_flags;
 mod metadata_method_signatures;

@@ -47,7 +47,7 @@ fn result_companion_success_is_public_inline_in_metadata() {
     assert!(success.is_inline(), "success must be inline");
     assert_eq!(success.jvm_name, "success");
     assert_eq!(
-        success.jvm_desc,
+        success.jvm_desc.as_deref(),
         Some("(Ljava/lang/Object;)Ljava/lang/Object;")
     );
     assert!(fns.iter().any(|f| f.kotlin_name == "failure"));

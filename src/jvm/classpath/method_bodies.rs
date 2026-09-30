@@ -84,7 +84,8 @@ impl crate::jvm::inline::MethodBodies for Classpath {
                             && function.jvm_name == candidate.name
                             && function
                                 .jvm_desc
-                                .is_none_or(|metadata| metadata == candidate.descriptor)
+                                .as_ref()
+                                .is_none_or(|metadata| *metadata == candidate.descriptor)
                     })
             })
             .map(|candidate| crate::jvm::inline::StaticMemberRealization {

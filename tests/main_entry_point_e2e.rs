@@ -24,7 +24,7 @@ fn methods(classes: &[Class], class: &str) -> Vec<(String, String, u16)> {
     let mut out = parsed
         .methods
         .iter()
-        .map(|m| (m.name.to_owned(), m.descriptor.to_owned(), m.access))
+        .map(|m| (m.name.to_string(), m.descriptor.to_string(), m.access))
         .collect::<Vec<_>>();
     out.sort();
     out

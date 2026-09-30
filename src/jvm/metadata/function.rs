@@ -9,7 +9,6 @@ use crate::libraries::{CallSig, GenericSig};
 use crate::types::{ContextParameterKind, ReturnValueStatus, Ty, TypeName, Visibility};
 
 use super::{MetaValueParam, MfnFlags};
-use crate::jvm::member_spelling;
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
@@ -19,15 +18,15 @@ use crate::jvm::member_spelling;
 /// fallback.
 #[derive(Clone, Debug)]
 pub struct MetaFn {
-    /// Kotlin source name. Equal names share metadata-owned spelling storage rather than one owned
-    /// copy per function. The pointer is storage, not semantic callable identity.
-    pub kotlin_name: &'static str,
+    /// Kotlin source name. Equal names in one catalog share one handle. The handle is storage,
+    /// not semantic callable identity.
+    pub kotlin_name: crate::jvm::member_spelling::MemberSpelling,
     /// JVM method name. When metadata does not rename the function this shares spelling storage
     /// with [`Self::kotlin_name`].
-    pub jvm_name: &'static str,
+    pub jvm_name: crate::jvm::member_spelling::MemberSpelling,
     /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
-    pub jvm_desc: Option<&'static str>,
+    pub jvm_desc: Option<crate::jvm::member_spelling::MemberSpelling>,
     pub visibility: Visibility,
     /// Bit-packed `is_inline`/`is_suspend`/`is_extension`/`is_operator`/`ret_nullable` (read via the
     /// accessors below).
@@ -81,7 +80,7 @@ struct FunctionExtras {
 pub(super) struct DecodedFunction {
     pub kotlin_name: String,
     pub jvm_name: String,
-    pub jvm_desc: Option<&'static str>,
+    pub jvm_desc: Option<String>,
     pub visibility: Visibility,
     pub flags: MfnFlags,
     pub receiver_class: Option<TypeName>,
@@ -120,11 +119,14 @@ fn pack_extras(
 }
 
 impl MetaFn {
-    pub(super) fn from_decoded(decoded: DecodedFunction) -> Self {
+    pub(super) fn from_decoded(
+        decoded: DecodedFunction,
+        spellings: &crate::jvm::member_spelling::SpellingPool,
+    ) -> Self {
         Self {
-            kotlin_name: member_spelling::intern_owned(decoded.kotlin_name),
-            jvm_name: member_spelling::intern_owned(decoded.jvm_name),
-            jvm_desc: decoded.jvm_desc,
+            kotlin_name: spellings.intern_owned(decoded.kotlin_name),
+            jvm_name: spellings.intern_owned(decoded.jvm_name),
+            jvm_desc: decoded.jvm_desc.map(|desc| spellings.intern_owned(desc)),
             visibility: decoded.visibility,
             flags: decoded.flags,
             receiver_class: decoded.receiver_class,
@@ -335,7 +337,8 @@ mod tests {
 
     #[test]
     fn common_function_omits_the_side_record() {
-        let function = MetaFn::from_decoded(blank());
+        let spellings = crate::jvm::member_spelling::SpellingPool::new();
+        let function = MetaFn::from_decoded(blank(), &spellings);
         assert!(function.context_params().is_empty());
         assert!(function.context_parameter_kinds().is_empty());
         assert!(function.only_input_type_formals().is_empty());
@@ -348,17 +351,32 @@ mod tests {
 
     #[test]
     fn repeated_method_names_share_one_spelling() {
+        let spellings = crate::jvm::member_spelling::SpellingPool::new();
         let mut first = blank();
         first.kotlin_name = "equals".to_string();
         first.jvm_name = "equals".to_string();
         let mut renamed = blank();
         renamed.kotlin_name = "equals".to_string();
         renamed.jvm_name = "equals$default".to_string();
-        let shared = MetaFn::from_decoded(first);
-        let other = MetaFn::from_decoded(renamed);
-        assert!(std::ptr::eq(shared.kotlin_name, shared.jvm_name));
-        assert!(std::ptr::eq(shared.kotlin_name, other.kotlin_name));
-        assert!(!std::ptr::eq(other.kotlin_name, other.jvm_name));
+        let shared = MetaFn::from_decoded(first, &spellings);
+        let other = MetaFn::from_decoded(renamed, &spellings);
+        assert!(crate::jvm::member_spelling::MemberSpelling::ptr_eq(
+            &shared.kotlin_name,
+            &shared.jvm_name
+        ));
+        assert!(crate::jvm::member_spelling::MemberSpelling::ptr_eq(
+            &shared.kotlin_name,
+            &other.kotlin_name
+        ));
+        assert!(!crate::jvm::member_spelling::MemberSpelling::ptr_eq(
+            &other.kotlin_name,
+            &other.jvm_name
+        ));
+        let weak = crate::jvm::member_spelling::MemberSpelling::downgrade(&shared.kotlin_name);
+        drop(shared);
+        drop(other);
+        drop(spellings);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]
@@ -373,7 +391,8 @@ mod tests {
         decoded.context_parameter_kinds = vec![ContextParameterKind::Named];
         decoded.only_input_type_formals = vec!["T".to_string()];
         decoded.equality_bound = Some(Ty::obj("kotlin/Any"));
-        let function = MetaFn::from_decoded(decoded);
+        let spellings = crate::jvm::member_spelling::SpellingPool::new();
+        let function = MetaFn::from_decoded(decoded, &spellings);
         assert_eq!(function.context_params().len(), 1);
         assert_eq!(function.context_params()[0].name, "ctx");
         assert_eq!(

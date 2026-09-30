@@ -1,6 +1,18 @@
 //! Kotlin class identity fields decoded from the class metadata protobuf.
 
 use super::*;
+use crate::libraries::TypeKind;
+
+/// Class kind stored in the metadata flags' three-bit kind field.
+pub(super) fn metadata_class_kind(flags: u64) -> TypeKind {
+    match (flags >> 6) & 0x7 {
+        1 => TypeKind::Interface,
+        2 => TypeKind::Enum,
+        4 => TypeKind::Annotation,
+        5 | 6 => TypeKind::Object,
+        _ => TypeKind::Class,
+    }
+}
 
 /// `Class.fq_name` (field 3) as a Kotlin qualified name. Metadata spells a class name with `/`
 /// between package segments and `.` between classes (`lib/Outer.Nested`); the qualified name dots

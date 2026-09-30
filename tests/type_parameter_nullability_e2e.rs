@@ -127,7 +127,7 @@ fn an_abstract_accessor_of_a_type_parameter_property_keeps_its_signature() {
             .methods
             .iter()
             .find(|method| method.name == name)
-            .map(|method| (method.descriptor.to_owned(), method.signature.clone()))
+            .map(|method| (method.descriptor.to_string(), method.signature.clone()))
     };
     for (name, descriptor, signature) in [
         ("getItem", "()Ljava/lang/Object;", "()TT;"),

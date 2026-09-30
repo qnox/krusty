@@ -83,7 +83,7 @@ fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
         .methods
         .iter()
         .filter(|method| method.name == "choose")
-        .map(|method| method.descriptor)
+        .map(|method| method.descriptor.as_ref())
         .collect::<Vec<_>>();
     descriptors.sort();
     assert_eq!(
@@ -146,7 +146,11 @@ fn a_class_carries_its_own_metadata_by_default() {
         .find(|(name, _)| name == "Point")
         .expect("krusty emits Point.class");
     let meta = parse_class(bytes).expect("Point.class parses").meta;
-    let functions: Vec<&str> = meta.class_functions.iter().map(|f| f.kotlin_name).collect();
+    let functions: Vec<&str> = meta
+        .class_functions
+        .iter()
+        .map(|f| f.kotlin_name.as_ref())
+        .collect();
     assert_eq!(
         functions,
         [
@@ -271,7 +275,8 @@ fn value_class_body_property_round_trips() {
         .iter()
         .find(|method| method.name.starts_with("getK-"))
         .expect("the value-class pass must realize the body property with its mangled getter")
-        .name;
+        .name
+        .as_ref();
     let described = info
         .meta
         .class_properties
@@ -279,7 +284,7 @@ fn value_class_body_property_round_trips() {
         .find(|p| p.name == "k")
         .expect("the record describes the property");
     assert_eq!(
-        described.getter.as_ref().map(|g| g.name.as_str()),
+        described.getter.as_ref().map(|g| g.name.as_ref()),
         Some(mangled),
         "the record must name the accessor the class file defines, not the plain convention",
     );
@@ -562,7 +567,11 @@ fn a_body_property_adds_no_component_or_copy_parameter() {
         .find(|(name, _)| name == "P")
         .expect("krusty emits P.class");
     let meta = parse_class(bytes).expect("P.class parses").meta;
-    let functions: Vec<&str> = meta.class_functions.iter().map(|f| f.kotlin_name).collect();
+    let functions: Vec<&str> = meta
+        .class_functions
+        .iter()
+        .map(|f| f.kotlin_name.as_ref())
+        .collect();
     assert_eq!(
         functions,
         ["component1", "copy", "equals", "hashCode", "toString"],

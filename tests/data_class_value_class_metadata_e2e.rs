@@ -71,7 +71,7 @@ fn repository_emission_binds_each_data_member_to_one_exact_jvm_realization() {
     assert_eq!(
         functions
             .iter()
-            .map(|function| function.kotlin_name)
+            .map(|function| function.kotlin_name.as_ref())
             .collect::<Vec<_>>(),
         [
             "component1",
@@ -96,7 +96,7 @@ fn repository_emission_binds_each_data_member_to_one_exact_jvm_realization() {
             panic!("one metadata declaration must own {source_name}: {exact:?}")
         };
         assert_ne!(function.jvm_name, function.kotlin_name);
-        assert_eq!(function.jvm_desc, Some(descriptor));
+        assert_eq!(function.jvm_desc.as_deref(), Some(descriptor));
         assert_eq!(
             class
                 .methods

@@ -8,8 +8,11 @@ mod class_identity;
 mod function;
 mod property_declarations;
 mod property_identity;
+mod standalone_metadata;
 mod string_table;
 mod value_parameter;
+
+pub use standalone_metadata::decode_metadata;
 
 pub use function::MetaFn;
 
@@ -29,6 +32,7 @@ use super::classfile::{
     ACC_PUBLIC, ACC_STATIC,
 };
 use super::classreader::ClassInfo;
+use super::member_spelling::SpellingPool;
 use super::names::method_descriptor;
 use crate::libraries::{GenericSig, ParamList, TypeKind};
 use crate::metadata::decode::{
@@ -1429,8 +1433,8 @@ pub struct MetaJvmFieldSig {
 #[derive(Clone, Debug)]
 pub struct MetaConstructor {
     pub params: ParamList,
-    pub jvm_name: &'static str,
-    pub jvm_desc: Option<&'static str>,
+    pub jvm_name: super::member_spelling::MemberSpelling,
+    pub jvm_desc: Option<super::member_spelling::MemberSpelling>,
     /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
     /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
     pub deprecated_hidden: bool,
@@ -1630,17 +1634,14 @@ struct MetaCtx<'a> {
     d2: &'a [String],
 }
 
-/// Decode a classfile's `@Metadata` into [`KotlinMeta`] — the ONE place the packed representation is
-/// read. `k` is the header kind: a synthetic class (`k = 3`) carries a lambda payload rather than a
-/// Class/Package message, while a multi-file facade (`k = 4`) lists its part class names in `d1`
-/// verbatim. Neither kind contributes declarations to the classpath semantic model.
-pub fn decode_metadata(
+pub(in crate::jvm) fn decode_metadata_with(
     d1: &[String],
     d2: &[String],
     k: Option<i32>,
     this_class: &str,
     package_name: Option<&str>,
     methods: &[super::classreader::MethodSig],
+    spellings: &SpellingPool,
 ) -> MetadataResult<KotlinMeta> {
     let package = package_name.map(|pn| pn.replace('.', "/"));
     if k == Some(3) {
@@ -1725,7 +1726,7 @@ pub fn decode_metadata(
     };
     let stamp_functions = |mut functions: Vec<MetaFn>| -> Vec<MetaFn> {
         for function in &mut functions {
-            if realization_hidden(&function.jvm_name, function.jvm_desc) {
+            if realization_hidden(&function.jvm_name, function.jvm_desc.as_deref()) {
                 function.flags = function.flags.with_deprecated_hidden(true);
             }
         }
@@ -1740,19 +1741,20 @@ pub fn decode_metadata(
         &class_tparams,
         &class_type_param_bounds,
         data_equality_bound,
+        spellings,
     )?)
     .into();
     // A package's field 5 is `Package.type_alias`, while a class's field 5 is
     // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over a
     // package would feed each complete TypeAlias message to the strict type-parameter decoder.
     let mut constructors = if k == Some(1) {
-        ctor_params(&ctx)?
+        ctor_params(&ctx, spellings)?
     } else {
         Vec::new()
     };
     for constructor in &mut constructors {
         constructor.deprecated_hidden =
-            realization_hidden(constructor.jvm_name, constructor.jvm_desc);
+            realization_hidden(&constructor.jvm_name, constructor.jvm_desc.as_deref());
     }
     let class_properties =
         decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds)?.into();
@@ -1760,7 +1762,7 @@ pub fn decode_metadata(
         class_visibility: class_flags
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
-        class_kind: class_flags.map(metadata_class_kind),
+        class_kind: class_flags.map(class_identity::metadata_class_kind),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
@@ -1769,7 +1771,8 @@ pub fn decode_metadata(
         ),
         class_supertypes,
         class_functions,
-        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?).into(),
+        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None, spellings)?)
+            .into(),
         class_properties,
         package_properties: decode_properties(&ctx, 4, &[], &[])?.into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
@@ -1785,16 +1788,6 @@ pub fn decode_metadata(
         multifile_parts: Vec::new(),
         package,
     })
-}
-
-fn metadata_class_kind(flags: u64) -> TypeKind {
-    match (flags >> 6) & 0x7 {
-        1 => TypeKind::Interface,
-        2 => TypeKind::Enum,
-        4 => TypeKind::Annotation,
-        5 | 6 => TypeKind::Object,
-        _ => TypeKind::Class,
-    }
 }
 
 /// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
@@ -2057,6 +2050,7 @@ fn decode_functions(
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
     data_equality_bound: Option<Ty>,
+    spellings: &SpellingPool,
 ) -> MetadataResult<Vec<MetaFn>> {
     let declared_classifier = |ty: Ty| match ty.non_null() {
         Ty::Obj(internal, _) => Some(internal),
@@ -2380,49 +2374,52 @@ fn decode_functions(
                         };
                         Some(method_descriptor(&physical_params, physical_ret))
                     });
-                    out.push(MetaFn::from_decoded(function::DecodedFunction {
-                        kotlin_name,
-                        jvm_name,
-                        jvm_desc: jvm_desc.map(super::member_spelling::intern_owned),
-                        visibility: pf.visibility,
-                        flags: MfnFlags::default()
-                            .with_is_inline(pf.is_inline)
-                            .with_is_suspend(pf.is_suspend)
-                            .with_is_abstract(pf.is_abstract)
-                            .with_is_final(pf.is_final)
-                            .with_is_extension(pf.has_receiver)
-                            .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
-                            .with_is_operator(pf.is_operator)
-                            .with_is_infix(pf.is_infix)
-                            .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
-                            .with_has_reified_type_params(
-                                pf.type_params.iter().any(|parameter| parameter.reified),
-                            ),
-                        receiver_class,
-                        ret_class,
-                        value_params,
-                        generic_sig,
-                        contract,
-                        equality_bound,
-                        return_value_status: pf.return_value_status,
-                        only_input_type_formals: pf
-                            .type_params
-                            .iter()
-                            .filter(|parameter| {
-                                annotation_names(&parameter.annotation_bodies, records, d2)
-                                    .iter()
-                                    .any(|annotation| {
-                                        annotation.matches("kotlin/internal/OnlyInputTypes")
-                                    })
-                            })
-                            .filter_map(|parameter| {
-                                resolve_string(records, d2, parameter.name_id as usize)
-                            })
-                            .collect(),
-                        context_params,
-                        context_parameter_kinds,
-                        annotations: annotation_names(&pf.annotation_bodies, records, d2),
-                    }));
+                    out.push(MetaFn::from_decoded(
+                        function::DecodedFunction {
+                            kotlin_name,
+                            jvm_name,
+                            jvm_desc,
+                            visibility: pf.visibility,
+                            flags: MfnFlags::default()
+                                .with_is_inline(pf.is_inline)
+                                .with_is_suspend(pf.is_suspend)
+                                .with_is_abstract(pf.is_abstract)
+                                .with_is_final(pf.is_final)
+                                .with_is_extension(pf.has_receiver)
+                                .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
+                                .with_is_operator(pf.is_operator)
+                                .with_is_infix(pf.is_infix)
+                                .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
+                                .with_has_reified_type_params(
+                                    pf.type_params.iter().any(|parameter| parameter.reified),
+                                ),
+                            receiver_class,
+                            ret_class,
+                            value_params,
+                            generic_sig,
+                            contract,
+                            equality_bound,
+                            return_value_status: pf.return_value_status,
+                            only_input_type_formals: pf
+                                .type_params
+                                .iter()
+                                .filter(|parameter| {
+                                    annotation_names(&parameter.annotation_bodies, records, d2)
+                                        .iter()
+                                        .any(|annotation| {
+                                            annotation.matches("kotlin/internal/OnlyInputTypes")
+                                        })
+                                })
+                                .filter_map(|parameter| {
+                                    resolve_string(records, d2, parameter.name_id as usize)
+                                })
+                                .collect(),
+                            context_params,
+                            context_parameter_kinds,
+                            annotations: annotation_names(&pf.annotation_bodies, records, d2),
+                        },
+                        spellings,
+                    ));
                 }
             }
             (_, w) => {
@@ -2789,7 +2786,7 @@ fn parse_type_alias_name(
 }
 
 /// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.
-fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
+fn ctor_params(ctx: &MetaCtx, spellings: &SpellingPool) -> MetadataResult<Vec<MetaConstructor>> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2920,10 +2917,10 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                 out.push(MetaConstructor {
                     params,
                     jvm_name: jvm_name.map_or_else(
-                        || super::member_spelling::intern("<init>"),
-                        super::member_spelling::intern_owned,
+                        || spellings.intern("<init>"),
+                        |name| spellings.intern_owned(name),
                     ),
-                    jvm_desc: jvm_desc.map(super::member_spelling::intern_owned),
+                    jvm_desc: jvm_desc.map(|descriptor| spellings.intern_owned(descriptor)),
                     deprecated_hidden: false,
                 });
             }
@@ -3671,6 +3668,7 @@ mod builtin_class_access_tests {
 
 #[cfg(test)]
 mod module_reader_tests {
+    use super::super::member_spelling::SpellingPool;
     use super::{
         builtin_bridge, decode_metadata_type, decode_properties, parse_function, parse_type_alias,
         parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
@@ -3892,8 +3890,8 @@ mod module_reader_tests {
             records: &[],
             d2: &d2,
         };
-        let decoded =
-            super::decode_functions(&ctx, 3, &[], &[], None).expect("function metadata decodes");
+        let decoded = super::decode_functions(&ctx, 3, &[], &[], None, &SpellingPool::new())
+            .expect("function metadata decodes");
         assert_eq!(decoded.len(), 1);
         let function = &decoded[0];
         assert!(function.is_extension());

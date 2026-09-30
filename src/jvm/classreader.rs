@@ -9,6 +9,8 @@
 use crate::kt_string::KtString;
 use crate::types::{TypeName, TypeNameList};
 
+use super::member_spelling::{MemberSpelling, SpellingPool};
+
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_PROTECTED: u16 = 0x0004;
@@ -29,11 +31,10 @@ pub enum JavaNullability {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
     pub access: u16,
-    /// JVM method name. Equal names share one interned spelling with every other classfile member
-    /// and with metadata method names.
-    pub name: &'static str,
-    /// JVM method descriptor. Equal descriptors share one interned spelling.
-    pub descriptor: &'static str,
+    /// JVM method name. Equal names in one catalog share one [`MemberSpelling`] handle.
+    pub name: MemberSpelling,
+    /// JVM method descriptor. Equal descriptors in one catalog share one [`MemberSpelling`] handle.
+    pub descriptor: MemberSpelling,
     /// The method's generic `Signature` attribute (JVM generics) if present, e.g. `listOf`'s
     /// `<T:Ljava/lang/Object;>([TT;)Ljava/util/List<TT;>;`. Carries the type parameters and how the
     /// parameter/return types use them — what the erased `descriptor` drops. `None` if non-generic.
@@ -89,10 +90,10 @@ impl MethodSig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldSig {
     pub access: u16,
-    /// JVM field name. Equal names share one interned spelling with method names.
-    pub name: &'static str,
-    /// JVM field descriptor. Equal descriptors share one interned spelling with method descriptors.
-    pub descriptor: &'static str,
+    /// JVM field name. Equal names in one catalog share one [`MemberSpelling`] handle.
+    pub name: MemberSpelling,
+    /// JVM field descriptor. Equal descriptors in one catalog share one [`MemberSpelling`] handle.
+    pub descriptor: MemberSpelling,
     /// The compile-time `ConstantValue` of a `static final` field, if present (e.g.
     /// `IntCompanionObject.MAX_VALUE` → `Int(2147483647)`). What kotlinc inlines at a use site.
     pub const_value: Option<ConstVal>,
@@ -774,6 +775,13 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
 }
 
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
+    parse_class_with(bytes, &SpellingPool::new())
+}
+
+pub(in crate::jvm) fn parse_class_with(
+    bytes: &[u8],
+    spellings: &SpellingPool,
+) -> Result<ClassInfo, ReadError> {
     let mut r = Reader { b: bytes, i: 0 };
     if r.u4()? != 0xCAFEBABE {
         return Err(ReadError::NotAClass);
@@ -837,8 +845,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| FieldSig {
             access: member.access,
-            name: super::member_spelling::intern_owned(member.name),
-            descriptor: super::member_spelling::intern_owned(member.descriptor),
+            name: spellings.intern_owned(member.name),
+            descriptor: spellings.intern_owned(member.descriptor),
             const_value: member.attributes.const_value,
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
@@ -848,8 +856,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .into_iter()
         .map(|member| MethodSig {
             access: member.access,
-            name: super::member_spelling::intern_owned(member.name),
-            descriptor: super::member_spelling::intern_owned(member.descriptor),
+            name: spellings.intern_owned(member.name),
+            descriptor: spellings.intern_owned(member.descriptor),
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
@@ -862,13 +870,14 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // (for an annotation class) its `@Retention` policy.
     let attrs = read_class_attrs(&mut r, &cp);
 
-    let meta = crate::jvm::metadata::decode_metadata(
+    let meta = crate::jvm::metadata::decode_metadata_with(
         &attrs.d1.unwrap_or_default(),
         &attrs.d2.unwrap_or_default(),
         attrs.k,
         &this_class,
         attrs.pn.as_deref(),
         &methods,
+        spellings,
     )
     .map_err(ReadError::BadKotlinMetadata)?;
     Ok(ClassInfo {
@@ -1791,27 +1800,34 @@ mod tests {
 
     #[test]
     fn repeated_member_spellings_share_one_interned_copy() {
+        let spellings = SpellingPool::new();
         let emit = |class_name: &str| {
             let mut writer = ClassWriter::new(class_name, "java/lang/Object");
             writer.add_field(super::ACC_PUBLIC, "value", "I");
             writer.add_abstract_method(super::ACC_PUBLIC | 0x0400, "value", "()I");
-            parse_class(&writer.finish()).expect("class parses")
+            parse_class_with(&writer.finish(), &spellings).expect("class parses")
         };
         let first = emit("demo/First");
         let second = emit("demo/Second");
-        assert!(std::ptr::eq(first.fields[0].name, second.fields[0].name));
-        assert!(std::ptr::eq(first.fields[0].name, first.methods[0].name));
-        assert!(std::ptr::eq(
-            first.fields[0].descriptor,
-            second.fields[0].descriptor
+        assert!(MemberSpelling::ptr_eq(
+            &first.fields[0].name,
+            &second.fields[0].name
         ));
-        assert!(std::ptr::eq(
-            first.methods[0].descriptor,
-            second.methods[0].descriptor
+        assert!(MemberSpelling::ptr_eq(
+            &first.fields[0].name,
+            &first.methods[0].name
         ));
-        assert!(!std::ptr::eq(
-            first.fields[0].descriptor,
-            first.methods[0].descriptor
+        assert!(MemberSpelling::ptr_eq(
+            &first.fields[0].descriptor,
+            &second.fields[0].descriptor
+        ));
+        assert!(MemberSpelling::ptr_eq(
+            &first.methods[0].descriptor,
+            &second.methods[0].descriptor
+        ));
+        assert!(!MemberSpelling::ptr_eq(
+            &first.fields[0].descriptor,
+            &first.methods[0].descriptor
         ));
     }
 }

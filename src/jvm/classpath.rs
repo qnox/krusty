@@ -885,18 +885,11 @@ fn global_ext_candidates(key: &[EntryKey]) -> ExtCandCache {
 /// means the stdlib jars' parses are shared across ALL of those, so each class is parsed once per
 /// process, period. `RwLock` because reads (cache hits) dominate; a per-class build lock coalesces
 /// concurrent cold misses without serializing reads of different classes.
+#[derive(Default)]
 struct ClassCacheData {
     classes: std::sync::RwLock<HashMap<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
     build_locks: std::sync::Mutex<HashMap<TypeName, std::sync::Arc<std::sync::Mutex<()>>>>,
-}
-
-impl Default for ClassCacheData {
-    fn default() -> Self {
-        ClassCacheData {
-            classes: std::sync::RwLock::new(HashMap::new()),
-            build_locks: std::sync::Mutex::new(HashMap::new()),
-        }
-    }
+    spellings: super::member_spelling::SpellingPool,
 }
 
 impl ClassCacheData {
@@ -2819,7 +2812,7 @@ impl Classpath {
             let Some(ci) = self.find_name(cn) else { break };
             for f in self.meta_functions_name(cn).iter() {
                 if f.jvm_desc.is_some() && f.ret_class.is_some() {
-                    names.insert(f.kotlin_name.to_owned());
+                    names.insert(f.kotlin_name.to_string());
                 }
             }
             cur = ci.super_class;
@@ -2890,8 +2883,8 @@ impl Classpath {
                 };
                 out.push(ExtCandidateRecord {
                     owner,
-                    name: m.name.to_owned(),
-                    descriptor: m.descriptor.to_owned(),
+                    name: m.name.to_string(),
+                    descriptor: m.descriptor.to_string(),
                     ret_desc,
                     signature: m.signature.clone(),
                     public: root_public && m.is_public(),
@@ -3934,7 +3927,7 @@ impl Classpath {
                 // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
                 // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
                 let Some(bytes) = bytes else { return Ok(None) };
-                let class = match parse_class(&bytes) {
+                let class = match super::classreader::parse_class_with(&bytes, &l2.spellings) {
                     Ok(class) => class,
                     Err(error @ ReadError::BadKotlinMetadata(_)) => return Err(error),
                     Err(_) => return Ok(None),
@@ -4308,7 +4301,7 @@ impl Classpath {
             if !f.is_inline() || f.jvm_name != name {
                 return false;
             }
-            if f.jvm_desc == Some(descriptor) {
+            if f.jvm_desc.as_deref() == Some(descriptor) {
                 return true;
             }
             if f.jvm_desc.is_some() {
@@ -4481,8 +4474,8 @@ impl Classpath {
                     // non-public inline implementation can only be spliced from the class that actually
                     // declares its bytecode, so retain the current superclass/part as its owner.
                     owner: if public { root } else { cn },
-                    name: m.name.to_owned(),
-                    descriptor: m.descriptor.to_owned(),
+                    name: m.name.to_string(),
+                    descriptor: m.descriptor.to_string(),
                     ret_desc,
                     signature: m.signature.clone(),
                     public,
@@ -4558,7 +4551,7 @@ impl Classpath {
                         metas
                             .iter()
                             .find(|metadata| metadata.jvm_name == jvm_name)
-                            .map(|metadata| metadata.kotlin_name.to_owned())
+                            .map(|metadata| metadata.kotlin_name.to_string())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
                     // — the scoped `find_extension_owners`. Recorded before `cand` is moved into the maps.
@@ -5646,8 +5639,8 @@ fn companion_owner_field_access(
     })?;
     Some(super::inline::PropertyAccess::Field {
         owner: outer,
-        name: field.name.to_owned(),
-        descriptor: field.descriptor.to_owned(),
+        name: field.name.to_string(),
+        descriptor: field.descriptor.to_string(),
         is_static: true,
     })
 }
@@ -5701,8 +5694,8 @@ fn class_property_write_access(
     let owner = ci.this_class;
     let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
         owner,
-        name: method.name.to_owned(),
-        descriptor: method.descriptor.to_owned(),
+        name: method.name.to_string(),
+        descriptor: method.descriptor.to_string(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
     };
@@ -5758,8 +5751,8 @@ fn class_property_write_access(
     })?;
     Some(PropertyAccess::Field {
         owner,
-        name: field.name.to_owned(),
-        descriptor: field.descriptor.to_owned(),
+        name: field.name.to_string(),
+        descriptor: field.descriptor.to_string(),
         is_static: field.access & super::classreader::ACC_STATIC != 0,
     })
 }
@@ -5776,8 +5769,8 @@ fn class_property_read_access(
     let owner = ci.this_class;
     let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
         owner,
-        name: method.name.to_owned(),
-        descriptor: method.descriptor.to_owned(),
+        name: method.name.to_string(),
+        descriptor: method.descriptor.to_string(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
     };
@@ -5835,8 +5828,8 @@ fn class_property_read_access(
         .find(|f| f.name == property && f.access & super::classreader::ACC_PUBLIC != 0)?;
     Some(PropertyAccess::Field {
         owner,
-        name: field.name.to_owned(),
-        descriptor: field.descriptor.to_owned(),
+        name: field.name.to_string(),
+        descriptor: field.descriptor.to_string(),
         is_static: field.access & super::classreader::ACC_STATIC != 0,
     })
 }

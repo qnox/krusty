@@ -191,6 +191,10 @@ review explanation tied to an active migration plan.
 - Never render for lookup, equality, prefix/suffix/segment inspection, map keys, or round-tripping
   back through `type_name()`. Add/use a `TypeName` or name-tree operation instead.
 - Likewise, do not intern arbitrary property/callable spellings merely to use a type-name API.
+- Arbitrary input-controlled source, dependency, and member spellings must not enter a process-global
+  `Box::leak` or `&'static` cache. Deduplicating that text needs an explicit reclaimable owner: a
+  classpath entry, a metadata catalog, or a request. A process-global map whose keys live for the
+  process does not qualify, including a weak-value map with owned keys.
 
 ## No fallback rule
 
@@ -227,6 +231,7 @@ rg -n 'resolve_|get_class|classpath|fallback|or_else' src/ir_lower.rs
 rg -n '#\[allow\(' src
 git diff --name-only origin/master... | rg '\.rs$' | xargs -r rg -n '#\[allow\('
 rg -n '\$iv|_u24' src/fir_lower
+rg -n 'Box::leak' src/jvm src/metadata
 rg --pcre2 -n -U '(front_end_diagnostics|compiler_diagnostics|krusty_(stderr|stdout|errors)|\bdiags?\b|\bdiagnostics\b)[\s\S]{0,240}(contains|starts_with|ends_with|\.(any|all|sort|sort_by|sort_by_key)\()' tests
 ```
 

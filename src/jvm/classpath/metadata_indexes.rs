@@ -83,8 +83,8 @@ fn collect_class_bytes(
         .filter(|method| method.is_static() && !method.name.starts_with('<'))
         .map(|method| {
             (
-                method.name.to_owned(),
-                method.descriptor.to_owned(),
+                method.name.to_string(),
+                method.descriptor.to_string(),
                 method.signature.clone(),
                 method.is_public(),
             )
@@ -97,9 +97,9 @@ fn collect_class_bytes(
         .chain(crate::jvm::metadata::class_functions(&class).iter())
     {
         if function.is_extension() {
-            ext_names.insert(function.jvm_name.to_owned());
+            ext_names.insert(function.jvm_name.to_string());
         } else {
-            toplevel_names.insert(function.jvm_name.to_owned());
+            toplevel_names.insert(function.jvm_name.to_string());
         }
     }
     all.insert(

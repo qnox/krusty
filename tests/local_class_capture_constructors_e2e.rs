@@ -445,7 +445,7 @@ fn a_captured_legacy_context_receiver_keeps_its_own_role() {
     let fields = class
         .fields
         .iter()
-        .map(|field| (field.name, field.descriptor))
+        .map(|field| (field.name.as_ref(), field.descriptor.as_ref()))
         .collect::<Vec<_>>();
     assert_eq!(fields, [("$$context_receiver_0", "LBox;")]);
 }

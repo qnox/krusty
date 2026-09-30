@@ -105,7 +105,7 @@ fn value_class_constructor_realization_name_round_trips() {
     assert_eq!(constructors[0].params.types, [Ty::String]);
     assert_eq!(constructors[0].jvm_name, "constructor-impl");
     assert_eq!(
-        constructors[0].jvm_desc,
+        constructors[0].jvm_desc.as_deref(),
         Some("(Ljava/lang/String;)Ljava/lang/String;")
     );
 }

@@ -56,15 +56,15 @@ fn declarations(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
     let class = parse_class(bytes).expect("a parseable class");
     let fields = class.fields.into_iter().map(|field| {
         (
-            field.name.to_owned(),
-            field.descriptor.to_owned(),
+            field.name.to_string(),
+            field.descriptor.to_string(),
             field.signature,
         )
     });
     let methods = class.methods.into_iter().map(|method| {
         (
-            method.name.to_owned(),
-            method.descriptor.to_owned(),
+            method.name.to_string(),
+            method.descriptor.to_string(),
             method.signature,
         )
     });

@@ -2504,8 +2504,8 @@ struct ConstructorMetadataShape {
     names: Vec<String>,
     defaults: Vec<bool>,
     types: Vec<Ty>,
-    jvm_name: &'static str,
-    jvm_descriptor: Option<&'static str>,
+    jvm_name: String,
+    jvm_descriptor: Option<String>,
 }
 
 fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataShape> {
@@ -2520,8 +2520,8 @@ fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataSh
             names: constructor.params.names.clone(),
             defaults: constructor.params.defaults.clone(),
             types: constructor.params.types.clone(),
-            jvm_name: constructor.jvm_name,
-            jvm_descriptor: constructor.jvm_desc,
+            jvm_name: constructor.jvm_name.to_string(),
+            jvm_descriptor: constructor.jvm_desc.as_ref().map(ToString::to_string),
         })
         .collect()
 }
@@ -2549,8 +2549,8 @@ fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
             names: vec!["x".to_string(), "y".to_string()],
             defaults: vec![false, false],
             types: vec![Ty::Int, Ty::String],
-            jvm_name: "<init>",
-            jvm_descriptor: Some("(ILjava/lang/String;)V"),
+            jvm_name: "<init>".to_string(),
+            jvm_descriptor: Some("(ILjava/lang/String;)V".to_string()),
         },
         ConstructorMetadataShape {
             visibility: krusty::types::Visibility::Internal,
@@ -2569,9 +2569,10 @@ fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
                     "kotlinx/serialization/internal/SerializationConstructorMarker",
                 )),
             ],
-            jvm_name: "<init>",
+            jvm_name: "<init>".to_string(),
             jvm_descriptor: Some(
-                "(IILjava/lang/String;Lkotlinx/serialization/internal/SerializationConstructorMarker;)V",
+                "(IILjava/lang/String;Lkotlinx/serialization/internal/SerializationConstructorMarker;)V"
+                    .to_string(),
             ),
         },
     ];

@@ -143,7 +143,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
                 .any(|function| {
                     function.kotlin_name == "load"
                         && function.jvm_name == candidate.name
-                        && function.jvm_desc == Some(candidate.descriptor.as_str())
+                        && function.jvm_desc.as_deref() == Some(candidate.descriptor.as_str())
                         && function.is_suspend()
                 })
         }),
