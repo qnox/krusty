@@ -251,6 +251,42 @@ pub(super) fn constructor_inference_signature(
     }
 }
 
+impl JvmLibraries {
+    /// Publish a Java method's `Signature` attribute: parameter and return nullability, then the
+    /// constructor's class type parameters when `constructor` is set. The caller decides
+    /// `<init>` at this provider boundary.
+    pub(super) fn publish_java_member_generic_signature(
+        &self,
+        signature: Option<&str>,
+        parameter_nullability: &[Option<JavaNullability>],
+        return_nullability: Option<JavaNullability>,
+        constructor: Option<(Option<&str>, TypeName, &str)>,
+    ) -> Option<GenericSig> {
+        let mut generic = signature
+            .and_then(parse_method_gsig)
+            .map(|signature| self.semanticize_jvm_generic_sig(signature))?;
+        for (index, parameter) in generic.params.iter_mut().enumerate() {
+            *parameter = java_type_nullability(
+                *parameter,
+                parameter_nullability.get(index).copied().flatten(),
+            );
+        }
+        generic.ret = java_type_nullability(
+            java_collection_return_lower_bound(generic.ret),
+            return_nullability,
+        );
+        if let Some((class_signature, owner, descriptor)) = constructor {
+            generic = self.semanticize_jvm_generic_sig(constructor_inference_signature(
+                class_signature,
+                owner,
+                descriptor,
+                generic,
+            ));
+        }
+        Some(generic)
+    }
+}
+
 #[cfg(test)]
 mod constructor_inference_signature_tests {
     use super::*;
