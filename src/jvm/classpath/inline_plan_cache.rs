@@ -734,7 +734,6 @@ mod tests {
                 owner,
                 name,
                 body_descriptor: "()V",
-                parameter_slots: &[0],
                 physical_parameters: &[Ty::String],
                 context_count: 0,
                 source_receiver: None,
