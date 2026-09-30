@@ -85,6 +85,7 @@ mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
 mod non_null_operands;
+mod nullable_sam;
 mod numeric_comparison;
 mod object_static_initialization;
 mod operand_representation;
@@ -10805,22 +10806,13 @@ impl<'a> Emitter<'a> {
                         let target = self.cw.class_ref(&iface);
                         code.checkcast(target);
                     } else {
-                        let class_index = self.cw.class_ref(&internal);
-                        code.new_obj(class_index);
-                        code.dup();
-                        for &c in captures {
-                            self.emit_value(c, code);
-                        }
-                        let cap_descs: String =
-                            cap_tys.iter().map(|t| type_descriptor(*t)).collect();
-                        let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                        let ctor =
-                            self.cw
-                                .methodref(&internal, "<init>", &format!("({cap_descs})V"));
-                        // `arg_words` excludes the receiver, which `invokespecial` accounts for
-                        // itself; counting it here leaves the constructed lambda invisible to
-                        // `max_stack` for the rest of the enclosing method.
-                        code.invokespecial(ctor, cap_words, 0);
+                        self.emit_capturing_lambda_class(
+                            code,
+                            &internal,
+                            captures,
+                            cap_tys,
+                            sam.as_ref().is_some_and(|target| target.nullable),
+                        );
                     }
                     return;
                 }
@@ -10848,10 +10840,13 @@ impl<'a> Emitter<'a> {
                     self.cw
                         .invoke_dynamic(bsm, &sam_method, &format!("({cap_descs})L{iface};"));
                 let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                for &c in captures {
-                    self.emit_value(c, code);
-                }
-                code.invokedynamic(indy, cap_words, 1);
+                self.emit_indy_lambda(
+                    code,
+                    indy,
+                    cap_words,
+                    captures,
+                    sam.as_ref().is_some_and(|target| target.nullable),
+                );
             }
             IrExpr::UnitInstance => {
                 let f = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");

@@ -10433,6 +10433,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot that must still box), corpus `inlineClasses/funInterface/{argumentResult,returnResult}.kt`,
   `inlineClasses/kt44141.kt`.
 
+- **A nullable function value converted to a nullable fun interface stays null.** Adapting
+  `(() -> Unit)?` to `KRunnable?` wraps only a non-null function. `null` remains `null`; wrapping it
+  would produce a non-null SAM whose method throws. The checker records that on the conversion from
+  the argument's semantic type (`FirSamConversion.nullable`). Lowering copies it onto the
+  function-value adapter (`IrSamTarget.nullable`); a lambda literal is a fresh object, so its target
+  stays non-null. Emission branches around the adapter. `invokedynamic` duplicates the function and
+  skips the call site when it is null. The class strategy parks the function in a local first: `new`
+  cannot both test that value and pass it to `<init>` without a temporary. A non-null function and a
+  lambda literal still become the interface. Test: `tests/nullable_sam_e2e.rs`. Corpus
+  `funInterface/nullableSam.kt`.
+
 - **A `Nothing`-bodied lambda materializes as an ordinary closure.** A lambda whose body diverges is
   typed `-> Nothing`, and krusty skipped the whole file on one that did NOT diverge through a bare
   non-local `return` — which is what made `runCatching { throw … }` uncompilable. Nothing about the

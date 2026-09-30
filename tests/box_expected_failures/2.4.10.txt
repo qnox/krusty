@@ -79,7 +79,6 @@ funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
 funInterface/noConversionForSubtype.kt
 funInterface/noConversionForSubtypeGeneric.kt
-funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
