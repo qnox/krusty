@@ -20,6 +20,9 @@ use crate::libraries::{
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
 use crate::spelling::Spelled;
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
+// The compilation-scoped supertype cache is a resolver fact. The driver and the frontend
+// facade enter it through this name so they stay on the resolve contract.
+pub(crate) use crate::symbol_resolver::SupertypeProjectionCache;
 use crate::symbol_source::{CachedCompositeSource, SymbolQueryCache, SymbolSource};
 use crate::type_engine::{DeclKey, DeclineReason, Resolution, TypeEngine};
 use crate::types::{

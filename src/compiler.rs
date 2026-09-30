@@ -25,7 +25,7 @@ pub fn emit_analyzed<B: Backend>(
     module_name: &str,
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
-    let _supertype_projection = crate::symbol_resolver::SupertypeProjectionCache::enter();
+    let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let StreamingSourceSetAnalysis {
         symbols,
         reparse_sources,

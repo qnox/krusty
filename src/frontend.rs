@@ -1352,7 +1352,7 @@ where
     }
     // Signatures are finalized above. Remember applied supertypes until this compilation's
     // checking and inline preparation finish; the next source set must not see them.
-    let _supertype_projection = crate::symbol_resolver::SupertypeProjectionCache::enter();
+    let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let (types, streamed) = if retain_inspection_analysis {
         // Successful finalization and diagnostic recovery both publish the same stable declaration
         // inventory. Recovery merely lacks signatures for declarations that failed to finalize;
