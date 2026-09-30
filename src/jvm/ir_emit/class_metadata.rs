@@ -148,11 +148,12 @@ pub(super) fn build_class_metadata(
         .copied()
         .filter(|&fid| {
             // A physical class method is not necessarily a Kotlin declaration. Lifted local
-            // functions and interface-delegation forwarders are implementation methods and have
-            // no Function entry in class metadata. Common lowering publishes the exact source
-            // callable -> function edge, so metadata consumes that identity instead of inferring
+            // functions are implementation methods and have no Function entry. An `interface by`
+            // forwarder is a Kotlin function (member kind DELEGATION); its identity is the
+            // override edge's implementation function, not a source callable. Property forwarders
+            // stay Property records. Metadata consumes those identities instead of inferring
             // declaration status from a name, descriptor, or parameter spelling.
-            if !source_callable_fids.contains(&fid) {
+            if !source_callable_fids.contains(&fid) && !ir.is_interface_delegation_function(fid) {
                 return false;
             }
             if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {

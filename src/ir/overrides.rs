@@ -68,6 +68,21 @@ impl IrFunctionOverride {
     }
 }
 
+impl IrFile {
+    /// Whether `function` is the common-IR body of an `interface by` forwarder.
+    ///
+    /// Source overrides leave [`IrFunctionOverride::implementation_function`] empty and keep their
+    /// callable identity. Only a delegation forwarder fills it, and that edge is what class
+    /// metadata publishes as a `Function` with member kind DELEGATION. Property forwarders use
+    /// [`super::IrPropertyOverride`] and stay property records.
+    pub(crate) fn is_interface_delegation_function(&self, function: FunId) -> bool {
+        self.function_overrides
+            .values()
+            .flatten()
+            .any(|edge| edge.implementation_function == Some(function))
+    }
+}
+
 /// Kotlin's primitive types: a non-null built-in scalar, never an unsigned type, a nullable one or
 /// a type parameter.
 pub fn is_kotlin_primitive(ty: Ty) -> bool {

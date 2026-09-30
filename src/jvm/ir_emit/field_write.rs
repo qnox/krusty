@@ -8,6 +8,22 @@ use crate::ir::{ClassId, IrBinOp, IrExpr};
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
+fn constructor_initializer_store_line(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    index: u32,
+) -> Option<u32> {
+    let class_decl = ir.classes.get(class as usize)?;
+    let field = class_decl.fields.get(index as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
+    ir.prop_decl_lines
+        .get(&(class_decl.fq_name_id(), field.name.clone()))
+        .copied()
+        .filter(|line| *line != 0)
+}
+
 impl Emitter<'_> {
     pub(super) fn emit_set_field(
         &mut self,
@@ -22,6 +38,10 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             return;
         }
+        let initializer_line = self
+            .in_constructor_initializer
+            .then(|| constructor_initializer_store_line(self.ir, class, index))
+            .flatten();
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let name = instance_field_jvm_name(self.ir, class_decl, field);
@@ -58,6 +78,9 @@ impl Emitter<'_> {
                 self.emit_value(value, code);
             }
             return;
+        }
+        if let Some(line) = initializer_line {
+            code.mark_line(line);
         }
         // Receiver, then value, as Kotlin evaluates them. A value that cannot carry the operand
         // stack has both evaluated into temporaries in that order and reloaded; every other value,

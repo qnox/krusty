@@ -491,6 +491,9 @@ struct BodyFirChecker<'a> {
     /// Constructor delegation and constructor-owned defaults execute before local-class capture
     /// fields are readable from `this`; capture accesses in those regions use prefix parameters.
     constructor_prefix_capture_access: bool,
+    /// A hoisted anonymous-object super-constructor argument is evaluated in the enclosing scope.
+    /// Capture-field lowerings recorded for the anonymous constructor do not exist there.
+    hoist_anonymous_super_argument: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -980,6 +983,7 @@ impl BodyFirChecker<'_> {
             owned_receiver_count: u32::from(has_dispatch_receiver),
             outer_receiver_frames: Vec::new(),
             constructor_prefix_capture_access: false,
+            hoist_anonymous_super_argument: false,
         }
     }
 
@@ -1867,8 +1871,11 @@ impl BodyFirChecker<'_> {
                             target,
                             dispatch_receiver,
                         }
-                    } else if let Some(ExprLowering::ClassStorageRead { field }) =
-                        self.info.expr_lowers.get(&expression)
+                    } else if let Some(ExprLowering::ClassStorageRead { field }) = self
+                        .info
+                        .expr_lowers
+                        .get(&expression)
+                        .filter(|_| !self.hoist_anonymous_super_argument)
                     {
                         match self.class_values.get(name).copied() {
                             Some(binding) => {

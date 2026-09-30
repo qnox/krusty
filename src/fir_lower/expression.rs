@@ -400,6 +400,7 @@ impl BodyLowering<'_> {
                                     is_vararg: false,
                                     type_param: None,
                                     check: None,
+                                    anonymous_super_forward: None,
                                     capture: None,
                                 }),
                         );
@@ -409,16 +410,114 @@ impl BodyLowering<'_> {
                         .ok_or(FirLoweringFailure::ValueIdentityOverflow)?;
                 }
                 arguments.extend(delegate_parameters);
-                let (arguments, parameter_types): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
-                self.ir.add_expr(IrExpr::New {
+                let mut lowered_forwards = Vec::with_capacity(object.super_arguments.len());
+                for argument in &object.super_arguments {
+                    let ty = self
+                        .body
+                        .expr(argument.value)
+                        .ok_or(FirLoweringFailure::MissingExpression(argument.value))?
+                        .ty
+                        .get();
+                    let value = self.expression(argument.value)?;
+                    lowered_forwards.push((
+                        argument.slot,
+                        argument.type_operator_shells,
+                        value,
+                        ty,
+                    ));
+                }
+                let mut prelude = Vec::new();
+                let mut forwarded_temporaries = std::collections::HashMap::new();
+                for argument in &object.super_arguments {
+                    if forwarded_temporaries.contains_key(&argument.slot) {
+                        continue;
+                    }
+                    let Some((_, _, value, ty)) = lowered_forwards
+                        .iter()
+                        .find(|(slot, _, _, _)| *slot == argument.slot)
+                    else {
+                        continue;
+                    };
+                    let temporary = self.allocate_temporary();
+                    prelude.push(self.ir.add_expr(IrExpr::Variable {
+                        index: temporary,
+                        ty: *ty,
+                        init: Some(*value),
+                        named: false,
+                    }));
+                    forwarded_temporaries.insert(argument.slot, temporary);
+                }
+                lowered_forwards.sort_by_key(|(slot, _, _, _)| *slot);
+                if !lowered_forwards.is_empty() {
+                    let class = self
+                        .ir
+                        .checked_classifier_classes
+                        .get(&object.declaration)
+                        .copied()
+                        .ok_or(FirLoweringFailure::MissingLocalClass(object.declaration))?;
+                    let start = u32::try_from(self.ir.classes[class as usize].ctor_args.len())
+                        .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?;
+                    for (offset, (slot, shells, _, ty)) in lowered_forwards.iter().enumerate() {
+                        let parameter = start
+                            .checked_add(u32::try_from(offset).unwrap_or(u32::MAX))
+                            .ok_or(FirLoweringFailure::ValueIdentityOverflow)?;
+                        self.ir
+                            .anonymous_super_forwards
+                            .insert((object.declaration, *slot), (parameter, *shells));
+                        self.ir.classes[class as usize]
+                            .ctor_args
+                            .push(crate::ir::IrCtorArg {
+                                name: None,
+                                context_kind: crate::types::ContextParameterKind::None,
+                                ty: *ty,
+                                declared_ty: None,
+                                is_field: false,
+                                field_index: None,
+                                has_default: false,
+                                is_vararg: false,
+                                type_param: None,
+                                check: None,
+                                anonymous_super_forward: u32::try_from(offset)
+                                    .ok()
+                                    .map(|ordinal| ordinal + 1),
+                                capture: None,
+                            });
+                    }
+                    let class = &mut self.ir.classes[class as usize];
+                    class.constructor_prefix_count = class
+                        .constructor_prefix_count
+                        .checked_add(lowered_forwards.len() as u32)
+                        .ok_or(FirLoweringFailure::ValueIdentityOverflow)?;
+                }
+                let mut new_arguments =
+                    Vec::with_capacity(arguments.len() + lowered_forwards.len());
+                let mut parameter_types = Vec::with_capacity(new_arguments.capacity());
+                for (value, ty) in arguments {
+                    new_arguments.push(value);
+                    parameter_types.push(ty);
+                }
+                for (slot, _, _, ty) in &lowered_forwards {
+                    let temporary = forwarded_temporaries[slot];
+                    new_arguments.push(self.ir.add_expr(IrExpr::GetValue(temporary)));
+                    parameter_types.push(*ty);
+                }
+                let construction = self.ir.add_expr(IrExpr::New {
                     internal: classifier,
-                    args: arguments,
+                    args: new_arguments,
                     ctor_params: Some(parameter_types),
                     ctor_desc: None,
                     external_target: None,
                     defaults: Box::new([]),
                     default_prefix_count: 0,
-                })
+                });
+                if prelude.is_empty() {
+                    construction
+                } else {
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: prelude,
+                        value: Some(construction),
+                    })
+                }
             }
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self.checked_call(call)?;

@@ -195,7 +195,40 @@ pub(super) fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Ve
     let Decl::Class(class) = file.decl(declaration) else {
         return Vec::new();
     };
-    class_capture_expressions(class)
+    // A non-constant super-constructor argument is evaluated at the construction site and forwarded.
+    // Only the bare name that stays in the anonymous constructor (after a cast or not-null assertion)
+    // is a use of this class. Names inside the forwarded expression are uses of the caller.
+    let forwarded = class
+        .base_args
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut expressions = class_capture_expressions(class)
+        .into_iter()
+        .filter(|expression| !forwarded.contains(expression))
+        .collect::<Vec<_>>();
+    for argument in &class.base_args {
+        if let Some(observed) = anonymous_super_argument_constructor_use(file, *argument) {
+            expressions.push(observed);
+        }
+    }
+    expressions
+}
+
+/// The subexpression of an anonymous super-constructor argument that the anonymous constructor
+/// itself still evaluates. A bare name stays. A larger expression is forwarded from the
+/// construction site, so names inside it are not uses of the anonymous class.
+pub(super) fn anonymous_super_argument_constructor_use(
+    file: &File,
+    mut expression: ExprId,
+) -> Option<ExprId> {
+    loop {
+        match file.expr(expression) {
+            Expr::As { operand, .. } | Expr::NotNull { operand } => expression = *operand,
+            Expr::Name(_) => return Some(expression),
+            _ => return None,
+        }
+    }
 }
 
 pub(super) fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {

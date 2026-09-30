@@ -822,11 +822,22 @@ pub struct FirInterfaceDelegateArgument {
     pub value: FirExprId,
 }
 
+/// One anonymous-object super-constructor argument evaluated at the construction site and forwarded
+/// through a synthetic constructor parameter. `type_operator_shells` is the number of source casts
+/// and not-null assertions that stay inside the anonymous constructor around that value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirAnonymousSuperArgument {
+    pub slot: u32,
+    pub value: FirExprId,
+    pub type_operator_shells: u8,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirAnonymousObject {
     pub declaration: DeclarationId,
     pub captures: Box<[FirLocalClassCapture]>,
     pub delegate_arguments: Box<[FirInterfaceDelegateArgument]>,
+    pub super_arguments: Box<[FirAnonymousSuperArgument]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1589,6 +1600,8 @@ impl FirExprKind {
                         .sum::<usize>()
                     + object.delegate_arguments.len()
                         * std::mem::size_of::<FirInterfaceDelegateArgument>()
+                    + object.super_arguments.len()
+                        * std::mem::size_of::<FirAnonymousSuperArgument>()
             }
             FirExprKind::LocalCall { arguments, .. } => {
                 arguments.len() * std::mem::size_of::<FirCallArgument>()

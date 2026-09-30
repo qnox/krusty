@@ -1,6 +1,8 @@
 //! Checked local-class declaration and lexical-capture identities.
 
 use super::*;
+use crate::ast::DeclId;
+use crate::fir::FirAnonymousSuperArgument;
 use crate::resolve::AnonymousObjectCaptureSource;
 
 #[derive(Clone, Copy)]
@@ -1257,11 +1259,88 @@ impl BodyFirChecker<'_> {
                 value: self.value_at_selected_boundary(delegation.value, resolved.interface)?,
             });
         }
+        let super_arguments = self.anonymous_super_arguments(transient, class, &captures)?;
         Ok(FirExprKind::AnonymousObject(FirAnonymousObject {
             declaration,
             captures,
             delegate_arguments: delegate_arguments.into_boxed_slice(),
+            super_arguments,
         }))
+    }
+
+    /// Non-constant, non-capture super-constructor arguments of an anonymous object are evaluated
+    /// at the construction site. Constants and lexical captures stay in the anonymous constructor,
+    /// and a cast or not-null assertion of either stays with them. A cast of anything else stays
+    /// in the constructor around the forwarded operand.
+    fn anonymous_super_arguments(
+        &mut self,
+        transient: DeclId,
+        class: &crate::ast::ClassDecl,
+        captures: &[FirLocalClassCapture],
+    ) -> Result<Box<[FirAnonymousSuperArgument]>, BodyCheckFailure> {
+        let delegation = self
+            .info
+            .resolved_primary_ctor_delegations
+            .get(&transient)
+            .map(|resolved| {
+                (
+                    resolved.argument_slots.clone(),
+                    resolved.argument_types.clone(),
+                    resolved.vararg,
+                )
+            });
+        let mut forwards = Vec::new();
+        for (index, argument) in class.base_args.iter().copied().enumerate() {
+            let (core, shells) = peel_super_type_operators(self.file, argument);
+            if anonymous_super_core_stays(self.file, self.info, core, |name| {
+                captures
+                    .iter()
+                    .any(|capture| capture.receiver.is_none() && capture.name.as_ref() == name)
+            }) {
+                continue;
+            }
+            let slot = delegation
+                .as_ref()
+                .and_then(|(slots, _, _)| slots.get(index).copied())
+                .unwrap_or(index);
+            if delegation
+                .as_ref()
+                .is_some_and(|(_, _, vararg)| *vararg == Some(slot))
+            {
+                continue;
+            }
+            let slot = u32::try_from(slot).map_err(|_| {
+                self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
+            })?;
+            let previous = self.hoist_anonymous_super_argument;
+            self.hoist_anonymous_super_argument = true;
+            let value = if shells == 0 {
+                if let Some(expected) = delegation
+                    .as_ref()
+                    .and_then(|(_, types, _)| types.get(index).copied())
+                {
+                    let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
+                        self.failure(
+                            self.file.expr_span(argument),
+                            BodyCheckFailureKind::UnpublishableType(error),
+                        )
+                    })?;
+                    self.value_at_selected_boundary(argument, target)
+                } else {
+                    self.expression(argument)
+                }
+            } else {
+                self.expression(core)
+            };
+            self.hoist_anonymous_super_argument = previous;
+            let value = value?;
+            forwards.push(FirAnonymousSuperArgument {
+                slot,
+                value,
+                type_operator_shells: shells,
+            });
+        }
+        Ok(forwards.into_boxed_slice())
     }
 
     pub(super) fn local_class_enclosing_receiver(
@@ -1423,4 +1502,54 @@ impl BodyFirChecker<'_> {
             },
         }))
     }
+}
+
+pub(super) fn peel_super_type_operators(
+    file: &crate::ast::File,
+    mut expression: crate::ast::ExprId,
+) -> (crate::ast::ExprId, u8) {
+    let mut shells = 0u8;
+    loop {
+        match file.expr(expression) {
+            crate::ast::Expr::As { operand, .. } | crate::ast::Expr::NotNull { operand } => {
+                expression = *operand;
+                shells = shells.saturating_add(1);
+            }
+            _ => return (expression, shells),
+        }
+    }
+}
+
+/// A constant, or a bare name of a value already captured by the anonymous object, is evaluated
+/// inside the anonymous constructor. Everything else is evaluated at the construction site.
+pub(super) fn anonymous_super_core_stays(
+    file: &crate::ast::File,
+    info: &crate::resolve::TypeInfo,
+    expression: crate::ast::ExprId,
+    is_lexical_capture: impl Fn(&str) -> bool,
+) -> bool {
+    let ty = info
+        .expr_types
+        .get(expression.0 as usize)
+        .copied()
+        .unwrap_or(crate::types::Ty::Error);
+    if crate::resolve::checked_constant_expression(
+        crate::resolve::CheckedConstantExpression {
+            file,
+            expression_types: &info.expr_types,
+            resolved_constants: &info.resolved_constants,
+            resolved_calls: &info.resolved_calls,
+            resolved_operator_calls: &info.resolved_operator_calls,
+        },
+        expression,
+        ty,
+    )
+    .is_some()
+    {
+        return true;
+    }
+    let crate::ast::Expr::Name(name) = file.expr(expression) else {
+        return false;
+    };
+    is_lexical_capture(name.as_str())
 }

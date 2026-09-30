@@ -21,12 +21,48 @@ impl Emitter<'_> {
         self.link_safe_call_chain(block, code);
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
+        let boundary = self.constructor_initializer_block_lines(block);
+        if let Some((start, _)) = boundary {
+            code.mark_line(start);
+            code.nop();
+        }
         self.emit_open_block(stmts, value, terminal_target, code);
         if !self.ir.callable_scopes.contains(&block) {
-            self.close_scope_locals(code);
+            self.close_scope_locals(code, boundary.is_some());
+        }
+        if let Some((_, end)) = boundary {
+            code.mark_line(end);
+            code.nop();
         }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
+    }
+
+    /// The `init` keyword line and the block's closing brace, when this block is that initializer.
+    fn constructor_initializer_block_lines(&self, block: u32) -> Option<(u32, u32)> {
+        if !self.in_constructor_initializer {
+            return None;
+        }
+        let start = self
+            .ir
+            .expr_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)
+            .or_else(|| {
+                self.ir
+                    .expr_source_lines
+                    .get(&block)
+                    .copied()
+                    .filter(|line| *line != 0)
+            })?;
+        let end = self
+            .ir
+            .expr_end_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)?;
+        Some((start, end))
     }
 
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
@@ -80,8 +116,12 @@ impl Emitter<'_> {
     }
 
     /// Close source-local debug ranges declared in the current nested block.
-    pub(super) fn close_scope_locals(&mut self, code: &mut CodeBuilder) {
-        if self.block_depth <= 1 {
+    ///
+    /// A callable body stays open through its return, so depth 1 is left alone. An `init` block
+    /// is itself that depth when it is the constructor's initializer, and its locals still end at
+    /// the block: `force` closes them there.
+    pub(super) fn close_scope_locals(&mut self, code: &mut CodeBuilder, force: bool) {
+        if !force && self.block_depth <= 1 {
             return;
         }
         let end = code.bytes.len().min(u16::MAX as usize) as u16;

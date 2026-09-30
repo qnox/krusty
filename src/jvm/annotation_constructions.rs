@@ -151,6 +151,7 @@ fn annotation_implementation(
                 is_vararg: false,
                 type_param: None,
                 check: None,
+                anonymous_super_forward: None,
                 capture: None,
             })
             .collect(),

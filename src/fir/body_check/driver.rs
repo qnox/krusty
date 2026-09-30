@@ -162,6 +162,7 @@ fn class_initialization_parameters<'a>(
     class
         .props
         .iter()
+        .filter(|parameter| !parameter.is_property)
         .map(|parameter| {
             let ty = info
                 .resolved_type(&parameter.ty)
@@ -649,10 +650,10 @@ fn check_and_dispatch_property_body(
             context_kind: parameter.context_kind,
         })
         .collect::<Vec<_>>();
-    // A member property initializer or delegate expression runs inside the constructor, where the primary-constructor
-    // parameters are ordinary locals — that is exactly how the checker types them
-    // (`class A(val y: Int) { var x = y }` reads `y` with `origin = Local`). The body unit therefore
-    // has to carry them, or the checked body has no binding for a name the checker resolved.
+    // A member property initializer or delegate expression runs after constructor properties are
+    // stored. A plain primary-constructor parameter is still a local (`class A(n: Int) { val x = n }`).
+    // A constructor property is the property (`class A(val y: Int) { var x = y }`), so it is not bound
+    // again as a local — a local would hide the property read the checker recorded.
     if matches!(work.kind, BodyKind::Initializer | BodyKind::Delegate) {
         if let Some(class) = index
             .declaration_anchor(property_declaration)

@@ -283,6 +283,7 @@ impl BodyFirChecker<'_> {
             // bound at the construction site, before the instance exists. The prefix rule therefore
             // follows the lambda in, and the capture it needs is carried in as a capture parameter.
             constructor_prefix_capture_access: self.constructor_prefix_capture_access,
+            hoist_anonymous_super_argument: self.hoist_anonymous_super_argument,
         };
         for (name, ty) in context_parameter_names
             .iter()

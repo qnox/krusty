@@ -363,6 +363,11 @@ pub(super) fn constructor_local_variables(
                 .map(capture_parameter_local)
                 .or(anonymous)
                 .or_else(|| local_variable(identity, "<init>"))
+                .or_else(|| {
+                    argument
+                        .anonymous_super_forward
+                        .map(|ordinal| format!("$super_call_param${ordinal}"))
+                })
         })
         .collect()
 }

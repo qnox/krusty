@@ -1520,6 +1520,7 @@ impl IrPlugin for SerializationPlugin {
                     is_vararg: false,
                     type_param: None,
                     check: None,
+                    anonymous_super_forward: None,
                     capture: None,
                 })
                 .collect();

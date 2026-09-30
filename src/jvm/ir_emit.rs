@@ -975,6 +975,7 @@ fn attach_synth_debug_tables(
     // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
     // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
     ctor_lines: &[(u16, u32)],
+    init_locals: &[(u16, u16, u16, String, String)],
 ) {
     let line = c.decl_line;
     if line == 0 {
@@ -1036,12 +1037,14 @@ fn attach_synth_debug_tables(
         c.decl_start_line
     };
     if let Some((ctor_desc, ctor_pc)) = primary_ctor_debug {
+        cw.reserve_ranged_local_names(init_locals);
         cw.set_method_debug(
             "<init>",
             ctor_desc,
             Some((ctor_pc, ctor_start_line)),
             &ctor_locals,
         );
+        cw.prepend_ranged_locals("<init>", ctor_desc, init_locals);
         if !ctor_lines.is_empty() {
             let mut entries = vec![(ctor_pc, ctor_start_line)];
             entries.extend_from_slice(ctor_lines);
@@ -3567,6 +3570,9 @@ fn emit_class(
     // `(start_pc, line)` for the ctor's LineNumberTable — one per body-property initializer, plus the
     // trailing `return`. Empty when the class has no body properties (kotlinc emits a single entry).
     let mut ctor_lines: Vec<(u16, u32)> = Vec::new();
+    // `init`-block locals, with the ranges emission recorded. Empty ranges stay until the method
+    // is written so an unused local's store is not removed as a temporary.
+    let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
     let mut primary_ctor_debug = None;
     let param_tys = class_ctor_jvm_tys(c);
     crate::trace_compiler!(
@@ -3750,6 +3756,12 @@ fn emit_class(
             let super_init = e.cw.methodref(&superclass, "<init>", &super_descriptor);
             ctor.invokespecial(super_init, aw, 0);
             e.this_uninitialized = false;
+            // Interface delegation runs after `super(…)` and before constructor-property stores.
+            // The delegate expression sees parameters, not the properties those parameters become.
+            let initializer = c.init_body.filter(|_| !static_storage(ir, c));
+            let initializer_rest = initializer
+                .map(|body| e.emit_interface_delegation_initializers(c, body, &mut ctor))
+                .unwrap_or_default();
             // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
             // stored to its field (the property fields are `fields[0..]` in declaration order among params);
             // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
@@ -3784,8 +3796,25 @@ fn emit_class(
                     slot += slot_words(*t);
                 }
             }
-            if let Some(init_body) = c.init_body.filter(|_| !static_storage(ir, c)) {
-                e.emit_constructor_init_body(c, init_body, &mut ctor, &mut ctor_lines);
+            if !initializer_rest.is_empty() {
+                let marks_before = ctor.line_marks().len();
+                e.record_locals = true;
+                e.in_constructor_initializer = true;
+                e.emit_initializer_statements(&initializer_rest, &mut ctor);
+                e.in_constructor_initializer = false;
+                e.record_locals = false;
+                ctor_lines.extend(
+                    ctor.line_marks()[marks_before..]
+                        .iter()
+                        .map(|&(pc, line)| (pc, u32::from(line))),
+                );
+                init_locals.extend(ctor.local_entries().iter().filter_map(
+                    |&(start, length, slot, ref name, ref desc)| {
+                        length.map(|length| (start, length, slot, name.clone(), desc.clone()))
+                    },
+                ));
+            }
+            if let Some(init_body) = initializer {
                 init_diverges = e.discarding_diverges(init_body);
             }
             max_slot = e.frame.max();
@@ -4091,6 +4120,7 @@ fn emit_class(
                 .as_ref()
                 .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
             &ctor_lines,
+            &init_locals,
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
@@ -4752,7 +4782,7 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, env.override_results, c, opts))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[]);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -5505,6 +5535,7 @@ fn emit_enum_class(
             &mut cw,
             opts.param_assertions,
             emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+            &[],
             &[],
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
@@ -7212,6 +7243,63 @@ fn emit_box_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuil
 }
 
 /// Emit `VC.unbox-impl()<underlying>` (virtual) — unboxes the `VC` on the stack to its underlying.
+fn interface_delegation_storage(ir: &IrFile, class: crate::ir::ClassId) -> HashSet<u32> {
+    ir.checked_classifier_classes
+        .iter()
+        .filter(|(_, &id)| id == class)
+        .flat_map(|(declaration, _)| {
+            ir.checked_interface_delegation_fields
+                .iter()
+                .filter(move |((owner, _), _)| owner == declaration)
+                .map(|(_, &field)| field)
+        })
+        .collect()
+}
+
+/// Pull interface-delegation stores out of an initializer. They run before constructor-property
+/// stores; everything else keeps its relative order and runs after those stores.
+fn partition_interface_delegation(
+    ir: &IrFile,
+    class: crate::ir::ClassId,
+    fields: &HashSet<u32>,
+    expression: crate::ir::ExprId,
+    delegation: &mut Vec<crate::ir::ExprId>,
+    rest: &mut Vec<crate::ir::ExprId>,
+) {
+    match ir.expr(expression) {
+        IrExpr::Block { stmts, value: None } => {
+            let mut inner_delegation = Vec::new();
+            let mut inner_rest = Vec::new();
+            for &statement in stmts {
+                partition_interface_delegation(
+                    ir,
+                    class,
+                    fields,
+                    statement,
+                    &mut inner_delegation,
+                    &mut inner_rest,
+                );
+            }
+            if inner_rest.is_empty() {
+                delegation.extend(inner_delegation);
+            } else if inner_delegation.is_empty() {
+                rest.push(expression);
+            } else {
+                delegation.extend(inner_delegation);
+                rest.extend(inner_rest);
+            }
+        }
+        IrExpr::SetField {
+            class: owner,
+            index,
+            ..
+        } if *owner == class && fields.contains(index) => {
+            delegation.push(expression);
+        }
+        _ => rest.push(expression),
+    }
+}
+
 fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
     let fq = vc
         .obj_internal()
@@ -7341,6 +7429,8 @@ struct Emitter<'a> {
     comparison_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
+    /// Property initializers and `init` blocks of the primary constructor currently being emitted.
+    in_constructor_initializer: bool,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
@@ -7420,6 +7510,7 @@ impl<'a> Emitter<'a> {
             statement_line: None,
             comparison_line: None,
             record_locals: false,
+            in_constructor_initializer: false,
             inside_condition: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
@@ -8348,6 +8439,55 @@ impl<'a> Emitter<'a> {
             return self.inline_value_used_lambda_call(&inline_call, code);
         }
         self.try_inline_classpath_body(&inline_call, code).is_some()
+    }
+
+    /// Emit interface-delegation stores and return the initializer statements that still run after
+    /// constructor-property parameters are stored.
+    fn emit_interface_delegation_initializers(
+        &mut self,
+        class: &crate::ir::IrClass,
+        init_body: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) -> Vec<crate::ir::ExprId> {
+        let Some(class_id) = self
+            .ir
+            .classes
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, class))
+        else {
+            return vec![init_body];
+        };
+        let class_id = class_id as crate::ir::ClassId;
+        let fields = interface_delegation_storage(self.ir, class_id);
+        if fields.is_empty() {
+            return vec![init_body];
+        }
+        let mut delegation = Vec::new();
+        let mut rest = Vec::new();
+        partition_interface_delegation(
+            self.ir,
+            class_id,
+            &fields,
+            init_body,
+            &mut delegation,
+            &mut rest,
+        );
+        for statement in delegation {
+            self.emit(statement, code);
+        }
+        rest
+    }
+
+    /// Emit initializer statements left after interface delegation. Source lines are the marks
+    /// emission writes; the constructor copies those into its curated line table.
+    fn emit_initializer_statements(
+        &mut self,
+        statements: &[crate::ir::ExprId],
+        code: &mut CodeBuilder,
+    ) {
+        for &statement in statements {
+            self.emit(statement, code);
+        }
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -10921,7 +11061,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 if !self.ir.callable_scopes.contains(&e) {
-                    self.close_scope_locals(code);
+                    self.close_scope_locals(code, false);
                 }
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);

@@ -142,6 +142,7 @@ mod tests {
                 is_vararg: false,
                 type_param: None,
                 check: Some("shared".to_string()),
+                anonymous_super_forward: None,
                 capture: None,
             },
             IrCtorArg {
@@ -155,6 +156,7 @@ mod tests {
                 is_vararg: false,
                 type_param: None,
                 check: Some("plain".to_string()),
+                anonymous_super_forward: None,
                 capture: None,
             },
         ];
