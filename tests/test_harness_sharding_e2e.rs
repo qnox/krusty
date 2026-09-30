@@ -549,3 +549,226 @@ fn run_tests_wires_target_hygiene_before_building() {
         "prune must run before the first cargo build"
     );
 }
+
+#[cfg(unix)]
+fn regression_fixture(name: &str, body: &str) -> (PathBuf, PathBuf) {
+    let temp = std::env::temp_dir().join(format!(
+        "krusty-conformance-regressions-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(temp.join("bin")).expect("create regressions fixture directory");
+    let binary = temp.join("conformance-bin");
+    fs::write(&binary, body).expect("write regressions fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+        .expect("make regressions fixture executable");
+    let just_stub = temp.join("bin").join("just");
+    fs::write(&just_stub, "#!/bin/sh\nexit 99\n").expect("write just stub");
+    fs::set_permissions(&just_stub, fs::Permissions::from_mode(0o755))
+        .expect("make just stub executable");
+    (temp, binary)
+}
+
+#[cfg(unix)]
+fn regression_threads() -> String {
+    let nproc = Command::new("nproc").output().expect("nproc").stdout;
+    let n = String::from_utf8(nproc)
+        .expect("nproc is UTF-8")
+        .trim()
+        .parse::<u32>()
+        .expect("nproc is a count");
+    n.min(4).to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_skip_the_box_suite() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "skip",
+        "#!/usr/bin/env bash\nprintf 'bin=%s\\n' \"$KRUSTY_BIN\"\nprintf '%s\\n' \"$@\"\n",
+    );
+    let sibling = temp.join("krusty");
+    fs::write(&sibling, "#!/bin/sh\nexit 0\n").expect("write sibling cli");
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o755))
+        .expect("make sibling cli executable");
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("conformance-regressions.sh"))
+        .arg(&binary)
+        .arg("2.4.10")
+        .env_remove("KRUSTY_BIN")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+        )
+        .output()
+        .expect("run conformance regressions");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("regressions stdout is UTF-8");
+    assert_eq!(
+        stdout,
+        format!(
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            sibling.display(),
+            regression_threads(),
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_recipe_runs_the_script() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "recipe",
+        "#!/usr/bin/env bash\nprintf 'bin=%s\\n' \"$KRUSTY_BIN\"\nprintf '%s\\n' \"$@\"\n",
+    );
+    let sibling = temp.join("krusty");
+    fs::write(&sibling, "#!/bin/sh\nexit 0\n").expect("write sibling cli");
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o755))
+        .expect("make sibling cli executable");
+
+    let output = Command::new("just")
+        .current_dir(&root)
+        .arg("--justfile")
+        .arg(root.join("justfile"))
+        .arg("conformance-regressions")
+        .arg(&binary)
+        .arg("2.4.10")
+        .env_remove("KRUSTY_BIN")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .output()
+        .expect("run conformance-regressions recipe");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("recipe stdout is UTF-8");
+    assert_eq!(
+        stdout,
+        format!(
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            sibling.display(),
+            regression_threads(),
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_keep_an_explicit_cli() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "cli",
+        "#!/usr/bin/env bash\nprintf 'bin=%s\\n' \"$KRUSTY_BIN\"\n",
+    );
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("conformance-regressions.sh"))
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_BIN", "/opt/krusty")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+        )
+        .output()
+        .expect("run conformance regressions");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"bin=/opt/krusty\n");
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_fail_when_the_suite_fails() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture("fail", "#!/usr/bin/env bash\nexit 7\n");
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("conformance-regressions.sh"))
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+        )
+        .output()
+        .expect("run failing conformance regressions");
+    assert_eq!(output.status.code(), Some(7));
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_enforce_the_deadline() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture("deadline", "#!/usr/bin/env bash\nsleep 10\n");
+    let started = std::time::Instant::now();
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("conformance-regressions.sh"))
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "1")
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+        )
+        .output()
+        .expect("run delayed conformance regressions");
+    let elapsed = started.elapsed();
+    assert_eq!(output.status.code(), Some(124));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
+        "conformance-regressions: timed out after 1s: Kotlin 2.4.10\n"
+    );
+    assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[test]
+fn ci_runs_prebuilt_box_and_regression_conformance() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workflow =
+        fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
+    let release = workflow
+        .find("needs: [ci, klib-semantics, conformance, conformance-regressions, versions, build-release]")
+        .expect("release waits on both conformance sets");
+    let box_run = workflow
+        .find("just conformance-run ")
+        .expect("version matrix runs the box suite");
+    let regressions = workflow
+        .find("just conformance-regressions ")
+        .expect("latest version runs the other conformance tests");
+    assert!(
+        box_run < regressions && regressions < release,
+        "box suite, then the other tests, then release"
+    );
+}
