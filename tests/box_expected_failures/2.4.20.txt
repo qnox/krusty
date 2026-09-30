@@ -70,7 +70,6 @@ coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 dataClasses/components/kt49812.kt
-defaultArguments/convention/incWithDefaultInGetter.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
@@ -117,7 +116,6 @@ function/defaultsWithVarArg2.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 ieee754/inline.kt
-increment/argumentWithSideEffects.kt
 inference/capturedSelfInsideIntersection.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/kt67609.kt

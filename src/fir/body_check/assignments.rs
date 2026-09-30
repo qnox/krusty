@@ -130,4 +130,60 @@ impl BodyFirChecker<'_> {
             kind: FirStatementKind::Expression(call),
         }))
     }
+
+    /// Bind the receiver of `receiver.name op= value` once, before the read inside `value`.
+    ///
+    /// An enclosing access increment has already substituted that receiver for every access in
+    /// the block, including a prefix re-read after this write. A fresh local whose substitution
+    /// is dropped at the end of the write would evaluate the receiver again on that re-read.
+    pub(super) fn bind_compound_member_receiver(
+        &mut self,
+        receiver: ExprId,
+        name: &str,
+        value: ExprId,
+        origin: OriginId,
+    ) -> Result<Option<FirStatementId>, BodyCheckFailure> {
+        if self.expression_substitutions.contains_key(&receiver)
+            || !self.is_compound_member_assignment(receiver, name, value)
+        {
+            return Ok(None);
+        }
+        let initializer = self.expression(receiver)?;
+        let ty = self.expression_type(receiver)?;
+        let target = self.allocate_local();
+        let declaration = self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Local {
+                target,
+                ty,
+                mutable: false,
+                lateinit: false,
+                deferred: false,
+                initializer: Some(initializer),
+                conversion: None,
+            },
+        });
+        let replacement = self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::ValueRead(target),
+        });
+        self.expression_substitutions.insert(receiver, replacement);
+        Ok(Some(declaration))
+    }
+
+    /// The parser represents `receiver.name op= rhs` as a write whose value contains the matching
+    /// read and deliberately reuses the same receiver expression identity.
+    fn is_compound_member_assignment(&self, receiver: ExprId, name: &str, value: ExprId) -> bool {
+        let Expr::Binary { lhs, .. } = self.file.expr(value) else {
+            return false;
+        };
+        matches!(
+            self.file.expr(*lhs),
+            Expr::Member {
+                receiver: read_receiver,
+                name: read_name,
+            } if *read_receiver == receiver && read_name == name
+        )
+    }
 }
