@@ -3916,10 +3916,7 @@ pub(crate) fn lower_value_classes(
 
     // A property whose declared type is a VALUE CLASS has a `@JvmName`-mangled accessor. The backend
     // synthesizes the accessors for a plain property and cannot know the value classes, so stamp the
-    // mangled spelling onto the declaration here, where the map exists. Native unsigned classes stay
-    // out of `under` (an expression keeps the primitive carrier) and live only in `callable_under`,
-    // which is the map a property reference already mangles against. A member `val uInt: UInt` is
-    // therefore `getUInt-pVg5ArA()I`, the method that reference calls.
+    // mangled spelling onto the declaration here, where the map exists.
     for ci in 0..ir.classes.len() {
         let props: Vec<(usize, String, Ty)> = ir.classes[ci]
             .properties

@@ -1,6 +1,7 @@
 //! A member property of an unsigned type publishes the value-class-mangled accessor a property
 //! reference already calls. `KProperty0<UInt>.get` invokes `getUInt-pVg5ArA()I`; a plain
-//! `getUInt()I` fails at the first read with `NoSuchMethodError`.
+//! `getUInt()I` fails at the first read with `NoSuchMethodError`. A top-level unsigned property
+//! on the file facade keeps the plain getter.
 
 use super::common;
 
@@ -35,6 +36,8 @@ fun box(): String {
 "#;
 
 const MEMBERS: &str = r#"
+val topUInt: UInt = 1u
+
 class UnsignedMembers {
     val uInt: UInt = 1u
     var uVar: UInt = 2u
@@ -96,5 +99,39 @@ fn unsigned_member_accessors_match_kotlinc() {
     for class in ["UnsignedMembers", "UnsignedBox"] {
         let (reference, krusty) = member_table("UnsignedMemberAccessors", MEMBERS, class);
         assert_eq!(krusty, reference, "{class}: kotlinc's member table");
+        if class == "UnsignedMembers" {
+            assert!(
+                krusty
+                    .iter()
+                    .any(|member| member.contains("getUInt-pVg5ArA()I")),
+                "member getter stays mangled: {krusty:?}"
+            );
+        }
     }
+}
+
+/// A file-facade accessor is not a member accessor. Return mangling stays off, so the top-level
+/// getter is the plain name while the member getter beside it is mangled.
+#[test]
+fn a_top_level_unsigned_getter_stays_unmangled() {
+    let (reference, krusty) = member_table(
+        "UnsignedMemberAccessors",
+        MEMBERS,
+        "UnsignedMemberAccessorsKt",
+    );
+    assert_eq!(krusty, reference, "file facade: kotlinc's member table");
+    assert!(
+        reference
+            .iter()
+            .any(|member| member.contains("getTopUInt()I")),
+        "kotlinc facade getter: {reference:?}"
+    );
+    assert!(
+        krusty.iter().any(|member| member.contains("getTopUInt()I")),
+        "facade getter stays the plain name: {krusty:?}"
+    );
+    assert!(
+        krusty.iter().all(|member| !member.contains("getTopUInt-")),
+        "facade getter is not value-class mangled: {krusty:?}"
+    );
 }
