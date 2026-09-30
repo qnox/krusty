@@ -18,6 +18,15 @@ pub struct BridgeParameter {
     pub semantic: Ty,
 }
 
+/// The collection-bridge guard a JVM pass selects once: which erased parameter to test, and the
+/// neutral result to return when the value is not that parameter's type. Common lowering leaves
+/// the plan absent. Emission writes this record and does not select it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionBarrierPlan {
+    pub parameter: usize,
+    pub outcome: crate::libraries::CollectionBarrierOutcome,
+}
+
 /// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeKind {
@@ -53,8 +62,8 @@ pub struct Bridge {
     /// adapts. A suspend target always returns `Object`; a generic bridge may still need to cast that
     /// object to a reference carrier and box it as a value class for the erased supertype boundary.
     pub target_ret: Option<Ty>,
-    /// Whether incompatible erased arguments return the collection operation's neutral result.
-    pub type_safe_barrier: bool,
+    /// Collection guard selected for this bridge. Absent until the JVM pass records one.
+    pub barrier_plan: Option<CollectionBarrierPlan>,
     /// kotlinc's `BRIDGE_SPECIAL`: the bridge a builtin member gets under the JVM name it maps to
     /// (`size()` for `Collection.size`). It is final and not synthetic, so a subclass inherits it
     /// rather than declaring it again.
