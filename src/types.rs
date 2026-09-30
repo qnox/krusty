@@ -79,6 +79,19 @@ pub(crate) fn insert_type_name_in(names: &NameTree, internal: TypeName) -> NameI
     names.insert_from(type_names(), internal.name_id())
 }
 
+/// First segment of a global type name (`java/util/List` → `java`). The empty root yields `""`.
+pub(crate) fn type_name_root_segment(name: TypeName) -> &'static str {
+    let names = type_names();
+    let mut id = name.name_id();
+    while let Some(parent) = names.parent(id) {
+        if parent == NameTree::ROOT {
+            break;
+        }
+        id = parent;
+    }
+    names.segment(id)
+}
+
 const KOTLIN_BOOLEAN: TypeName = TypeName(NameId(2));
 const KOTLIN_BYTE: TypeName = TypeName(NameId(3));
 const KOTLIN_SHORT: TypeName = TypeName(NameId(4));

@@ -361,8 +361,7 @@ impl Clone for NameTree {
     fn clone(&self) -> Self {
         // Take one writer-consistent snapshot. Replaying every node through `child_or_insert` used
         // to re-hash and re-probe the whole tree (and repeatedly grow its table), even though ids and
-        // table slots are already final. Package-tree base+delta composition clones a large stable
-        // name tree per source module, so that replay was a measured frontend hotspot.
+        // table slots are already final.
         let writer = self.writer.lock().unwrap();
         let arena = Arena::new();
         for id in 0..self.arena.len() {

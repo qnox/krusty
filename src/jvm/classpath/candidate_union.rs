@@ -62,7 +62,7 @@ pub(super) fn extensions_in_scope(
         let Some(node) = tree.node_for_name(package) else {
             continue;
         };
-        for &entry in &node.jars {
+        for &entry in node.jars() {
             if classpath.entries.get(entry).is_none() {
                 continue;
             }
@@ -102,7 +102,7 @@ pub(super) fn functions_in_scope(
         let Some(node) = tree.node_for_name(package) else {
             continue;
         };
-        for &entry in &node.jars {
+        for &entry in node.jars() {
             if classpath.entries.get(entry).is_none() {
                 continue;
             }
