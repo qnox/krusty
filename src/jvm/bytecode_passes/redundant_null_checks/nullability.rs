@@ -12,7 +12,8 @@
 use std::collections::BTreeSet;
 
 use super::super::analysis::{
-    merge_references, opcode, AnalyzerError, At, BasicInterpreter, BasicValue, Interpreter, Value,
+    intern_descriptor, merge_references, opcode, AnalyzerError, At, BasicInterpreter, BasicValue,
+    Interpreter, Value,
 };
 use super::super::opcodes::*;
 use super::super::redundant_boxing::{self, ValueClasses};
@@ -25,8 +26,8 @@ const OBJECT: &str = "Ljava/lang/Object;";
 pub(super) enum NullValue {
     /// A plain `StrictBasicValue`: whether it is `null` is not known.
     Basic(BasicValue),
-    /// `NotNullBasicValue`, by descriptor.
-    NotNull(String),
+    /// `NotNullBasicValue`, by an interned descriptor.
+    NotNull(&'static str),
     /// `NullBasicValue`: typed `Object`, and `null`.
     Null,
     /// `ProgressionIteratorBasicValue`, by the iterator's descriptor.
@@ -64,10 +65,9 @@ impl NullValue {
     fn basic(&self) -> BasicValue {
         match self {
             NullValue::Basic(value) => value.clone(),
-            _ => BasicValue::Reference(
+            _ => BasicValue::reference(
                 self.descriptor()
-                    .expect("a known-nullability value has a type")
-                    .to_string(),
+                    .expect("a known-nullability value has a type"),
             ),
         }
     }
@@ -119,7 +119,7 @@ impl<'a> NullabilityInterpreter<'a> {
 }
 
 fn not_null(value: &BasicValue) -> NullValue {
-    NullValue::NotNull(value.descriptor().unwrap_or(OBJECT).to_string())
+    NullValue::NotNull(intern_descriptor(value.descriptor().unwrap_or(OBJECT)))
 }
 
 /// `isUnitInstance`: `getstatic kotlin/Unit.INSTANCE`.
@@ -228,7 +228,7 @@ impl Interpreter for NullabilityInterpreter<'_> {
                     index: at.index,
                     message: "a non-null assumption about a slot holding no value".to_string(),
                 })?;
-            return Ok(Some(NullValue::NotNull(operand.to_string())));
+            return Ok(Some(NullValue::NotNull(intern_descriptor(operand))));
         }
         Ok(Some(NullValue::Basic(result)))
     }
@@ -246,17 +246,17 @@ impl Interpreter for NullabilityInterpreter<'_> {
         use NullValue::{Null, ProgressionIterator};
         match (v, w) {
             (Null, Null) => Null,
-            (Null, _) | (_, Null) => NullValue::Basic(BasicValue::Reference(OBJECT.to_string())),
+            (Null, _) | (_, Null) => NullValue::Basic(BasicValue::reference(OBJECT)),
             (ProgressionIterator(a), ProgressionIterator(b)) if a == b => v.clone(),
             (ProgressionIterator(_) | NullValue::NotNull(_), ProgressionIterator(_))
             | (ProgressionIterator(_), NullValue::NotNull(_)) => {
-                NullValue::NotNull(OBJECT.to_string())
+                NullValue::NotNull(intern_descriptor(OBJECT))
             }
             (NullValue::NotNull(a), NullValue::NotNull(b)) => {
                 if a == b {
                     v.clone()
                 } else {
-                    NullValue::NotNull(OBJECT.to_string())
+                    NullValue::NotNull(intern_descriptor(OBJECT))
                 }
             }
             (NullValue::Basic(a), NullValue::Basic(b)) => NullValue::Basic(self.basic.merge(a, b)),
