@@ -31,7 +31,9 @@ parameters.
   AST integrity, and never enters signature collection or checking.
 - Use `./run-tests.sh --survey --frontend-only` to audit parser/signature/checker skips against the
   pinned corpus without building or running the backend. This is deliberately not a parser metric.
-- Do not pass `--release`; the gate profile is the intended fast edit/build/test loop.
+- Do not pass `--release`; the gate profile is the intended fast edit/build/test loop. The `krusty`
+  package, including its integration tests, is opt-level 2 with 16 codegen units, because the box
+  corpus and e2e run that compiler in-process. A one-line incremental rebuild measured about 8s.
 - `gate` is a Cargo *profile* (`--profile gate`), never a target directory. `--target-dir target/gate`
   or `CARGO_TARGET_DIR=target/gate` silently builds the *dev* profile into `target/gate/debug`; the
   harness refuses that shape. It also prunes orphan `*.rcgu.o` codegen temporaries (left by any rustc
