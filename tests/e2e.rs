@@ -1542,6 +1542,8 @@ mod library_function_reference_class_e2e;
 mod loop_backedge_narrowing_e2e;
 #[path = "nested_data_class_tostring_recipe_e2e.rs"]
 mod nested_data_class_tostring_recipe_e2e;
+#[path = "nullable_sam_e2e.rs"]
+mod nullable_sam_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
 mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
@@ -1744,8 +1746,6 @@ mod safe_cast_elvis_e2e;
 mod sam_classpath_e2e;
 #[path = "sam_constructor_lambda_label_e2e.rs"]
 mod sam_constructor_lambda_label_e2e;
-#[path = "nullable_sam_e2e.rs"]
-mod nullable_sam_e2e;
 #[path = "sam_conversion_e2e.rs"]
 mod sam_conversion_e2e;
 #[path = "sam_generic_lambda_param_e2e.rs"]
