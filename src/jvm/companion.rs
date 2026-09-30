@@ -105,17 +105,32 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         })
         .collect();
     for (outer, companion) in companion_owners {
+        let outer_is_interface = ir.classes.iter().any(|class| {
+            class.fq_name_id() == outer && (class.is_interface || class.is_annotation)
+        });
         let statics = ir
             .declared_class_statics
             .get(&companion)
             .cloned()
             .unwrap_or_default();
+        let mut companion_copies = Vec::new();
         for static_id in statics {
-            let declaration = &mut ir.statics[static_id as usize];
-            if declaration.is_const && declaration.owner == Some(companion) {
-                declaration.owner = Some(outer);
+            let declaration = &ir.statics[static_id as usize];
+            if !(declaration.is_const && declaration.owner == Some(companion)) {
+                continue;
+            }
+            // A class companion's const moves onto the outer class. An interface companion's
+            // public or internal const is stored on both: the interface field is the Java
+            // constant, and the companion keeps the same field. A private const cannot be an
+            // interface field, so it stays on the companion only.
+            if outer_is_interface && !declaration.visibility.is_private() {
+                companion_copies.push(declaration.clone());
+            }
+            if !(outer_is_interface && declaration.visibility.is_private()) {
+                ir.statics[static_id as usize].owner = Some(outer);
             }
         }
+        ir.statics.extend(companion_copies);
     }
 
     let mut candidates = Vec::new();
