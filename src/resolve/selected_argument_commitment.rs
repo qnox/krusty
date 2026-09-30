@@ -127,8 +127,30 @@ impl Checker<'_> {
                 implicit_lambda_label.as_deref(),
             );
         }
-        self.resolved_call_arg_slots.insert(call, slots);
+        self.commit_selected_argument_slots(call, slots, &call_sig.param_defaults);
         true
+    }
+
+    /// Record one selected call's source-argument slots and the declaration-owned default flags
+    /// parallel to those slots. Checked FIR reads the flags; it does not recover them from the
+    /// selected-call variant or from another declaration lookup.
+    pub(super) fn commit_selected_argument_slots(
+        &mut self,
+        call: ExprId,
+        slots: Vec<Option<ExprId>>,
+        param_defaults: &[bool],
+    ) {
+        let flags = declared_omission_defaults(param_defaults, slots.len());
+        self.resolved_call_arg_slots.insert(call, slots);
+        match flags {
+            Some(flags) => {
+                self.resolved_selected_parameter_defaults
+                    .insert(call, flags);
+            }
+            None => {
+                self.resolved_selected_parameter_defaults.remove(&call);
+            }
+        }
     }
 
     /// Project one declared vararg array onto the representation currently carried by its source
@@ -153,5 +175,17 @@ impl Checker<'_> {
             }
             _ => declared_array,
         }
+    }
+}
+
+/// `param_defaults` is either empty — the provider recorded that no parameter declares a default —
+/// or exactly one flag per committed slot. Any other length is not a recorded decision.
+fn declared_omission_defaults(param_defaults: &[bool], slot_count: usize) -> Option<Vec<bool>> {
+    if param_defaults.is_empty() {
+        Some(vec![false; slot_count])
+    } else if param_defaults.len() == slot_count {
+        Some(param_defaults.to_vec())
+    } else {
+        None
     }
 }

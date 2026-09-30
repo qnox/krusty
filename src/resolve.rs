@@ -10251,6 +10251,11 @@ pub struct TypeInfo {
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// Declaration-owned `declares_default_value` flags parallel to [`Self::resolved_call_arg_slots`].
+    /// Recorded with the slots from the call signature that won selection, so checked FIR does not
+    /// reconstruct the flag from a call variant or a later declaration-table query. An empty provider
+    /// vector is recorded as "no parameter declares a default".
+    pub resolved_selected_parameter_defaults: HashMap<ExprId, Vec<bool>>,
     /// The LITERAL a call site passes for an omitted defaulted parameter, for a dependency callable
     /// whose provider states the default as a constant.
     ///
@@ -18167,6 +18172,7 @@ impl<'a> Checker<'a> {
         self.resolved_call_type_args.remove(&call);
         self.resolved_call_type_argument_bounds.remove(&call);
         self.resolved_call_arg_slots.remove(&call);
+        self.resolved_selected_parameter_defaults.remove(&call);
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
             .map(Ty::non_null);
@@ -20939,7 +20945,9 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             if let Some(slots) = mapped_slots {
-                                self.resolved_call_arg_slots.insert(call, slots);
+                                let defaults =
+                                    sig.param_defaults.get(ctx_count..).unwrap_or_default();
+                                self.commit_selected_argument_slots(call, slots, defaults);
                             }
                             self.mark_context_extension_receiver_used(scope, call, &sources);
                             self.mark_local_function_call(
@@ -20997,7 +21005,7 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
-                            self.resolved_call_arg_slots.insert(call, slots);
+                            self.commit_selected_argument_slots(call, slots, &sig.param_defaults);
                             let ret = sig.ret;
                             self.mark_local_function_call(
                                 call,
@@ -21070,14 +21078,13 @@ impl<'a> Checker<'a> {
                             self.expect_call_arg(scope, p, a, aty);
                         }
                         if omitted_are_optional {
-                            self.resolved_call_arg_slots.insert(
-                                call,
-                                args.iter()
-                                    .copied()
-                                    .map(Some)
-                                    .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
-                                    .collect(),
-                            );
+                            let slots = args
+                                .iter()
+                                .copied()
+                                .map(Some)
+                                .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
+                                .collect();
+                            self.commit_selected_argument_slots(call, slots, &sig.param_defaults);
                         }
                     }
                     let ret = sig.ret;
@@ -37182,6 +37189,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_constant_receivers: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
+        resolved_selected_parameter_defaults: HashMap::new(),
         resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
@@ -38779,6 +38787,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_selected_parameter_defaults,
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
@@ -39128,6 +39137,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_selected_parameter_defaults,
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
@@ -40057,6 +40067,8 @@ struct Checker<'a> {
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// See [`TypeInfo::resolved_selected_parameter_defaults`].
+    resolved_selected_parameter_defaults: HashMap<ExprId, Vec<bool>>,
     /// See [`TypeInfo::resolved_library_default_literals`].
     resolved_library_default_literals:
         HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
@@ -64111,7 +64123,12 @@ impl<'a> Checker<'a> {
                 if let Some(slots) =
                     indexed_operator_argument_slots(&params, vararg, &indices, false)
                 {
-                    self.resolved_call_arg_slots.insert(e, slots);
+                    let defaults = selected
+                        .call_sig
+                        .param_defaults
+                        .get(selected.context_count..)
+                        .unwrap_or(selected.call_sig.param_defaults.as_slice());
+                    self.commit_selected_argument_slots(e, slots, defaults);
                 }
                 let semantic = selected.semantic_signature();
                 let context_count = selected.context_count.min(semantic.params.len());
@@ -71336,12 +71353,22 @@ impl<'a> Checker<'a> {
                 }
                 return Err(());
             }
-            self.record_zero_arg_operator_slots(site, name, value_parameter_count);
+            self.record_zero_arg_operator_slots(
+                site,
+                name,
+                value_parameter_count,
+                &value_call_sig.param_defaults,
+            );
             return Ok(Some(ResolvedCall::Member(resolved)));
         }
         let mut callable = selected.callable.clone();
         callable.ret = ret;
-        self.record_zero_arg_operator_slots(site, name, value_parameter_count);
+        self.record_zero_arg_operator_slots(
+            site,
+            name,
+            value_parameter_count,
+            &value_call_sig.param_defaults,
+        );
         Ok(Some(ResolvedCall::source_extension(
             callable,
             recv,
@@ -71440,6 +71467,7 @@ impl<'a> Checker<'a> {
         site: Option<IncDecSite>,
         name: &str,
         count: usize,
+        param_defaults: &[bool],
     ) {
         if count == 0 {
             return;
@@ -71447,7 +71475,7 @@ impl<'a> Checker<'a> {
         let slots = vec![None; count];
         match site {
             Some(IncDecSite::Expression(expression)) => {
-                self.resolved_call_arg_slots.insert(expression, slots);
+                self.commit_selected_argument_slots(expression, slots, param_defaults);
             }
             Some(IncDecSite::Statement(statement)) => {
                 self.resolved_stmt_operator_arg_slots.insert(

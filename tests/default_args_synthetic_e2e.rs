@@ -126,3 +126,39 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("constructor vararg default omitted"), "OK");
 }
+
+#[test]
+fn omitted_extension_vararg_with_a_declared_default_uses_that_array() {
+    const SRC: &str = "fun String.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
+    var sum = 0\n\
+    for (value in arr) sum += value\n\
+    return sum\n\
+}\n\
+fun box(): String {\n\
+    val omitted = \"x\".pack()\n\
+    val given = \"y\".pack(42)\n\
+    return if (omitted == 3 && given == 42) \"OK\" else \"omitted=$omitted given=$given\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("extension vararg default omitted"), "OK");
+}
+
+#[test]
+fn omitted_member_extension_vararg_with_a_declared_default_uses_that_array() {
+    const SRC: &str = "class Host {\n\
+    fun String.pack(vararg arr: Int = intArrayOf(1, 2)): Int {\n\
+        var sum = 0\n\
+        for (value in arr) sum += value\n\
+        return sum\n\
+    }\n\
+    fun test(): String {\n\
+        val omitted = \"x\".pack()\n\
+        val given = \"y\".pack(42)\n\
+        return if (omitted == 3 && given == 42) \"OK\" else \"omitted=$omitted given=$given\"\n\
+    }\n\
+}\n\
+fun box(): String = Host().test()\n";
+    assert_eq!(
+        run(SRC).expect("member extension vararg default omitted"),
+        "OK"
+    );
+}

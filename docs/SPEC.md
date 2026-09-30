@@ -8446,10 +8446,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   omitted parameter: the call sets that parameter's mask bit and the stub evaluates the default
   array. Metadata records `declares_default_value` for that explicit default; the flag stays unset
   only for a vararg that is omittable solely because it is a vararg. Supplying an element still
-  packs it and leaves the bit clear. A constructor call and constructor delegation follow the same
+  packs it and leaves the bit clear.   A constructor call and constructor delegation follow the same
   rule (`default_args_synthetic_e2e::omitted_vararg_with_a_declared_default_uses_that_array`,
   `default_args_synthetic_e2e::omitted_constructor_vararg_with_a_declared_default_uses_that_array`,
-  corpus `function/defaultsWithVarArg2.kt`). Known gap: the named-array form
+  corpus `function/defaultsWithVarArg2.kt`). The selected call records those declaration-owned
+  flags beside its argument slots, from the call signature that won selection. Checked FIR reads
+  that record for a function, a member, an extension, and a member extension, including a dependency
+  whose declaration is not in this module. A missing record or slot is a frontend failure rather
+  than an empty pack (`classpath_vararg_default_extension_e2e`). Known gap: the named-array form
   `f(more = arrayOf(x))` with an omitted default before the vararg still fails to map.
   A NAMED argument that also omits a default (`foo(y = "Y")` skipping `x`) maps through the
   checker's recorded argument→slot mapping at every `$default` emit site — the bare-name path once

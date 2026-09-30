@@ -383,6 +383,8 @@ mod classpath_value_class_member_e2e;
 mod classpath_value_class_param_e2e;
 #[path = "classpath_valueclass_param_ext_e2e.rs"]
 mod classpath_valueclass_param_ext_e2e;
+#[path = "classpath_vararg_default_extension_e2e.rs"]
+mod classpath_vararg_default_extension_e2e;
 #[path = "classreader_e2e.rs"]
 mod classreader_e2e;
 #[path = "cli_compiler_plugin_e2e.rs"]

@@ -794,7 +794,7 @@ impl BodyFirChecker<'_> {
         parameter_offset: usize,
     ) -> Result<FirCallArgument, BodyCheckFailure> {
         let ordinal = self.call_parameter_ordinal(expression, parameter, parameter_offset)?;
-        if self.omitted_vararg_declares_default(expression, parameter) {
+        if self.omitted_vararg_declares_default(expression, parameter)? {
             return Ok(FirCallArgument::Default {
                 parameter: ordinal,
                 origin: self
@@ -811,46 +811,30 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    fn omitted_vararg_declares_default(&self, expression: ExprId, parameter: usize) -> bool {
-        let Some(selected) = self.info.resolved_calls.get(&expression) else {
-            return false;
-        };
-        match selected {
-            ResolvedCall::TopLevel(call) => call.call_sig.param_has_default(parameter),
-            ResolvedCall::Member(member) => member.member.call_sig.param_has_default(parameter),
-            ResolvedCall::Companion(member) => member.call_sig.param_has_default(parameter),
-            ResolvedCall::LocalFunction(local) => local
-                .sig
-                .param_defaults
-                .get(parameter)
-                .copied()
-                .unwrap_or(false),
-            ResolvedCall::Extension(extension) => {
-                self.declaration_parameter_declares_default(extension.stable_declaration, parameter)
-            }
-            ResolvedCall::MemberExtension {
-                stable_declaration, ..
-            } => self.declaration_parameter_declares_default(*stable_declaration, parameter),
-        }
-    }
-
-    fn declaration_parameter_declares_default(
+    /// The declaration-owned default flag recorded for this selected call's parameter.
+    /// A missing call record or slot is a frontend failure: guessing `false` would pack an empty
+    /// array instead of evaluating a declared default.
+    fn omitted_vararg_declares_default(
         &self,
-        declaration: Option<crate::fir::DeclarationId>,
+        expression: ExprId,
         parameter: usize,
-    ) -> bool {
-        let Some(declaration) = declaration else {
-            return false;
-        };
-        let Some(callable) = self.index.callable_for_declaration(declaration) else {
-            return false;
-        };
-        let Ok(ordinal) = u32::try_from(parameter) else {
-            return false;
-        };
-        self.index
-            .callable_parameter(callable.id, ordinal)
-            .is_some_and(|header| header.flags().has_default())
+    ) -> Result<bool, BodyCheckFailure> {
+        let flags = self
+            .info
+            .resolved_selected_parameter_defaults
+            .get(&expression)
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?;
+        flags.get(parameter).copied().ok_or_else(|| {
+            self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            )
+        })
     }
 
     fn call_parameter_ordinal(
