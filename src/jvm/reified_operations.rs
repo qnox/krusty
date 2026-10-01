@@ -150,6 +150,7 @@ fn realize_expression_dag(
             IrExpr::KClassLiteral {
                 classifier: Some(classifier),
                 value: None,
+                ..
             } => parameter(classifier, parameters).map(|parameter| IrExpr::ReifiedClassMarker {
                 name: parameter.source_name.clone(),
                 erased: parameter.erased,
@@ -313,6 +314,7 @@ mod tests {
         let body = ir.add_expr(IrExpr::KClassLiteral {
             classifier: Some(Ty::ty_param(identity, Ty::obj("kotlin/Any"))),
             value: None,
+            type_argument: true,
         });
         function(&mut ir, body, identity);
 

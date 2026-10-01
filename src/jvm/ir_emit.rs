@@ -36,6 +36,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
 mod comparison_branches;
@@ -8863,40 +8864,11 @@ impl<'a> Emitter<'a> {
                     .map_or_else(|| self.facade.clone(), |name| name.render());
                 code.ldc_class(&name, self.cw);
             }
-            IrExpr::KClassLiteral { classifier, value } => {
-                match (classifier, value) {
-                    (Some(classifier), None) => {
-                        let descriptor = boxed_descriptor(*classifier);
-                        let internal = descriptor
-                            .strip_prefix('L')
-                            .and_then(|descriptor| descriptor.strip_suffix(';'))
-                            .unwrap_or(&descriptor);
-                        code.ldc_class(internal, self.cw);
-                    }
-                    (None, Some(value)) => {
-                        self.emit_value(*value, code);
-                        self.box_scalar_operand(self.value_ty(*value), code);
-                        let get_class = self.cw.methodref(
-                            "java/lang/Object",
-                            "getClass",
-                            "()Ljava/lang/Class;",
-                        );
-                        code.invokevirtual(get_class, 0, 1);
-                    }
-                    _ => {
-                        self.run.set_emit_error(
-                            "checked class literal has an invalid operand shape".to_string(),
-                        );
-                        return;
-                    }
-                }
-                let reflection = self.cw.methodref(
-                    "kotlin/jvm/internal/Reflection",
-                    "getOrCreateKotlinClass",
-                    "(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
-                );
-                code.invokestatic(reflection, 1, 1);
-            }
+            IrExpr::KClassLiteral {
+                classifier,
+                value,
+                type_argument,
+            } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
                 // A slot that was never allocated means the lowering produced malformed IR (e.g. an
                 // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.

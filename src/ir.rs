@@ -380,6 +380,9 @@ pub enum IrExpr {
     KClassLiteral {
         classifier: Option<Ty>,
         value: Option<ExprId>,
+        /// The literal names a type parameter (`T::class`). Inlining may substitute a primitive
+        /// for it, which still denotes the boxed class token rather than the primitive one.
+        type_argument: bool,
     },
     /// Backend-neutral reflection value passed to local delegated-property conventions.
     LocalPropertyReference(IrLocalPropertyReference),
