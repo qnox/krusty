@@ -23,13 +23,9 @@ impl Checker<'_> {
             return Ok(None);
         }
 
-        let mut root_alias = false;
-        let mut prefix = match self.select_classifier(scope, root_name) {
+        let (root_selection, _, root_alias) = self.select_classifier_binding(scope, root_name);
+        let mut prefix = match root_selection {
             InheritedNestedClassifier::Found(classifier) => {
-                root_alias = self.scoped_source_alias_target(scope, root_name).is_some()
-                    || self
-                        .selected_alias_expansion(root_name, classifier, false)
-                        .is_some();
                 ResolvedQualifier::Classifier(classifier)
             }
             InheritedNestedClassifier::Ambiguous => {
@@ -56,20 +52,41 @@ impl Checker<'_> {
             }
         };
 
-        let mut applied_parent = match prefix {
-            ResolvedQualifier::Classifier(_)
-                if root_alias && self.has_type_arguments(*root_expression) =>
+        let mut applied_parent = match (prefix, root_alias) {
+            (ResolvedQualifier::Classifier(_), Some(alias))
+                if self.has_type_arguments(*root_expression) =>
             {
-                Some(self.applied_callable_ref_alias(scope, *root_expression, root_name))
+                crate::trace_compiler!(
+                    "resolve",
+                    "selected callable-reference typealias identity={:?} spelling={root_name}",
+                    alias.identity,
+                );
+                let arguments = self
+                    .file
+                    .call_type_args
+                    .get(&root_expression.0)
+                    .cloned()
+                    .unwrap_or_default();
+                let span = self.file.expr_spans[root_expression.0 as usize];
+                Some(self.alias_application_ty(
+                    scope,
+                    alias.formals,
+                    alias.expansion,
+                    root_name,
+                    &arguments,
+                    span,
+                ))
             }
-            ResolvedQualifier::Classifier(internal) => Some(self.applied_callable_ref_classifier(
-                scope,
-                *root_expression,
-                diagnostic_site,
-                internal,
-                None,
-            )),
-            ResolvedQualifier::Package(_) | ResolvedQualifier::Value => None,
+            (ResolvedQualifier::Classifier(internal), _) => {
+                Some(self.applied_callable_ref_classifier(
+                    scope,
+                    *root_expression,
+                    diagnostic_site,
+                    internal,
+                    None,
+                ))
+            }
+            (ResolvedQualifier::Package(_) | ResolvedQualifier::Value, _) => None,
         };
 
         for (segment_expression, segment) in segments.iter().skip(1) {
@@ -206,31 +223,5 @@ impl Checker<'_> {
             .call_type_args
             .get(&expression.0)
             .is_some_and(|arguments| !arguments.is_empty())
-    }
-
-    /// A typealias root applied to type arguments (`Alias<Any>::m`) denotes the alias's expansion
-    /// with those arguments substituted, exactly as the same spelling in a type position; its
-    /// arguments never attach to the expanded classifier directly.
-    fn applied_callable_ref_alias(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        root_expression: ExprId,
-        root_name: &str,
-    ) -> Ty {
-        let reference = TypeRef {
-            name: root_name.to_string(),
-            flags: TrFlags::default(),
-            arg: None,
-            targs: self
-                .file
-                .call_type_args
-                .get(&root_expression.0)
-                .cloned()
-                .unwrap_or_default(),
-            span: self.file.expr_spans[root_expression.0 as usize],
-            fun_params: Vec::new(),
-            fun_context_count: 0,
-        };
-        self.type_ref_ty(scope, &reference)
     }
 }

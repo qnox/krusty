@@ -190,7 +190,20 @@ impl Checker<'_> {
         let context_args = if parts.context.is_empty() {
             None
         } else {
-            Some(self.select_context_arguments(scope, parts.context)?)
+            match self.select_context_arguments_with_types(scope, parts.context) {
+                Ok(arguments) => Some(
+                    arguments
+                        .into_iter()
+                        .map(|(argument, _)| argument)
+                        .collect(),
+                ),
+                Err(missing) => {
+                    // The function value has already won its source-name/receiver rung. Missing
+                    // context is therefore its frontend error, not permission to reinterpret the
+                    // same spelling as a later function/property/invoke candidate.
+                    return Some(self.report_missing_context_parameter(call, missing, &[]));
+                }
+            }
         };
         let implicit_receiver = match explicit_receiver {
             Some(actual) => {

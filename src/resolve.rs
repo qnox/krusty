@@ -69,6 +69,7 @@ mod cast_narrowing;
 mod catch_flow;
 mod checker_symbol_queries;
 mod classifier_associated;
+mod classifier_binding;
 mod collection_literals;
 #[cfg(test)]
 mod common_supertype_identity_tests;
@@ -49372,148 +49373,6 @@ impl<'a> Checker<'a> {
         classifier_path(path, &self.fed_source(), None).ok()
     }
 
-    /// Select the classifier root from the scope tower, then commit every remaining segment through
-    /// the shared qualifier loop. There is no import/module/classpath retry after this returns.
-    fn select_classifier_binding(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> (InheritedNestedClassifier, Option<String>) {
-        let segments = name
-            .split(['.', '/'])
-            .filter(|segment| !segment.is_empty())
-            .map(|segment| (None, segment.to_string()))
-            .collect::<Vec<_>>();
-        let Some((_, root_name)) = segments.first() else {
-            return (InheritedNestedClassifier::NotFound, Some(name.to_string()));
-        };
-        let source = self.fed_source();
-        let scoped = scope.symbols(root_name, &source);
-        let root = if let Some(internal) = scoped.classifier_name {
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(internal) = self.lexical_source_alias_classifier(scope, root_name) {
-            // A body-local or nested alias belongs to the current lexical classifier rung. Package
-            // and imported aliases are deliberately excluded here; they participate at their own
-            // levels below, after enclosing/inherited and same-package classifier declarations.
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(internal) = self.classifier_header_lexical_type_name(root_name) {
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(internal) = self.enclosing_nested_type_name(root_name) {
-            ResolvedQualifier::Classifier(internal)
-        } else {
-            match self.inherited_nested_type_name(root_name) {
-                InheritedNestedClassifier::Found(internal) => {
-                    ResolvedQualifier::Classifier(internal)
-                }
-                InheritedNestedClassifier::Ambiguous => {
-                    return (
-                        InheritedNestedClassifier::Ambiguous,
-                        Some(root_name.clone()),
-                    );
-                }
-                InheritedNestedClassifier::NotFound => {
-                    if let Some(classifier) = self.explicit_import_classifier_name(root_name) {
-                        // An explicit import outranks the current package (it is a HIGHER rung of
-                        // the same tower `import_levels` models, whose level 0 IS this package).
-                        // A sibling file declaring the same simple name therefore does not capture
-                        // a spelling this file imported by name.
-                        ResolvedQualifier::Classifier(classifier)
-                    } else if let Some(classifier) = self.same_package_classifier_name(root_name) {
-                        ResolvedQualifier::Classifier(classifier)
-                    } else if let Some(classifier) =
-                        self.alias_ahead_of_imported_classifier(scope, root_name, &source)
-                    {
-                        ResolvedQualifier::Classifier(classifier)
-                    } else {
-                        let imported = classifier_from_imports(
-                            root_name,
-                            &self.imports,
-                            &self.import_levels,
-                            &source,
-                        );
-                        crate::trace_compiler!(
-                            "resolve",
-                            "classifier root={root_name} imported={:?}",
-                            imported.found().map(TypeName::render)
-                        );
-                        match imported {
-                            InheritedNestedClassifier::Found(internal) => {
-                                ResolvedQualifier::Classifier(internal)
-                            }
-                            InheritedNestedClassifier::Ambiguous => {
-                                return (
-                                    InheritedNestedClassifier::Ambiguous,
-                                    Some(root_name.clone()),
-                                );
-                            }
-                            InheritedNestedClassifier::NotFound => {
-                                match self
-                                    .classifier_header_owner
-                                    .map_or(InheritedNestedClassifier::NotFound, |owner| {
-                                        self.inherited_nested_type_for_owner(root_name, owner)
-                                    }) {
-                                    InheritedNestedClassifier::Found(internal) => {
-                                        ResolvedQualifier::Classifier(internal)
-                                    }
-                                    InheritedNestedClassifier::Ambiguous => {
-                                        return (
-                                            InheritedNestedClassifier::Ambiguous,
-                                            Some(root_name.clone()),
-                                        );
-                                    }
-                                    InheritedNestedClassifier::NotFound
-                                        if segments.len() > 1
-                                            && source.package_exists(TypeName::ROOT, root_name) =>
-                                    {
-                                        ResolvedQualifier::Package(crate::types::type_name_child(
-                                            TypeName::ROOT,
-                                            root_name,
-                                        ))
-                                    }
-                                    InheritedNestedClassifier::NotFound => {
-                                        return (
-                                            InheritedNestedClassifier::NotFound,
-                                            Some(root_name.clone()),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        match walk_qualifier_namespace_facets(
-            &source,
-            root.classifier(),
-            None,
-            root_name,
-            &segments[1..],
-        ) {
-            Ok(ResolvedQualifier::Classifier(internal)) => (
-                InheritedNestedClassifier::Found(
-                    self.libraries.canonical_source_type_name(internal),
-                ),
-                None,
-            ),
-            Ok(ResolvedQualifier::Value | ResolvedQualifier::Package(_)) => (
-                InheritedNestedClassifier::NotFound,
-                segments.last().map(|(_, segment)| segment.clone()),
-            ),
-            Err(QualifierError::UnresolvedSegment { name, .. })
-            | Err(QualifierError::AmbiguousRoot { name, .. }) => {
-                (InheritedNestedClassifier::NotFound, Some(name))
-            }
-            Err(QualifierError::NotANameChain { .. }) => {
-                (InheritedNestedClassifier::NotFound, Some(root_name.clone()))
-            }
-        }
-    }
-
-    fn select_classifier(&self, scope: &CheckerScope<'_>, name: &str) -> InheritedNestedClassifier {
-        self.select_classifier_binding(scope, name).0
-    }
-
     /// Find a nested type visible from the lexical class receiver stack.
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
         // Probe the current class and its structural lexical owners in nearest-first order.
@@ -49895,49 +49754,6 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         r: &TypeRef,
     ) -> Ty {
-        // A classpath `typealias` resolved to its TARGET classifier, which may declare a different
-        // argument list than the alias (`Lens<S, A>` = `PLens<S, S, A, A>`). Place this use's
-        // arguments through the alias's expansion; attaching them to the target directly would
-        // change its arity.
-        // Apply the alias template only when this spelling resolved to the alias's OWN target —
-        // see `alias_expanded_ty`; the checker's classifier channels (enclosing/nested, inherited,
-        // same-package) outrank imports, so the winner is only known here.
-        if let Some((formals, expansion)) = self
-            .selected_alias_expansion(&r.name, internal, r.is_import())
-            .map(|alias| (alias.formals, alias.expansion))
-        {
-            if formals.len() != r.targs.len() {
-                self.diags.error(
-                    r.span,
-                    format!(
-                        "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                        r.name,
-                        formals.len(),
-                        r.targs.len()
-                    ),
-                );
-                return Ty::Error;
-            }
-            // Project each argument exactly as `classifier_type_with_arguments` does before it is
-            // substituted: `Lens<*, *>` is an existential out-projection, not invariant `Any?`.
-            let arguments = r
-                .targs
-                .iter()
-                .map(|argument| {
-                    let resolved = self.type_ref_ty(scope, argument);
-                    projected_typeref_argument(
-                        argument,
-                        resolved,
-                        Ty::nullable(Ty::obj("kotlin/Any")),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let bindings = formals
-                .into_iter()
-                .zip(arguments)
-                .collect::<crate::symbol_resolver::GSigBinds>();
-            return crate::symbol_resolver::ty_subst(expansion, &bindings);
-        }
         self.classifier_type_with_arguments(scope, internal, &r.targs)
     }
 
@@ -50276,33 +50092,31 @@ impl<'a> Checker<'a> {
             // recorded at that parameter's own span rather than as a fictitious `<fun>` binding.
             typeref_leaf(r, &mut |component| self.type_ref_ty(scope, component))
         } else {
-            // A finalized source typealias whose expansion is a class participates in the same
-            // classifier lookup as that target. Selecting the target is therefore not enough to
-            // decide that the source spelled the class directly: the alias still owns its arity
-            // and argument placement (`Table<V> = Map<String, V>`). Apply the alias only when its
-            // expansion head is the classifier that won this scope rung. A nearer same-named
-            // classifier has a different identity and keeps its ordinary class shape.
-            let source_alias = self
-                .scoped_source_alias_identity(scope, &r.name)
-                .and_then(|identity| self.source_alias_expansion(identity));
-            let (selection, failed_segment) = self.select_classifier_binding(scope, &r.name);
+            // Classifier selection carries the exact alias binding from the winning tower rung.
+            // Never rediscover alias-ness from the spelling after a classifier has been selected:
+            // a lower same-named alias may expand to that very classifier while still losing to it.
+            let (selection, failed_segment, selected_alias) =
+                self.select_classifier_binding(scope, &r.name);
             match selection {
                 InheritedNestedClassifier::Found(internal) => {
-                    let alias_matches = source_alias.as_ref().is_some_and(|(_, expansion)| {
-                        (match expansion.non_null() {
-                            Ty::Unit => Some(type_name("kotlin/Unit")),
-                            expansion => expansion.obj_internal(),
-                        }) == Some(internal)
-                    });
-                    if alias_matches {
-                        source_alias.map(|(formals, expansion)| {
-                            if r.is_import() {
-                                expansion
-                            } else {
-                                self.alias_application_ty(
-                                    scope, formals, expansion, &r.name, &r.targs, r.span,
-                                )
-                            }
+                    if let Some(alias) = selected_alias {
+                        crate::trace_compiler!(
+                            "resolve",
+                            "selected typealias identity={:?} spelling={} target={internal:?}",
+                            alias.identity,
+                            r.name,
+                        );
+                        Some(if r.is_import() {
+                            alias.expansion
+                        } else {
+                            self.alias_application_ty(
+                                scope,
+                                alias.formals,
+                                alias.expansion,
+                                &r.name,
+                                &r.targs,
+                                r.span,
+                            )
                         })
                     } else {
                         typeref_classifier(r, Some(internal))
@@ -50315,15 +50129,9 @@ impl<'a> Checker<'a> {
                 }
                 InheritedNestedClassifier::NotFound => {
                     unresolved_segment = failed_segment;
-                    source_alias.map(|(formals, expansion)| {
-                        if r.is_import() {
-                            expansion
-                        } else {
-                            self.alias_application_ty(
-                                scope, formals, expansion, &r.name, &r.targs, r.span,
-                            )
-                        }
-                    })
+                    // Primitive/function aliases have no classifier facet, so no classifier was
+                    // selected above. Resolve that sole alias binding through the normal type path.
+                    self.scoped_source_alias_ty(scope, r)
                 }
             }
         };
@@ -50646,27 +50454,6 @@ impl<'a> Checker<'a> {
                 Ty::Unit => Some(type_name("kotlin/Unit")),
                 expansion => expansion.obj_internal(),
             })
-    }
-
-    /// Classifier facet of an alias declared on the active lexical tower only. File/package/import
-    /// aliases are intentionally left to the ordinary classifier import levels.
-    fn lexical_source_alias_classifier(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<TypeName> {
-        let expansion = scope
-            .type_alias(name)
-            .map(|alias| alias.expansion)
-            .or_else(|| {
-                self.lexical_source_alias_identity(name)
-                    .and_then(|identity| self.source_alias_expansion(identity))
-                    .map(|(_, expansion)| expansion)
-            })?;
-        match expansion.non_null() {
-            Ty::Unit => Some(type_name("kotlin/Unit")),
-            expansion => expansion.obj_internal(),
-        }
     }
 
     fn scoped_source_alias_target(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {

@@ -471,3 +471,27 @@ fn a_context_receiver_function_value_takes_its_context_and_receiver_from_scope()
     common::assert_accepted_like_kotlinc(CONTEXT_EXTENSION_SOURCE);
     common::expect_box_same_as_kotlinc(CONTEXT_EXTENSION_SOURCE, "ContextExtensionFunctionTypeRun");
 }
+
+/// Once the local function value wins the name rung, an unavailable context argument is its error.
+/// The checker must not reinterpret the spelling as the later top-level function with the same name.
+#[test]
+fn a_selected_receiver_function_value_owns_its_missing_context_error() {
+    const SOURCE: &str = "// LANGUAGE: +ContextParameters\n\
+        interface Mark\n\
+        object Selected : Mark\n\
+        object Fallback : Mark\n\
+        class Needed\n\
+        class Receiver\n\
+        fun action(): Mark = Fallback\n\
+        fun use(receiver: Receiver): Mark {\n\
+        \x20   val action: context(Needed) Receiver.() -> Mark = { Selected }\n\
+        \x20   return with(receiver) { action() }\n\
+        }\n";
+    let sources = [("Main.kt", SOURCE)];
+    let result = common::compiler_diagnostics_with_reference_args(
+        &sources,
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+    common::expect_identical_rejection(&result, "selected receiver-function missing context");
+}
