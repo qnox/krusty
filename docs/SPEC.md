@@ -3381,11 +3381,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   default-flags behavior matches kotlinc. LSP project sync also reads recognized task-level Gradle
   arguments, unions module feature sets for project-wide analysis, applies explicit server flags in
   order, and applies source directives last in the compiler worker. First gated feature,
-  `NameBasedDestructuring`: `for ([a, b] in e)` and `val/var [a, b] = e` are accepted ONLY when
-  enabled, parsing identically to the `(a, b)` forms
+  `NameBasedDestructuring`: `for ([a, b] in e)`, `val/var [a, b] = e`, and `{ [a, b] -> … }` are
+  accepted when enabled, parsing identically to the `(a, b)` forms
   — both desugar to positional `component1()/component2()` calls, byte-identical to kotlinc (verified vs
-  `-Xname-based-destructuring=complete`). Without the flag, `[a, b]` is rejected (kotlinc errors that the
-  feature is experimental). A `var` destructured component captured and written by a closure is boxed
+  `-Xname-based-destructuring=complete`). The brackets are parsed at every language level. Without the
+  flag kotlinc reports `the feature "name based destructuring" is only available since language version 2.5`
+  at the `[` and still binds the components. The diagnostic is reported after the file joins the
+  module, so a declaration after the destructure stays visible in that file and in every other file.
+  A `var` destructured component captured and written by a closure is boxed
   into a `Ref` exactly like a plain captured `var` local (`var [a,b]=A(); val f={a=3}; f()` sees `a==3`).
   Tests: `multiDecl/*` box corpus (+96 gate), `tests/name_based_destructuring_e2e.rs`.
 

@@ -24744,8 +24744,8 @@ impl<'a> Checker<'a> {
         // Destructuring requires the initializer to be a known reference type whose class
         // declares `component1..N` (e.g. a krusty `data class`). Anything else is rejected,
         // never miscompiled.
-        let source_props = self.file.destructure_source_props.get(&s.0).cloned();
-        let entry_types = self.file.destructure_entry_types.get(&s.0).cloned();
+        let source_props = self.file.destructuring.source_properties.get(&s.0).cloned();
+        let entry_types = self.file.destructuring.entry_types.get(&s.0).cloned();
         for (idx, entry) in entries.iter().enumerate() {
             if entry.ignored {
                 continue;
