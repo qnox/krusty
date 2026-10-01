@@ -4,10 +4,12 @@ use super::common;
 
 #[test]
 fn an_inner_constructor_lists_its_outer_instance() {
-    let source = "class Holder {\n\
-                  \x20   fun area(): Int = 1\n\
-                  \x20   inner class Corner(val side: Int) {\n\
-                  \x20       fun outer(): Int = area() + side\n\
+    let source = "open class Root\n\
+                  class Token : Root()\n\
+                  class Holder {\n\
+                  \x20   fun item(): Root = Token()\n\
+                  \x20   inner class Corner(val side: Root) {\n\
+                  \x20       fun outer(): Root = item()\n\
                   \x20   }\n\
                   }\n";
     let compared =
@@ -20,12 +22,13 @@ fn an_inner_constructor_lists_its_outer_instance() {
 /// The constructed inner instance reads its outer instance's state.
 #[test]
 fn an_inner_instance_reads_its_outer_state() {
-    const SRC: &str = "class Holder(val base: Int) {\n\
-        \x20   inner class Corner(val side: Int) {\n\
-        \x20       fun total(): Int = base + side\n\
+    const SRC: &str = "class Token(val text: String)\n\
+        class Holder(val base: Token) {\n\
+        \x20   inner class Corner(val side: Token) {\n\
+        \x20       fun total(): Token = base\n\
         \x20   }\n\
         }\n\
-        fun box(): String = if (Holder(40).Corner(2).total() == 42) \"OK\" else \"Fail\"\n";
+        fun box(): String = Holder(Token(\"OK\")).Corner(Token(\"unused\")).total().text\n";
     assert_eq!(
         common::compile_and_run_with_stdlib(SRC, "Main").expect("inner instance"),
         "OK"
@@ -36,11 +39,13 @@ fn an_inner_instance_reads_its_outer_state() {
 /// the captured name, never as `this$0`.
 #[test]
 fn a_capturing_local_constructor_lists_no_outer_instance() {
-    let source = "fun make(offset: Int): Any {\n\
-                  \x20   class Piece(val size: Int) {\n\
-                  \x20       fun total(): Int = size + offset\n\
+    let source = "open class Root\n\
+                  class Token : Root()\n\
+                  fun make(offset: Root): Root {\n\
+                  \x20   class Piece(val item: Root) : Root() {\n\
+                  \x20       fun captured(): Root = offset\n\
                   \x20   }\n\
-                  \x20   return Piece(1)\n\
+                  \x20   return Piece(Token())\n\
                   }\n";
     let compared = common::compile_with_kotlinc("Make", source, &[], &["MakeKt$make$Piece"]);
     let (expected, actual) = &compared[0];
