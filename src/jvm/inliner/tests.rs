@@ -35,7 +35,7 @@ impl AnonymousObjects for NoObjects {
         _class: &str,
         _desc: &str,
         _lambdas: &[ObjectLambda<'_>],
-    ) -> Result<(String, String), InlineError> {
+    ) -> Result<RegeneratedObject, InlineError> {
         panic!("a body without anonymous objects regenerates none")
     }
 }
@@ -436,11 +436,10 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     };
 
     let mut reified = MethodNode::new(ACC_STATIC, "r", "()V");
+    // The exact marker is not refused here: the anonymous class it guards is copied and the
+    // marker is removed. A different descriptor or an interface call is not that marker.
     reified.nodes = vec![method("needClassReification", "()V", false)];
-    assert_eq!(
-        unsupported_shape(&reified, &NoClasses),
-        Some(super::callee_shape::UnsupportedShape::ClassReification),
-    );
+    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
     assert_eq!(unsupported_shape(&reified, &NoClasses), None);
     reified.nodes = vec![method("needClassReification", "()V", true)];
@@ -643,6 +642,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
 #[derive(Default)]
 struct NumberingObjects {
     asked: Vec<(String, String)>,
+    singletons: Vec<String>,
 }
 
 impl AnonymousObjects for NumberingObjects {
@@ -651,13 +651,24 @@ impl AnonymousObjects for NumberingObjects {
         class: &str,
         desc: &str,
         _lambdas: &[ObjectLambda<'_>],
-    ) -> Result<(String, String), InlineError> {
+    ) -> Result<RegeneratedObject, InlineError> {
         self.asked.push((class.to_string(), desc.to_string()));
         let n = self.asked.len();
-        Ok((
-            format!("Main$g$$inlined$f${n}"),
-            format!("({})V", "I".repeat(n)),
-        ))
+        Ok(RegeneratedObject {
+            name: format!("Main$g$$inlined$f${n}"),
+            constructor_desc: format!("({})V", "I".repeat(n)),
+            reified_parameters_remain: false,
+        })
+    }
+
+    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
+        self.singletons.push(class.to_string());
+        let n = self.singletons.len();
+        Ok(RegeneratedObject {
+            name: format!("Main$g$$inlined$f${n}"),
+            constructor_desc: "()V".to_string(),
+            reified_parameters_remain: false,
+        })
     }
 }
 
@@ -860,4 +871,84 @@ fn a_class_spelled_like_an_anonymous_object_is_not_regenerated() {
     .expect("keeps the construction");
     assert!(objects.asked.is_empty());
     assert_eq!(constructions(&node), ["new lib/A$f$1", "init lib/A$f$1()V"]);
+}
+
+fn reification_marker() -> Node {
+    Node::Insn(Insn::Method {
+        op: 0xb8,
+        owner: "kotlin/jvm/internal/Intrinsics".into(),
+        name: "needClassReification".into(),
+        desc: "()V".into(),
+        interface: false,
+    })
+}
+
+fn instance_load(owner: &str) -> Node {
+    Node::Insn(Insn::Field {
+        op: 0xb2,
+        owner: owner.to_string(),
+        name: "INSTANCE".to_string(),
+        desc: format!("L{owner};"),
+    })
+}
+
+/// `getstatic INSTANCE` of an anonymous object is copied, and the `needClassReification` that
+/// preceded it is removed once that copy is the only class the body names.
+#[test]
+fn an_anonymous_singleton_is_copied_and_the_reification_marker_goes() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![reification_marker(), instance_load("lib/A$f$1"), op(0xb1)];
+    let mut objects = NumberingObjects::default();
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &AnonymousClasses(&["lib/A$f$1"]),
+        &mut objects,
+    )
+    .expect("copies the singleton");
+    assert_eq!(objects.singletons, ["lib/A$f$1"]);
+    let fields: Vec<String> = node
+        .instructions()
+        .filter_map(|insn| match insn {
+            Insn::Field {
+                owner, name, desc, ..
+            } if name == "INSTANCE" => Some(format!("{owner} {desc}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        ["Main$g$$inlined$f$1 LMain$g$$inlined$f$1;".to_string()]
+    );
+    assert!(!node.instructions().any(|insn| {
+        matches!(insn, Insn::Method { name, .. } if name == "needClassReification")
+    }));
+}
+
+/// A class the classpath says still contains `reifiedOperationMarker`, and that this stage did
+/// not copy, keeps the splice from emitting a call that would throw.
+#[test]
+fn a_reified_class_left_in_place_refuses_the_inline() {
+    struct Marked;
+    impl ClassRoles for Marked {
+        fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
+            None
+        }
+        fn contains_reified_marker(&self, internal: &str) -> bool {
+            internal == "lib/Kept"
+        }
+    }
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![reification_marker(), instance_load("lib/Kept"), op(0xb1)];
+    assert_eq!(
+        object_regeneration::regenerate_objects(
+            &mut node,
+            &Parameters::default(),
+            &[],
+            &Marked,
+            &mut NumberingObjects::default(),
+        ),
+        Err(InlineError::UnreifiedClass)
+    );
 }

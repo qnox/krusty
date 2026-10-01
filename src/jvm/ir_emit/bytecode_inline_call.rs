@@ -27,6 +27,45 @@ pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
 
+/// kotlinc's `IrDeclaration.isInlineOnly`: the `@InlineOnly` annotation, which the class file
+/// records by making the method private. A public reified function is still mandatory to splice
+/// and keeps the lines and locals an `@InlineOnly` body drops.
+///
+/// A multifile facade (`MapsKt`, `StringsKt`) does not declare the method. The call names the
+/// facade; the private method, and the body, live on the part the facade extends. Privacy is the
+/// defining class's bit, the same class [`MethodBodies::body`] reads.
+pub(super) fn declaration_is_inline_only(
+    bodies: &dyn crate::jvm::inline::MethodBodies,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+    inline: crate::libraries::InlineKind,
+) -> bool {
+    if !inline.must_inline() {
+        return false;
+    }
+    if bodies.member_is_private(owner, name, descriptor) {
+        return true;
+    }
+    bodies.body(owner, name, descriptor).is_some_and(|code| {
+        code.defining_class != owner
+            && bodies.member_is_private(&code.defining_class, name, descriptor)
+    })
+}
+
+/// A static call the byte splice may absorb. `@InlineOnly` is decided here, from the defining
+/// class, so the emitter facade does not assemble that target itself.
+pub(super) struct StaticSpliceRequest<'a> {
+    pub(super) call_expression: u32,
+    pub(super) owner: &'a str,
+    pub(super) name: &'a str,
+    pub(super) descriptor: &'a str,
+    pub(super) args: &'a [u32],
+    pub(super) dispatch_receiver: Option<u32>,
+    pub(super) inline: crate::libraries::InlineKind,
+    pub(super) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+}
+
 /// The clean failure of a reified inline body whose call shape only the byte splice handles: only
 /// the MethodNode inliner specializes reified type parameters.
 pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
@@ -63,6 +102,68 @@ pub(super) fn check_byte_splice_body(
 }
 
 impl Emitter<'_> {
+    /// Splice a static inline call. Privacy for `@InlineOnly` is the defining class's bit, including
+    /// a multifile part the facade extends.
+    pub(super) fn try_splice_static_inline(
+        &mut self,
+        request: StaticSpliceRequest<'_>,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let StaticSpliceRequest {
+            call_expression,
+            owner,
+            name,
+            descriptor,
+            args,
+            dispatch_receiver,
+            inline,
+            reified,
+        } = request;
+        if let Some(recv) = dispatch_receiver {
+            let recv_desc = type_descriptor(self.value_ty(recv));
+            let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(recv);
+            all.extend(args.iter().copied());
+            let target = super::inline_call::InlineStaticTarget {
+                owner,
+                name,
+                descriptor,
+                splice_desc: &splice_desc,
+                inline_only: declaration_is_inline_only(
+                    self.bodies,
+                    owner,
+                    name,
+                    descriptor,
+                    inline,
+                ),
+                allow_owner_bridge: true,
+            };
+            self.try_inline_static_as(call_expression, target, &all, 1, code, reified)
+        } else {
+            let has_lambda_arg = args.iter().any(|&argument| {
+                matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    || self.function_ref_class_and_captures(argument).is_some()
+                    || self.property_ref_class_and_captures(argument).is_some()
+            });
+            let target = super::inline_call::InlineStaticTarget {
+                owner,
+                name,
+                descriptor,
+                splice_desc: descriptor,
+                inline_only: declaration_is_inline_only(
+                    self.bodies,
+                    owner,
+                    name,
+                    descriptor,
+                    inline,
+                ),
+                allow_owner_bridge: inline.must_inline() || has_lambda_arg,
+            };
+            self.try_inline_static_as(call_expression, target, args, 0, code, reified)
+        }
+    }
+
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
     /// constructor of an anonymous object the body creates (`Continuation(ctx){…}`'s
     /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. Whether
@@ -1145,5 +1246,87 @@ mod tests {
             check_byte_splice_body("truncated", "()V", &truncated),
             Err(UNREADABLE_INLINE_BODY)
         );
+    }
+
+    /// A facade names the call. The body, and the private bit, belong to the part class.
+    struct FacadePart {
+        part: &'static str,
+        part_is_private: bool,
+    }
+
+    impl crate::jvm::inline::MethodBodies for FacadePart {
+        fn body(&self, owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            let mut code = body(vec![0xb1]);
+            code.defining_class = if owner == "kotlin/collections/MapsKt" {
+                self.part.to_string()
+            } else {
+                owner.to_string()
+            };
+            Some(code)
+        }
+
+        fn member_is_private(&self, owner: &str, _name: &str, _descriptor: &str) -> bool {
+            owner == self.part && self.part_is_private
+        }
+    }
+
+    #[test]
+    fn a_private_part_method_behind_a_facade_is_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "set",
+            "(Ljava/util/Map;Ljava/lang/Object;Ljava/lang/Object;)V",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn a_public_reified_method_on_its_owner_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/sequences/SequencesKt",
+            "filterIsInstance",
+            "(Lkotlin/sequences/Sequence;)Lkotlin/sequences/Sequence;",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn a_public_part_method_behind_a_facade_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: false,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "emptyMap",
+            "()Ljava/util/Map;",
+            crate::libraries::InlineKind::MustInline,
+        ));
+    }
+
+    #[test]
+    fn an_optional_inline_method_is_not_inline_only() {
+        let bodies = FacadePart {
+            part: "kotlin/collections/MapsKt__MapsKt",
+            part_is_private: true,
+        };
+        assert!(!declaration_is_inline_only(
+            &bodies,
+            "kotlin/collections/MapsKt",
+            "set",
+            "(Ljava/util/Map;Ljava/lang/Object;Ljava/lang/Object;)V",
+            crate::libraries::InlineKind::CanInline,
+        ));
     }
 }

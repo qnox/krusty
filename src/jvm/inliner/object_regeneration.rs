@@ -13,7 +13,7 @@ use crate::jvm::bytecode_passes::analysis::{
     PlainFrames, Value,
 };
 use crate::jvm::bytecode_passes::descriptors;
-use crate::jvm::method_node::{Insn, MethodNode, Node};
+use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
 
 use super::anonymous_object::{MalformedType, TypeRemapper};
 use super::class_roles::ClassRoles;
@@ -22,6 +22,18 @@ use super::{InlineError, Lambda, Parameters};
 
 const NEW: u8 = 0xbb;
 const INVOKESPECIAL: u8 = 0xb7;
+const INVOKESTATIC: u8 = 0xb8;
+const GETSTATIC: u8 = 0xb2;
+const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
+
+/// The class an inlined call site got back from regenerating one anonymous object.
+pub(crate) struct RegeneratedObject {
+    pub name: String,
+    pub constructor_desc: String,
+    /// A method of the copy still calls `reifiedOperationMarker`, so the caller keeps
+    /// `needClassReification` for its own caller to specialize.
+    pub reified_parameters_remain: bool,
+}
 
 /// An inline lambda one of an object's constructor arguments passes, which the copy inlines
 /// (kotlinc's `capturedLambdasToInline`).
@@ -41,7 +53,16 @@ pub(crate) trait AnonymousObjects {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
-    ) -> Result<(String, String), InlineError>;
+    ) -> Result<RegeneratedObject, InlineError>;
+
+    /// Regenerate `class`, which the body loads with `getstatic INSTANCE` rather than `new`. The
+    /// copy's constructor is the original's; nothing at this instruction passes a lambda.
+    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
+        let _ = class;
+        Err(InlineError::Regeneration(RegenerationError::Unsupported(
+            "an anonymous singleton",
+        )))
+    }
 }
 
 /// A constructor call whose object takes lambdas: the call is completed once the lambdas' loads are
@@ -71,7 +92,28 @@ pub(super) fn regenerate_objects(
     let mut pending = Vec::new();
     // The copy and its constructor descriptor, by the index of the `new` that made it.
     let mut copies: HashMap<usize, (String, String)> = HashMap::new();
+    // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
+    let mut reemit_markers = Vec::new();
+    let marker_sites = need_class_reification_sites(node);
     for at in 0..node.nodes.len() {
+        if let Some(owner) = anonymous_singleton_owner(node, at, classes) {
+            let copy = objects.regenerate_singleton(&owner)?;
+            crate::trace_compiler!(
+                "splice",
+                "singleton {owner} -> {} remain={}",
+                copy.name,
+                copy.reified_parameters_remain
+            );
+            remapper.add_mapping(&owner, &copy.name);
+            if copy.reified_parameters_remain {
+                reemit_markers.push(at);
+            }
+            let Node::Insn(insn) = &mut node.nodes[at] else {
+                unreachable!("a singleton load is a field instruction")
+            };
+            remapper.remap_insn(insn).map_err(malformed)?;
+            continue;
+        }
         let Node::Insn(insn) = &mut node.nodes[at] else {
             continue;
         };
@@ -87,21 +129,24 @@ pub(super) fn regenerate_objects(
                     lambda: &lambdas[lambda],
                 })
                 .collect();
-            let (name, desc) = objects.regenerate(
+            let copy = objects.regenerate(
                 class,
                 &constructions.descriptors[&constructor],
                 &object_lambdas,
             )?;
             if !passed.is_empty() {
                 pending.push(PendingConstructor {
-                    class: name.clone(),
-                    desc: desc.clone(),
+                    class: copy.name.clone(),
+                    desc: copy.constructor_desc.clone(),
                     captured_loads: captured_loads(parameters, lambdas, passed),
                 });
             }
-            remapper.add_mapping(class, &name);
-            *class = name.clone();
-            copies.insert(at, (name, desc));
+            if copy.reified_parameters_remain {
+                reemit_markers.push(at);
+            }
+            remapper.add_mapping(class, &copy.name);
+            *class = copy.name.clone();
+            copies.insert(at, (copy.name, copy.constructor_desc));
         } else if let Some(new) = constructions.by_constructor.get(&at) {
             let Insn::Method { owner, desc, .. } = insn else {
                 unreachable!("a construction ends at an `<init>` call")
@@ -123,7 +168,129 @@ pub(super) fn regenerate_objects(
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
     }
+    if !marker_sites.is_empty() && names_unreified_class(node, classes) {
+        return Err(InlineError::UnreifiedClass);
+    }
+    remove_nodes(node, &marker_sites);
+    insert_reification_markers(node, &marker_sites, &reemit_markers);
     Ok(pending)
+}
+
+/// `getstatic owner.INSTANCE` of an anonymous object, the owner's internal name.
+fn anonymous_singleton_owner(
+    node: &MethodNode,
+    at: usize,
+    classes: &dyn ClassRoles,
+) -> Option<String> {
+    match &node.nodes[at] {
+        Node::Insn(Insn::Field {
+            op: GETSTATIC,
+            owner,
+            name,
+            ..
+        }) if name == "INSTANCE" && classes.is_anonymous_object(owner) => Some(owner.clone()),
+        _ => None,
+    }
+}
+
+/// Reachable `invokestatic Intrinsics.needClassReification()V` instructions, in order.
+fn need_class_reification_sites(node: &MethodNode) -> Vec<usize> {
+    node.nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(at, entry)| match entry {
+            Node::Insn(insn) if is_need_class_reification(insn) => Some(at),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_need_class_reification(insn: &Insn) -> bool {
+    matches!(insn, Insn::Method { op: INVOKESTATIC, owner, name, desc, interface }
+        if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
+}
+
+/// Whether `node` still names a class whose methods call `reifiedOperationMarker`.
+fn names_unreified_class(node: &MethodNode, classes: &dyn ClassRoles) -> bool {
+    let mut named = Vec::new();
+    for insn in node.instructions() {
+        note_classes(insn, &mut named);
+    }
+    for block in &node.try_catch_blocks {
+        if let Some(class) = &block.catch_type {
+            named.push(class.clone());
+        }
+    }
+    for local in &node.local_variables {
+        internal_names(&local.desc, &mut named);
+    }
+    named.iter().any(|class| {
+        let marked = classes.contains_reified_marker(class);
+        if marked {
+            crate::trace_compiler!("splice", "unreified class {class}");
+        }
+        marked
+    })
+}
+
+fn note_classes(insn: &Insn, named: &mut Vec<String>) {
+    match insn {
+        Insn::Type { class, .. } => named.push(class.clone()),
+        Insn::Field { owner, desc, .. } | Insn::Method { owner, desc, .. } => {
+            named.push(owner.clone());
+            internal_names(desc, named);
+        }
+        Insn::Ldc(Constant::Class(class)) => named.push(class.clone()),
+        Insn::MultiANewArray { desc, .. } => internal_names(desc, named),
+        Insn::InvokeDynamic { desc, .. } => internal_names(desc, named),
+        _ => {}
+    }
+}
+
+/// Every `L…;` internal name in `desc`.
+fn internal_names(desc: &str, named: &mut Vec<String>) {
+    let bytes = desc.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'L' {
+            if let Some(end) = desc[at + 1..].find(';') {
+                named.push(desc[at + 1..at + 1 + end].to_string());
+                at += end + 2;
+                continue;
+            }
+        }
+        at += 1;
+    }
+}
+
+fn remove_nodes(node: &mut MethodNode, indices: &[usize]) {
+    for &at in indices.iter().rev() {
+        node.nodes.remove(at);
+    }
+}
+
+/// Put `needClassReification` back immediately before each site whose copy still uses a reified
+/// parameter. `removed` are the original marker indices, deleted before this runs.
+fn insert_reification_markers(node: &mut MethodNode, removed: &[usize], sites: &[usize]) {
+    let mut adjusted: Vec<usize> = sites
+        .iter()
+        .map(|&site| site - removed.iter().filter(|&&marker| marker < site).count())
+        .collect();
+    adjusted.sort_unstable();
+    adjusted.dedup();
+    for site in adjusted.into_iter().rev() {
+        node.nodes.insert(site, reification_marker());
+    }
+}
+
+fn reification_marker() -> Node {
+    Node::Insn(Insn::Method {
+        op: INVOKESTATIC,
+        owner: INTRINSICS.to_string(),
+        name: "needClassReification".to_string(),
+        desc: "()V".to_string(),
+        interface: false,
+    })
 }
 
 /// The loads of every value the `passed` lambdas capture, from the body's captured parameters, in
