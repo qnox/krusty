@@ -40,7 +40,6 @@ pub(super) fn splice_inline_property_accessors(
 }
 
 struct PropertyAccess {
-    target: crate::fir::PropertyId,
     dispatch_receiver: Option<ExprId>,
     extension_receiver: Option<ExprId>,
     context_arguments: Vec<ExprId>,
@@ -51,27 +50,23 @@ struct PropertyAccess {
 fn property_access(ir: &crate::ir::IrFile, site: ExprId) -> Option<PropertyAccess> {
     match ir.expr(site).clone() {
         IrExpr::Checked(IrCheckedOperation::PropertyRead {
-            target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
             ..
         }) => Some(PropertyAccess {
-            target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
             value: None,
         }),
         IrExpr::Checked(IrCheckedOperation::PropertyWrite {
-            target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
             value,
             ..
         }) => Some(PropertyAccess {
-            target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
@@ -135,7 +130,7 @@ fn expand_inline_accessor(
     let Some(inner) = accessor_inner_body(ir, function, access.value.is_some()) else {
         return Err(failure(accessor, InlineFail::MissingBody));
     };
-    let Some(operands) = access_operands(ir, access) else {
+    let Some(operands) = access_operands(ir, function, access) else {
         return Err(failure(accessor, InlineFail::OperandMismatch));
     };
     let has_dispatch = ir
@@ -459,61 +454,37 @@ fn accessor_inner_body(
     }
 }
 
-fn access_operands(ir: &crate::ir::IrFile, access: &PropertyAccess) -> Option<Vec<ExprId>> {
-    let layout = ir.local_property_layouts.get(&access.target)?;
+fn access_operands(
+    ir: &crate::ir::IrFile,
+    function_id: crate::ir::FunId,
+    access: &PropertyAccess,
+) -> Option<Vec<ExprId>> {
+    let function = ir.functions.get(function_id as usize)?;
+    let identities = ir.function_parameter_identities(function_id)?;
     let mut operands = Vec::new();
-    match layout {
-        crate::ir::IrLocalPropertyLayout::TopLevelStorage { .. } => {
-            if access.dispatch_receiver.is_some()
-                || access.extension_receiver.is_some()
-                || !access.context_arguments.is_empty()
-            {
-                return None;
-            }
-        }
-        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-            receiver,
-            context_parameters,
-            ..
-        } => {
-            if access.context_arguments.len() != context_parameters.len() {
-                return None;
-            }
-            operands.extend(access.context_arguments.iter().copied());
-            match (
-                receiver.is_some(),
-                access.dispatch_receiver,
-                access.extension_receiver,
-            ) {
-                (false, None, None) => {}
-                (true, None, Some(receiver)) => operands.push(receiver),
-                _ => return None,
-            }
-        }
-        crate::ir::IrLocalPropertyLayout::MemberExtension {
-            context_parameters, ..
-        } => {
-            if access.context_arguments.len() != context_parameters.len() {
-                return None;
-            }
-            operands.push(access.dispatch_receiver?);
-            operands.extend(access.context_arguments.iter().copied());
-            operands.push(access.extension_receiver?);
-        }
-        crate::ir::IrLocalPropertyLayout::Member {
-            context_parameters, ..
-        } => {
-            if access.extension_receiver.is_some()
-                || access.context_arguments.len() != context_parameters.len()
-            {
-                return None;
-            }
-            operands.push(access.dispatch_receiver?);
-            operands.extend(access.context_arguments.iter().copied());
-        }
+    match (function.dispatch_receiver, access.dispatch_receiver) {
+        (Some(_), Some(receiver)) => operands.push(receiver),
+        (None, None) => {}
+        _ => return None,
     }
-    if let Some(value) = access.value {
-        operands.push(value);
+    let mut contexts = access.context_arguments.iter().copied();
+    let mut extension = access.extension_receiver;
+    let mut value = access.value;
+    for identity in identities {
+        let operand = match identity.role {
+            crate::ir::IrParameterRole::ContextValue
+            | crate::ir::IrParameterRole::AnonymousContextParameter { .. }
+            | crate::ir::IrParameterRole::ContextReceiver { .. } => contexts.next()?,
+            crate::ir::IrParameterRole::ExtensionReceiver => extension.take()?,
+            crate::ir::IrParameterRole::Value | crate::ir::IrParameterRole::PropertySetterValue => {
+                value.take()?
+            }
+            _ => return None,
+        };
+        operands.push(operand);
+    }
+    if contexts.next().is_some() || extension.is_some() || value.is_some() {
+        return None;
     }
     Some(operands)
 }
