@@ -16,6 +16,7 @@ mod catalog_availability;
 mod class_locations;
 mod ct_sym_index;
 mod jimage_catalog;
+mod jimage_locations;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
