@@ -595,6 +595,49 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
     }
 }
 
+fn undetermined_classifier(ty: Ty) -> bool {
+    match ty {
+        Ty::Pending => true,
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => undetermined_classifier(*inner),
+        _ => false,
+    }
+}
+
+/// Replace pending and error markers that sit under a real classifier. The classifier itself is
+/// unchanged, so an array keeps its dimensions and a function type keeps its arity.
+fn erase_undetermined_markers(ty: Ty) -> Ty {
+    match ty {
+        Ty::Pending | Ty::Error => Ty::obj_name(crate::types::wk::any()),
+        Ty::Nullable(inner) => Ty::nullable(erase_undetermined_markers(*inner)),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(erase_undetermined_markers(*inner)),
+        Ty::InProjection(inner) => Ty::in_projection(erase_undetermined_markers(*inner)),
+        Ty::OutProjection(inner) => Ty::out_projection(erase_undetermined_markers(*inner)),
+        Ty::StarProjection(inner) => Ty::star_projection(erase_undetermined_markers(*inner)),
+        Ty::TyParam(name, bound) => Ty::ty_param(name, erase_undetermined_markers(*bound)),
+        Ty::Obj(name, args) => {
+            let args = args
+                .iter()
+                .copied()
+                .map(erase_undetermined_markers)
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(name, &args)
+        }
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .copied()
+                .map(erase_undetermined_markers)
+                .collect(),
+            erase_undetermined_markers(signature.ret),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        other => other,
+    }
+}
+
 /// The class an `instanceof`/`checkcast` names for `t`.
 ///
 /// One mapping, because the two instructions must agree: a value that passes the check is exactly a
@@ -611,9 +654,18 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
 /// boxed `void`, so representation-only casts and checks name `java/lang/Void`; `instanceof Void`
 /// remains false for every realizable Kotlin value and for `null`.
 pub(crate) fn instanceof_internal_name(t: Ty) -> &'static str {
-    if t.mentions_pending() || t.mentions_error() {
+    // A pending classifier has no runtime class yet. `Ty::Error` is the erased unknown that
+    // already-accepted checks name as `Object`, including a star projection whose bound was not
+    // recovered. Type arguments are erased either way, so a pending argument does not reject the
+    // enclosing array or class check.
+    if undetermined_classifier(t) {
         unreachable!("a not-determined type reached a JVM instanceof name");
     }
+    let t = if !matches!(t, Ty::Error) && (t.mentions_pending() || t.mentions_error()) {
+        erase_undetermined_markers(t)
+    } else {
+        t
+    };
     match t {
         Ty::Nothing => classfile_internal_name_of(crate::types::wk::java_void()),
         Ty::String => "java/lang/String",
@@ -1016,45 +1068,58 @@ mod tests {
     }
 
     #[test]
-    fn instanceof_name_rejects_direct_and_nested_undetermined_types() {
-        let invalid = [
-            ("direct pending", Ty::Pending),
-            ("direct error", Ty::Error),
-            (
-                "object argument pending",
-                Ty::obj_args("sample/Box", &[Ty::Pending]),
-            ),
-            (
-                "object argument error",
-                Ty::obj_args("sample/Box", &[Ty::Error]),
-            ),
-            (
-                "function parameter pending",
-                Ty::fun(vec![Ty::Pending], Ty::Unit),
-            ),
-            (
-                "function parameter error",
-                Ty::fun(vec![Ty::Error], Ty::Unit),
-            ),
-            ("function return pending", Ty::fun(Vec::new(), Ty::Pending)),
-            ("function return error", Ty::fun(Vec::new(), Ty::Error)),
-        ];
-        for (label, ty) in invalid {
+    fn instanceof_name_rejects_an_undetermined_classifier() {
+        for ty in [Ty::Pending, Ty::nullable(Ty::Pending)] {
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = instanceof_internal_name(ty);
             }));
-            let message = panicked.expect_err(label);
+            let message = panicked.expect_err("undetermined classifier");
             let text = message
                 .downcast_ref::<&str>()
                 .copied()
                 .or_else(|| message.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or_else(|| panic!("{label}: non-string panic"));
+                .expect("string panic");
             assert_eq!(
                 text,
-                "internal error: entered unreachable code: a not-determined type reached a JVM instanceof name",
-                "{label}"
+                "internal error: entered unreachable code: a not-determined type reached a JVM instanceof name"
             );
         }
+    }
+
+    #[test]
+    fn instanceof_name_erases_an_undetermined_type_argument() {
+        assert_eq!(instanceof_internal_name(Ty::Error), "java/lang/Object");
+        assert_eq!(
+            instanceof_internal_name(Ty::obj_args("sample/Box", &[Ty::Pending])),
+            classfile_internal_name_of(crate::types::type_name("sample/Box"))
+        );
+        assert_eq!(
+            instanceof_internal_name(Ty::obj_args("sample/Box", &[Ty::Error])),
+            classfile_internal_name_of(crate::types::type_name("sample/Box"))
+        );
+        assert_eq!(
+            instanceof_internal_name(Ty::fun(vec![Ty::Pending], Ty::Unit)),
+            function_interface_internal_name(1)
+        );
+        assert_eq!(
+            instanceof_internal_name(Ty::fun(Vec::new(), Ty::Error)),
+            function_interface_internal_name(0)
+        );
+        let nested = Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::obj_args(
+                "kotlin/Array",
+                &[Ty::star_projection(Ty::Pending)],
+            )],
+        );
+        let erased = Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::obj_args(
+                "kotlin/Array",
+                &[Ty::star_projection(Ty::obj("kotlin/Any"))],
+            )],
+        );
+        assert_eq!(instanceof_internal_name(nested), type_descriptor(erased));
     }
 
     #[test]
