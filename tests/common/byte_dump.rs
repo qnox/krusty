@@ -27,9 +27,9 @@
 //! writes the archive.
 //!
 //! The fingerprint is the sources kotlinc compiles and the class files compiled from those sources.
-//! Stdlib and the rest of the selected distribution's `lib/` are the version range, so those jars
-//! are not read. The JDK image is not part of the key: it does not change the class files kotlinc
-//! writes.
+//! Entries proven to belong to the selected Kotlin distribution use their logical distribution
+//! path, while the selected JDK image uses its kind and the JDK `release` identity. Other
+//! classpath entries always contribute their bytes.
 //!
 //! The archive is read at runtime and is not compiled into the test binary.
 
@@ -145,8 +145,8 @@ fn split_leading_digits(text: &str) -> (&str, &str) {
 /// The fingerprint covers the source, the JVM target, the normalized flags, and class files
 /// compiled from the fixture's own sources. A scratch classpath directory contributes those file
 /// bytes and not the directory's name, so the next run still hits and a changed class file misses.
-/// The Kotlin distribution and the JDK image contribute nothing. File-valued options contribute
-/// bytes rather than scratch paths.
+/// Selected Kotlin-distribution and JDK entries contribute compact, location-independent
+/// identities. File-valued options contribute bytes rather than scratch paths.
 pub struct ClassDumpInputs {
     pub fingerprint: u128,
     pub variant: String,
@@ -559,7 +559,17 @@ fn store_files(
         .or_default()
         .insert(key.to_string(), updated);
     slot.archive.insert_blob(blob, raw);
-    slot.dirty.insert((module, key.to_string()));
+    let pending = PendingDump {
+        module,
+        key: key.to_string(),
+        compiler,
+        fingerprint,
+        blob,
+    };
+    // Only the last publication of one exact version/fingerprint matters. Coalescing it keeps the
+    // replay log bounded while retaining independent versions and fingerprints for the same key.
+    slot.pending.retain(|record| !record.same_slot(&pending));
+    slot.pending.push(pending);
     ensure_flush_at_exit();
 }
 
@@ -636,7 +646,7 @@ fn merge_spans(
 }
 
 /// One process-wide cache. The archive is decompressed once; later lookups copy one payload.
-/// Stores stay in memory until the process exits, which writes each dirty archive once.
+/// Stores stay in memory until the process exits, which writes each pending archive once.
 fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, CacheSlot>>> =
         std::sync::OnceLock::new();
@@ -647,8 +657,9 @@ struct CacheSlot {
     /// Stamp of the file this memory was reconciled with. `None` when that file does not exist yet.
     stamp: Option<Stamp>,
     archive: Archive,
-    /// Module/key pairs changed in memory and not yet written.
-    dirty: BTreeSet<(String, String)>,
+    /// Exact publications not yet written. Replaying operations, rather than copying a stale final
+    /// span vector, preserves versions concurrently published by another process.
+    pending: Vec<PendingDump>,
 }
 
 impl CacheSlot {
@@ -656,8 +667,26 @@ impl CacheSlot {
         Self {
             stamp: None,
             archive: Archive::empty(),
-            dirty: BTreeSet::new(),
+            pending: Vec::new(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingDump {
+    module: String,
+    key: String,
+    compiler: DumpVersion,
+    fingerprint: u128,
+    blob: u128,
+}
+
+impl PendingDump {
+    fn same_slot(&self, other: &Self) -> bool {
+        self.module == other.module
+            && self.key == other.key
+            && self.compiler == other.compiler
+            && self.fingerprint == other.fingerprint
     }
 }
 
@@ -715,35 +744,40 @@ impl Archive {
         modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
         blobs: BTreeMap<u128, Vec<u8>>,
     ) -> Self {
-        Self::parse(serialize_archive(&modules, &blobs))
+        Self::try_parse(serialize_archive(&modules, &blobs)).expect("serialized class-dump archive")
     }
 
-    fn parse(body: Vec<u8>) -> Self {
-        let split = body
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or_else(|| panic!("class-dump archive has no blob section"));
-        let text = std::str::from_utf8(&body[..split]).expect("class-dump index is utf-8");
-        let modules = parse_modules(text);
+    fn try_parse(body: Vec<u8>) -> Option<Self> {
+        let split = body.iter().position(|byte| *byte == 0)?;
+        let text = std::str::from_utf8(&body[..split]).ok()?;
+        let modules = parse_modules(text)?;
         let mut offset = split + 1;
-        let count = read_u32(&body, &mut offset).expect("class-dump blob count") as usize;
+        let count = read_u32(&body, &mut offset)? as usize;
         let mut blobs = BTreeMap::new();
         for _ in 0..count {
-            let id_bytes = read_bytes(&body, &mut offset, 16).expect("class-dump blob id");
-            let id = u128::from_be_bytes(id_bytes.try_into().expect("16-byte blob id"));
-            let len = read_u32(&body, &mut offset).expect("class-dump blob length") as usize;
+            let id_bytes = read_bytes(&body, &mut offset, 16)?;
+            let id = u128::from_be_bytes(id_bytes.try_into().ok()?);
+            let len = read_u32(&body, &mut offset)? as usize;
             let start = offset;
-            let _ = read_bytes(&body, &mut offset, len).expect("class-dump blob bytes");
+            let _ = read_bytes(&body, &mut offset, len)?;
             blobs.insert(id, start..offset);
         }
         if offset != body.len() {
-            panic!("trailing bytes in class-dump archive");
+            return None;
         }
-        Self {
+        if modules.values().any(|entries| {
+            entries
+                .values()
+                .flatten()
+                .any(|span| !blobs.contains_key(&span.blob))
+        }) {
+            return None;
+        }
+        Some(Self {
             modules,
             body,
             blobs,
-        }
+        })
     }
 }
 
@@ -782,13 +816,11 @@ fn render_modules(modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>) -> St
     text
 }
 
-fn parse_modules(text: &str) -> BTreeMap<String, BTreeMap<String, Vec<Span>>> {
+fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Span>>>> {
     let mut modules: BTreeMap<String, BTreeMap<String, Vec<Span>>> = BTreeMap::new();
     let mut module: Option<String> = None;
     let mut key: Option<String> = None;
-    for (index, line) in text.lines().enumerate() {
-        let malformed =
-            || -> ! { panic!("malformed class-dump index line {}: {line:?}", index + 1) };
+    for line in text.lines() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -810,20 +842,18 @@ fn parse_modules(text: &str) -> BTreeMap<String, BTreeMap<String, Vec<Span>>> {
                     entries.entry(name.to_string()).or_default();
                     key = Some(name.to_string());
                 }
-                None => malformed(),
+                None => return None,
             }
             continue;
         }
         let mut parts = line.split_whitespace();
-        let range = parts.next().unwrap_or_else(|| malformed());
-        let fingerprint = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
-            .unwrap_or_else(|| malformed());
-        let blob = parse_hex128(parts.next().unwrap_or_else(|| malformed()))
-            .unwrap_or_else(|| malformed());
+        let range = parts.next()?;
+        let fingerprint = parse_hex128(parts.next()?)?;
+        let blob = parse_hex128(parts.next()?)?;
         if parts.next().is_some() {
-            malformed();
+            return None;
         }
-        let (channel, lo, hi) = parse_range(range).unwrap_or_else(|| malformed());
+        let (channel, lo, hi) = parse_range(range)?;
         match module
             .as_ref()
             .zip(key.as_ref())
@@ -836,10 +866,10 @@ fn parse_modules(text: &str) -> BTreeMap<String, BTreeMap<String, Vec<Span>>> {
                 fingerprint,
                 blob,
             }),
-            None => malformed(),
+            None => return None,
         }
     }
-    modules
+    Some(modules)
 }
 
 fn cached_archive<'a>(
@@ -848,7 +878,7 @@ fn cached_archive<'a>(
 ) -> Option<&'a Archive> {
     reconcile(path, cache);
     let slot = cache.get(path)?;
-    if slot.stamp.is_none() && slot.dirty.is_empty() {
+    if slot.stamp.is_none() && slot.pending.is_empty() {
         return None;
     }
     Some(&slot.archive)
@@ -866,7 +896,7 @@ fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
                     CacheSlot {
                         stamp: Some(stamp),
                         archive,
-                        dirty: BTreeSet::new(),
+                        pending: Vec::new(),
                     },
                 );
             }
@@ -877,7 +907,7 @@ fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
         cache.insert(path.to_path_buf(), slot);
         return;
     }
-    if slot.dirty.is_empty() {
+    if slot.pending.is_empty() {
         if let Some(stamp) = on_disk {
             if let Some(archive) = read_archive(path) {
                 cache.insert(
@@ -885,46 +915,68 @@ fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
                     CacheSlot {
                         stamp: Some(stamp),
                         archive,
-                        dirty: BTreeSet::new(),
+                        pending: Vec::new(),
                     },
                 );
-                return;
             }
         }
-        cache.insert(path.to_path_buf(), slot);
+        // A clean slot never outlives deletion, replacement with an unreadable archive, or
+        // corruption. Serving its old memory would make a removed cache entry appear valid.
         return;
     }
-    let mut disk = read_archive(path).unwrap_or_else(Archive::empty);
-    merge_dirty(&mut disk, &slot.archive, &slot.dirty);
+
+    let (stamp, mut disk) = match (slot.stamp, on_disk) {
+        // A newly created in-memory archive has no disk predecessor yet.
+        (None, None) => {
+            cache.insert(path.to_path_buf(), slot);
+            return;
+        }
+        (_, Some(stamp)) => {
+            let Some(archive) = read_archive(path) else {
+                // Do not overwrite an archive that another process replaced with unreadable or
+                // corrupt data. Drop the stale snapshot and its pending publication instead.
+                return;
+            };
+            (Some(stamp), archive)
+        }
+        // A previously observed archive was deleted. Respect deletion instead of recreating it
+        // from stale process memory.
+        (Some(_), None) => return,
+    };
+    replay_pending(&mut disk, &slot.archive, &slot.pending);
     cache.insert(
         path.to_path_buf(),
         CacheSlot {
-            stamp: on_disk,
+            stamp,
             archive: disk,
-            dirty: slot.dirty,
+            pending: slot.pending,
         },
     );
 }
 
-fn merge_dirty(into: &mut Archive, from: &Archive, dirty: &BTreeSet<(String, String)>) {
+fn replay_pending(into: &mut Archive, from: &Archive, pending: &[PendingDump]) {
     let mut blobs = into.owned_blobs();
-    for (module, key) in dirty {
-        let Some(spans) = from
-            .modules
-            .get(module)
-            .and_then(|entries| entries.get(key))
-        else {
+    for record in pending {
+        let Some(raw) = from.blob(record.blob) else {
+            // A later coalesced publication superseded this blob in the in-memory archive.
             continue;
         };
-        for span in spans {
-            if let Some(raw) = from.blob(span.blob) {
-                blobs.insert(span.blob, raw.to_vec());
-            }
-        }
+        blobs.insert(record.blob, raw.to_vec());
+        let current = into
+            .modules
+            .get(&record.module)
+            .and_then(|entries| entries.get(&record.key))
+            .cloned()
+            .unwrap_or_default();
+        let (mine, rest): (Vec<Span>, Vec<Span>) = current.into_iter().partition(|span| {
+            span.channel == record.compiler.channel && span.fingerprint == record.fingerprint
+        });
+        let mut spans = revised_spans(&mine, record.compiler, record.fingerprint, record.blob);
+        spans.extend(rest);
         into.modules
-            .entry(module.clone())
+            .entry(record.module.clone())
             .or_default()
-            .insert(key.clone(), spans.clone());
+            .insert(record.key.clone(), spans);
     }
     let mut referenced = BTreeSet::new();
     for entries in into.modules.values() {
@@ -941,7 +993,7 @@ fn merge_dirty(into: &mut Archive, from: &Archive, dirty: &BTreeSet<(String, Str
 
 fn read_archive(path: &Path) -> Option<Archive> {
     let bytes = std::fs::read(path).ok()?;
-    Some(Archive::parse(decompress(&bytes)))
+    Archive::try_parse(try_decompress(&bytes)?)
 }
 
 /// Write every archive this process has changed. A directory that has already been removed is
@@ -951,7 +1003,7 @@ fn flush_dirty_archives() {
         let cache = dump_cache().lock().expect("class-dump cache");
         cache
             .iter()
-            .filter(|(_, slot)| !slot.dirty.is_empty())
+            .filter(|(_, slot)| !slot.pending.is_empty())
             .map(|(path, _)| path.clone())
             .collect()
     };
@@ -968,7 +1020,7 @@ fn flush_archive(root: &Path) {
         return;
     };
     let mut cache = dump_cache().lock().expect("class-dump cache");
-    if cache.get(&path).is_none_or(|slot| slot.dirty.is_empty()) {
+    if cache.get(&path).is_none_or(|slot| slot.pending.is_empty()) {
         return;
     }
     if !parent.exists() {
@@ -980,7 +1032,7 @@ fn flush_archive(root: &Path) {
     let Some(slot) = cache.get(&path) else {
         return;
     };
-    if slot.dirty.is_empty() {
+    if slot.pending.is_empty() {
         return;
     }
     let bytes = compress(&slot.archive.body);
@@ -988,18 +1040,21 @@ fn flush_archive(root: &Path) {
     let stamp = file_stamp(&path).expect("written class-dump archive");
     let slot = cache.get_mut(&path).expect("class-dump slot");
     slot.stamp = Some(stamp);
-    slot.dirty.clear();
+    slot.pending.clear();
 }
 
 fn ensure_flush_at_exit() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
-        libc::atexit(flush_at_exit);
+        let registered = libc::atexit(flush_at_exit);
+        assert_eq!(registered, 0, "register class-dump exit flush");
     });
 }
 
 extern "C" fn flush_at_exit() {
-    flush_dirty_archives();
+    // No panic may cross the C ABI boundary. Normal test-time explicit flushes retain their exact
+    // diagnostics; process teardown is best-effort and must never abort an otherwise valid run.
+    let _ = std::panic::catch_unwind(flush_dirty_archives);
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {
@@ -1050,11 +1105,13 @@ fn compress(raw: &[u8]) -> Vec<u8> {
 }
 
 fn decompress(bytes: &[u8]) -> Vec<u8> {
+    try_decompress(bytes).expect("decompress class dump")
+}
+
+fn try_decompress(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut raw = Vec::new();
-    ZlibDecoder::new(bytes)
-        .read_to_end(&mut raw)
-        .expect("decompress class dump");
-    raw
+    ZlibDecoder::new(bytes).read_to_end(&mut raw).ok()?;
+    Some(raw)
 }
 
 fn encode_raw(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
@@ -1458,16 +1515,35 @@ fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
     Ok(format!("{name}={}", hashed.join(",")))
 }
 
-/// Classpath entries the compiler version does not already identify.
+/// Classpath entries not already identified by the selected compiler toolchains.
 ///
-/// Jars from that distribution — stdlib, reflect, test, annotations, and anything under its
-/// `lib/` — are the version range, so their bytes are not read. `lib/modules` and `lib/ct.sym`
-/// are the JDK image; they do not change the class files kotlinc writes. A dependency directory
-/// or any other jar stays in the fingerprint, in declaration order.
+/// A proven entry under the selected kotlinc `lib/` contributes its logical distribution path.
+/// The selected JDK's `modules` and `ct.sym` contribute their kind plus the small `release` file,
+/// which includes vendor and patch identity. Every arbitrary dependency—including a jar with a
+/// stdlib-like basename or a different `lib/modules`—contributes its content, in declaration order.
 fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+    let kotlinc_lib = krusty::toolchain::kotlinc_lib_dir();
+    let jdk_modules = krusty::toolchain::jdk_modules();
+    classpath_content_fingerprint_with_platform(
+        paths,
+        kotlinc_lib.as_deref(),
+        jdk_modules.as_deref(),
+    )
+}
+
+fn classpath_content_fingerprint_with_platform(
+    paths: &[PathBuf],
+    kotlinc_lib: Option<&Path>,
+    jdk_modules: Option<&Path>,
+) -> Result<String, String> {
     let mut rows = Vec::new();
     for path in paths {
-        if is_versioned_platform(path) {
+        if let Some(relative) = selected_kotlinc_entry(path, kotlinc_lib) {
+            rows.push(format!("kotlinc:{relative}"));
+            continue;
+        }
+        if let Some(row) = selected_jdk_entry(path, jdk_modules)? {
+            rows.push(row);
             continue;
         }
         if path.is_dir() {
@@ -1481,42 +1557,55 @@ fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
     Ok(rows.join("\n"))
 }
 
-fn is_versioned_platform(path: &Path) -> bool {
-    is_jdk_image(path) || is_kotlinc_dist_entry(path) || is_kotlin_runtime_jar(path)
-}
-
-fn is_jdk_image(path: &Path) -> bool {
-    let name = path.file_name().and_then(|name| name.to_str());
-    let parent = path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str());
-    matches!((parent, name), (Some("lib"), Some("modules" | "ct.sym")))
-}
-
-fn is_kotlinc_dist_entry(path: &Path) -> bool {
-    krusty::toolchain::kotlinc_lib_dir().is_some_and(|lib| path.starts_with(lib))
-}
-
-fn is_kotlin_runtime_jar(path: &Path) -> bool {
-    let Some(stem) = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix(".jar"))
-    else {
-        return false;
-    };
-    [
-        "kotlin-stdlib",
-        "kotlin-reflect",
-        "kotlin-test",
-        "kotlin-annotations",
-    ]
-    .into_iter()
-    .any(|prefix| {
-        stem.strip_prefix(prefix)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+fn selected_kotlinc_entry(path: &Path, selected_lib: Option<&Path>) -> Option<String> {
+    let selected_lib = selected_lib?.canonicalize().ok()?;
+    let path = path.canonicalize().ok()?;
+    let relative = path.strip_prefix(selected_lib).ok()?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    Some(if relative.is_empty() {
+        ".".to_string()
+    } else {
+        relative
     })
+}
+
+fn selected_jdk_entry(
+    path: &Path,
+    selected_modules: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let Some(selected_modules) = selected_modules else {
+        return Ok(None);
+    };
+    let Ok(selected_modules) = selected_modules.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(path) = path.canonicalize() else {
+        return Ok(None);
+    };
+    let Some(lib) = selected_modules.parent() else {
+        return Ok(None);
+    };
+    let kind = if path == selected_modules {
+        "modules"
+    } else if lib.join("ct.sym").canonicalize().ok().as_ref() == Some(&path) {
+        "ct.sym"
+    } else {
+        return Ok(None);
+    };
+    let Some(home) = lib.parent() else {
+        return Ok(None);
+    };
+    let release = home.join("release");
+    let bytes = std::fs::read(&release).map_err(|err| {
+        format!(
+            "unreadable selected JDK identity {}: {err}",
+            release.display()
+        )
+    })?;
+    Ok(Some(format!(
+        "jdk:{kind}:{:032x}",
+        fingerprint_parts(&[&bytes])
+    )))
 }
 
 fn read_output_tree(out: &Path) -> Option<BTreeMap<String, Vec<u8>>> {
@@ -2370,83 +2459,105 @@ mod tests {
     }
 
     #[test]
-    fn the_stdlib_and_jdk_image_are_not_part_of_the_dump_key() {
-        let root = temp_root("platform-cp");
+    fn arbitrary_platform_lookalikes_are_content_hashed() {
+        let root = temp_root("platform-lookalike");
         let stdlib = root.join("kotlin-stdlib.jar");
-        let versioned = root.join("dist").join("kotlin-stdlib-2.4.20.jar");
-        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
-        std::fs::write(&stdlib, b"stdlib-a").unwrap();
-        std::fs::write(&versioned, b"stdlib-b").unwrap();
-        std::fs::write(root.join("kotlin-stdlib-jdk8.jar"), b"jdk8").unwrap();
-        std::fs::write(root.join("kotlin-reflect.jar"), b"reflect").unwrap();
-        std::fs::write(root.join("kotlin-test-junit.jar"), b"test").unwrap();
-        std::fs::write(root.join("kotlin-annotations-jvm.jar"), b"annotations").unwrap();
-        let modules = root.join("jdk").join("lib").join("modules");
+        let modules = root.join("other-jdk").join("lib").join("modules");
         std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
-        std::fs::write(&modules, vec![7u8; 64]).unwrap();
-        let symbols = root.join("jdk").join("lib").join("ct.sym");
-        std::fs::write(&symbols, b"symbols").unwrap();
-        let platform = [
-            stdlib,
-            versioned,
-            root.join("kotlin-stdlib-jdk8.jar"),
-            root.join("kotlin-reflect.jar"),
-            root.join("kotlin-test-junit.jar"),
-            root.join("kotlin-annotations-jvm.jar"),
-            modules,
-            symbols,
-            root.join("kotlin-stdlib.jar"),
-        ];
-        let bare = class_dump_inputs("src", "default", &[], &[]);
-        let with_platform = class_dump_inputs("src", "default", &[], &platform);
-        assert_eq!(bare.fingerprint, with_platform.fingerprint);
-        assert_eq!(
-            classpath_content_fingerprint(&[root.join("no-such").join("kotlin-stdlib.jar")])
-                .unwrap(),
-            ""
-        );
-
-        let compiled = root.join("libout");
-        std::fs::create_dir_all(&compiled).unwrap();
-        std::fs::write(compiled.join("A.class"), b"class-v1").unwrap();
-        let with_compiled = class_dump_inputs("src", "default", &[], &[compiled.clone()]);
-        assert_ne!(bare.fingerprint, with_compiled.fingerprint);
-        std::fs::write(compiled.join("A.class"), b"class-v2").unwrap();
-        let recompiled = class_dump_inputs("src", "default", &[], &[compiled]);
-        assert_ne!(with_compiled.fingerprint, recompiled.fingerprint);
-
-        let coroutines = root.join("kotlinx-coroutines-core-jvm.jar");
-        std::fs::write(&coroutines, b"coroutines-a").unwrap();
-        let with_coroutines = class_dump_inputs("src", "default", &[], &[coroutines.clone()]);
-        std::fs::write(&coroutines, b"coroutines-b").unwrap();
-        let other_coroutines = class_dump_inputs("src", "default", &[], &[coroutines]);
-        assert_ne!(bare.fingerprint, with_coroutines.fingerprint);
-        assert_ne!(with_coroutines.fingerprint, other_coroutines.fingerprint);
-
-        let source = root.join("Main.kt");
-        std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
-        let out = root.join("out").to_string_lossy().into_owned();
-        let args = |classpath: Option<String>| {
-            let mut args = vec!["-d".to_string(), out.clone()];
-            if let Some(classpath) = classpath {
-                args.push("-cp".to_string());
-                args.push(classpath);
-            }
-            args.push(source.to_string_lossy().into_owned());
-            args
-        };
-        let sources_only = parse_invocation(&args(None)).unwrap().unwrap();
-        let platform_cp = std::env::join_paths([
-            root.join("kotlin-stdlib.jar"),
-            root.join("jdk").join("lib").join("modules"),
-            root.join("kotlin-test.jar"),
-        ])
+        std::fs::write(&stdlib, b"stdlib-a").unwrap();
+        std::fs::write(&modules, b"modules-a").unwrap();
+        let first = classpath_content_fingerprint_with_platform(
+            &[stdlib.clone(), modules.clone()],
+            None,
+            None,
+        )
         .unwrap();
-        let with_platform_cp =
-            parse_invocation(&args(Some(platform_cp.to_string_lossy().into_owned())))
-                .unwrap()
-                .unwrap();
-        assert_eq!(sources_only.fingerprint, with_platform_cp.fingerprint);
+        std::fs::write(&stdlib, b"stdlib-b").unwrap();
+        let second = classpath_content_fingerprint_with_platform(
+            &[stdlib.clone(), modules.clone()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(first, second);
+        std::fs::write(&modules, b"modules-b").unwrap();
+        let third =
+            classpath_content_fingerprint_with_platform(&[stdlib, modules], None, None).unwrap();
+        assert_ne!(second, third);
+
+        let missing = root.join("no-such").join("kotlin-stdlib.jar");
+        assert_eq!(
+            classpath_content_fingerprint_with_platform(
+                std::slice::from_ref(&missing),
+                None,
+                None,
+            )
+            .unwrap_err(),
+            format!(
+                "unreadable classpath entry {}: No such file or directory (os error 2)",
+                missing.display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn selected_toolchain_entries_have_compact_stable_identities() {
+        let root = temp_root("selected-platform");
+        let lib = root.join("kotlinc").join("lib");
+        let stdlib = lib.join("kotlin-stdlib.jar");
+        let reflect = lib.join("kotlin-reflect.jar");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(&stdlib, vec![1u8; 1024]).unwrap();
+        std::fs::write(&reflect, vec![2u8; 1024]).unwrap();
+
+        let jdk = root.join("jdk");
+        let modules = jdk.join("lib").join("modules");
+        let symbols = jdk.join("lib").join("ct.sym");
+        std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
+        std::fs::write(
+            jdk.join("release"),
+            b"JAVA_VERSION=\"21.0.1\"\nIMPLEMENTOR=\"A\"\n",
+        )
+        .unwrap();
+        std::fs::write(&modules, vec![3u8; 4096]).unwrap();
+        std::fs::write(&symbols, vec![4u8; 2048]).unwrap();
+
+        let selected = |paths: &[PathBuf]| {
+            classpath_content_fingerprint_with_platform(paths, Some(&lib), Some(&modules)).unwrap()
+        };
+        let first = selected(&[stdlib.clone(), modules.clone(), symbols.clone()]);
+        assert!(first.contains("kotlinc:kotlin-stdlib.jar"), "{first}");
+        assert!(first.contains("jdk:modules:"), "{first}");
+        assert!(first.contains("jdk:ct.sym:"), "{first}");
+
+        std::fs::write(&stdlib, vec![9u8; 1024]).unwrap();
+        std::fs::write(&modules, vec![8u8; 4096]).unwrap();
+        assert_eq!(
+            first,
+            selected(&[stdlib.clone(), modules.clone(), symbols.clone()]),
+            "the immutable compiler identity replaces large selected-toolchain bytes"
+        );
+        assert_ne!(
+            selected(&[stdlib.clone(), modules.clone()]),
+            selected(&[reflect.clone(), modules.clone()]),
+            "logical distribution entries remain distinct"
+        );
+        assert_ne!(
+            selected(&[stdlib.clone(), modules.clone()]),
+            selected(&[modules.clone(), stdlib.clone()]),
+            "classpath declaration order remains significant"
+        );
+        std::fs::write(
+            jdk.join("release"),
+            b"JAVA_VERSION=\"21.0.2\"\nIMPLEMENTOR=\"B\"\n",
+        )
+        .unwrap();
+        assert_ne!(
+            first,
+            selected(&[stdlib.clone(), modules.clone(), symbols]),
+            "a JDK vendor or patch identity change invalidates the dump"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2625,6 +2736,137 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&foreign_root);
+    }
+
+    #[test]
+    fn concurrent_versions_under_one_key_survive_publication_replay() {
+        let root = temp_root("concurrent-version");
+        let foreign_root = temp_root("concurrent-version-foreign");
+        let key = "case|A|default|plain";
+        let fingerprint = fingerprint_parts(&[b"same inputs"]);
+        let local = version("2.4.10");
+        let foreign = version("2.4.20");
+
+        store_files(
+            &root,
+            "mod",
+            key,
+            version("2.4.0"),
+            fingerprint,
+            &files(b"base"),
+        );
+        flush_archive(&root);
+        store_files(&root, "mod", key, local, fingerprint, &files(b"local"));
+
+        store_files(
+            &foreign_root,
+            "mod",
+            key,
+            foreign,
+            fingerprint,
+            &files(b"foreign"),
+        );
+        flush_archive(&foreign_root);
+        std::fs::write(
+            archive_path(&root),
+            std::fs::read(archive_path(&foreign_root)).unwrap(),
+        )
+        .unwrap();
+        flush_archive(&root);
+
+        assert_eq!(
+            load_files(&root, "mod", key, local, fingerprint)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"local"
+        );
+        assert_eq!(
+            load_files(&root, "mod", key, foreign, fingerprint)
+                .unwrap()
+                .get("pkg/A")
+                .unwrap(),
+            b"foreign"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&foreign_root);
+    }
+
+    #[test]
+    fn deletion_and_corruption_never_resurrect_cached_archive_state() {
+        let release = version("2.4.20");
+        let fingerprint = fingerprint_parts(&[b"source"]);
+        let key = "case|A|default|plain";
+
+        let deleted = temp_root("deleted-archive");
+        store_files(&deleted, "mod", key, release, fingerprint, &files(b"old"));
+        flush_archive(&deleted);
+        assert!(load_files(&deleted, "mod", key, release, fingerprint).is_some());
+        std::fs::remove_file(archive_path(&deleted)).unwrap();
+        assert!(
+            load_files(&deleted, "mod", key, release, fingerprint).is_none(),
+            "a clean in-memory snapshot must not outlive disk deletion"
+        );
+
+        let corrupt = temp_root("corrupt-archive");
+        store_files(&corrupt, "mod", key, release, fingerprint, &files(b"old"));
+        flush_archive(&corrupt);
+        assert!(load_files(&corrupt, "mod", key, release, fingerprint).is_some());
+        std::fs::write(archive_path(&corrupt), b"not a zlib archive").unwrap();
+        assert!(
+            load_files(&corrupt, "mod", key, release, fingerprint).is_none(),
+            "corruption is a cache miss, not stale memory or a panic"
+        );
+
+        let pending = temp_root("deleted-pending-archive");
+        store_files(&pending, "mod", key, release, fingerprint, &files(b"old"));
+        flush_archive(&pending);
+        store_files(
+            &pending,
+            "mod",
+            "case|B|default|plain",
+            release,
+            fingerprint_parts(&[b"new"]),
+            &files(b"new"),
+        );
+        std::fs::remove_file(archive_path(&pending)).unwrap();
+        flush_archive(&pending);
+        assert!(
+            !archive_path(&pending).exists(),
+            "pending memory must not recreate a deliberately deleted archive"
+        );
+
+        let pending_corrupt = temp_root("corrupt-pending-archive");
+        store_files(
+            &pending_corrupt,
+            "mod",
+            key,
+            release,
+            fingerprint,
+            &files(b"old"),
+        );
+        flush_archive(&pending_corrupt);
+        store_files(
+            &pending_corrupt,
+            "mod",
+            "case|B|default|plain",
+            release,
+            fingerprint_parts(&[b"new"]),
+            &files(b"new"),
+        );
+        let corrupt_bytes = b"replacement is corrupt";
+        std::fs::write(archive_path(&pending_corrupt), corrupt_bytes).unwrap();
+        flush_archive(&pending_corrupt);
+        assert_eq!(
+            std::fs::read(archive_path(&pending_corrupt)).unwrap(),
+            corrupt_bytes,
+            "pending memory must not overwrite a corrupt concurrent replacement"
+        );
+
+        let _ = std::fs::remove_dir_all(&deleted);
+        let _ = std::fs::remove_dir_all(&corrupt);
+        let _ = std::fs::remove_dir_all(&pending);
+        let _ = std::fs::remove_dir_all(&pending_corrupt);
     }
 
     #[test]
