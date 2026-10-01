@@ -4103,7 +4103,7 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     visibility: function.visibility,
-                    owner: function.callable.owner,
+                    owner: cn,
                     receiver_rank: 0,
                     source_key: None,
                     stable_declaration: None,
