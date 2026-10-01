@@ -6963,9 +6963,6 @@ struct Emitter<'a> {
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
     owner: String,
-    /// Whether `owner` is an interface companion. Fixed when the emitter is built; singleton
-    /// loads consult it instead of reclassifying every class on each read.
-    interface_companion_self: bool,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
     /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
@@ -7100,9 +7097,6 @@ impl<'a> Emitter<'a> {
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
-            interface_companion_self: singleton_instance_load::emitted_class_is_interface_companion(
-                ir, owner,
-            ),
             facade: facade.to_string(),
             slots: HashMap::new(),
             temporaries: backend_temporaries::BackendTemporaries::default(),
@@ -10473,7 +10467,7 @@ impl<'a> Emitter<'a> {
                     return;
                 };
                 let (owner, field) = singleton_instance_load::instance_load(
-                    self.interface_companion_self,
+                    self.ir,
                     *classifier,
                     &self.owner,
                     published,
@@ -10485,7 +10479,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
                 let (owner, field) = singleton_instance_load::instance_load(
-                    self.interface_companion_self,
+                    self.ir,
                     *ty,
                     &self.owner,
                     singleton_instance_load::PublishedSingleton {

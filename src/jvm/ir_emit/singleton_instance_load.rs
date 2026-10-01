@@ -1,19 +1,11 @@
 //! Which JVM field a singleton value loads while one class is being emitted.
 //!
 //! The published field of an interface companion is the interface's `Companion` field. That field
-//! is assigned only after the companion `<clinit>` returns, so code of the companion itself loads
-//! `$$INSTANCE`, which that `<clinit>` stores first. The emitted class's role is decided once per
-//! emitter; each read only applies it.
+//! is assigned only after the companion `<clinit>` returns, so the companion and a class declared
+//! in its initializer load `$$INSTANCE`, which that `<clinit>` stores first.
 
 use crate::ir::IrFile;
 use crate::types::TypeName;
-
-/// Whether the class whose bytecode this emitter is writing is an interface companion.
-pub(super) fn emitted_class_is_interface_companion(ir: &IrFile, owner: &str) -> bool {
-    ir.classes
-        .iter()
-        .any(|class| class.fq_name_matches(owner) && super::companion_of_interface(ir, class))
-}
 
 /// The field a resolved singleton publishes for callers outside its own class.
 pub(super) struct PublishedSingleton {
@@ -62,17 +54,45 @@ pub(super) fn published_singleton(
     dependency.map(|(owner, field)| PublishedSingleton { owner, field })
 }
 
+/// The interface companion whose `$$INSTANCE` this emission should load for a self-read.
+///
+/// That is the class being emitted when it is the companion, and the companion that encloses a
+/// class declared in its initializer. An anonymous object there is its own class, but it still
+/// runs before the interface's `Companion` field is assigned.
+pub(super) fn self_companion(ir: &IrFile, emitted_owner: &str) -> Option<TypeName> {
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_matches(emitted_owner))?;
+    if super::companion_of_interface(ir, class) {
+        return Some(class.fq_name);
+    }
+    let crate::ir::IrEnclosure::ClassInitializer(owner) = class.enclosure? else {
+        return None;
+    };
+    let companion = ir.classes.get(owner as usize)?;
+    super::companion_of_interface(ir, companion).then_some(companion.fq_name)
+}
+
 /// The field actually loaded for `singleton`.
 ///
-/// `interface_companion_self` is the role of the class being emitted. A self-read of that
-/// companion uses `$$INSTANCE`; every other read uses the published field.
+/// A self-read of the companion being emitted, or of the companion whose initializer encloses the
+/// class being emitted, uses `$$INSTANCE`. Every other read uses the published field.
 pub(super) fn instance_load(
-    interface_companion_self: bool,
+    ir: &IrFile,
     singleton: TypeName,
     emitted_owner: &str,
     published: PublishedSingleton,
 ) -> (TypeName, String) {
-    if interface_companion_self && singleton.matches(emitted_owner) {
+    loaded_instance(self_companion(ir, emitted_owner), singleton, published)
+}
+
+pub(super) fn loaded_instance(
+    self_companion: Option<TypeName>,
+    singleton: TypeName,
+    published: PublishedSingleton,
+) -> (TypeName, String) {
+    if self_companion.is_some_and(|companion| companion == singleton) {
         (singleton, "$$INSTANCE".to_string())
     } else {
         (published.owner, published.field)
@@ -94,12 +114,8 @@ mod tests {
     #[test]
     fn an_interface_companion_loads_its_own_instance_field() {
         let companion = type_name("Test$Companion");
-        let (owner, field) = instance_load(
-            true,
-            companion,
-            &companion.render(),
-            published_interface_field(),
-        );
+        let (owner, field) =
+            loaded_instance(Some(companion), companion, published_interface_field());
         assert_eq!(owner, companion);
         assert_eq!(field, "$$INSTANCE");
     }
@@ -108,7 +124,7 @@ mod tests {
     fn an_external_caller_loads_the_published_companion_field() {
         let companion = type_name("Test$Companion");
         let interface = type_name("Test");
-        let (owner, field) = instance_load(false, companion, "MainKt", published_interface_field());
+        let (owner, field) = loaded_instance(None, companion, published_interface_field());
         assert_eq!(owner, interface);
         assert_eq!(field, "Companion");
     }
@@ -116,10 +132,9 @@ mod tests {
     #[test]
     fn another_singleton_inside_the_companion_keeps_its_published_field() {
         let other = type_name("Other");
-        let (owner, field) = instance_load(
-            true,
+        let (owner, field) = loaded_instance(
+            Some(type_name("Test$Companion")),
             other,
-            &type_name("Test$Companion").render(),
             PublishedSingleton {
                 owner: other,
                 field: "INSTANCE".to_string(),
