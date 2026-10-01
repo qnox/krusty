@@ -51,30 +51,36 @@ impl IntegerConstant {
         }
     }
 
-    /// Fold an operation in the constant's ordinary source width. Overflow and division by zero
-    /// are not constant provenance: lowering must retain their ordinary runtime semantics.
+    /// Fold an operation in the constant's ordinary source width. Kotlin integral arithmetic wraps
+    /// before a contextual conversion, including in a compile-time constant expression. Division
+    /// by zero is the only arithmetic failure; signed minimum divided by `-1` keeps the wrapped
+    /// minimum value and its remainder is zero, as on the JVM.
     pub(crate) fn fold(self, operation: IntegerConstantOp, right: Self) -> Option<Self> {
         match (self, right) {
             (Self::Signed(left), Self::Signed(right)) => {
                 let value = match operation {
-                    IntegerConstantOp::Add => left.checked_add(right),
-                    IntegerConstantOp::Subtract => left.checked_sub(right),
-                    IntegerConstantOp::Multiply => left.checked_mul(right),
-                    IntegerConstantOp::Divide => left.checked_div(right),
-                    IntegerConstantOp::Remainder => left.checked_rem(right),
-                }?;
+                    IntegerConstantOp::Add => left.wrapping_add(right),
+                    IntegerConstantOp::Subtract => left.wrapping_sub(right),
+                    IntegerConstantOp::Multiply => left.wrapping_mul(right),
+                    IntegerConstantOp::Divide => left
+                        .checked_div(right)
+                        .or_else(|| (left == i32::MIN && right == -1).then_some(i32::MIN))?,
+                    IntegerConstantOp::Remainder => left
+                        .checked_rem(right)
+                        .or_else(|| (left == i32::MIN && right == -1).then_some(0))?,
+                };
                 Some(Self::Signed(value))
             }
             (Self::Unsigned(left), Self::Unsigned(right)) => {
                 let left = u32::try_from(left).ok()?;
                 let right = u32::try_from(right).ok()?;
                 let value = match operation {
-                    IntegerConstantOp::Add => left.checked_add(right),
-                    IntegerConstantOp::Subtract => left.checked_sub(right),
-                    IntegerConstantOp::Multiply => left.checked_mul(right),
-                    IntegerConstantOp::Divide => left.checked_div(right),
-                    IntegerConstantOp::Remainder => left.checked_rem(right),
-                }?;
+                    IntegerConstantOp::Add => left.wrapping_add(right),
+                    IntegerConstantOp::Subtract => left.wrapping_sub(right),
+                    IntegerConstantOp::Multiply => left.wrapping_mul(right),
+                    IntegerConstantOp::Divide => left.checked_div(right)?,
+                    IntegerConstantOp::Remainder => left.checked_rem(right)?,
+                };
                 Some(Self::Unsigned(u64::from(value)))
             }
             _ => None,
@@ -112,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fold_preserves_width_and_rejects_overflow() {
+    fn fold_preserves_width_and_wraps_overflow() {
         assert_eq!(
             IntegerConstant::Signed(2)
                 .fold(IntegerConstantOp::Multiply, IntegerConstant::Signed(3),),
@@ -126,12 +132,12 @@ mod tests {
         assert_eq!(
             IntegerConstant::Unsigned(u64::from(u32::MAX))
                 .fold(IntegerConstantOp::Add, IntegerConstant::Unsigned(1),),
-            None
+            Some(IntegerConstant::Unsigned(0))
         );
         assert_eq!(
             IntegerConstant::Signed(i32::MIN)
                 .fold(IntegerConstantOp::Divide, IntegerConstant::Signed(-1),),
-            None
+            Some(IntegerConstant::Signed(i32::MIN))
         );
         assert_eq!(
             IntegerConstant::Signed(1).fold(IntegerConstantOp::Add, IntegerConstant::Unsigned(1),),

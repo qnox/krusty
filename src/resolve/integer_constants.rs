@@ -4,7 +4,9 @@ use crate::ast::{BinOp, Expr, ExprId, File, UnOp};
 use crate::integer_constant::{IntegerConstant, IntegerConstantOp};
 use crate::types::Ty;
 
-use super::{BuiltinUnaryOperation, CallArgKind};
+use super::{
+    checked_constant_expression, BuiltinUnaryOperation, CallArgKind, CheckedConstantExpression,
+};
 
 /// Branch values of a conditional integer constant: an `if` that has an `else`, a `when` that has
 /// an `else` arm, or a block through its trailing expression. A missing `else` is not a value.
@@ -29,15 +31,46 @@ fn integer_constant_branches(file: &File, expression: ExprId) -> Option<Vec<Expr
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
 ///
 /// This is deliberately the one AST walk used by both lightweight signature inference and the full
-/// checker. Every operation is checked in the expression's ordinary width (`Int` or `UInt`), not in
-/// a wider scratch type: lowering evaluates that width before any call-boundary coercion, so
-/// accepting an expression that overflows here would silently change Kotlin semantics.
+/// checker. Every operation is evaluated in the expression's ordinary width (`Int` or `UInt`), not
+/// in a wider scratch type: Kotlin wraps integral overflow before any call-boundary coercion, so the
+/// recorded constant must carry that wrapped value.
 /// Keeping this outside either phase also prevents the two call paths from drifting on which
 /// expressions carry literal provenance. An `if`, `when`, or block is the same kind of constant
 /// when every branch value is: adaptation uses one representative that fits a target only when
 /// every branch does, and the branches themselves still evaluate as `Int`.
 pub(super) fn folded_integer_literal(file: &File, expression: ExprId) -> Option<IntegerConstant> {
     integer_constant(file, expression)
+}
+
+/// Evaluate an integer constant from the exact operator/call decisions already recorded by checking.
+/// Conditional and block nodes contribute one representative only when every value branch is a
+/// checked constant. Unsigned arithmetic deliberately remains an ordinary `UInt` value: Kotlin does
+/// not contextually adapt `1u + 2u` to another unsigned width.
+pub(super) fn checked_integer_constant(
+    context: CheckedConstantExpression<'_>,
+    expression: ExprId,
+) -> Option<IntegerConstant> {
+    let branches = integer_constant_branches(context.file, expression);
+    if let Some(branches) = branches {
+        let values = branches
+            .into_iter()
+            .map(|branch| checked_integer_constant(context, branch))
+            .collect::<Option<Vec<_>>>()?;
+        return IntegerConstant::representative(&values);
+    }
+
+    let ty = *context.expression_types.get(expression.0 as usize)?;
+    let constant = checked_constant_expression(context, expression, ty)?;
+    match (ty.non_null(), constant.value) {
+        (Ty::Int, crate::libraries::LibConst::Int(value)) => Some(IntegerConstant::Signed(value)),
+        (Ty::UInt, crate::libraries::LibConst::Int(value))
+            if matches!(context.file.expr(expression), Expr::UIntLit(_))
+                || context.resolved_constants.contains_key(&expression) =>
+        {
+            Some(IntegerConstant::Unsigned(u64::from(value as u32)))
+        }
+        _ => None,
+    }
 }
 
 fn integer_constant(file: &File, expression: ExprId) -> Option<IntegerConstant> {
@@ -137,7 +170,11 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::lexer::lex;
+    use crate::libraries::Origin;
     use crate::parser::parse;
+    use crate::resolve::{
+        check_file, signature_collection::collect_signatures, ExprLowering, ResolvedCall,
+    };
 
     fn signed(values: &[i32]) -> CallArgKind {
         let values = values
@@ -238,7 +275,7 @@ mod tests {
         assert!(kinds[3].adapts_integer_literal_to(Ty::Byte));
         assert!(!kinds[4].adapts_integer_literal_to(Ty::Short));
         assert!(!kinds[4].adapts_integer_literal_to(Ty::Long));
-        assert!(!kinds[5].adapts_integer_literal_to(Ty::Long));
+        assert!(kinds[5].adapts_integer_literal_to(Ty::Long));
         assert!(kinds[6].adapts_integer_literal_to(Ty::UByte));
         assert!(!kinds[7].adapts_integer_literal_to(Ty::UByte));
         assert!(kinds[7].adapts_integer_literal_to(Ty::UShort));
@@ -274,6 +311,46 @@ mod tests {
             selected_builtin_unary_integer_constant(&file, argument, BuiltinUnaryOperation::Negate,),
             Some(IntegerConstant::Signed(-1)),
         );
+    }
+
+    #[test]
+    fn same_spelled_source_member_does_not_record_a_builtin_unary_operation() {
+        let source = "class Counter {\n\
+                          fun unaryMinus(): Int = 1\n\
+                      }\n\
+                      fun use(counter: Counter): Int = counter.unaryMinus()";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        let call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Call { callee, .. }
+                    if matches!(files[0].expr(*callee), Expr::Member { name, .. } if name == "unaryMinus") =>
+                {
+                    Some(ExprId(index as u32))
+                }
+                _ => None,
+            })
+            .expect("source unaryMinus call");
+        assert!(!matches!(
+            info.expr_lowers.get(&call),
+            Some(ExprLowering::BuiltinUnaryCall { .. })
+        ));
+        assert!(matches!(
+            info.resolved_calls.get(&call),
+            Some(ResolvedCall::Member(member))
+                if matches!(member.origin, Origin::Module { .. })
+                    && member.member.name == "unaryMinus"
+                    && member.member.stable_declaration.is_some()
+        ));
     }
 
     #[test]

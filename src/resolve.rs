@@ -209,7 +209,8 @@ pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
 use integer_constants::{
-    call_arg_kind, folded_integer_literal, selected_builtin_unary_integer_constant,
+    call_arg_kind, checked_integer_constant, folded_integer_literal,
+    selected_builtin_unary_integer_constant,
 };
 use lambda_expectation::{
     functional_argument_expectation, module_member_lambda_shape, shaped_argument_inlining,
@@ -19790,6 +19791,7 @@ impl<'a> Checker<'a> {
                         args,
                         &arg_tys,
                         infix_shadows_builtin,
+                        &receiver_callables,
                     ) {
                         return ret;
                     }
@@ -59384,10 +59386,9 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        // Numeric literal narrowing and primitive widening; emit sites insert the conversion.
-        if expected.accepts_numeric(actual) {
-            return;
-        }
+        // Integer-constant conversion is committed before this boundary, so its recorded `actual`
+        // is already the selected primitive. A plain primitive value is exact in Kotlin: an `Int`
+        // returned by a call does not become `Byte` merely because the declaration expects it.
         // A primitive is assignable to its boxed wrapper — i.e. to the matching nullable primitive
         // (`Int` → `Int?`). The box (`Integer.valueOf`) is the emit site's job.
         if expected.nullable_primitive() == Some(actual) {
@@ -60119,11 +60120,21 @@ impl<'a> Checker<'a> {
 
     /// Integer-constant provenance available after semantic selection.
     ///
-    /// Syntax-level literals and parser operator nodes are recognized directly. An explicit
-    /// primitive unary-method call is admitted only when overload selection recorded the exact
-    /// built-in operation; source/member spellings never manufacture this fact.
+    /// Parser operator nodes are evaluated only after checking has selected their semantic calls.
+    /// An explicit primitive unary-method call is admitted only when overload selection recorded
+    /// the exact built-in operation; source/member spellings never manufacture this fact.
     fn integer_constant_provenance(&self, expression: ExprId) -> Option<IntegerConstant> {
-        folded_integer_literal(self.file, expression).or_else(|| {
+        let semantic = checked_integer_constant(
+            CheckedConstantExpression {
+                file: self.file,
+                expression_types: &self.expr_types,
+                resolved_constants: &self.resolved_constants,
+                resolved_calls: &self.resolved_calls,
+                resolved_operator_calls: &self.resolved_operator_calls,
+            },
+            expression,
+        );
+        semantic.or_else(|| {
             let ExprLowering::BuiltinUnaryCall { operation } = self.expr_lowers.get(&expression)?
             else {
                 return None;
@@ -63758,9 +63769,16 @@ impl<'a> Checker<'a> {
                         // origin. Resolve the builtin member first, then use the ordinary member and
                         // library/source extension indexes. In particular, generic library
                         // extensions such as `takeIf` must not disappear only for the non-null form.
-                        if let Some(ret) =
-                            self.check_builtin_operator_method(e, recv, &name, a, arg_tys, false)
-                        {
+                        let receiver_callables = self.stable_receiver_callables(recv, &name);
+                        if let Some(ret) = self.check_builtin_operator_method(
+                            e,
+                            recv,
+                            &name,
+                            a,
+                            arg_tys,
+                            false,
+                            &receiver_callables,
+                        ) {
                             ret
                         } else {
                             self.check_member_extension_function_call(
@@ -68058,6 +68076,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arg_tys: &[Ty],
         skip_operator_arm: bool,
+        callables: &crate::libraries::Callables,
     ) -> Option<Ty> {
         // Byte/Short bitwise operations live in `kotlin.experimental` as ordinary extensions;
         // unlike Int/Long they are not primitive members. Let the shared candidate path select
@@ -68088,6 +68107,44 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 self.expect_assignable(expected, arg0, self.span(argument), "argument");
+            }
+            let argument_kinds = args
+                .iter()
+                .copied()
+                .zip(arg_tys.iter().copied())
+                .map(|(argument, ty)| call_arg_kind(self.file, argument, ty))
+                .collect::<Vec<_>>();
+            if let crate::symbol_resolver::CandidateSelection::Selected((
+                selected,
+                _,
+                selected_ret,
+            )) = self
+                .resolver()
+                .select_receiver_function_with_params_tracking(
+                    rt,
+                    name,
+                    &argument_kinds,
+                    &[],
+                    callables,
+                    Some(ret),
+                )
+            {
+                if matches!(
+                    selected.callable.compiler_intrinsic,
+                    Some(
+                        crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
+                            | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
+                            | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
+                    )
+                ) {
+                    let resolved = self.resolver().commit_selected_member_function_result(
+                        rt,
+                        selected,
+                        selected_ret,
+                    );
+                    self.resolved_calls
+                        .insert(e, ResolvedCall::Member(resolved));
+                }
             }
             return Some(ret);
         }

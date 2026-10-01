@@ -279,6 +279,20 @@ fn unadapted_integer_constants_prefer_the_int_overload() {
 }
 
 #[test]
+fn overflowing_int_constant_expression_wraps_before_adapting_to_long() {
+    both_compilers_box(
+        "fun box(): String {\n\
+         val sum: Long = 2147483647 + 1\n\
+         val shifted: Long = -(1 shl 31)\n\
+         if (sum != -2147483648L) return \"sum: $sum\"\n\
+         if (shifted != -2147483648L) return \"shift: $shifted\"\n\
+         return \"OK\"\n\
+         }\n",
+        "overflowing_int_constant_expression_wraps_before_adapting_to_long",
+    );
+}
+
+#[test]
 fn same_spelled_user_unary_member_is_not_an_integer_constant() {
     common::assert_errors_match_kotlinc(
         &[(
