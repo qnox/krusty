@@ -66460,6 +66460,11 @@ impl<'a> Checker<'a> {
                     suppressed_continuation =
                         suppressed_continuation || self.try_never_completes(*expression);
                 }
+                if !self.stmt_diverges(*s) {
+                    let mut casts = Vec::new();
+                    self.as_cast_narrowings_after_statement(scope, *s, &mut casts);
+                    self.apply_narrowings(scope, &casts, &[], false);
+                }
                 // Early-return guard: `if (x !is T) return …` (a diverging then) narrows a
                 // stable `x` to `T` for the remaining statements of this block. An `else if`
                 // CHAIN narrows level by level — `if (x is A) return …; else if (x !is B)
@@ -66468,11 +66473,6 @@ impl<'a> Checker<'a> {
                 // walk stops at the first non-diverging then-branch: control can fall through
                 // it with its condition TRUE, so neither its negation nor anything deeper holds.
                 if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
-                    if !self.stmt_diverges(*s) {
-                        let mut casts = Vec::new();
-                        self.as_cast_narrowings(scope, ie, &mut casts);
-                        self.apply_narrowings(scope, &casts, &[], false);
-                    }
                     let mut level = ie;
                     while let Expr::If {
                         cond,

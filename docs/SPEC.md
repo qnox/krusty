@@ -2720,8 +2720,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
 - **A successful non-null `as` narrows its operand for every later read that cannot run until the
   cast has been evaluated.** `major == (other as Version).major && minor == other.minor` types
-  `other.minor` as `Version`, and `(other as String).length == other.length` types the right
-  `other` as `String`. The same holds for the right operand of `||` and of any eager operator,
+  `other.minor` as `Version`, and `(other as Payload).value == other.value` types the right
+  `other` as `Payload`. The same holds for the right operand of `||` and of any eager operator,
   and for an inferred return whose signature is solved before the body check. A cast on the
   right of `&&` or `||` does not narrow code that can skip that operand. The cast never widens a
   more specific stable type (`x: String` stays `String` after `x as Any`). Tests:
