@@ -42,6 +42,16 @@ fn if_else_expression() {
 }
 
 #[test]
+fn checked_equality_mode_distinguishes_boxed_and_ieee_zero() {
+    check(
+        "fun structural(a: Any?, b: Any?): Boolean = a == b\n\
+         fun ieee(a: Double, b: Double): Boolean = a == b\n\
+         fun box(): String = if (!structural(-0.0, 0.0) && ieee(-0.0, 0.0)) \"OK\" else \"FAIL\"",
+        "OK",
+    );
+}
+
+#[test]
 fn while_loop_accumulate() {
     check(
         "fun box(): Int { var i = 0; var s = 0; while (i < 5) { s = s + i; i = i + 1 }; return s }",

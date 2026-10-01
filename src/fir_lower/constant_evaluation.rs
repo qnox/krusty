@@ -62,6 +62,7 @@ impl ConstantEvaluation {
         let operation = match kind {
             FirExprKind::Unary { .. }
             | FirExprKind::Binary { .. }
+            | FirExprKind::Equality { .. }
             | FirExprKind::StringTemplate(_)
             | FirExprKind::Call(_) => true,
             // An explicit conversion call (`300.toByte()`) is intrinsic-const; an implicit widening
@@ -153,7 +154,13 @@ impl ConstantEvaluation {
                 let operand = self.evaluate(body, *operand)?;
                 unary(*operation, operand, ty)
             }
-            FirExprKind::Binary {
+            FirExprKind::Equality {
+                operation,
+                lhs,
+                rhs,
+                ..
+            }
+            | FirExprKind::Binary {
                 operation,
                 lhs,
                 rhs,

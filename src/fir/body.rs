@@ -1374,6 +1374,13 @@ pub enum FirExprKind {
         lhs: FirExprId,
         rhs: FirExprId,
     },
+    /// Source `==`/`!=` with the equality mode the checker selected from the static operand types.
+    Equality {
+        operation: FirBinaryOperation,
+        mode: crate::types::EqualityMode,
+        lhs: FirExprId,
+        rhs: FirExprId,
+    },
     /// Kotlin structural equality between one nullable primitive wrapper and its non-null primitive.
     /// The wrapper is null-tested and unboxed before primitive comparison; this is a frontend-selected
     /// semantic operation, not a physical-type guess left to a backend.
@@ -1514,6 +1521,7 @@ impl FirExprKind {
             | FirExprKind::ImplicitConversion { .. }
             | FirExprKind::Unary { .. }
             | FirExprKind::Binary { .. }
+            | FirExprKind::Equality { .. }
             | FirExprKind::NullablePrimitiveComparison { .. }
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::Range { .. }

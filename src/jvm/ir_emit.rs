@@ -10365,6 +10365,7 @@ impl<'a> Emitter<'a> {
                 arg,
                 type_operand,
             } => self.emit_type_operation(e, *op, *arg, *type_operand, code),
+            IrExpr::Equality { .. } => self.emit_comparison(e, code),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
@@ -11048,23 +11049,14 @@ impl<'a> Emitter<'a> {
     /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
     /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.
     fn emits_control_flow(&self, e: u32) -> bool {
-        use IrBinOp::*;
         match self.ir.expr(e) {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             // The multi-part `StringConcat` itself spills branchy parts internally, so as a whole it
             // leaves only its `String` result — but a parent operand sequence still must treat it as
             // branchy if any part is (it builds the StringBuilder mid-stack otherwise).
             IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.emits_control_flow(p)),
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
-                    // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
-                    // and the value-compare path it remaps to for primitives both do.
-                    || matches!(op, RefEq | RefNe)
-                    // `x == null`/`x != null` emits an `ifnull`/`ifnonnull` branch+merge frame.
-                    || (matches!(op, Eq | Ne)
-                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
-                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.emits_control_flow(*lhs) || self.emits_control_flow(*rhs)
+            IrExpr::Equality { .. } | IrExpr::PrimitiveBinOp { .. } => {
+                self.comparison_emits_control_flow(e)
             }
             IrExpr::Call {
                 callee,
@@ -11649,6 +11641,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
+            IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le

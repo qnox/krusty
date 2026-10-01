@@ -107,8 +107,11 @@ pub(super) fn realize(
     under: &Under,
     fresh: &mut u32,
 ) {
-    let IrExpr::PrimitiveBinOp { op, lhs, rhs } = ir.exprs[id as usize] else {
-        unreachable!("a specialized equality is a primitive `==`/`!=`");
+    let (op, lhs, rhs) = match ir.exprs[id as usize] {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs } | IrExpr::Equality { op, lhs, rhs, .. } => {
+            (op, lhs, rhs)
+        }
+        _ => unreachable!("a specialized equality is a primitive or recorded `==`/`!=`"),
     };
     let Equality {
         value_class: owner,

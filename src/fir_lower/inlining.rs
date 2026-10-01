@@ -1125,6 +1125,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
         | IrExpr::PrimitiveBinOp { .. }
+        | IrExpr::Equality { .. }
         | IrExpr::StringConcat(_)
         | IrExpr::EnclosingInstance { .. }
         | IrExpr::GetField { .. }

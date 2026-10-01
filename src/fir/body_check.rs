@@ -636,13 +636,14 @@ impl BodyFirChecker<'_> {
                 extension_receiver,
                 ..
             } => extension_receiver.or(*dispatch_receiver),
-            // `a?.plus(b)` is already a checked binary; its left operand is the safe-call receiver.
-            FirExprKind::Binary { lhs, .. } | FirExprKind::Range { start: lhs, .. } => {
-                Some(FirReceiver {
-                    value: *lhs,
-                    conversion: None,
-                })
-            }
+            // `a?.plus(b)` and a checked equality are already binary forms. The left operand is
+            // the safe-call receiver.
+            FirExprKind::Binary { lhs, .. }
+            | FirExprKind::Equality { lhs, .. }
+            | FirExprKind::Range { start: lhs, .. } => Some(FirReceiver {
+                value: *lhs,
+                conversion: None,
+            }),
             FirExprKind::Unary { operand, .. }
             | FirExprKind::ImplicitConversion { value: operand, .. } => Some(FirReceiver {
                 value: *operand,
