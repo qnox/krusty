@@ -6082,7 +6082,7 @@ fn emit_method_inner_with_holder(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = declared_nullability::declared_nullability(ir, fid);
+    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {

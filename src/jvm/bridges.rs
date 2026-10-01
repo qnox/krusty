@@ -181,13 +181,28 @@ fn superclass_method_bridges(
         let mut declared_parameters = edge.declared_parameters.clone();
         let mut declared_result = edge.declared_result;
         // An overridden declaration whose primitive result is realized as its wrapper is reached
-        // through that wrapper.
-        if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {
-            if override_results
-                .boxed_callable_result(ir, callable)
+        // through that wrapper. Dependency representation comes only from the exact frozen
+        // callable fact; a missing fact fails this pass instead of falling back to the semantic
+        // result.
+        match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                if override_results
+                    .boxed_callable_result(ir, callable)
+                    .is_some()
+                {
+                    declared_result = Ty::nullable(declared_result);
+                }
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                if crate::jvm::override_results::external_boxed_result(
+                    callables,
+                    target,
+                    edge.declared_result,
+                )?
                 .is_some()
-            {
-                declared_result = Ty::nullable(declared_result);
+                {
+                    declared_result = Ty::nullable(declared_result);
+                }
             }
         }
         let mut base_params = declared_parameters
