@@ -309,34 +309,87 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     .then_some(CompilerIntrinsic::TypeOf)
 }
 
-/// The `kotlin.ranges` progression builders: `downTo` and `until` over integral values, and `step`
-/// and `reversed` over a progression.
-/// The stdlib floating `rangeTo` whose `contains` is IEEE comparison. The generic
-/// `Comparable.rangeTo` returns `ClosedRange` and orders with `compareTo`, so it stays an
-/// ordinary call: `-0.0 in 0.0..0.0` is false there and true for the floating range.
-fn floating_range_membership(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
-    if facts.kind != FnKind::Extension
-        || !facts.is_operator
-        || facts.is_suspend
-        || facts.is_infix
-        || facts.context_count != 0
-        || facts.type_parameter_count != 0
-        || facts.vararg.is_some()
-        || facts.name != "rangeTo"
-    {
-        return None;
-    }
-    let Some(receiver) = facts.receiver else {
-        return None;
+/// One exact `kotlin.ranges` floating operator. `realization` is a constant of this row; publishing
+/// the declaration copies it. Nothing derives that constant from the operator's spelling.
+struct FloatingRangeCatalog {
+    name: &'static str,
+    element: Ty,
+    open_end: bool,
+    realization: CompilerIntrinsic,
+}
+
+fn floating_range_catalog() -> [FloatingRangeCatalog; 4] {
+    let membership = CompilerIntrinsic::FloatingRangeMembership;
+    let row = |name, element, open_end| FloatingRangeCatalog {
+        name,
+        element,
+        open_end,
+        realization: membership,
     };
-    let [argument] = facts.params else {
-        return None;
+    [
+        row("rangeTo", Ty::Double, false),
+        row("rangeTo", Ty::Float, false),
+        row("rangeUntil", Ty::Double, true),
+        row("rangeUntil", Ty::Float, true),
+    ]
+}
+
+fn floating_range_result(element: Ty, open_end: bool) -> Ty {
+    let class = if open_end {
+        "kotlin/ranges/OpenEndRange"
+    } else {
+        "kotlin/ranges/ClosedFloatingPointRange"
     };
-    if receiver != *argument || !matches!(receiver, Ty::Double | Ty::Float) {
-        return None;
-    }
-    let range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[receiver]);
-    (facts.ret == range).then_some(CompilerIntrinsic::FloatingRangeMembership)
+    Ty::obj_args(class, &[element])
+}
+
+fn floating_range_catalog_row(
+    facts: &BuiltinFunctionDeclaration<'_>,
+) -> Option<FloatingRangeCatalog> {
+    floating_range_catalog().into_iter().find(|row| {
+        facts.package == crate::types::wk::kotlin_ranges_package()
+            && facts.name == row.name
+            && facts.kind == FnKind::Extension
+            && facts.is_operator
+            && !facts.is_suspend
+            && !facts.is_infix
+            && facts.context_count == 0
+            && facts.type_parameter_count == 0
+            && facts.vararg.is_none()
+            && facts.receiver == Some(row.element)
+            && facts.params == [row.element]
+            && facts.ret == floating_range_result(row.element, row.open_end)
+    })
+}
+
+/// The realization stored on the catalog row this declaration is, copied unchanged.
+fn copied_floating_range_realization(
+    facts: &BuiltinFunctionDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    floating_range_catalog_row(facts).map(|row| row.realization)
+}
+
+/// The four catalog operators, each already carrying its row's realization.
+#[cfg(test)]
+fn publish_floating_range_catalog() -> Vec<FunctionInfo> {
+    floating_range_catalog()
+        .into_iter()
+        .map(|row| {
+            let result = floating_range_result(row.element, row.open_end);
+            let mut callable = crate::libraries::LibraryCallable::library(
+                crate::types::wk::kotlin_ranges_package(),
+                row.name,
+                vec![row.element, row.element],
+                result,
+                result,
+                "",
+            );
+            callable.compiler_intrinsic = Some(row.realization);
+            let mut function = FunctionInfo::plain(FnKind::Extension, Some(row.element), callable);
+            function.flags.operator = true;
+            function
+        })
+        .collect()
 }
 
 fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
@@ -503,7 +556,7 @@ pub(crate) fn function_realization(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts).or_else(|| floating_range_membership(&facts))
+        progression_builder(&facts)
     } else {
         None
     }
@@ -518,7 +571,7 @@ pub(crate) fn normalized_function_realization(
 ) -> Option<CompilerIntrinsic> {
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();
-    function_realization(BuiltinFunctionDeclaration {
+    let facts = BuiltinFunctionDeclaration {
         package,
         name,
         kind: function.kind,
@@ -531,7 +584,13 @@ pub(crate) fn normalized_function_realization(
         is_suspend: function.flags.suspend,
         is_operator: function.flags.operator,
         is_infix: function.flags.infix,
-    })
+    };
+    // Floating-range membership is the catalog row's constant. Signature recognition does not
+    // create it; a provider copies it onto the declaration that is that row.
+    if let Some(realization) = copied_floating_range_realization(&facts) {
+        return Some(realization);
+    }
+    function_realization(facts)
 }
 
 pub(crate) fn property_realization(
@@ -698,37 +757,76 @@ mod tests {
     }
 
     #[test]
-    fn floating_range_to_is_primitive_membership_only_for_the_stdlib_declaration() {
-        let realize = |receiver: Ty, result: Ty, type_parameters: usize| {
-            let params = [receiver];
+    fn floating_range_membership_belongs_to_the_exact_catalog_declaration() {
+        let catalog = publish_floating_range_catalog();
+        let carried = |name: &str, element: Ty| {
+            catalog
+                .iter()
+                .find(|declaration| {
+                    declaration.callable.name == name
+                        && declaration.semantic_receiver() == Some(element)
+                })
+                .unwrap_or_else(|| panic!("catalog publishes {name} for {element:?}"))
+                .callable
+                .compiler_intrinsic
+        };
+        assert_eq!(
+            carried("rangeTo", Ty::Double),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+        assert_eq!(
+            carried("rangeTo", Ty::Float),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+        assert_eq!(
+            carried("rangeUntil", Ty::Double),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+        assert_eq!(
+            carried("rangeUntil", Ty::Float),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+
+        let double_range_to = catalog
+            .iter()
+            .find(|declaration| {
+                declaration.callable.name == "rangeTo"
+                    && declaration.semantic_receiver() == Some(Ty::Double)
+            })
+            .expect("catalog Double.rangeTo");
+        let package = crate::types::wk::kotlin_ranges_package();
+        let shape = [Ty::Double];
+        assert_eq!(
             function_realization(BuiltinFunctionDeclaration {
-                package: type_name("kotlin/ranges"),
+                package,
                 name: "rangeTo",
                 kind: FnKind::Extension,
-                receiver: Some(receiver),
-                params: &params,
-                ret: result,
+                receiver: Some(Ty::Double),
+                params: &shape,
+                ret: Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]),
                 context_count: 0,
-                type_parameter_count: type_parameters,
+                type_parameter_count: 0,
                 vararg: None,
                 is_suspend: false,
                 is_operator: true,
                 is_infix: false,
-            })
-        };
-        let floating = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
-        assert_eq!(
-            realize(Ty::Double, floating, 0),
-            Some(CompilerIntrinsic::FloatingRangeMembership)
+            }),
+            None
         );
-        let float_range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Float]);
         assert_eq!(
-            realize(Ty::Float, float_range, 0),
-            Some(CompilerIntrinsic::FloatingRangeMembership)
+            normalized_function_realization(package, "rangeTo", double_range_to),
+            double_range_to.callable.compiler_intrinsic
         );
-        let comparable = Ty::obj_args("kotlin/ranges/ClosedRange", &[Ty::Double]);
-        assert_eq!(realize(Ty::Double, comparable, 0), None);
-        assert_eq!(realize(Ty::Double, floating, 1), None);
-        assert_eq!(realize(Ty::Int, Ty::obj("kotlin/ranges/IntRange"), 0), None);
+        assert_eq!(
+            normalized_function_realization(type_name("sample/ranges"), "rangeTo", double_range_to),
+            None
+        );
+
+        let mut comparable = double_range_to.clone();
+        comparable.callable.ret = Ty::obj_args("kotlin/ranges/ClosedRange", &[Ty::Double]);
+        assert_eq!(
+            normalized_function_realization(package, "rangeTo", &comparable),
+            None
+        );
     }
 }

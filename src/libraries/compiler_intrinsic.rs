@@ -81,10 +81,11 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
-    /// `kotlin.ranges` `Double.rangeTo` / `Float.rangeTo` whose result is a
-    /// `ClosedFloatingPointRange`. Membership `x in a..b` is that range's IEEE comparison.
-    /// A nearer declaration of the same operator is an ordinary call and does not carry this
-    /// marker, so the call is not rewritten into a comparison.
+    /// The catalog `kotlin.ranges` operators `Double`/`Float` `rangeTo` (a
+    /// `ClosedFloatingPointRange`) and `rangeUntil` (an `OpenEndRange`). Membership is that
+    /// declaration's IEEE comparison. The realization is stored on those catalog rows and copied
+    /// onto the published declaration. A nearer operator, and any other declaration with the same
+    /// shape, does not carry it, so the call is not rewritten into a comparison.
     FloatingRangeMembership,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.

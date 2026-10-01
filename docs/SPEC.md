@@ -10663,12 +10663,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
 
 - **A nearer `Double`/`Float` `rangeTo` replaces primitive `in`.** `x in a..b` for those
-  primitives is a direct IEEE comparison only when overload resolution selects the stdlib
-  `kotlin.ranges` operator that returns `ClosedFloatingPointRange` (`-0.0 in 0.0..0.0` is true,
-  `NaN in NaN..NaN` is false). A declaration in a nearer scope is an ordinary `rangeTo` call
-  followed by `contains`. The generic `Comparable.rangeTo` is not that operator: its `contains`
-  uses `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral
-  ranges stay comparisons. Tests:
+  primitives is a direct IEEE comparison only when overload resolution selects a catalog
+  `kotlin.ranges` operator (`Double`/`Float` `rangeTo` returning `ClosedFloatingPointRange`, and
+  the matching `rangeUntil` returning `OpenEndRange`). The provider copies
+  `FloatingRangeMembership` from that catalog row onto the published declaration; a declaration
+  with the same shape in another package, and `Comparable.rangeTo` returning `ClosedRange`, do
+  not carry it (`-0.0 in 0.0..0.0` is true and `NaN in NaN..NaN` is false only for the catalog
+  operator). A declaration in a nearer scope is an ordinary `rangeTo` call followed by
+  `contains`. The generic `Comparable.rangeTo` orders with `compareTo`, so `-0.0` is outside
+  `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay comparisons. Tests:
+  `floating_range_membership_belongs_to_the_exact_catalog_declaration`,
   `a_nearer_double_range_to_is_a_contains_call`,
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
