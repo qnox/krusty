@@ -9099,7 +9099,7 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
                 code.getfield(fref, slot_words(jt) as i32);
             }
-            IrExpr::GetStatic(i) => self.emit_get_static(*i, code),
+            IrExpr::GetStatic(i) => self.emit_get_static(*i, e, code),
             IrExpr::New {
                 internal,
                 args,
@@ -11357,7 +11357,7 @@ impl<'a> Emitter<'a> {
                 stmts.iter().any(|&s| self.emits_control_flow(s))
                     || value.is_some_and(|v| self.emits_control_flow(v))
             }
-            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — straight-line
+            other => self.static_expr_branches(e, other),
         }
     }
 
