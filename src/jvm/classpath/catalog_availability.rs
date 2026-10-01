@@ -39,7 +39,7 @@ impl Classpath {
         &self,
     ) -> Result<(), crate::libraries::PlatformInitializationError> {
         let tree = self.package_tree();
-        let Some(&entry) = tree.incomplete_entries.first() else {
+        let Some(&entry) = tree.incomplete_entries().first() else {
             return Ok(());
         };
         let path = self

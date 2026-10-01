@@ -13,12 +13,7 @@ impl Classpath {
             return Ok(());
         }
         let tree = self.package_tree();
-        let mut packages = tree
-            .packages
-            .iter()
-            .filter(|(_, node)| !node.builtins_jars.is_empty())
-            .map(|(&package, _)| crate::types::type_name_from(&tree.names, package))
-            .collect::<Vec<_>>();
+        let mut packages = tree.builtins_packages().collect::<Vec<_>>();
         packages.sort_by(|left, right| left.path_cmp(*right));
         drop(tree);
         for package in packages {

@@ -5,8 +5,7 @@
 
 use std::path::PathBuf;
 
-use super::{Classpath, Entry, JarId, PackageTree};
-use crate::name_tree::NameId;
+use super::{Classpath, Entry};
 use crate::types::{type_name, TypeName};
 
 impl Classpath {
@@ -43,7 +42,7 @@ impl Classpath {
         if tree.first_jar_for_spelling(spelling).is_some() {
             return true;
         }
-        if tree.incomplete_entries.is_empty() {
+        if tree.catalog_complete() {
             return false;
         }
         self.class_exists(spelling)
@@ -74,23 +73,6 @@ impl Classpath {
     fn stub_overlay_contains_classifier(&self, classifier: TypeName) -> bool {
         let physical = super::super::jvm_class_map::to_jvm_classfile_type_name(classifier);
         self.stub_overlay.borrow().contains_key(&physical)
-    }
-}
-
-impl PackageTree {
-    /// The first classpath entry whose class file is stored as `internal`. The spelling is the
-    /// zip entry without `.class`. A miss does not intern it.
-    pub(super) fn first_jar_for_spelling(&self, internal: &str) -> Option<JarId> {
-        self.first_jar_for_id(self.names.get(internal)?)
-    }
-
-    pub(super) fn first_jar_for_id(&self, class: NameId) -> Option<JarId> {
-        let start = self
-            .classes
-            .partition_point(|&(candidate, _)| candidate.0 < class.0);
-        self.classes
-            .get(start)
-            .and_then(|&(candidate, jar)| (candidate == class).then_some(jar))
     }
 }
 

@@ -885,6 +885,12 @@ impl NameTree {
         &self.node(id).segment
     }
 
+    /// Nodes currently stored, including the root. Catalog composition uses this structural size
+    /// to retain the larger owned tree and remap the smaller one into it.
+    pub(crate) fn node_count(&self) -> u32 {
+        self.arena.len()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.arena.len() as usize

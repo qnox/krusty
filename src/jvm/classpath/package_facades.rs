@@ -17,8 +17,8 @@ impl Classpath {
         }
         let tree = self.package_tree();
         let mut out = Vec::new();
-        if let Some(node) = tree.node_for_name(pkg) {
-            for &jar_id in &node.jars {
+        if let Some(jars) = tree.package_jars_name(pkg) {
+            for &jar_id in jars {
                 if self.entries.get(jar_id).is_none() {
                     continue;
                 }
