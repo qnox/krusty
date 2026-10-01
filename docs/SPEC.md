@@ -6498,6 +6498,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   conditional is still computed as `Int` and widened at the use, so an overflowing `Int` addition
   inside a branch wraps before that widening. Test:
   `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`.
+- **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
+  expected type still adapts an integer-constant branch to the non-null primitive of the other
+  branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
+  `if (flag) byteValue else 0` is `Byte`,   `if (flag) ulongValue else 0u` is `ULong`, and
+  `if (flag) longOrNull else 0` is `Long?`. An unsigned constant keeps its full `UInt` magnitude,
+  including values above `Int.MAX_VALUE`: `2147483648u` and `UInt.MAX_VALUE` beside a `ULong` are
+  `ULong`. Unsigned arithmetic is not that constant. `if (flag) ulongValue else 65535u + 1u` is
+  not a `ULong`: an explicit `ULong` return is `Comparable<*>` on the reference compiler, and
+  inferring the return lowers the sum as `Long` and throws. The same magnitude refuses a narrower
+  unsigned sibling (`2147483648u` beside a `UShort`).
+  Checker and signature evaluation share one range test, so those boundaries cannot drift. The same
+  approximation infers an expression body's return type. A conditional whose branches are all
+  integer constants stays an integer constant (`if (c) 1 else 2` is `Int` and still prefers
+  `f(Int)` over `f(Long)`). A constant that does not fit (`200` beside a `Byte`) and a non-constant
+  of another primitive (`anInt` beside a `Long`) do not adapt. Test:
+  `tests/integer_literal_branch_join_e2e.rs`.
 - **`UByte`/`UShort` operate as `UInt`.** Their representation is the SIGN-extended `byte`/`short` the
   JVM loads, so every widening out of it masks first (`UByte.toInt()` is `iand 0xFF`, `UShort.toInt()`
   is `iand 0xFFFF`) — exactly kotlinc's lowering. Kotlin gives them no arithmetic of their own: each

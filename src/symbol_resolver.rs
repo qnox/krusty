@@ -8078,10 +8078,7 @@ mod tests {
             &source,
             &source,
             &classifier,
-            &[CallArgKind::IntegerLiteral {
-                ty: Ty::Int,
-                value: 1,
-            }],
+            &[CallArgKind::integer_literal(Ty::Int, 1)],
         )
         .expect("the inferred constructor parameter must be applicable");
 

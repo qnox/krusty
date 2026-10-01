@@ -181,6 +181,7 @@ mod when_flow;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
+use crate::integer_constant::IntegerConstant;
 use call_constraints::CallConstraints;
 use call_diagnostics::RejectedCallOwner;
 use call_result_constraint::CallResultConstraint;
@@ -207,7 +208,9 @@ pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
-use integer_constants::{call_arg_kind, folded_integer_literal, FoldedIntegerLiteral};
+use integer_constants::{
+    call_arg_kind, folded_integer_literal, selected_builtin_unary_integer_constant,
+};
 use lambda_expectation::{
     functional_argument_expectation, module_member_lambda_shape, shaped_argument_inlining,
     written_inline_modifier, FunctionalArgumentExpectation, MemberLambdaShape,
@@ -4672,11 +4675,8 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
 /// `ULongLit`). A magnitude that does NOT fit the expected type stays `UInt` so the ordinary
 /// initializer-mismatch diagnostic reports it instead of the value silently truncating.
 fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
-    let fits = |t: Ty| match t {
-        Ty::UByte => (0..=0xFF).contains(&value),
-        Ty::UShort => (0..=0xFFFF).contains(&value),
-        Ty::UInt | Ty::ULong => true,
-        _ => false,
+    let Some(constant) = u64::try_from(value).ok().map(IntegerConstant::Unsigned) else {
+        return Ty::UInt;
     };
     expected
         .map(Ty::non_null)
@@ -4684,7 +4684,7 @@ fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
             Ty::TyParam(_, bound) => bound.non_null(),
             expected => expected,
         })
-        .filter(|t| fits(*t))
+        .filter(|ty| constant.fits(*ty))
         .unwrap_or(Ty::UInt)
 }
 
@@ -4693,11 +4693,8 @@ fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
 /// so checking and selected-call materialization must use the same type instead of reverting to `Int`.
 fn signed_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
     let fits = |ty: Ty| match ty {
-        Ty::Byte => i8::try_from(value).is_ok(),
-        Ty::Short => i16::try_from(value).is_ok(),
-        Ty::Int => i32::try_from(value).is_ok(),
         Ty::Long => true,
-        _ => false,
+        other => i32::try_from(value).is_ok_and(|value| IntegerConstant::Signed(value).fits(other)),
     };
     expected
         .map(Ty::non_null)
@@ -21126,7 +21123,7 @@ impl<'a> Checker<'a> {
                                 constraints
                                     .entry(formal.to_string())
                                     .or_default()
-                                    .push(CallArgKind::integer_literal(actual, value.value()));
+                                    .push(CallArgKind::integer_constant(actual, value));
                             }
                         }
                         if !constraints.is_empty() {
@@ -42234,10 +42231,12 @@ impl<'a> Checker<'a> {
                 .filter_map(|&(argument, parameter, actual, whole_array)| {
                     let mut actual = (parameter, actual, whole_array);
                     let kind = match argument_kinds[argument].clone() {
-                        CallArgKind::IntegerLiteral { ty, value } => CallArgKind::integer_literal(
-                            self.integer_literal_semantic_type(ty),
-                            value,
-                        ),
+                        CallArgKind::IntegerLiteral { ty, constant } => {
+                            CallArgKind::integer_constant(
+                                self.integer_literal_semantic_type(ty),
+                                constant,
+                            )
+                        }
                         kind => kind,
                     };
                     if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
@@ -60118,6 +60117,21 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Integer-constant provenance available after semantic selection.
+    ///
+    /// Syntax-level literals and parser operator nodes are recognized directly. An explicit
+    /// primitive unary-method call is admitted only when overload selection recorded the exact
+    /// built-in operation; source/member spellings never manufacture this fact.
+    fn integer_constant_provenance(&self, expression: ExprId) -> Option<IntegerConstant> {
+        folded_integer_literal(self.file, expression).or_else(|| {
+            let ExprLowering::BuiltinUnaryCall { operation } = self.expr_lowers.get(&expression)?
+            else {
+                return None;
+            };
+            selected_builtin_unary_integer_constant(self.file, expression, *operation)
+        })
+    }
+
     /// The expression type used by assignability and overload checks. Callable references keep a
     /// nominal reflection type (`KFunction`/`KProperty`) and an exact callable signature; only a
     /// functional expectation consumes the latter. Every checking seam uses this one policy.
@@ -60133,13 +60147,16 @@ impl<'a> Checker<'a> {
             self.contextual_signed_integer_literal_type(*value, Some(expected))
         } else if let Expr::UIntLit(value) = self.file.expr(expression) {
             self.contextual_unsigned_integer_literal_type(*value, Some(expected))
-        } else if let Some(value) = folded_integer_literal(self.file, expression) {
+        } else if let Some(value) = self.integer_constant_provenance(expression) {
             match value {
-                FoldedIntegerLiteral::Signed(value) => {
+                IntegerConstant::Signed(value) => {
                     self.contextual_signed_integer_literal_type(i64::from(value), Some(expected))
                 }
-                FoldedIntegerLiteral::Unsigned(value) => {
-                    self.contextual_unsigned_integer_literal_type(i64::from(value), Some(expected))
+                IntegerConstant::Unsigned(value) => {
+                    let Some(value) = i64::try_from(value).ok() else {
+                        return Ty::ULong;
+                    };
+                    self.contextual_unsigned_integer_literal_type(value, Some(expected))
                 }
             }
         } else if matches!(expected.non_null(), Ty::Fun(_)) {
@@ -60191,7 +60208,7 @@ impl<'a> Checker<'a> {
                 self.file.expr(expression),
                 Expr::IntLit(_) | Expr::UIntLit(_)
             )
-            && folded_integer_literal(self.file, expression).is_some()
+            && self.integer_constant_provenance(expression).is_some()
         {
             self.selected_numeric_conversions
                 .insert(expression, expected);
@@ -60407,37 +60424,6 @@ impl<'a> Checker<'a> {
         let ty = self.expr(scope, expression);
         self.postponed_argument_depth -= 1;
         ty
-    }
-
-    fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
-        let expression = conditional_branch::branch_value_expression(self.file, expression);
-        if let Some(signature) = self.unbound_call_result_signature(expression) {
-            return Some(signature);
-        }
-        if self
-            .file
-            .call_type_args
-            .get(&expression.0)
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return None;
-        }
-        let signature = self.selected_generic_call_signature(expression)?;
-        signature
-            .formals
-            .iter()
-            .any(|formal| {
-                let formal = std::slice::from_ref(formal);
-                ty_mentions_param(signature.ret, formal)
-                    && signature
-                        .receiver
-                        .is_none_or(|receiver| !ty_mentions_param(receiver, formal))
-                    && signature
-                        .params
-                        .iter()
-                        .all(|parameter| !ty_mentions_param(*parameter, formal))
-            })
-            .then_some(signature)
     }
 
     /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
@@ -60727,7 +60713,13 @@ impl<'a> Checker<'a> {
                 };
             }
         }
-        call_arg_kind(self.file, argument, ty)
+        let kind = call_arg_kind(self.file, argument, ty);
+        if matches!(kind, CallArgKind::Typed(_)) {
+            if let Some(constant) = self.integer_constant_provenance(argument) {
+                return CallArgKind::integer_constant(ty, constant);
+            }
+        }
+        kind
     }
 
     fn call_arg_kinds(&mut self, scope: &CheckerScope<'_>, args: &[ExprId]) -> Vec<CallArgKind> {
@@ -62540,6 +62532,7 @@ impl<'a> Checker<'a> {
             });
             let mut exit_flows = vec![scope.flow_snapshot()];
             let mut result = bt;
+            let mut branch_types = vec![(body, bt)];
             for c in &catches {
                 scope.restore_flow(&entry_flow);
                 self.clear_narrowings_a_try_body_writes(scope, &written);
@@ -62583,12 +62576,12 @@ impl<'a> Checker<'a> {
                     self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
                 };
                 exit_flows.push(scope.flow_snapshot());
+                branch_types.push((c.body, ht));
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
-                // join to `Any`. Restricting this to reference-like branches is intentional. The JVM
-                // lowering currently stores each branch directly into one merge slot, so a primitive
-                // join that requires per-branch widening or boxing (`Int` versus `Long`) cannot be
-                // represented soundly and retains the lenient join of `try_branch_join`.
+                // join to `Any`. Restricting this to reference-like branches is intentional. An
+                // integer constant is adapted to a sibling primitive after this loop. A non-constant
+                // primitive disagreement (`Int` versus `Long`) keeps `try_branch_join`.
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
                 result = if wanted.value_required && reference_like(result) && reference_like(ht) {
@@ -62601,6 +62594,12 @@ impl<'a> Checker<'a> {
                     conditional_branch::try_branch_join(self, wanted.value_required, result, ht)
                 };
             }
+            result = conditional_branch::adapted_try_result(
+                self,
+                wanted.value_required,
+                &branch_types,
+                result,
+            );
             scope.restore_common_flow(&exit_flows);
             if let Some(f) = finally {
                 self.expr_statement(scope, f);
@@ -65474,36 +65473,6 @@ impl<'a> Checker<'a> {
             self.path_narrowed_read_ty(scope, e, receiver, declared)
         };
         self.set(e, t)
-    }
-
-    /// Report a conditional branch whose selected generic call remains symbolic after sibling
-    /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
-    /// diagnosed here.
-    fn report_unbound_conditional_branch(&mut self, scope: &CheckerScope<'_>, branch: ExprId) {
-        if self.postponed_argument_depth != 0 {
-            return;
-        }
-        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
-            return;
-        };
-        let actual = self.expr_types[branch.0 as usize];
-        if Self::type_is_lexically_fixed(scope, actual) {
-            return;
-        }
-        let Some(formal) = signature
-            .formals
-            .iter()
-            .find(|formal| ty_mentions_param(actual, std::slice::from_ref(formal)))
-        else {
-            return;
-        };
-        self.diags.error(
-            self.call_callee_name_span(branch),
-            format!(
-                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                crate::types::type_parameter_source_name(formal)
-            ),
-        );
     }
 
     fn expr_inner_block(
@@ -71133,10 +71102,10 @@ impl<'a> Checker<'a> {
                         }
                         let nominal = self.expr_types[argument.0 as usize];
                         let kind = match call_arg_kind(self.file, argument, nominal) {
-                            CallArgKind::IntegerLiteral { ty, value } => {
-                                CallArgKind::integer_literal(
+                            CallArgKind::IntegerLiteral { ty, constant } => {
+                                CallArgKind::integer_constant(
                                     self.integer_literal_semantic_type(ty),
-                                    value,
+                                    constant,
                                 )
                             }
                             kind => kind,

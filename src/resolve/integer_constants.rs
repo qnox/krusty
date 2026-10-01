@@ -1,81 +1,10 @@
 //! Integer-constant provenance used by call applicability and contextual coercion.
 
 use crate::ast::{BinOp, Expr, ExprId, File, UnOp};
+use crate::integer_constant::{IntegerConstant, IntegerConstantOp};
 use crate::types::Ty;
 
-use super::CallArgKind;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FoldedIntegerLiteral {
-    Signed(i32),
-    Unsigned(i32),
-}
-
-impl FoldedIntegerLiteral {
-    pub(super) fn value(self) -> i32 {
-        match self {
-            Self::Signed(value) | Self::Unsigned(value) => value,
-        }
-    }
-
-    fn binary(self, right: Self, operation: impl FnOnce(i32, i32) -> Option<i32>) -> Option<Self> {
-        match (self, right) {
-            (Self::Signed(left), Self::Signed(right)) => operation(left, right).map(Self::Signed),
-            (Self::Unsigned(left), Self::Unsigned(right)) => {
-                operation(left, right).map(Self::Unsigned)
-            }
-            _ => None,
-        }
-    }
-}
-
-/// One value whose primitive range is exactly the range shared by every branch value.
-///
-/// `200` does not fit in `Byte` and `-129` does not fit in `Byte`, so a conditional that contains
-/// either value must not adapt to `Byte`. The hardest constituent has that same refusal, and any
-/// constituent works once every one fits.
-fn representative_integer_constant(
-    values: &[FoldedIntegerLiteral],
-) -> Option<FoldedIntegerLiteral> {
-    if values.is_empty() {
-        return None;
-    }
-    let signed = values
-        .iter()
-        .all(|value| matches!(value, FoldedIntegerLiteral::Signed(_)));
-    let unsigned = values
-        .iter()
-        .all(|value| matches!(value, FoldedIntegerLiteral::Unsigned(_)));
-    if signed {
-        let hardest = values
-            .iter()
-            .map(|value| value.value())
-            .find(|value| i16::try_from(*value).is_err())
-            .or_else(|| {
-                values
-                    .iter()
-                    .map(|value| value.value())
-                    .find(|value| i8::try_from(*value).is_err())
-            })
-            .unwrap_or_else(|| values[0].value());
-        Some(FoldedIntegerLiteral::Signed(hardest))
-    } else if unsigned {
-        let hardest = values
-            .iter()
-            .map(|value| value.value())
-            .find(|value| u16::try_from(*value).is_err())
-            .or_else(|| {
-                values
-                    .iter()
-                    .map(|value| value.value())
-                    .find(|value| u8::try_from(*value).is_err())
-            })
-            .unwrap_or_else(|| values[0].value());
-        Some(FoldedIntegerLiteral::Unsigned(hardest))
-    } else {
-        None
-    }
-}
+use super::{BuiltinUnaryOperation, CallArgKind};
 
 /// Branch values of a conditional integer constant: an `if` that has an `else`, a `when` that has
 /// an `else` arm, or a block through its trailing expression. A missing `else` is not a value.
@@ -100,34 +29,34 @@ fn integer_constant_branches(file: &File, expression: ExprId) -> Option<Vec<Expr
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
 ///
 /// This is deliberately the one AST walk used by both lightweight signature inference and the full
-/// checker. Every operation is checked in the expression's ordinary `Int` representation, not in a
-/// wider scratch type: lowering evaluates the same `Int` operations before any call-boundary
-/// coercion, so accepting an expression that overflows here would silently change Kotlin semantics.
+/// checker. Every operation is checked in the expression's ordinary width (`Int` or `UInt`), not in
+/// a wider scratch type: lowering evaluates that width before any call-boundary coercion, so
+/// accepting an expression that overflows here would silently change Kotlin semantics.
 /// Keeping this outside either phase also prevents the two call paths from drifting on which
 /// expressions carry literal provenance. An `if`, `when`, or block is the same kind of constant
 /// when every branch value is: adaptation uses one representative that fits a target only when
 /// every branch does, and the branches themselves still evaluate as `Int`.
-pub(super) fn folded_integer_literal(
-    file: &File,
-    expression: ExprId,
-) -> Option<FoldedIntegerLiteral> {
+pub(super) fn folded_integer_literal(file: &File, expression: ExprId) -> Option<IntegerConstant> {
+    integer_constant(file, expression)
+}
+
+fn integer_constant(file: &File, expression: ExprId) -> Option<IntegerConstant> {
     match file.expr(expression) {
-        Expr::IntLit(value) => i32::try_from(*value).ok().map(FoldedIntegerLiteral::Signed),
-        Expr::UIntLit(value) => i32::try_from(*value)
-            .ok()
-            .map(FoldedIntegerLiteral::Unsigned),
+        Expr::IntLit(value) => i32::try_from(*value).ok().map(IntegerConstant::Signed),
+        Expr::UIntLit(value) => u64::try_from(*value).ok().and_then(|magnitude| {
+            let constant = IntegerConstant::Unsigned(magnitude);
+            constant.fits(Ty::UInt).then_some(constant)
+        }),
         Expr::Unary {
             op: UnOp::Plus,
             operand,
-        } => folded_integer_literal(file, *operand),
+        } => integer_constant(file, *operand),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
-        } => match folded_integer_literal(file, *operand)? {
-            FoldedIntegerLiteral::Signed(value) => {
-                value.checked_neg().map(FoldedIntegerLiteral::Signed)
-            }
-            FoldedIntegerLiteral::Unsigned(_) => None,
+        } => match integer_constant(file, *operand)? {
+            IntegerConstant::Signed(value) => value.checked_neg().map(IntegerConstant::Signed),
+            IntegerConstant::Unsigned(_) => None,
         },
         Expr::Binary { op, lhs, rhs, .. }
             if matches!(
@@ -135,53 +64,58 @@ pub(super) fn folded_integer_literal(
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
             ) =>
         {
-            let left = folded_integer_literal(file, *lhs)?;
-            let right = folded_integer_literal(file, *rhs)?;
-            left.binary(right, |left, right| match op {
-                BinOp::Add => left.checked_add(right),
-                BinOp::Sub => left.checked_sub(right),
-                BinOp::Mul => left.checked_mul(right),
-                BinOp::Div => left.checked_div(right),
-                BinOp::Rem => left.checked_rem(right),
+            let left = integer_constant(file, *lhs)?;
+            let right = integer_constant(file, *rhs)?;
+            let operation = match op {
+                BinOp::Add => IntegerConstantOp::Add,
+                BinOp::Sub => IntegerConstantOp::Subtract,
+                BinOp::Mul => IntegerConstantOp::Multiply,
+                BinOp::Div => IntegerConstantOp::Divide,
+                BinOp::Rem => IntegerConstantOp::Remainder,
                 _ => unreachable!("guarded integer constant operator"),
-            })
-        }
-        Expr::Call { callee, args } if args.len() == 1 => {
-            let Expr::Member { receiver, name } = file.expr(*callee) else {
-                return None;
             };
-            let left = folded_integer_literal(file, *receiver)?;
-            let right = folded_integer_literal(file, args[0])?;
-            left.binary(right, |left, right| match name.as_str() {
-                "plus" => left.checked_add(right),
-                "minus" => left.checked_sub(right),
-                "times" => left.checked_mul(right),
-                "div" => left.checked_div(right),
-                "rem" => left.checked_rem(right),
-                _ => None,
-            })
-        }
-        Expr::Call { callee, args } if args.is_empty() => {
-            let Expr::Member { receiver, name } = file.expr(*callee) else {
-                return None;
-            };
-            let value = folded_integer_literal(file, *receiver)?;
-            match (name.as_str(), value) {
-                ("unaryPlus", value) => Some(value),
-                ("unaryMinus", FoldedIntegerLiteral::Signed(value)) => {
-                    value.checked_neg().map(FoldedIntegerLiteral::Signed)
-                }
-                _ => None,
-            }
+            let folded = left.fold(operation, right)?;
+            // Unsigned arithmetic stays `UInt`. The reference compiler does not adapt
+            // `1u + 2u` to `UByte` or `65535u + 1u` to `ULong`.
+            (!folded.is_unsigned()).then_some(folded)
         }
         _ => {
             let branches = integer_constant_branches(file, expression)?;
             let folded = branches
                 .into_iter()
-                .map(|branch| folded_integer_literal(file, branch))
+                .map(|branch| integer_constant(file, branch))
                 .collect::<Option<Vec<_>>>()?;
-            representative_integer_constant(&folded)
+            IntegerConstant::representative(&folded)
         }
+    }
+}
+
+/// Apply a selected primitive unary operation to its syntax-only constant operand.
+///
+/// The operation is semantic provenance recorded by overload selection. The member spelling is
+/// deliberately ignored: a source member named `unaryPlus` or `unaryMinus` is not a built-in
+/// integer constant merely because it has the same name.
+pub(super) fn selected_builtin_unary_integer_constant(
+    file: &File,
+    expression: ExprId,
+    operation: BuiltinUnaryOperation,
+) -> Option<IntegerConstant> {
+    let Expr::Call { callee, args } = file.expr(expression) else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let Expr::Member { receiver, .. } = file.expr(*callee) else {
+        return None;
+    };
+    let value = integer_constant(file, *receiver)?;
+    match (operation, value) {
+        (BuiltinUnaryOperation::Identity, value) => Some(value),
+        (BuiltinUnaryOperation::Negate, IntegerConstant::Signed(value)) => {
+            value.checked_neg().map(IntegerConstant::Signed)
+        }
+        (BuiltinUnaryOperation::Negate, IntegerConstant::Unsigned(_)) => None,
     }
 }
 
@@ -191,8 +125,8 @@ pub(super) fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgK
         CallArgKind::Spread(ty)
     } else if matches!(file.expr(expression), Expr::Lambda { .. }) {
         CallArgKind::LambdaLiteral(ty)
-    } else if let Some(value) = folded_integer_literal(file, expression) {
-        CallArgKind::integer_literal(ty, value.value())
+    } else if let Some(constant) = folded_integer_literal(file, expression) {
+        CallArgKind::integer_constant(ty, constant)
     } else {
         CallArgKind::Typed(ty)
     }
@@ -209,22 +143,22 @@ mod tests {
         let values = values
             .iter()
             .copied()
-            .map(FoldedIntegerLiteral::Signed)
+            .map(IntegerConstant::Signed)
             .collect::<Vec<_>>();
         let representative =
-            representative_integer_constant(&values).expect("signed representative");
-        CallArgKind::integer_literal(Ty::Int, representative.value())
+            IntegerConstant::representative(&values).expect("signed representative");
+        CallArgKind::integer_constant(Ty::Int, representative)
     }
 
-    fn unsigned(values: &[i32]) -> CallArgKind {
+    fn unsigned(values: &[u64]) -> CallArgKind {
         let values = values
             .iter()
             .copied()
-            .map(FoldedIntegerLiteral::Unsigned)
+            .map(IntegerConstant::Unsigned)
             .collect::<Vec<_>>();
         let representative =
-            representative_integer_constant(&values).expect("unsigned representative");
-        CallArgKind::integer_literal(Ty::UInt, representative.value())
+            IntegerConstant::representative(&values).expect("unsigned representative");
+        CallArgKind::integer_constant(Ty::UInt, representative)
     }
 
     #[test]
@@ -248,14 +182,22 @@ mod tests {
         let uint = unsigned(&[0, 65_536]);
         assert!(!uint.adapts_integer_literal_to(Ty::UShort));
         assert!(uint.adapts_integer_literal_to(Ty::ULong));
+
+        let above_i32 = unsigned(&[0, u64::from(i32::MAX as u32) + 1]);
+        assert!(!above_i32.adapts_integer_literal_to(Ty::UShort));
+        assert!(above_i32.adapts_integer_literal_to(Ty::ULong));
+
+        let uint_max = unsigned(&[u64::from(u32::MAX)]);
+        assert!(uint_max.adapts_integer_literal_to(Ty::ULong));
+        assert!(!uint_max.adapts_integer_literal_to(Ty::UShort));
     }
 
     #[test]
     fn signed_and_unsigned_branches_do_not_share_literal_provenance() {
         assert_eq!(
-            representative_integer_constant(&[
-                FoldedIntegerLiteral::Signed(1),
-                FoldedIntegerLiteral::Unsigned(1),
+            IntegerConstant::representative(&[
+                IntegerConstant::Signed(1),
+                IntegerConstant::Unsigned(1),
             ]),
             None
         );
@@ -302,8 +244,88 @@ mod tests {
         assert!(kinds[7].adapts_integer_literal_to(Ty::UShort));
         assert!(!kinds[8].adapts_integer_literal_to(Ty::UShort));
         assert!(kinds[8].adapts_integer_literal_to(Ty::ULong));
-        assert!(kinds[9].adapts_integer_literal_to(Ty::UByte));
+        assert!(!kinds[9].adapts_integer_literal_to(Ty::UByte));
+        assert!(!kinds[9].adapts_integer_literal_to(Ty::ULong));
         assert!(kinds[..6].iter().all(|argument| argument.ty() == Ty::Int));
         assert!(kinds[6..].iter().all(|argument| argument.ty() == Ty::UInt));
+    }
+
+    #[test]
+    fn explicit_unary_call_requires_the_selected_builtin_operation() {
+        let source = "fun sample() { target(1.unaryMinus()) }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let argument = file
+            .expr_arena
+            .iter()
+            .find_map(|expression| match expression {
+                Expr::Call { callee, args }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "target") =>
+                {
+                    args.first().copied()
+                }
+                _ => None,
+            })
+            .expect("unaryMinus argument");
+
+        assert_eq!(folded_integer_literal(&file, argument), None);
+        assert_eq!(
+            selected_builtin_unary_integer_constant(&file, argument, BuiltinUnaryOperation::Negate,),
+            Some(IntegerConstant::Signed(-1)),
+        );
+    }
+
+    #[test]
+    fn an_unsigned_sum_is_a_call_constant_but_not_a_sibling_constant() {
+        let source = "fun sample() { target(1u + 2u) }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let argument = file
+            .expr_arena
+            .iter()
+            .find_map(|expression| match expression {
+                Expr::Call { callee, args }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "target") =>
+                {
+                    args.first().copied()
+                }
+                _ => None,
+            })
+            .expect("unsigned sum");
+        assert_eq!(folded_integer_literal(&file, argument), None);
+        assert!(!call_arg_kind(&file, argument, Ty::UInt).adapts_integer_literal_to(Ty::UByte));
+    }
+
+    #[test]
+    fn unsigned_literals_above_i32_max_keep_a_ulong_range() {
+        let source = "fun sample() { target(2147483648u, 4294967295u, 2147483648u) }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let arguments = file
+            .expr_arena
+            .iter()
+            .find_map(|expression| match expression {
+                Expr::Call { callee, args }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "target") =>
+                {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .expect("target call");
+        let kinds = arguments
+            .iter()
+            .map(|argument| call_arg_kind(&file, *argument, Ty::UInt))
+            .collect::<Vec<_>>();
+        assert!(kinds[0].adapts_integer_literal_to(Ty::ULong));
+        assert!(!kinds[0].adapts_integer_literal_to(Ty::UShort));
+        assert!(kinds[1].adapts_integer_literal_to(Ty::ULong));
+        assert!(!kinds[1].adapts_integer_literal_to(Ty::UShort));
+        assert!(!kinds[2].adapts_integer_literal_to(Ty::UByte));
+        assert!(kinds.iter().all(|argument| argument.ty() == Ty::UInt));
     }
 }

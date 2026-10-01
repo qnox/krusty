@@ -14,7 +14,9 @@ use super::header::{
 use super::ResolvedParameterIdentity;
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 
+mod call_arguments;
 mod selections;
+pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
 pub use selections::*;
@@ -35,53 +37,6 @@ pub struct OperandRange {
 pub struct CallArgumentRange {
     start: u32,
     len: u32,
-}
-
-/// Source call facts needed by ordinary argument mapping and overload selection. The spelling is
-/// temporary lookup input interned in the signature graph; no parser expression id survives.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SigCallArgument {
-    pub value: SigExprId,
-    /// Exact source span of the written argument. This stays inside the temporary signature graph
-    /// and lets Pass 1 attach applicability diagnostics to the same source location as Pass 2.
-    pub origin: OriginId,
-    pub name: Option<SigNameId>,
-    pub spread: bool,
-    /// Whether this argument is a LAMBDA LITERAL. Overload resolution applies lambda-specific rules
-    /// to one — most visibly, a lambda always conforms to an expected `… -> Unit` regardless of what
-    /// its last expression evaluates to (`value.also { sb.append(x) }`).
-    pub lambda: bool,
-}
-
-/// A call argument after its compact expression has been evaluated. Names borrow the temporary
-/// graph and disappear with it after signature finalization.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResolvedSigCallArgument<'a> {
-    pub ty: ResolvedTy,
-    pub origin: OriginId,
-    pub name: Option<&'a str>,
-    pub spread: bool,
-    pub integer_literal: Option<i32>,
-    pub lambda: bool,
-    /// This provisional argument is itself a call whose generic result can be rebound by the
-    /// enclosing callable's selected parameter. It is set only while probing the compact graph;
-    /// materialization immediately re-evaluates the call with that expectation.
-    pub contextual_call: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SigCallArgumentProbe<'a> {
-    Typed(ResolvedSigCallArgument<'a>),
-    PostponedLambda {
-        parameter_count: u32,
-        implicit_it: bool,
-        name: Option<&'a str>,
-        spread: bool,
-    },
-    PostponedCallableReference {
-        name: Option<&'a str>,
-        spread: bool,
-    },
 }
 
 /// A half-open slice in the signature graph's shared substitution arena.
@@ -134,6 +89,9 @@ pub enum SigExpr {
     /// type or a retained body: it is temporary literal provenance used by Kotlin's integer-
     /// constant adaptation during overload selection, and is destroyed with the signature graph.
     IntegerLiteral(i32),
+    /// An unsigned integer literal (`0u`, `2147483648u`). The payload is the full `UInt` magnitude,
+    /// including values above `i32::MAX`, until a sibling primitive adapts it.
+    UnsignedIntegerLiteral(u64),
     DeclarationType(DeclarationId),
     ClassifierType {
         declaration: DeclarationId,
@@ -1038,11 +996,24 @@ pub trait SignatureSemantics {
         &self,
         _operator: SigBinaryOperator,
         _lhs_ty: ResolvedTy,
-        _lhs: i32,
+        _lhs: crate::integer_constant::IntegerConstant,
         _rhs_ty: ResolvedTy,
-        _rhs: i32,
+        _rhs: crate::integer_constant::IntegerConstant,
         _result: ResolvedTy,
-    ) -> Option<i32> {
+    ) -> Option<crate::integer_constant::IntegerConstant> {
+        None
+    }
+
+    /// The type an integer constant contributes to a conditional whose other branches fix a
+    /// primitive. `current` is the constant's unresolved type (`Int` or `UInt`) and `sibling` is
+    /// the common type of the non-constant branches, nullability included. The result is the
+    /// non-null primitive the constant fits, or `None` when it does not fit.
+    fn adapted_integer_constant_branch(
+        &self,
+        _current: ResolvedTy,
+        _constant: crate::integer_constant::IntegerConstant,
+        _sibling: ResolvedTy,
+    ) -> Option<ResolvedTy> {
         None
     }
 
