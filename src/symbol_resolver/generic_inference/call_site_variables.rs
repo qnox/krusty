@@ -237,4 +237,38 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn returning_a_call_owned_solution_preserves_definitely_non_null_provenance() {
+        let any = Ty::obj("kotlin/Any");
+        let formal_name = "demo:Owner:R";
+        let formal = Ty::ty_param(formal_name, any);
+        let signature = GenericSig {
+            formals: vec![formal_name.to_string()],
+            formal_bounds: vec![vec![any]],
+            receiver: None,
+            params: vec![Ty::nullable(formal)],
+            ret: Ty::nullable(formal),
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let caller = Ty::ty_param("caller:T", Ty::nullable(any));
+        let call = CallSiteVariables::instantiate(&signature, |_| true)
+            .expect("the visible formal must get a call-owned identity");
+
+        let inferred = infer_generic_call_constraints_from_symbols(
+            &EmptySymbolSource,
+            call.signature(),
+            [(0, caller, false)],
+            None,
+        );
+        let declared = call.declared_bindings(inferred);
+        let solved = declared.bindings[formal_name];
+
+        assert!(matches!(solved, Ty::DefinitelyNotNull(_)));
+        assert_eq!(Ty::nullable(solved), Ty::nullable(caller));
+        assert_eq!(
+            Ty::nullable(solved).non_null().ty_param_bound(),
+            Some(Ty::nullable(any))
+        );
+    }
 }

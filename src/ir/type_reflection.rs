@@ -145,7 +145,8 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
             }
             type_parameters_named_by(signature.ret, names);
         }
-        Ty::Nullable(inner)
+        Ty::DefinitelyNotNull(inner)
+        | Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
         | Ty::OutProjection(inner) => type_parameters_named_by(*inner, names),

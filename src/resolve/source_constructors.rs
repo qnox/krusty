@@ -663,7 +663,7 @@ impl Checker<'_> {
     }
 
     pub(super) fn constructor_shape_constraint(shape: Ty) -> ConstructorParameterConstraint {
-        if !Self::ty_mentions_type_param(shape) {
+        if !shape.mentions_ty_param() {
             ConstructorParameterConstraint::Concrete
         } else if matches!(shape.non_null(), Ty::Fun(_)) {
             ConstructorParameterConstraint::GenericFunction

@@ -16526,8 +16526,8 @@ impl<'a> Checker<'a> {
         };
         let component = |expected: Ty, actual: Ty| {
             expected.is_erased_top()
-                || Self::ty_mentions_type_param(expected)
-                || Self::ty_mentions_type_param(actual)
+                || expected.mentions_ty_param()
+                || actual.mentions_ty_param()
                 || self.member_argument_score(expected, actual).is_some()
         };
         expected.params.len() == actual.params.len()
@@ -49636,30 +49636,6 @@ impl<'a> Checker<'a> {
         candidates
     }
 
-    /// Whether `ty` mentions a generic type parameter anywhere — directly, inside a nullable wrapper, or
-    /// as a type argument. Such a type is a placeholder the call site instantiates, not a fixed
-    /// expectation an argument can be measured against before inference runs.
-    fn ty_mentions_type_param(ty: Ty) -> bool {
-        match ty {
-            Ty::TyParam(..) => true,
-            Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner)
-            | Ty::StarProjection(inner) => Self::ty_mentions_type_param(*inner),
-            Ty::Obj(_, args) => args.iter().copied().any(Self::ty_mentions_type_param),
-            Ty::Fun(signature) => {
-                signature
-                    .params
-                    .iter()
-                    .copied()
-                    .any(Self::ty_mentions_type_param)
-                    || Self::ty_mentions_type_param(signature.ret)
-            }
-            Ty::Unit | Ty::Pending | Ty::Nothing | Ty::Null | Ty::Error => false,
-        }
-    }
-
     fn generic_function_constructor_arg_fits(&self, expected: Ty, actual: Ty) -> bool {
         if actual == Ty::Null {
             return expected.is_nullable();
@@ -49783,7 +49759,7 @@ impl<'a> Checker<'a> {
                 .get(slot)
                 .copied()
                 .unwrap_or_else(|| {
-                    if !Self::ty_mentions_type_param(expected) {
+                    if !expected.mentions_ty_param() {
                         ConstructorParameterConstraint::Concrete
                     } else if matches!(expected.non_null(), Ty::Fun(_)) {
                         ConstructorParameterConstraint::GenericFunction
@@ -70802,9 +70778,8 @@ impl<'a> Checker<'a> {
         // An unbound result variable is an inference output, not a contextual expected type. Its
         // upper bound (`Any`) must not coerce the body before the enclosing call can bind `R` from
         // the body's real type.
-        let expected_return = (fixed_expected_return
-            || !Self::ty_mentions_type_param(signature.ret))
-        .then_some(signature.ret);
+        let expected_return =
+            (fixed_expected_return || !signature.ret.mentions_ty_param()).then_some(signature.ret);
         self.check_lambda_with_implicit_receivers_and_return_labeled(
             scope,
             e,
@@ -73761,9 +73736,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .zip(&actual.params)
                 .all(|(&expected, &actual)| {
-                    Self::ty_mentions_type_param(expected)
-                        || Self::ty_mentions_type_param(actual)
-                        || expected == actual
+                    expected.mentions_ty_param() || actual.mentions_ty_param() || expected == actual
                 })
             && expected.context_count == actual.context_count
             && expected.has_receiver == actual.has_receiver

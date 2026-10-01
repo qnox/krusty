@@ -431,6 +431,9 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
             }
         }
         Ty::PlatformNullable(inner) => format!("{}!", qualified_type_name(*inner)?),
+        Ty::DefinitelyNotNull(inner) => {
+            format!("{} & Any", qualified_type_name(*inner)?)
+        }
         Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
         Ty::Fun(signature) => {
             let parameters = signature
@@ -482,6 +485,17 @@ mod tests {
             undetermined_type_message(UndeterminedDiagnosticType::Pending),
             "internal error: package function platform-clash diagnostic contains a pending type"
         );
+    }
+
+    #[test]
+    fn diagnostic_type_rendering_preserves_definitely_non_null_identity() {
+        let caller = crate::types::Ty::ty_param(
+            "T",
+            crate::types::Ty::nullable(crate::types::Ty::obj_name(crate::types::wk::any())),
+        );
+        let intersection = caller.contributed_through_nullable_formal();
+
+        assert_eq!(qualified_type_name(intersection), Ok("T & Any".to_string()));
     }
 
     #[test]

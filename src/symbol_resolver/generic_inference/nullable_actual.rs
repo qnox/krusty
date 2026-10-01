@@ -14,7 +14,10 @@ pub(super) fn nullable_generic_actual(actual: Ty) -> Ty {
     if actual == Ty::Null || matches!(actual, Ty::Nullable(inner) if *inner == Ty::Nothing) {
         Ty::Nothing
     } else {
-        actual.non_null()
+        // A nullable formal contributes the definitely-non-null form. `T : Any?` becomes `T & Any`,
+        // which satisfies `R : Any`; a parameter already bounded by non-null `Any` stays that
+        // parameter. Substituting the intersection back through `R?` reopens the original `T?`.
+        actual.contributed_through_nullable_formal()
     }
 }
 
@@ -39,6 +42,26 @@ mod tests {
         assert_eq!(
             nullable_generic_actual(Ty::in_projection(string)),
             Ty::in_projection(string)
+        );
+    }
+
+    #[test]
+    fn a_nullable_formal_contributes_the_definitely_non_null_type_parameter() {
+        let nullable_caller = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let non_null_caller = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+
+        assert_eq!(
+            nullable_generic_actual(nullable_caller),
+            nullable_caller.contributed_through_nullable_formal()
+        );
+        assert!(matches!(
+            nullable_generic_actual(nullable_caller),
+            Ty::DefinitelyNotNull(_)
+        ));
+        assert_eq!(nullable_generic_actual(non_null_caller), non_null_caller);
+        assert_eq!(
+            non_null_caller.ty_param_bound(),
+            Some(Ty::obj("kotlin/Any"))
         );
     }
 

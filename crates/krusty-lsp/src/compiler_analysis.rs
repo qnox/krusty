@@ -364,7 +364,7 @@ fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'sta
         Ty::TyParam(name, _) => {
             names.insert(name);
         }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
             type_parameters_mentioned(*inner, names)
         }
         Ty::InProjection(inner) | Ty::OutProjection(inner) => {
@@ -1872,5 +1872,18 @@ mod tests {
             vec!["'val' cannot be reassigned."],
             "writable pairs must check clean; getter-only stays val"
         );
+    }
+
+    #[test]
+    fn a_definitely_non_null_parameter_is_still_mentioned() {
+        let parameter = krusty::types::Ty::ty_param(
+            "T",
+            krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any")),
+        );
+        let intersection =
+            krusty::types::Ty::DefinitelyNotNull(krusty::types::intern_ty(parameter));
+        let mut names = std::collections::HashSet::new();
+        type_parameters_mentioned(intersection, &mut names);
+        assert!(names.contains("T"));
     }
 }

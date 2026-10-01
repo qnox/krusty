@@ -681,6 +681,12 @@ pub enum Ty {
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
     /// erasure is a backend concern.
     TyParam(&'static str, &'static Ty),
+    /// Kotlin's definitely-non-null type `T & Any`.
+    ///
+    /// The wrapped type is the original type parameter, including a bound that still admits null.
+    /// This is distinct from a parameter declared `T : Any`: `(T & Any)?` reopens to that original
+    /// `T?`, while `T : Any` keeps its recorded bound when used as `T?`.
+    DefinitelyNotNull(&'static Ty),
 }
 
 pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
@@ -891,6 +897,9 @@ impl Ty {
     /// `null` literal.
     pub fn nullable(inner: Ty) -> Ty {
         match inner {
+            // `(T & Any)?` is the original parameter's `T?`. The intersection exists only to satisfy
+            // a non-null bound; nullability restores the caller parameter and its recorded bound.
+            Ty::DefinitelyNotNull(original) => Ty::nullable(*original),
             Ty::Nullable(_) | Ty::Null | Ty::Error => inner,
             Ty::PlatformNullable(inner) => Ty::Nullable(inner),
             _ => Ty::Nullable(intern_ty(inner)),
@@ -980,11 +989,32 @@ impl Ty {
     /// Kotlin's definitely-non-null form (`T & Any`). Unlike [`Self::non_null`], this retains a
     /// type parameter's identity while making its occurrence bound non-null, so substituting a
     /// nullable type argument through a metadata or source signature cannot erase the intersection.
+    ///
+    /// A parameter whose bound already excludes null stays that parameter. Source `T & Any` tightens
+    /// the occurrence bound and keeps the parameter identity. Inference of a nullable use records
+    /// [`Ty::DefinitelyNotNull`] instead, so the original bound can be reopened by [`Self::nullable`].
     pub fn definitely_non_null(self) -> Ty {
         match self {
             Ty::Null => Ty::Nothing,
+            Ty::DefinitelyNotNull(_) => self,
             Ty::TyParam(name, bound) => Ty::ty_param(name, bound.definitely_non_null()),
             _ => self.non_null(),
+        }
+    }
+
+    /// The constraint a nullable formal position contributes.
+    ///
+    /// Concrete types contribute their non-null form. A type parameter whose bound admits null
+    /// contributes `T & Any` ([`Ty::DefinitelyNotNull`]) rather than a copy whose bound was rewritten
+    /// to `Any`: that copy is indistinguishable from a parameter declared `T : Any`. A parameter
+    /// already bounded by non-null `Any` is contributed unchanged.
+    pub(crate) fn contributed_through_nullable_formal(self) -> Ty {
+        let actual = self.non_null();
+        match actual {
+            Ty::TyParam(_, bound) if bound.upper_bound_admits_null() => {
+                Ty::DefinitelyNotNull(intern_ty(actual))
+            }
+            other => other,
         }
     }
 
@@ -1004,7 +1034,9 @@ impl Ty {
     pub fn kotlin_class_internal(self) -> Option<TypeName> {
         match self {
             Ty::Obj(i, _) => Some(i),
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.kotlin_class_internal(),
+            Ty::DefinitelyNotNull(inner) | Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+                inner.kotlin_class_internal()
+            }
             Ty::TyParam(_, bound) => bound.kotlin_class_internal(),
             _ => None,
         }
@@ -1044,7 +1076,7 @@ impl Ty {
             }
             Ty::Nullable(inner) => inner.erased_recv(),
             Ty::PlatformNullable(inner) => inner.erased_recv(),
-            Ty::TyParam(_, b) => b.erased_recv(),
+            Ty::DefinitelyNotNull(inner) | Ty::TyParam(_, inner) => inner.erased_recv(),
             // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
             // `Array<List>`) — an array receiver keys per element class. Use `obj_args` (NOT `Ty::array`,
             // which collapses a bare-primitive element to a `IntArray` = `[I`, breaking the boxed
@@ -1070,6 +1102,7 @@ impl Ty {
         match self {
             Ty::Nullable(inner) => Ty::nullable(inner.extension_recv_key()),
             Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.extension_recv_key()),
+            Ty::DefinitelyNotNull(inner) => inner.extension_recv_key(),
             Ty::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
             Ty::Obj(n, args) if n.matches("kotlin/Array") => {
                 let element = args
@@ -1138,7 +1171,9 @@ impl Ty {
             return true;
         }
         match self {
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_marker(marker),
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
+                inner.mentions_marker(marker)
+            }
             Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
                 inner.mentions_marker(marker)
             }
@@ -1154,6 +1189,7 @@ impl Ty {
     pub fn mentions_ty_param(self) -> bool {
         match self {
             Ty::TyParam(..) => true,
+            Ty::DefinitelyNotNull(inner) => inner.mentions_ty_param(),
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::InProjection(inner)
@@ -1188,6 +1224,7 @@ impl Ty {
     pub(crate) fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
         match self {
             Ty::TyParam(candidate, bound) => (candidate == name).then_some(*bound),
+            Ty::DefinitelyNotNull(inner) => inner.type_parameter_occurrence_bound(name),
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::InProjection(inner)
@@ -1342,6 +1379,12 @@ impl Ty {
                     .map(Ty::canonical_semantic)
                     .collect::<Vec<_>>(),
             ),
+            // Canonicalization changes classifier representation, not occurrence identity. Keep
+            // the intersection wrapper and its original nullable-bound provenance so a later `?`
+            // can still reopen the caller's type parameter.
+            Ty::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(intern_ty(inner.canonical_semantic()))
+            }
             Ty::Nullable(inner) => Ty::nullable(inner.canonical_semantic()),
             Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.canonical_semantic()),
             Ty::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
@@ -1541,6 +1584,10 @@ impl Ty {
                 inner.source_name_with_type_parameter_in(context, type_parameter)
             ),
             Ty::StarProjection(_) => "*".to_string(),
+            Ty::DefinitelyNotNull(inner) => format!(
+                "{} & Any",
+                inner.source_name_with_type_parameter_in(context, type_parameter)
+            ),
             Ty::TyParam(n, _) => type_parameter(n),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
@@ -1602,6 +1649,7 @@ impl Ty {
             Ty::OutProjection(inner) => format!("out {}", inner.name()),
             Ty::StarProjection(_) => "*".to_string(),
             Ty::TyParam(name, _) => name.to_string(),
+            Ty::DefinitelyNotNull(inner) => format!("{} & Any", inner.name()),
         }
     }
 
@@ -1610,6 +1658,7 @@ impl Ty {
         match self {
             Ty::Obj(n, _) => Some(n),
             // A type parameter follows its bound for object identity queries.
+            Ty::DefinitelyNotNull(inner) => inner.obj_internal(),
             Ty::TyParam(_, b) | Ty::PlatformNullable(b) => b.obj_internal(),
             _ => None,
         }
@@ -1620,6 +1669,7 @@ impl Ty {
     pub fn is_reference(self) -> bool {
         match self {
             scalar if scalar.scalar_value_repr().is_some() => false,
+            Ty::DefinitelyNotNull(_) => true,
             Ty::TyParam(_, b) => b.is_reference(),
             // A flexible Java `T!` can be consumed as its non-null lower bound, but until that
             // commitment it also admits null and is represented by a reference — including a method
@@ -1662,7 +1712,7 @@ impl Ty {
                 signature.params.iter().copied().any(Ty::contains_error)
                     || signature.ret.contains_error()
             }
-            Ty::Nullable(inner) => inner.contains_error(),
+            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => inner.contains_error(),
             _ => false,
         }
     }
@@ -1870,6 +1920,7 @@ pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     match ty {
         Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
+        Ty::DefinitelyNotNull(inner) => ty_mentions_param(*inner, names),
         Ty::Obj(_, arguments) => arguments
             .iter()
             .any(|argument| ty_mentions_param(*argument, names)),
@@ -2650,11 +2701,62 @@ mod tests {
     }
 
     #[test]
-    fn definitely_non_null_type_parameter_retains_identity_with_non_null_bound() {
+    fn ordinary_dnn_compacts_the_bound_while_nullable_formal_inference_keeps_provenance() {
         let nullable_any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let caller = Ty::ty_param("T", nullable_any);
+        let compact = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let provenance = Ty::DefinitelyNotNull(intern_ty(caller));
+
         assert_eq!(
-            Ty::ty_param("T", nullable_any).definitely_non_null(),
-            Ty::ty_param("T", Ty::obj("kotlin/Any"))
+            caller.definitely_non_null(),
+            compact,
+            "ordinary source and expression DNN paths retain the established compact identity"
+        );
+        assert_eq!(
+            caller.contributed_through_nullable_formal(),
+            provenance,
+            "nullable-formal inference alone records the bound needed to reopen T?"
+        );
+        assert_eq!(Ty::nullable(provenance), Ty::nullable(caller));
+
+        let non_null_caller = Ty::ty_param("U", Ty::obj("kotlin/Any"));
+        assert_eq!(non_null_caller.definitely_non_null(), non_null_caller);
+    }
+
+    #[test]
+    fn nullable_formal_contribution_keeps_a_non_null_bound_and_reopens_an_intersection() {
+        let any = Ty::obj("kotlin/Any");
+        let nullable_caller = Ty::ty_param("T", Ty::nullable(any));
+        let non_null_caller = Ty::ty_param("T", any);
+        let intersection = nullable_caller.contributed_through_nullable_formal();
+
+        assert_eq!(
+            intersection,
+            Ty::DefinitelyNotNull(intern_ty(nullable_caller))
+        );
+        assert_eq!(Ty::nullable(intersection), Ty::nullable(nullable_caller));
+        assert_eq!(
+            non_null_caller.contributed_through_nullable_formal(),
+            non_null_caller
+        );
+        assert_eq!(
+            Ty::nullable(non_null_caller).non_null().ty_param_bound(),
+            Some(any)
+        );
+    }
+
+    #[test]
+    fn semantic_canonicalization_preserves_definitely_non_null_provenance() {
+        let caller = Ty::ty_param("caller:T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let intersection = Ty::DefinitelyNotNull(intern_ty(caller));
+
+        let canonical = intersection.canonical_semantic();
+
+        assert_eq!(canonical, intersection);
+        assert_eq!(Ty::nullable(canonical), Ty::nullable(caller));
+        assert_eq!(
+            Ty::nullable(canonical).non_null().ty_param_bound(),
+            Some(Ty::nullable(Ty::obj("kotlin/Any")))
         );
     }
 

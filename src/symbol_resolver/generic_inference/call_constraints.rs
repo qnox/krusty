@@ -433,7 +433,7 @@ impl CallInferenceConstraints {
         // input until this point and select a declared bound only when it admits them all and the
         // complete declared-bound graph accepts that substitution.
         for (index, formal) in signature.formals.iter().enumerate() {
-            let Some(current) = self.lower.get(formal).copied() else {
+            let Some(mut current) = self.lower.get(formal).copied() else {
                 continue;
             };
             let bounds = signature
@@ -441,18 +441,46 @@ impl CallInferenceConstraints {
                 .get(index)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            if bounds.is_empty()
-                || bounds.iter().all(|bound| {
-                    resolution_subtype(source, current, ty_subst_keep_unbound(*bound, &self.lower))
-                })
-            {
-                continue;
+            // A nullable position initially contributes `T & Any` so a genuinely non-null formal
+            // bound can accept a caller parameter whose own bound admits null. Do not publish that
+            // extra intersection when the formal's declaration already accepts the original `T`:
+            // an unconstrained/default-nullable constructor variable must remain the caller's exact
+            // parameter in its invariant result. This is a bound-proven reduction of the recorded
+            // provenance, not a representation fallback; `R : Any` still requires the wrapper.
+            if let Ty::DefinitelyNotNull(original) = current {
+                let original = *original;
+                let original_fits = bounds.iter().all(|bound| {
+                    resolution_subtype(source, original, ty_subst_keep_unbound(*bound, &self.lower))
+                });
+                if original_fits {
+                    self.lower.insert(formal.clone(), original);
+                    current = original;
+                }
             }
             let lowers = self
                 .lower_inputs
                 .get(formal)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            // `lower_inputs` are the contributions collected after nullable-formal absorption, not
+            // the types written at the call. A merged `Any` can fit `R : Any` while a bare `T : Any?`
+            // input does not; keep that input on the violation path. A star read through `T?` is
+            // already stored as non-null `Any`, so this does not re-impose the pre-normalization type.
+            let contributed_fits = |candidate: Ty| {
+                bounds.iter().all(|bound| {
+                    resolution_subtype(
+                        source,
+                        candidate,
+                        ty_subst_keep_unbound(*bound, &self.lower),
+                    )
+                })
+            };
+            if bounds.is_empty()
+                || (contributed_fits(current)
+                    && lowers.iter().all(|(actual, _)| contributed_fits(*actual)))
+            {
+                continue;
+            }
             let mut candidates = bounds
                 .iter()
                 .map(|bound| ty_subst_keep_unbound(*bound, &self.lower))

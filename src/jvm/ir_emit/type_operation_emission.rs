@@ -375,6 +375,9 @@ impl Emitter<'_> {
             Ty::InProjection(inner) => format!("in {}", self.rendered_cast_type(*inner, root)),
             Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_type(*inner, root)),
             Ty::StarProjection(_) => "*".to_string(),
+            Ty::DefinitelyNotNull(inner) => {
+                format!("{} & Any", self.rendered_cast_type(*inner, root))
+            }
             Ty::TyParam(name, _) => self.rendered_type_parameter(name),
             Ty::Fun(signature) => format!(
                 "{}{}{}",

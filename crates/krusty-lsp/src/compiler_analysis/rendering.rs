@@ -91,6 +91,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         }
         Ty::Nullable(inner) => format!("{}?", render_ty(*inner)),
         Ty::PlatformNullable(inner) => format!("{}!", render_ty(*inner)),
+        Ty::DefinitelyNotNull(inner) => format!("{} & Any", render_ty(*inner)),
         Ty::TyParam(name, _) => name.to_string(),
         Ty::InProjection(inner) => format!("in {}", render_ty(*inner)),
         Ty::OutProjection(inner) => format!("out {}", render_ty(*inner)),
@@ -98,5 +99,18 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         // Editor surface: a declaration the resolution engine has not resolved yet has no type to
         // show. It reaches here only while analysis is mid-flight.
         Ty::Pending => "…".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_ty;
+    use krusty::types::{intern_ty, Ty};
+
+    #[test]
+    fn a_definitely_non_null_parameter_renders_as_an_intersection() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let intersection = Ty::DefinitelyNotNull(intern_ty(parameter));
+        assert_eq!(render_ty(intersection), "T & Any");
     }
 }

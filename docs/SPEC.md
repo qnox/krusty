@@ -3500,6 +3500,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   this, a bounded generic class is BYTE-IDENTICAL to kotlinc. Test:
   `tests/class_type_param_bound_erasure_e2e.rs`.
 
+- **A nullable use of `R : Any` infers `T & Any` and substitutes back as `T?`.** `T` (upper bound
+  `Any?`) is not a subtype of non-null `Any`, so `fun <R : Any> id(x: R): R = x` called as `id(t)`
+  is rejected. A nullable occurrence contributes the definitely-non-null form of that type
+  parameter (`T & Any`), which keeps the original parameter rather than rewriting its bound to
+  `Any`. The solved binding satisfies the declared bound, and substituting it through `R?` reopens
+  the original `T?`. `fun <T, R : Any> Iterable<T>.firstNotNullOfOrNull(transform: (T) -> R?): R?`
+  therefore accepts `maps.firstNotNullOfOrNull { it[key] }` where `maps: List<Map<K, V>>`, with
+  result `V?`. A caller parameter already declared `T : Any` is a different type: the same nullable
+  use binds `R` to that parameter and substitutes `T?` while the recorded bound stays `Any`. A bare
+  use beside a nullable one still rejects the nullable-bounded parameter, and a declared bound other
+  than non-null `Any` (`R : CharSequence`) is unchanged. When nullable-formal inference's
+  provenance-bearing `T & Any` meets the compact `T & Any` produced by an ordinary source or `!!`
+  path, their semantic join retains the provenance-bearing form only when both carry the same type
+  parameter identity and tightened bound. At finalization, a formal whose substituted declared
+  bounds already accept the original caller parameter drops the unnecessary intersection; this
+  keeps an unconstrained/default-nullable invariant result as the caller's exact parameter. Tests:
+  `tests/nullable_any_bound_e2e.rs`,
+  `nullable_any_bound_solves_to_definitely_non_null_and_substitutes_as_nullable`,
+  `nullable_formal_drops_unneeded_dnn_provenance_when_its_bound_accepts_the_caller`,
+  `nullable_and_exact_dnn_paths_merge_without_losing_the_caller_bound`,
+  `non_null_any_bound_keeps_its_recorded_bound_through_nullable_substitution`.
+
 - **A mapped collection's member scope comes from `.kotlin_builtins`, not from the JVM class.** A mapped
   Kotlin type (`kotlin/collections/MutableList`, …) has no `.class` of its own; krusty resolves it through
   the JVM type it maps to (`java/util/List`). That class's method set is NOT its Kotlin API. `java.util.List`
