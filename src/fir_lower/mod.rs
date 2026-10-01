@@ -36,6 +36,8 @@ mod erased_parameters;
 mod error;
 mod expression;
 mod external_references;
+#[cfg(test)]
+mod fact_completeness_tests;
 mod floating_equality;
 mod function_references;
 mod function_value_conversions;
