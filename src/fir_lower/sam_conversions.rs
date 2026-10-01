@@ -119,6 +119,7 @@ impl BodyLowering<'_> {
                     overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                     function_adapter,
                     wraps_function_value: true,
+                    nullable: conversion.nullable,
                 }),
                 inline_body: None,
             }),

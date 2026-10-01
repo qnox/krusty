@@ -574,6 +574,60 @@ pub fn expect_box_same_as_kotlinc(source: &str, stem: &str) {
     );
 }
 
+/// Compile and run one `box()` fixture with both compilers under the same command-line switches.
+/// This is the differential path for backend strategies that the in-process compiler API does not
+/// expose, such as class-based lambda and SAM conversion.
+pub fn expect_box_same_as_kotlinc_with_args(source: &str, stem: &str, shared_args: &[&str]) {
+    let work = common::scratch_dir().expect("cannot allocate argument-bearing runtime fixture");
+    let source_paths = write_fixture_sources(&work, &[("Main.kt", source)]);
+    let krusty_output = work.join("krusty-out");
+    let reference_output = work.join("reference-out");
+    std::fs::create_dir_all(&krusty_output).expect("create krusty output directory");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+
+    let krusty = Command::new(common::krusty_binary())
+        .args(["-d", krusty_output.to_str().expect("UTF-8 output path")])
+        .arg("-no-reflect")
+        .args(shared_args)
+        .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib path")])
+        .args(&source_paths)
+        .output()
+        .expect("run krusty runtime fixture");
+    assert!(
+        krusty.status.success(),
+        "{stem}: krusty rejected shared-argument fixture: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+
+    let mut reference_args = shared_args
+        .iter()
+        .map(|argument| (*argument).to_string())
+        .collect::<Vec<_>>();
+    reference_args.extend([
+        "-classpath".to_string(),
+        stdlib.to_string_lossy().into_owned(),
+    ]);
+    let (reference_code, reference_stderr) =
+        kotlinc_paths_result(&source_paths, &reference_output, &reference_args);
+    assert_eq!(
+        reference_code, 0,
+        "{stem}: kotlinc rejected shared-argument fixture: {reference_stderr}"
+    );
+
+    let reference = common::run_box(
+        &[],
+        "MainKt",
+        &[reference_output, stdlib.clone(), jdk.clone()],
+    )
+    .expect("run kotlinc shared-argument fixture");
+    assert_eq!(reference, "OK", "{stem}: kotlinc fixture must succeed");
+    let krusty = common::run_box(&[], "MainKt", &[krusty_output, stdlib, jdk])
+        .expect("run krusty shared-argument fixture");
+    let _ = std::fs::remove_dir_all(work);
+    assert_eq!(krusty, reference, "{stem}: compiler box results differ");
+}
+
 /// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
 /// `box()` result on the shared JVM. The fixture's `// LANGUAGE:` directives become kotlinc flags.
 pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {

@@ -65,6 +65,7 @@ pub enum FirFileLoweringFailure {
     },
     InvalidInlineParameterContract(CallableId),
     UndeterminedType(crate::ir::UndeterminedIrType),
+    InvalidIrContract(crate::ir::InvalidIrContract),
     ValueIdentityOverflow,
     /// The frontend's selected entry point has no realization in this file's function arena.
     UnmappedEntryPoint(CallableId),
@@ -228,7 +229,10 @@ impl<'a> CommonIrBodySink<'a> {
         super::companion_blocks::realize_companion_block_calls(self.ir);
         self.ir
             .validate_determined_types()
-            .map_err(FirFileLoweringFailure::UndeterminedType)
+            .map_err(FirFileLoweringFailure::UndeterminedType)?;
+        self.ir
+            .validate_semantic_contracts()
+            .map_err(FirFileLoweringFailure::InvalidIrContract)
     }
 
     pub fn attached_body_count(&self) -> usize {

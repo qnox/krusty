@@ -1661,6 +1661,9 @@ impl BodyLowering<'_> {
                         overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                         function_adapter: false,
                         wraps_function_value: false,
+                        // The lambda object is created here. A null check applies to a captured
+                        // function value, not to this literal.
+                        nullable: false,
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
