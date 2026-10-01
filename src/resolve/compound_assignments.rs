@@ -12,7 +12,7 @@ impl Checker<'_> {
         let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(value).clone() else {
             return false;
         };
-        self.try_in_place_assignment_operands(scope, statement, op, lhs, rhs)
+        self.try_in_place_assignment_operands(scope, statement, op, lhs, rhs, None)
     }
 
     pub(super) fn try_in_place_assignment_operands(
@@ -22,11 +22,15 @@ impl Checker<'_> {
         operation: BinOp,
         receiver: ExprId,
         argument: ExprId,
+        prepared_receiver: Option<Ty>,
     ) -> bool {
         let Some(name) = assign_op_name(operation) else {
             return false;
         };
-        let receiver_ty = self.expr(scope, receiver);
+        let receiver_ty = match prepared_receiver {
+            Some(ty) => self.set(receiver, ty),
+            None => self.expr(scope, receiver),
+        };
         if receiver_ty == Ty::Error {
             return false;
         }

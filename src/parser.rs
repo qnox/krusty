@@ -5304,7 +5304,7 @@ impl<'a> Parser<'a> {
                             receiver,
                             name,
                             args: None,
-                        } => {
+                        } if !self.parenthesized_expressions.contains(&e.0) => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
@@ -5319,6 +5319,9 @@ impl<'a> Parser<'a> {
                                 start,
                                 target_span,
                             );
+                        }
+                        Expr::SafeIndex { .. } => {
+                            return self.finish_safe_index_assignment(e, start, target_span);
                         }
                         _ => self
                             .diags
@@ -5385,18 +5388,23 @@ impl<'a> Parser<'a> {
                             receiver,
                             name,
                             args: None,
-                        } => {
+                        } if !self.parenthesized_expressions.contains(&e.0) => {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_unlabelled_expr();
+                            // The compound operator applies to the non-null member, inside the
+                            // safe-call guard. A safe-call lhs would select the nullable extension.
+                            let name_span = self.file.exact_member_name_spans.get(&e.0).copied();
                             let lhs = self.file.add_expr(
-                                Expr::SafeCall {
+                                Expr::Member {
                                     receiver,
                                     name: name.clone(),
-                                    args: None,
                                 },
                                 target_span,
                             );
+                            if let Some(name_span) = name_span {
+                                self.file.exact_member_name_spans.insert(lhs.0, name_span);
+                            }
                             let value = self.file.add_expr(
                                 Expr::Binary {
                                     op,
@@ -5413,6 +5421,15 @@ impl<'a> Parser<'a> {
                                     value,
                                     safe: true,
                                 },
+                                start,
+                                target_span,
+                            );
+                        }
+                        Expr::SafeIndex { .. } => {
+                            return self.finish_compound_safe_index_assignment(
+                                e,
+                                op,
+                                op_span,
                                 start,
                                 target_span,
                             );
@@ -5532,24 +5549,6 @@ impl<'a> Parser<'a> {
     fn finish_stmt(&mut self, s: Stmt, start: Span) -> StmtId {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_stmt(s, Span::new(start.lo, end.hi))
-    }
-
-    fn assignment_target_span(&self, expression: ExprId) -> Span {
-        match self.file.expr(expression) {
-            Expr::Member { name, .. }
-            | Expr::SafeCall {
-                name, args: None, ..
-            } => self
-                .file
-                .exact_member_name_spans
-                .get(&expression.0)
-                .copied()
-                .unwrap_or_else(|| {
-                    let span = self.file.expr_spans[expression.0 as usize];
-                    Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
-                }),
-            _ => self.file.expr_spans[expression.0 as usize],
-        }
     }
 
     fn finish_assignment_stmt(&mut self, statement: Stmt, start: Span, target: Span) -> StmtId {

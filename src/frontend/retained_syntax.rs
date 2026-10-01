@@ -652,6 +652,24 @@ fn remap_expression(
             *array = map(*array);
             indices.iter_mut().for_each(|index| *index = map(*index));
         }
+        Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        }
+        | Expr::SafeIndexIncDec {
+            receiver,
+            access,
+            element,
+            indices,
+            ..
+        } => {
+            *receiver = map(*receiver);
+            *access = map(*access);
+            *element = map(*element);
+            indices.iter_mut().for_each(|index| *index = map(*index));
+        }
         Expr::Call { callee, args } => {
             *callee = map(*callee);
             args.iter_mut()
@@ -746,6 +764,19 @@ fn remap_statement(statement: &mut Stmt, expressions: &HashMap<ExprId, ExprId>) 
             value,
         } => {
             *array = map(*array);
+            indices.iter_mut().for_each(|index| *index = map(*index));
+            *value = map(*value);
+        }
+        Stmt::AssignSafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+            value,
+        } => {
+            *receiver = map(*receiver);
+            *access = map(*access);
+            *element = map(*element);
             indices.iter_mut().for_each(|index| *index = map(*index));
             *value = map(*value);
         }

@@ -1781,6 +1781,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   being rebound to a different origin or emitted with the wrong representation.
   (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`,
   `tests/safe_call_any_member_e2e.rs`.)
+  An unparenthesized continuation of the selector stays inside that null check and therefore sees
+  the non-null member. `arg?.alias[i]`, `arg?.alias[i] = x`, `arg?.alias[i] += x`, and
+  `arg?.alias[i]++` / `++arg?.alias[i]` run the member `get` / `set` / `plusAssign` / `inc`.
+  The receiver is evaluated once, outside the null check. Index operands and the assigned value run
+  only in the non-null branch, including a parenthesized index operand, a safe selector nested in
+  an index, and a second safe index on the right-hand side. A stable receiver path is narrowed in
+  that branch. When the receiver is a copy of an immutable local, proving the copy non-null also
+  proves the original local non-null, so an index or assigned value that names it
+  (`arg?.alias[42] = arg`) is checked at the non-null type and the member `set` stays applicable.
+  A prefix index update reads `get` again after the write; a postfix update keeps the first read.
+  Each spill restores the substitution it replaced, so an enclosing `when` subject that is also an
+  index operand is still that one value after the update.
+  Parentheses end the selector: `(arg?.alias)[i]`, `(arg?.alias) += x`, and `(arg?.alias[i])++`
+  are operators on the nullable result, so a `Foo?` extension wins over `Foo`'s member.
+  (`tests/parenthesized_safe_call_e2e.rs`. Corpus:
+  `codegen/box/safeCall/parenthesizedSafeCallsAndOperators.kt`.)
 - **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
   / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
   value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else

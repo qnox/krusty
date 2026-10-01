@@ -464,6 +464,8 @@ impl Parser<'_> {
             );
             return if matches!(self.file.expr(target), Expr::Name(_)) {
                 expression
+            } else if matches!(self.file.expr(target), Expr::SafeIndex { .. }) {
+                self.safe_index_incdec(expression, target, dec, true)
             } else {
                 self.incdec_access_value_expr(expression, target, dec, true, start)
             };
@@ -549,6 +551,8 @@ impl Parser<'_> {
                     );
                     lhs = if matches!(self.file.expr(target), Expr::Name(_)) {
                         expression
+                    } else if matches!(self.file.expr(target), Expr::SafeIndex { .. }) {
+                        self.safe_index_incdec(expression, target, dec, false)
                     } else {
                         self.incdec_access_value_expr(expression, target, dec, false, lspan)
                     };
@@ -947,13 +951,19 @@ impl Parser<'_> {
                     let end = self.tok().span;
                     self.expect(TokenKind::RBracket, "']'");
                     let span = Span::new(lspan.lo, end.hi);
-                    lhs = self.file.add_expr(
-                        Expr::Index {
-                            array: lhs,
-                            indices,
-                        },
-                        span,
-                    );
+                    lhs = if let Some(safe_index) =
+                        self.safe_index_selector(lhs, indices.clone(), span)
+                    {
+                        safe_index
+                    } else {
+                        self.file.add_expr(
+                            Expr::Index {
+                                array: lhs,
+                                indices,
+                            },
+                            span,
+                        )
+                    };
                 }
                 // `expr<TypeArgs>(args)` — generic call with explicit type arguments.
                 // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
@@ -1142,6 +1152,9 @@ impl Parser<'_> {
                 let e = self.parse_expr();
                 self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
+                // Parentheses end a safe selector. The index becomes an ordinary subscript of the
+                // nullable safe call, so a later update selects the nullable operator.
+                let e = self.reopen_parenthesized_safe_index(e);
                 self.parenthesized_expressions.insert(e.0);
                 e
             }
