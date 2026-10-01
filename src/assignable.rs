@@ -156,6 +156,21 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
         return true;
     }
+    // `T & Any` is a subtype of the original parameter and of that parameter's non-null upper
+    // bound (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies `Throwable`). It does not
+    // satisfy an unrelated non-null bound.
+    if let Ty::DefinitelyNotNull(original) = sub {
+        if assignable_inner(cx, oracle, *original, sup) {
+            return true;
+        }
+        if let Ty::TyParam(_, bound) = *original {
+            let tightened = bound.non_null();
+            if tightened != *original && assignable_inner(cx, oracle, tightened, sup) {
+                return true;
+            }
+        }
+        return false;
+    }
     if sub == Ty::Error || sup == Ty::Error {
         return true;
     }
@@ -363,7 +378,8 @@ fn capture_projection_parameters(
             }
             capture_projection_parameters(cx, oracle, template.ret, actual.ret);
         }
-        Ty::Nullable(template)
+        Ty::DefinitelyNotNull(template)
+        | Ty::Nullable(template)
         | Ty::PlatformNullable(template)
         | Ty::InProjection(template)
         | Ty::OutProjection(template)
