@@ -1658,6 +1658,8 @@ mod reference_range_expression_e2e;
 mod reified_anonymous_object_e2e;
 #[path = "reified_class_literal_member_inference_e2e.rs"]
 mod reified_class_literal_member_inference_e2e;
+#[path = "reified_class_regeneration_e2e.rs"]
+mod reified_class_regeneration_e2e;
 #[path = "reified_collection_round_trip_e2e.rs"]
 mod reified_collection_round_trip_e2e;
 #[path = "reified_inline_check_e2e.rs"]

@@ -590,6 +590,15 @@ impl ClassBodies {
         })
     }
 
+    /// Every method that has a `Code` attribute, as `(name, descriptor)`.
+    pub fn coded_methods(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.methods
+            .iter()
+            .filter_map(|((name, descriptor), code)| {
+                code.as_ref().map(|_| (name.as_ref(), descriptor.as_ref()))
+            })
+    }
+
     /// Decode one method's `Code` attribute against the shared constant pool. `None` when the
     /// class declares no such method, declares it without `Code`, or its `Code` is unreadable.
     pub fn method_code(&self, name: &str, descriptor: &str) -> Option<MethodCode> {

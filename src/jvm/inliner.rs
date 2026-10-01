@@ -45,7 +45,7 @@ pub(crate) use callee_shape::{
 pub(crate) use class_roles::ClassRoles;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
-pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda};
+pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(crate) use preparation::reads_local;
 pub(in crate::jvm) use reified::has_reified_markers;
@@ -77,6 +77,8 @@ pub(crate) enum InlineError {
     UnpairedAnonymousObject,
     /// An anonymous object the body constructs could not be regenerated for the call site.
     Regeneration(RegenerationError),
+    /// `needClassReification` is still paired with a class whose methods use a reified parameter.
+    UnreifiedClass,
 }
 
 /// What one call's inlining reports to its caller (kotlinc's `InliningContext`): where the body's
