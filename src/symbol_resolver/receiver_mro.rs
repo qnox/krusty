@@ -301,3 +301,38 @@ impl ReceiverMro {
             .map(|(_, applied)| applied)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::receiver_type_args_match;
+    use crate::types::Ty;
+
+    #[test]
+    fn both_caller_bounds_specialize_a_nullable_any_receiver_by_equality() {
+        let any = Ty::obj("kotlin/Any");
+        let iterable = |argument| Ty::obj_args("kotlin/collections/Iterable", &[argument]);
+        let declared = iterable(Ty::nullable(Ty::ty_param("stdlib:T", any)));
+        let source = crate::libraries::EmptySymbolSource;
+
+        let non_null_caller = Ty::ty_param("caller:T", any);
+        let non_null_receiver = iterable(Ty::nullable(non_null_caller));
+        // These callers are ordinary bounds, not variables of a postponed call.
+        assert!(receiver_type_args_match(
+            &source,
+            declared,
+            non_null_receiver,
+            &[]
+        ));
+
+        let nullable_caller = Ty::ty_param("caller:U", Ty::nullable(any));
+        let nullable_receiver = iterable(Ty::nullable(nullable_caller));
+        assert!(receiver_type_args_match(
+            &source,
+            declared,
+            nullable_receiver,
+            &[]
+        ));
+        assert_eq!(non_null_caller.ty_param_bound(), Some(any));
+        assert_eq!(nullable_caller.ty_param_bound(), Some(Ty::nullable(any)));
+    }
+}
