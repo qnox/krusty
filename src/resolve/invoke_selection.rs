@@ -284,9 +284,11 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         if !member_extensions.is_empty() {
-            let mut maximal = maximal_member_extensions(self, &member_extensions, |candidate| {
-                candidate.0.priority
-            });
+            let mut maximal = member_extension_selection::maximal_member_extensions(
+                self,
+                &member_extensions,
+                |candidate| candidate.0.priority,
+            );
             let best = maximal
                 .iter()
                 .map(|index| member_extensions[*index].1.score)

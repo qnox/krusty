@@ -979,3 +979,118 @@ fn contextual_class_constructors_forward_the_same_context_prefix() {
     "#;
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
+
+#[test]
+fn same_type_context_dispatch_and_extension_stay_distinct() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        fun <A, R> context(context: A, block: context(A) () -> R): R = block(context)
+        class A(val a: String = "d ") {
+            context(a: A)
+            fun A.funMember(): String {
+                return a.a + this@A.a + this.a
+            }
+            context(a: A)
+            val A.propertyMember: String
+                get() = a.a + this@A.a + this.a
+            fun simpleUsageInsideClass(): String {
+                return funMember() + propertyMember
+            }
+            fun usageWithThisInsideClass(): String {
+                return this.funMember() + this.propertyMember
+            }
+            fun usageWithExtensionInsideClass(): String {
+                return A("e ").funMember() + A("e ").propertyMember
+            }
+            fun usageWithContextAndExtensionInsideClass(): String {
+                var temp = ""
+                context(A("c ")) {
+                    @Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER")
+                    temp = A("e ").funMember() + A("e ").propertyMember
+                }
+                return temp
+            }
+        }
+        fun simpleUsageOutsideClass(): String {
+            with(A("d ")) {
+                return funMember() + propertyMember
+            }
+        }
+        fun usageWithExtensionOutsideClass(): String {
+            with(A("d ")) {
+                return A("e ").funMember() + A("e ").propertyMember
+            }
+        }
+        fun usageWithExtensionAndContextOutsideClass(): String {
+            var temp = ""
+            with(A("d ")) {
+                context(A("c ")) {
+                    temp = (@Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER") A("e ").funMember()) + (@Suppress("RECEIVER_SHADOWED_BY_CONTEXT_PARAMETER") A("e ").propertyMember)
+                }
+            }
+            return temp
+        }
+        fun box(): String {
+            return if (
+                (A().simpleUsageInsideClass() == "d d d d d d ") &&
+                (A().usageWithThisInsideClass() == "d d d d d d ") &&
+                (A().usageWithExtensionInsideClass() == "d d e d d e ") &&
+                (A().usageWithContextAndExtensionInsideClass() == "c d e c d e ") &&
+                (simpleUsageOutsideClass() == "d d d d d d ") &&
+                (usageWithExtensionOutsideClass() == "d d e d d e ") &&
+                (usageWithExtensionAndContextOutsideClass() == "c d e c d e ")
+            ) "OK" else "NOK"
+        }
+    "#;
+    common::expect_box_ok_with_stdlib(SRC, "SameTypeContextDispatchAndExtension");
+}
+
+/// `getValue`, `setValue`, and `provideDelegate` are separate convention calls, and each one can
+/// bind a different dispatch receiver. The context receiver is lexically nearer, but the ordinary
+/// `with` receiver declares the same delegate operators and wins all three.
+#[test]
+fn ordinary_delegate_operator_beats_a_nearer_context_receiver() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        class Ordinary(val tag: String) {
+            operator fun Cell.getValue(thisRef: Any?, property: Any?): String = "get-" + tag
+            operator fun VarCell.getValue(thisRef: Any?, property: Any?): String = "get"
+            operator fun VarCell.setValue(thisRef: Any?, property: Any?, value: String) {
+                seen = "set-" + tag
+            }
+            operator fun Factory.provideDelegate(thisRef: Any?, property: Any?): Provided =
+                Provided("provide-" + tag)
+        }
+        class Contextual(val tag: String) {
+            operator fun Cell.getValue(thisRef: Any?, property: Any?): String = "get-" + tag
+            operator fun VarCell.getValue(thisRef: Any?, property: Any?): String = "get"
+            operator fun VarCell.setValue(thisRef: Any?, property: Any?, value: String) {
+                seen = "set-" + tag
+            }
+            operator fun Factory.provideDelegate(thisRef: Any?, property: Any?): Provided =
+                Provided("provide-" + tag)
+        }
+        class Cell
+        class VarCell { var seen: String = "unset" }
+        class Factory
+        class Provided(val tag: String) {
+            operator fun getValue(thisRef: Any?, property: Any?): String = tag
+        }
+        fun <A, R> context(value: A, block: context(A) () -> R): R = block(value)
+        fun box(): String {
+            val seen = with(Ordinary("ordinary")) {
+                context(Contextual("context")) {
+                    val read: String by Cell()
+                    val cell = VarCell()
+                    var slot: String by cell
+                    slot = "x"
+                    val made: String by Factory()
+                    read + "|" + cell.seen + "|" + made
+                }
+            }
+            val expected = "get-ordinary|set-ordinary|provide-ordinary"
+            return if (seen == expected) "OK" else seen
+        }
+    "#;
+    common::expect_box_same_as_kotlinc(SRC, "OrdinaryDelegateBeforeContext");
+}
