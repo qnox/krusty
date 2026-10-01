@@ -118,6 +118,7 @@ mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
 mod operator_calls;
+use operator_calls::range_operator;
 mod overload_diagnostics;
 mod override_plans;
 mod plugin_class_checks;
@@ -9980,10 +9981,10 @@ pub struct TypeInfo {
     /// `a.rangeTo(b)` and `<range>.contains(x)` from one `Expr::InRange`; lowering reads these selections
     /// instead of re-running operator/member resolution.
     pub resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
-    /// Frontend-selected primitive comparison type for a direct `x in a..b` check. Floating-point
-    /// membership and widened primitive membership are comparisons, not counted loops; checked FIR
-    /// carries this exact type so common lowering never classifies the source operands again.
-    pub(crate) resolved_in_range_comparisons: HashMap<ExprId, Ty>,
+    /// Frontend-selected primitive comparison plan for a direct `x in a..b` check. Provider-normalized
+    /// provenance stays attached because the selected declaration's realization, not the operand
+    /// spelling, authorizes bypassing the ordinary `range*` + `contains` calls.
+    pub(crate) resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
     /// Statement-level synthetic operator calls selected while checking, e.g. `a[i] = v` resolving to
     /// `a.set(i, v)` or `a.put(i, v)`. Lowering reads this table instead of selecting the setter again.
     pub resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
@@ -10225,6 +10226,12 @@ pub enum ResolvedCall {
     LocalFunction(Box<ResolvedLocalFunctionCall>),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedInRangeComparison {
+    pub(crate) comparison: Ty,
+    pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
+}
+
 impl ResolvedCall {
     fn library_extension(callable: crate::libraries::LibraryCallable) -> Self {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
@@ -10268,18 +10275,33 @@ impl ResolvedCall {
         }
     }
 
-    /// Compiler implementation attached to this exact selected declaration, when it has one.
-    /// Constant evaluation and FIR construction consume the same provider-normalized fact; neither
-    /// phase infers builtin behavior from a callable spelling or receiver type.
-    pub(crate) fn compiler_intrinsic(&self) -> Option<crate::libraries::CompilerIntrinsic> {
+    /// Provider realization attached to this exact selected declaration. For top-level and
+    /// extension declarations the intrinsic marker is stored separately from ordinary dispatch in
+    /// the normalized callable, so fold both fields into the one realization consumers inspect.
+    pub(crate) fn provider_realization(&self) -> Option<crate::libraries::MemberRealization> {
         let realization = match self {
             Self::Member(resolved) => resolved.member.realization,
-            Self::TopLevel(call) => call.callable.member_realization,
+            Self::TopLevel(call) => call
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(call.callable.member_realization),
             Self::Companion(member) => member.realization,
-            Self::Extension(extension) => extension.callable.member_realization,
+            Self::Extension(extension) => extension
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(extension.callable.member_realization),
             Self::MemberExtension { .. } | Self::LocalFunction(_) => return None,
         };
-        match realization {
+        Some(realization)
+    }
+
+    /// Compiler implementation attached to this exact selected declaration, when it has one.
+    /// Constant evaluation and FIR construction consume the provider-normalized realization;
+    /// neither phase recovers builtin behavior from the callable spelling or receiver type.
+    pub(crate) fn compiler_intrinsic(&self) -> Option<crate::libraries::CompilerIntrinsic> {
+        match self.provider_realization()? {
             crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
             crate::libraries::MemberRealization::Dispatch
             | crate::libraries::MemberRealization::Direct { .. }
@@ -25411,18 +25433,13 @@ impl<'a> Checker<'a> {
             self.record_progression_plans();
             counter
         } else {
-            let convention = match range.kind {
-                crate::ast::RangeKind::Through => "rangeTo",
-                crate::ast::RangeKind::OpenEnd => "rangeUntil",
-                crate::ast::RangeKind::Until => "until",
-                crate::ast::RangeKind::DownTo => "downTo",
-            };
+            let convention = range_operator(range.kind);
             let span = self.file.stmt_spans[statement.0 as usize];
             match self.operator_call_ret(
                 scope,
                 range.start,
                 st,
-                convention,
+                convention.name,
                 &[et],
                 &[range.end],
                 span,
@@ -25438,12 +25455,10 @@ impl<'a> Checker<'a> {
                     ) {
                         Ok(Some(protocol)) => {
                             let elem = protocol.elem_ty;
-                            let operator = SyntheticOperatorCall::from_name(convention)
-                                .expect("every range convention has a semantic operator key");
                             self.resolved_stmt_operator_calls
-                                .insert((statement, operator), range_call.clone());
+                                .insert((statement, convention.key), range_call.clone());
                             self.resolved_stmt_operator_arg_slots
-                                .insert((statement, operator), vec![Some(range.end)]);
+                                .insert((statement, convention.key), vec![Some(range.end)]);
                             self.for_range_iterator_protocols.insert(
                                 statement,
                                 ForRangeIteratorTarget {
@@ -25471,7 +25486,8 @@ impl<'a> Checker<'a> {
                     self.diags.error(
                         span,
                         format!(
-                            "operator '{convention}' cannot be applied to '{}' and '{}'",
+                            "operator '{}' cannot be applied to '{}' and '{}'",
+                            convention.name,
                             st.source_name(),
                             et.source_name()
                         ),
@@ -39111,7 +39127,7 @@ struct Checker<'a> {
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
-    resolved_in_range_comparisons: HashMap<ExprId, Ty>,
+    resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
@@ -61691,24 +61707,26 @@ impl<'a> Checker<'a> {
                 // operators, and `rangeUntil`) and the exact selected target is handed to lowering.
                 // Reconstructing the result from operand classes duplicates that metadata and was the
                 // reason UByte/UShort ranges degraded to `ClosedRange<T>` or were rejected outright.
-                let name = match kind {
-                    crate::ast::RangeKind::Through => "rangeTo",
-                    crate::ast::RangeKind::OpenEnd => "rangeUntil",
-                    crate::ast::RangeKind::Until => "until",
-                    crate::ast::RangeKind::DownTo => "downTo",
-                };
-                if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(scope, e, lt, name, &[rt], &[hi], self.span(e), None)
-                {
-                    if let Some(key) = SyntheticOperatorCall::from_name(name) {
-                        self.resolved_operator_calls.insert((e, key), range_call);
-                    }
+                let convention = range_operator(kind);
+                if let Some((range_ty, range_call)) = self.operator_call_ret(
+                    scope,
+                    e,
+                    lt,
+                    convention.name,
+                    &[rt],
+                    &[hi],
+                    self.span(e),
+                    None,
+                ) {
+                    self.resolved_operator_calls
+                        .insert((e, convention.key), range_call);
                     return self.set(e, range_ty);
                 }
                 self.diags.error(
                     self.span(e),
                     format!(
-                        "operator '{name}' cannot be applied to '{}' and '{}'",
+                        "operator '{}' cannot be applied to '{}' and '{}'",
+                        convention.name,
                         lt.source_name(),
                         rt.source_name()
                     ),

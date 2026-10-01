@@ -10,6 +10,17 @@ pub enum FirRangeOperation {
     DownTo,
 }
 
+/// Provider-owned semantic reason a selected range declaration may be realized as comparisons.
+/// This is distinct from [`FirRangeOperation`], which records only the source syntax: a custom
+/// declaration can use the same syntax but must execute its returned range's `contains` operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirRangeComparisonProvenance {
+    RangeConstruction { open_end: bool },
+    FloatingRangeMembership,
+    RangeUntil,
+    RangeDownTo,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirRangeCounterKind {
     Int,

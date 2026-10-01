@@ -514,6 +514,18 @@ pub enum RangeKind {
     DownTo,  // a downTo b (descending, inclusive)
 }
 
+impl RangeKind {
+    /// Declaration name this syntax selects. Presentation (`..`, `..<`) is a separate spelling.
+    pub(crate) fn operator_name(self) -> &'static str {
+        match self {
+            Self::Through => "rangeTo",
+            Self::OpenEnd => "rangeUntil",
+            Self::Until => "until",
+            Self::DownTo => "downTo",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ForRange {
     pub start: ExprId,
