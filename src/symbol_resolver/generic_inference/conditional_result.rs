@@ -78,11 +78,12 @@ pub(crate) fn generic_return_expectation_from_sibling(
     // ambiguous beside the same non-null constructor, so `Result.failure()` next to `n: Result<Int>?`
     // never rebound. Unrelated constructors at this distance stay ambiguous.
     let declared_nullable = signature.ret.is_nullable();
-    let mut unique = Vec::new();
+    let mut unique: Vec<Candidate> = Vec::new();
     for candidate in candidates {
-        if let Some(existing) = unique.iter_mut().find(|existing| {
-            existing.expectation.non_null() == candidate.expectation.non_null()
-        }) {
+        if let Some(existing) = unique
+            .iter_mut()
+            .find(|existing| existing.expectation.non_null() == candidate.expectation.non_null())
+        {
             let existing_matches = existing.expectation.is_nullable() == declared_nullable;
             let candidate_matches = candidate.expectation.is_nullable() == declared_nullable;
             if candidate_matches && !existing_matches {
