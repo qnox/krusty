@@ -5,7 +5,7 @@ use crate::ir::{
     IrCapturedReceiver, IrClass, IrConstructorCapture, IrCtorArg, IrCtorParameterProvenance,
     IrExpr, IrFile,
 };
-use crate::types::Ty;
+use crate::types::{ContextParameterKind, Ty};
 
 fn argument(
     ty: Ty,
@@ -16,7 +16,7 @@ fn argument(
 ) -> IrCtorArg {
     IrCtorArg {
         name: None,
-        context_kind: None,
+        context_kind: ContextParameterKind::None,
         ty,
         declared_ty: None,
         is_field: field_index.is_some(),
