@@ -171,3 +171,228 @@ pub(super) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature>
     }
     Some((formals, formal_bounds, supers))
 }
+
+/// The inference signature of a JVM constructor.
+///
+/// A constructor `Signature` names only type parameters the constructor itself declares and returns
+/// `void`. The constructed classifier's type parameters are declared on the class and show up in
+/// the parameter list as free type variables. Kotlin inference treats those class parameters as
+/// the constructor's result variables — the same shape metadata constructors already publish — and
+/// keeps constructor-only parameters as additional variables that do not appear in the result. A
+/// constructor parameter that redeclares a class parameter's name is a different variable.
+pub(super) fn constructor_inference_signature(
+    class_signature: Option<&str>,
+    owner: TypeName,
+    declaration: &str,
+    mut method: GenericSig,
+) -> GenericSig {
+    let Some((class_formals, class_bounds, _)) = class_signature.and_then(parse_class_gsig) else {
+        return method;
+    };
+    if class_formals.is_empty() {
+        return method;
+    }
+    let result_arguments = class_formals
+        .iter()
+        .zip(&class_bounds)
+        .map(|(formal, bounds)| {
+            let bound = bounds
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            Ty::ty_param(formal, bound)
+        })
+        .collect::<Vec<_>>();
+    if method.ret.obj_internal() == Some(owner)
+        && method.ret.type_args() == result_arguments.as_slice()
+        && method.formals.starts_with(class_formals.as_slice())
+    {
+        return method;
+    }
+
+    let declared_formals = method.formals.clone();
+    let mut constructor_formals = Vec::with_capacity(declared_formals.len());
+    let mut rename = std::collections::HashMap::new();
+    for (ordinal, formal) in declared_formals.iter().enumerate() {
+        if class_formals
+            .iter()
+            .any(|class_formal| class_formal == formal)
+        {
+            let fresh =
+                crate::types::constructor_type_parameter(owner, declaration, ordinal, formal);
+            rename.insert(formal.as_str(), fresh);
+            constructor_formals.push(fresh.to_string());
+        } else {
+            constructor_formals.push(formal.clone());
+        }
+    }
+    if !rename.is_empty() {
+        for parameter in &mut method.params {
+            *parameter = crate::types::ty_rename_params(*parameter, &rename);
+        }
+        for bounds in &mut method.formal_bounds {
+            for bound in bounds {
+                *bound = crate::types::ty_rename_params(*bound, &rename);
+            }
+        }
+    }
+
+    let mut formals = class_formals;
+    let mut formal_bounds = class_bounds;
+    formals.extend(constructor_formals);
+    formal_bounds.extend(method.formal_bounds);
+    GenericSig {
+        formals,
+        formal_bounds,
+        receiver: method.receiver,
+        params: method.params,
+        ret: Ty::obj_args_name(owner, &result_arguments),
+        return_policy: GenericReturnPolicy::Exact,
+    }
+}
+
+impl JvmLibraries {
+    /// Publish a Java method's `Signature` attribute: parameter and return nullability, then the
+    /// constructor's class type parameters when `constructor` is set. The caller decides
+    /// `<init>` at this provider boundary.
+    pub(super) fn publish_java_member_generic_signature(
+        &self,
+        signature: Option<&str>,
+        parameter_nullability: &[Option<JavaNullability>],
+        return_nullability: Option<JavaNullability>,
+        constructor: Option<(Option<&str>, TypeName, &str)>,
+    ) -> Option<GenericSig> {
+        let mut generic = signature
+            .and_then(parse_method_gsig)
+            .map(|signature| self.semanticize_jvm_generic_sig(signature))?;
+        for (index, parameter) in generic.params.iter_mut().enumerate() {
+            *parameter = java_type_nullability(
+                *parameter,
+                parameter_nullability.get(index).copied().flatten(),
+            );
+        }
+        generic.ret = java_type_nullability(
+            java_collection_return_lower_bound(generic.ret),
+            return_nullability,
+        );
+        if let Some((class_signature, owner, descriptor)) = constructor {
+            generic = self.semanticize_jvm_generic_sig(constructor_inference_signature(
+                class_signature,
+                owner,
+                descriptor,
+                generic,
+            ));
+        }
+        Some(generic)
+    }
+}
+
+#[cfg(test)]
+mod constructor_inference_signature_tests {
+    use super::*;
+
+    fn void_constructor(formals: &[&str], params: &[Ty]) -> GenericSig {
+        GenericSig {
+            formals: formals.iter().map(|formal| (*formal).to_string()).collect(),
+            formal_bounds: vec![Vec::new(); formals.len()],
+            receiver: None,
+            params: params.to_vec(),
+            ret: Ty::Unit,
+            return_policy: GenericReturnPolicy::Exact,
+        }
+    }
+
+    #[test]
+    fn class_type_parameters_are_the_constructor_result_variables() {
+        let owner = type_name("demo/Ref");
+        let signature = constructor_inference_signature(
+            Some("<V:Ljava/lang/Object;>Ljava/lang/Object;"),
+            owner,
+            "()V",
+            void_constructor(&[], &[Ty::ty_param("V", Ty::obj("kotlin/Any"))]),
+        );
+
+        assert_eq!(signature.formals, vec!["V".to_string()]);
+        assert_eq!(signature.ret.obj_internal(), Some(owner));
+        assert!(matches!(
+            signature.ret.type_args(),
+            [Ty::TyParam(name, _)] if *name == "V"
+        ));
+    }
+
+    #[test]
+    fn a_constructor_type_parameter_stays_out_of_the_result() {
+        let owner = type_name("demo/Cell");
+        let signature = constructor_inference_signature(
+            Some("<E:Ljava/lang/Object;>Ljava/lang/Object;"),
+            owner,
+            "(Ljava/lang/Object;Ljava/lang/Object;)V",
+            void_constructor(
+                &["U"],
+                &[
+                    Ty::ty_param("E", Ty::obj("kotlin/Any")),
+                    Ty::ty_param("U", Ty::obj("kotlin/Any")),
+                ],
+            ),
+        );
+
+        assert_eq!(signature.formals, vec!["E".to_string(), "U".to_string()]);
+        assert!(matches!(
+            signature.ret.type_args(),
+            [Ty::TyParam(name, _)] if *name == "E"
+        ));
+        assert!(matches!(
+            signature.params.as_slice(),
+            [Ty::TyParam(value, _), Ty::TyParam(extra, _)]
+                if *value == "E" && *extra == "U"
+        ));
+    }
+
+    #[test]
+    fn a_constructor_parameter_that_redeclares_a_class_parameter_is_a_different_variable() {
+        let owner = type_name("demo/Shadow");
+        let signature = constructor_inference_signature(
+            Some("<T:Ljava/lang/Object;>Ljava/lang/Object;"),
+            owner,
+            "(Ljava/lang/Object;)V",
+            void_constructor(&["T"], &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+        );
+
+        assert_eq!(signature.formals.len(), 2);
+        assert_eq!(signature.formals[0], "T");
+        assert_ne!(signature.formals[1], "T");
+        assert!(matches!(
+            signature.ret.type_args(),
+            [Ty::TyParam(name, _)] if *name == "T"
+        ));
+        assert!(matches!(
+            signature.params.as_slice(),
+            [Ty::TyParam(name, _)] if *name == signature.formals[1]
+        ));
+        assert_eq!(
+            crate::types::type_parameter_source_name(&signature.formals[1]),
+            "T"
+        );
+    }
+
+    #[test]
+    fn overloaded_constructors_do_not_share_a_shadowed_formal() {
+        let shadow = |owner: &str, declaration: &str| {
+            constructor_inference_signature(
+                Some("<T:Ljava/lang/Object;>Ljava/lang/Object;"),
+                type_name(owner),
+                declaration,
+                void_constructor(&["T"], &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            )
+        };
+        let left = shadow("demo/Left", "(I)V");
+        let overload = shadow("demo/Left", "(Ljava/lang/String;)V");
+        let other = shadow("demo/Right", "(I)V");
+
+        assert_ne!(left.formals[1], overload.formals[1]);
+        assert_ne!(left.formals[1], other.formals[1]);
+        for formal in [&left.formals[1], &overload.formals[1], &other.formals[1]] {
+            assert_eq!(crate::types::type_parameter_source_name(formal), "T");
+        }
+    }
+}

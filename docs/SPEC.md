@@ -6860,6 +6860,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument would fix the outer result to `Any`. Test:
   `tests/nested_concrete_argument_inference_e2e.rs`.
 
+- **A Java constructor infers the class's type parameters, and an invariant expected result
+  fixes them.** A JVM constructor `Signature` names only type parameters the constructor itself
+  declares (`(TV;)V` has none) and returns `void`. The constructed classifier's type parameters
+  are declared on the class. The provider publishes the same semantic constructor signature a
+  Kotlin constructor already has: those class parameters are the inference variables,
+  constructor-only parameters stay additional variables, and the result is the classifier applied
+  to the class parameters. A constructor parameter that redeclares a class parameter's name is a
+  different variable. The invariant expected-result rule then applies.
+  `AtomicReference(s)` with `s: String` is an `AtomicReference<String?>`, an
+  `AtomicReference<Any>`, and an `AtomicReference<CharSequence>` where that result is expected,
+  because `String` still satisfies the widened argument. A Kotlin `Box<String>(s: String?)` stays
+  a mismatch: the argument does not fit `String`. Tests:
+  `tests/java_constructor_expected_type_e2e.rs`,
+  `src/jvm/jvm_libraries/generic_signatures.rs`.
+
 - **A value never has a projected type; a projected binding is approximated.** Matching a member
   against a star-projected receiver binds the member's own formal to the PROJECTION — the stdlib
   `fun <K, V> Map<out K, V>.get(key: K): V?` applied to `Map<*, *>` binds `V` to `out Any?`. The

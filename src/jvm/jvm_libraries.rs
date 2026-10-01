@@ -1951,23 +1951,18 @@ impl JvmLibraries {
                     } else {
                         Visibility::PackagePrivate
                     };
-                    member.generic_sig = m
-                        .signature
-                        .as_deref()
-                        .and_then(parse_method_gsig)
-                        .map(|signature| self.semanticize_jvm_generic_sig(signature));
-                    if let Some(signature) = &mut member.generic_sig {
-                        for (index, parameter) in signature.params.iter_mut().enumerate() {
-                            *parameter = java_type_nullability(
-                                *parameter,
-                                m.parameter_nullability.get(index).copied().flatten(),
-                            );
-                        }
-                        signature.ret = java_type_nullability(
-                            java_collection_return_lower_bound(signature.ret),
-                            m.return_nullability,
-                        );
-                    }
+                    // `<init>` is the classfile constructor. Its signature returns void and omits
+                    // the class type parameters; publication turns those into the result.
+                    member.generic_sig = self.publish_java_member_generic_signature(
+                        m.signature.as_deref(),
+                        &m.parameter_nullability,
+                        m.return_nullability,
+                        (uses_java_type_semantics && m.name == "<init>").then_some((
+                            ci.signature.as_deref(),
+                            internal_name,
+                            m.descriptor.as_str(),
+                        )),
+                    );
                 }
                 let value_arity = member.params.len();
                 if member.suspend() {
