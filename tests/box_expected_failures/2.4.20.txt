@@ -144,7 +144,6 @@ secondaryConstructors/localClasses.kt
 suspendConversion/suspendConversionNullableCCE.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
-unsignedTypes/kt43286.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/kt10926.kt
