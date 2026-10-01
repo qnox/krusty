@@ -2844,7 +2844,7 @@ mod tests {
             events,
         );
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a() {}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a() {}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
         {
@@ -2859,7 +2859,7 @@ mod tests {
             );
         }
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun b() {}".into(), 2)],
+            documents: vec![("file:///a.kt".into(), "fun b() {}".into(), 2, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
 
