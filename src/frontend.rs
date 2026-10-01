@@ -934,6 +934,14 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
+        // The brackets were parsed. Report the language gate only after `parse_error` is captured,
+        // so the file's declarations still join the module for every other file.
+        for span in file.destructuring.ungated_bracket_spans.iter().copied() {
+            diags.error(
+                span,
+                "the feature \"name based destructuring\" is only available since language version 2.5",
+            );
+        }
         let extracted = pass1_builder.add_source(
             index,
             source,

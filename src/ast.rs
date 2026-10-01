@@ -14,11 +14,13 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
 mod constructors;
+mod destructuring;
 mod operators;
 mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use destructuring::DestructuringSyntax;
 pub use operators::{BinOp, UnOp};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -1748,21 +1750,8 @@ pub struct File {
     /// the innermost call it is written in (`parser::lambda_literals`). Absent for a lambda in a
     /// scope that names none. An explicit label in `lambda_labels` replaces it.
     pub lambda_call_labels: std::collections::HashMap<u32, String>,
-    /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
-    /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
-    /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
-    /// Absent ⇒ the whole destructuring is positional.
-    pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
-    /// The `val (a, b) = …` a destructured lambda parameter `{ (a, b) -> … }` prepends to the
-    /// body. kotlinc gives its component calls no line of their own.
-    pub lambda_parameter_destructures: std::collections::HashSet<StmtId>,
-    /// Loops whose variable is a destructuring pattern (`for ((a, b) in xs)`). Such a loop's own
-    /// variable is a compiler temporary, read only by the `val (a, b) = …` prepended to its body.
-    pub destructured_loops: std::collections::HashSet<StmtId>,
-    /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
-    /// These remain parser-owned syntax; resolution publishes their semantic types before checked
-    /// FIR consumes the active bounded unit.
-    pub destructure_entry_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// Parser-owned destructuring syntax retained for checking, lowering, and source diagnostics.
+    pub destructuring: DestructuringSyntax,
     /// Context parameters written on a local property declaration, keyed by that declaration's
     /// statement id. Later semantic phases may reject the ownership form, but syntax and spans are
     /// retained by the parser.
@@ -1941,10 +1930,7 @@ impl File {
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();
         self.lambda_call_labels = Default::default();
-        self.destructure_source_props = Default::default();
-        self.lambda_parameter_destructures = Default::default();
-        self.destructured_loops = Default::default();
-        self.destructure_entry_types = Default::default();
+        self.destructuring = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();
         self.file_annotations = Default::default();

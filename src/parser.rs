@@ -18,6 +18,7 @@ mod debug_lines;
 mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
+mod destructuring;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -38,8 +39,8 @@ pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
     parse_with_features(src, tokens, diags, &LangFeatures::default())
 }
 
-/// Parse under an explicit language-feature set — flag-gated syntax (e.g. name-based `[a, b]`
-/// destructuring) is accepted only when its feature is enabled, matching a drop-in `kotlinc`.
+/// Parse under an explicit language-feature set. Square-bracket destructuring is always parsed;
+/// without `NameBasedDestructuring` it is reported as a language-version error, matching kotlinc.
 pub fn parse_with_features(
     src: &str,
     tokens: &[Token],
@@ -4704,101 +4705,6 @@ impl<'a> Parser<'a> {
         self.file.add_expr(e, span)
     }
 
-    /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
-    /// under `+NameBasedDestructuring`) IMMEDIATELY followed by a `val`/`var` keyword — the marker
-    /// that distinguishes it from a parenthesized-expression statement.
-    fn at_full_form_destructure(&self) -> bool {
-        // Full-form destructuring is part of the `NameBasedDestructuring` feature — without it,
-        // `(val a, …)` at statement position stays a (rejected) expression, matching kotlinc.
-        if !self.name_based_destructuring {
-            return false;
-        }
-        let opener = self.at(TokenKind::LParen) || self.at(TokenKind::LBracket);
-        opener
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|t| matches!(t.kind, TokenKind::KwVal | TokenKind::KwVar))
-    }
-
-    /// Parse a full-form destructuring declaration: `(val a, val b) = e` / `[var a, var b] = e`,
-    /// where each component carries its own `val`/`var` (and optional `: T` / `= sourceProp`). The
-    /// paren form binds each component BY PROPERTY NAME (name-based); the bracket form is positional
-    /// (`componentN`). Reuses `Stmt::Destructure` + the `destructure_source_props` side-table.
-    fn parse_full_form_destructure(&mut self, start: Span) -> StmtId {
-        let close = if self.at(TokenKind::LParen) {
-            TokenKind::RParen
-        } else {
-            TokenKind::RBracket
-        };
-        self.bump(); // '(' or '['
-        let mut entries: Vec<DestructureEntry> = Vec::new();
-        let mut source_props: Vec<Option<String>> = Vec::new();
-        let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
-        loop {
-            // Each component declares its own mutability.
-            let is_var = self.at(TokenKind::KwVar);
-            if is_var || self.at(TokenKind::KwVal) {
-                self.bump();
-            } else {
-                self.diags
-                    .error(self.tok().span, "expected 'val' or 'var'".to_string());
-            }
-            let ignored = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
-            let name = self.ident_or_error("variable name");
-            let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-            // `val newName = sourceProp` — bind `newName` from the receiver's `sourceProp` property.
-            // A plain paren component `val a` binds by its OWN name; a bracket component is positional.
-            let source = if self.eat(TokenKind::Eq) {
-                let src = self.ident_or_error("property name");
-                if self.eat(TokenKind::Colon) {
-                    entry_type = Some(self.parse_type());
-                }
-                Some(src)
-            } else if close == TokenKind::RParen {
-                Some(name.clone())
-            } else {
-                None
-            };
-            entries.push(DestructureEntry {
-                name,
-                mutable: is_var,
-                ignored,
-            });
-            source_props.push(source);
-            entry_types.push(entry_type);
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            if self.at(close) {
-                break;
-            } // trailing comma
-        }
-        self.expect(
-            close,
-            if close == TokenKind::RParen {
-                "')'"
-            } else {
-                "']'"
-            },
-        );
-        self.expect(TokenKind::Eq, "'='");
-        self.skip_newlines();
-        let init = self.parse_expr();
-        let stmt = self.finish_stmt(Stmt::Destructure { entries, init }, start);
-        if source_props.iter().any(|s| s.is_some()) {
-            self.file
-                .destructure_source_props
-                .insert(stmt.0, source_props);
-        }
-        if entry_types.iter().any(Option::is_some) {
-            self.file
-                .destructure_entry_types
-                .insert(stmt.0, entry_types);
-        }
-        stmt
-    }
-
     /// Depth-guarded entry for the statement parser. Nested statement structures — block bodies
     /// (`while (…) { while (…) { … } }`), local declarations — recurse `parse_stmt` →
     /// `parse_block_expr` → `parse_stmt` without ever passing through `parse_bp`, so they need
@@ -4974,147 +4880,7 @@ impl<'a> Parser<'a> {
         }
         let start = self.tok().span;
         match self.kind() {
-            TokenKind::KwVal | TokenKind::KwVar => {
-                let is_var = self.at(TokenKind::KwVar);
-                self.bump();
-                // Destructuring declaration: `val (a, b, …) = init`, or the name-based `val [a, b] =
-                // init` under `+NameBasedDestructuring` (both desugar to positional `componentN`).
-                let close = if self.at(TokenKind::LParen) {
-                    Some(TokenKind::RParen)
-                } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
-                    Some(TokenKind::RBracket)
-                } else {
-                    None
-                };
-                if let Some(close) = close {
-                    self.bump();
-                    let mut entries = Vec::new();
-                    // NAME-BASED destructuring (`+NameBasedDestructuring`): an entry `newName = sourceProp`
-                    // binds `newName` to the receiver's `sourceProp` property (not `componentN`). Parallel
-                    // to `entries`; `None` for a positional entry.
-                    let mut source_props: Vec<Option<String>> = Vec::new();
-                    let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
-                    loop {
-                        let ignored = self.at(TokenKind::Ident)
-                            && self.text() == "_"
-                            && !self.escaped_ident();
-                        let n = self.ident_or_error("variable name");
-                        let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-                        // `newName = sourceProp` — the by-name renaming form. This `=` is inside the
-                        // destructuring parens/brackets, distinct from the initializer `=` after `)`.
-                        // Under `+EnableNameBasedDestructuringShortForm`, a plain PAREN entry `(a, b)`
-                        // binds each variable to the receiver property of the SAME name.
-                        let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
-                            let src = self.ident_or_error("property name");
-                            if self.eat(TokenKind::Colon) {
-                                entry_type = Some(self.parse_type());
-                            }
-                            Some(src)
-                        } else if self.short_form_destructuring && close == TokenKind::RParen {
-                            Some(n.clone())
-                        } else {
-                            None
-                        };
-                        entries.push(DestructureEntry {
-                            name: n,
-                            mutable: is_var,
-                            ignored,
-                        });
-                        source_props.push(source);
-                        entry_types.push(entry_type);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        if self.at(close) {
-                            break;
-                        } // trailing comma
-                    }
-                    self.expect(
-                        close,
-                        if close == TokenKind::RParen {
-                            "')'"
-                        } else {
-                            "']'"
-                        },
-                    );
-                    self.skip_plain_newlines_before(TokenKind::Eq);
-                    self.expect(TokenKind::Eq, "'='");
-                    self.skip_newlines();
-                    let init = self.parse_expr();
-                    let stmt = self.finish_stmt(Stmt::Destructure { entries, init }, start);
-                    if source_props.iter().any(|s| s.is_some()) {
-                        self.file
-                            .destructure_source_props
-                            .insert(stmt.0, source_props);
-                    }
-                    if entry_types.iter().any(Option::is_some) {
-                        self.file
-                            .destructure_entry_types
-                            .insert(stmt.0, entry_types);
-                    }
-                    return stmt;
-                }
-                let name = self.ident_or_error("variable name");
-                let ty = if self.eat(TokenKind::Colon) {
-                    self.skip_plain_newlines();
-                    Some(self.parse_type())
-                } else {
-                    None
-                };
-                // `val/var x (: T)? by <delegate>` — a local delegated property.
-                if self.at(TokenKind::Ident) && self.keyword_text("by") {
-                    let by_span = self.tok().span;
-                    self.bump(); // 'by'
-                    self.skip_newlines();
-                    let delegate = self.parse_unlabelled_expr();
-                    return self.finish_stmt(
-                        Stmt::LocalDelegate {
-                            is_var,
-                            name,
-                            ty,
-                            delegate,
-                            by_span,
-                        },
-                        start,
-                    );
-                }
-                // `val`/`var x: T` with no initializer (deferred assignment) → synthesize the type's
-                // default value (`0`/`false`/`null`); a later `x = …` assigns it. Kotlin's definite-
-                // assignment guarantees the synthetic default is always overwritten before a read, so a
-                // deferred `val` behaves like a once-assigned `var` — treat it as internally mutable
-                // (krusty doesn't enforce assign-once; kotlinc already rejects misuse). Nullability of
-                // the declared type does not enter into it: a deferred `val` is lowered exactly like
-                // the `var` spelling, which already handles a nullable declared type and the
-                // smart-cast-after-assignment that follows it.
-                let initializer = self.eat_initializer_eq();
-                let deferred = ty.is_some() && initializer.is_none();
-                let init_operator = (!deferred).then(|| {
-                    initializer.unwrap_or_else(|| {
-                        let operator = self.tok().span;
-                        self.expect(TokenKind::Eq, "'='");
-                        operator
-                    })
-                });
-                let init = if deferred {
-                    let sp = self.tok().span;
-                    self.default_init_expr(ty.as_ref().unwrap(), sp)
-                } else {
-                    self.skip_newlines();
-                    self.parse_unlabelled_expr()
-                };
-                if let Some(operator) = init_operator {
-                    self.file.value_operator_spans.insert(init.0, operator);
-                }
-                self.finish_stmt(
-                    Stmt::Local {
-                        is_var: is_var || deferred,
-                        name,
-                        ty,
-                        init,
-                    },
-                    start,
-                )
-            }
+            TokenKind::KwVal | TokenKind::KwVar => self.parse_local_binding(start),
             TokenKind::KwReturn => self.parse_return_statement(start),
             TokenKind::Ident if self.keyword_text("break") => {
                 self.bump();

@@ -1,8 +1,9 @@
 //! Name-based `[a, b]` destructuring (`// LANGUAGE: +NameBasedDestructuring`, kotlinc's
-//! `-Xname-based-destructuring`). A drop-in must accept it ONLY when the feature is enabled and reject
-//! it otherwise — matching `kotlinc`, which errors "the feature name based destructuring is
-//! experimental" without the flag. Both `[a, b]` and `(a, b)` desugar to the same positional
-//! `componentN` calls (proven byte-identical against kotlinc), so the compiled-and-run result is "OK".
+//! `-Xname-based-destructuring`). A drop-in accepts it only when the feature is enabled. Without the
+//! flag kotlinc still parses the brackets and reports that the feature is available since language
+//! version 2.5, and every later declaration in the file stays in scope. Both `[a, b]` and `(a, b)`
+//! desugar to the same positional `componentN` calls (proven byte-identical against kotlinc), so the
+//! compiled-and-run result is "OK".
 
 use super::common;
 
@@ -141,4 +142,111 @@ fn name_based_lambda_shortform() {
         \x20 return if (f(P(1, 2)) == 12) \"OK\" else \"fail\"\n\
         }\n";
     assert_eq!(run_stdlib(SRC).expect("name-based lambda"), "OK");
+}
+
+/// A `for` bracket pattern without the feature is one language-version error. The loop is still
+/// parsed, so the ledger is that gate and nothing else.
+#[test]
+fn ungated_bracket_destructure_in_a_loop_is_a_language_version_error() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+    operator fun component2(): Int = 2
+}
+
+class One {
+    operator fun iterator(): One = this
+    operator fun hasNext(): Boolean = false
+    operator fun next(): C = C()
+}
+
+fun box(): String {
+    var result = 0
+    for ([a, b] in One()) {
+        result += a + b
+    }
+    return if (result == 0) "OK" else "fail"
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
+/// A local `val` bracket pattern without the feature is one language-version error. The
+/// declaration stays bound, so the ledger is that gate and nothing else.
+#[test]
+fn ungated_bracket_destructure_in_a_declaration_is_a_language_version_error() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+    operator fun component2(): Int = 2
+}
+
+fun box(): String {
+    val [x, y] = C()
+    return if (x + y == 3) "OK" else "fail"
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
+/// A lambda-parameter bracket pattern without the feature is one language-version error. The
+/// parameter stays bound, so the ledger is that gate and nothing else.
+#[test]
+fn ungated_bracket_destructure_in_a_lambda_parameter_is_a_language_version_error() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+    operator fun component2(): Int = 2
+}
+
+fun box(): String {
+    val read: (C) -> Int = { [p, q] -> p + q }
+    return if (read(C()) == 3) "OK" else "fail"
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
+/// The same gate must not drop the file from the module. Another file still sees the class and
+/// the extension declared beside the bracket destructure.
+#[test]
+fn ungated_bracket_destructure_stays_visible_across_files() {
+    const LIB: &str = r#"class C {
+    operator fun component1(): Int = 1
+    operator fun component2(): Int = 2
+}
+
+class One {
+    operator fun iterator(): One = this
+    operator fun hasNext(): Boolean = false
+    operator fun next(): C = C()
+}
+
+fun hash(): Int {
+    var result = 0
+    for ([a, b] in One()) {
+        result += a + b
+    }
+    return result
+}
+
+fun <T> T.tag(): T = this
+"#;
+    const USE: &str = r#"class Payload(val value: Int)
+
+class Builder {
+    lateinit var description: Payload
+}
+
+fun build(block: Builder.() -> Unit): Builder {
+    val builder = Builder()
+    block(builder)
+    return builder
+}
+
+fun box(): String {
+    val built = build {
+        description = Payload(7).tag()
+    }
+    return if (built.description.value == 7 && hash() == 0) "OK" else "fail"
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Lib.kt", LIB), ("Use.kt", USE)], &[]);
 }

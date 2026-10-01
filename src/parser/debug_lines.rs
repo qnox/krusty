@@ -85,7 +85,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
         .collect();
     // A destructured lambda parameter's `val (a, b) = <parameter>` is generated from the parameter
     // itself: neither the statement nor the parameter read it destructures starts a line.
-    for &statement in &file.lambda_parameter_destructures {
+    for &statement in &file.destructuring.lambda_parameters {
         file.stmt_lines[statement.0 as usize] = 0;
         if let crate::ast::Stmt::Destructure { init, .. } = file.stmt(statement) {
             let init = init.0 as usize;

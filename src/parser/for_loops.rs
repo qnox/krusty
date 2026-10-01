@@ -7,13 +7,16 @@ impl Parser<'_> {
     pub(super) fn parse_for(&mut self, start: Span, label: Option<String>) -> StmtId {
         self.bump(); // 'for'
         self.expect(TokenKind::LParen, "'('");
-        // A destructuring loop variable — `for ((a, b) in pairs)`, or the name-based `for ([a, b] in
-        // pairs)` under `+NameBasedDestructuring` — desugars to a synthetic temp plus `val (a, b) =
-        // temp` prepended to the body (reusing the `Stmt::Destructure` machinery; both forms lower to
-        // the same positional `componentN` calls, so the bytecode matches kotlinc's either way).
+        // A destructuring loop variable — `for ((a, b) in pairs)` or `for ([a, b] in pairs)` —
+        // desugars to a synthetic temp plus `val (a, b) = temp` prepended to the body (reusing the
+        // `Stmt::Destructure` machinery; both forms lower to the same positional `componentN` calls,
+        // so the bytecode matches kotlinc's either way).
         let close = if self.at(TokenKind::LParen) {
             Some(TokenKind::RParen)
-        } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
+        } else if self.at(TokenKind::LBracket) {
+            // Always parse the brackets. Without the feature this is kotlinc's language-version
+            // error, and the rest of the file — including declarations after the loop — stays bound.
+            self.note_ungated_bracket_destructure();
             Some(TokenKind::RBracket)
         } else {
             None
@@ -234,7 +237,7 @@ impl Parser<'_> {
     fn finish_loop(&mut self, statement: Stmt, start: Span, destructured: bool) -> StmtId {
         let statement = self.finish_stmt(statement, start);
         if destructured {
-            self.file.destructured_loops.insert(statement);
+            self.file.destructuring.loops.insert(statement);
         }
         statement
     }
@@ -261,12 +264,14 @@ impl Parser<'_> {
         );
         if source_props.iter().any(|s| s.is_some()) {
             self.file
-                .destructure_source_props
+                .destructuring
+                .source_properties
                 .insert(dstmt.0, source_props);
         }
         if entry_types.iter().any(Option::is_some) {
             self.file
-                .destructure_entry_types
+                .destructuring
+                .entry_types
                 .insert(dstmt.0, entry_types);
         }
         match self.file.expr(body).clone() {

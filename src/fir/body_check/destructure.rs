@@ -52,7 +52,8 @@ impl BodyFirChecker<'_> {
             });
             let binding_ty = self
                 .file
-                .destructure_entry_types
+                .destructuring
+                .entry_types
                 .get(&statement.0)
                 .and_then(|types| types.get(index))
                 .and_then(Option::as_ref)
