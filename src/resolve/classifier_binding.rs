@@ -67,7 +67,10 @@ impl Checker<'_> {
                     if let Some(classifier) = self.explicit_import_classifier_name(root_name) {
                         selected_alias = self.selected_explicit_type_alias(root_name, classifier);
                         ResolvedQualifier::Classifier(classifier)
-                    } else if let Some(classifier) = self.same_package_classifier_name(root_name) {
+                    } else if let Some((classifier, alias)) =
+                        self.selected_same_package_classifier(root_name)
+                    {
+                        selected_alias = alias;
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some(classifier) =
                         self.alias_ahead_of_imported_classifier(scope, root_name, &source)
@@ -139,18 +142,17 @@ impl Checker<'_> {
                 }
             }
         };
-        match walk_qualifier_namespace_facets(
+        match walk_qualifier_namespace_facets_with_declaration_identity(
             &source,
             root.classifier(),
             None,
             root_name,
             &segments[1..],
         ) {
-            Ok(ResolvedQualifier::Classifier(internal)) => {
+            Ok((ResolvedQualifier::Classifier(internal), declaration_identity)) => {
                 let internal = self.libraries.canonical_source_type_name(internal);
-                if selected_alias.is_none() && name.contains(['.', '/']) {
-                    selected_alias = crate::types::existing_type_name(&name.replace('.', "/"))
-                        .and_then(|identity| self.selected_alias_from_identity(identity, internal));
+                if let Some(identity) = declaration_identity {
+                    selected_alias = self.selected_alias_from_identity(identity, internal);
                 }
                 (
                     InheritedNestedClassifier::Found(internal),
@@ -158,7 +160,7 @@ impl Checker<'_> {
                     selected_alias,
                 )
             }
-            Ok(ResolvedQualifier::Value | ResolvedQualifier::Package(_)) => (
+            Ok((ResolvedQualifier::Value | ResolvedQualifier::Package(_), _)) => (
                 InheritedNestedClassifier::NotFound,
                 segments.last().map(|(_, segment)| segment.clone()),
                 None,
@@ -214,6 +216,26 @@ impl Checker<'_> {
         let path = self.imports.get(name)?;
         let identity = crate::types::existing_type_name(&path.replace('.', "/"))?;
         self.selected_alias_from_identity(identity, classifier)
+    }
+
+    /// Classifier and alias provenance from the current-package rung. The package namespace and
+    /// source lookup name identify the declaration before the target classifier is selected, so an
+    /// alias keeps its own stable identity even when the provider normalizes the classifier facet to
+    /// the alias target.
+    fn selected_same_package_classifier(
+        &self,
+        name: &str,
+    ) -> Option<(TypeName, Option<SelectedTypeAlias>)> {
+        let namespace = crate::symbol_source::SymbolNamespace::Package(self.source_package_name());
+        let record = self.fed_source().symbols(namespace, name);
+        let classifier = self
+            .libraries
+            .canonical_source_type_name(record.classifier_name?);
+        let identity = namespace
+            .existing_classifier(name)
+            .expect("selected same-package classifier declaration must be interned");
+        let alias = self.selected_alias_from_identity(identity, classifier);
+        Some((classifier, alias))
     }
 
     /// Alias provenance from the exact star/default import rung that selected `classifier`.

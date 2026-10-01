@@ -59,6 +59,33 @@ fn pass_two_applies_generic_function_typealias_from_dependency() {
 }
 
 #[test]
+fn same_package_dependency_typealias_keeps_its_generic_function_template() {
+    let library = r#"package fixture
+
+data class Mark(val value: String)
+class Input
+typealias Transform<T> = (T) -> Mark
+
+class Consumer<T>(private val value: T) {
+    fun apply(transform: Transform<T>): Mark = transform(value)
+}
+"#;
+    let main = r#"package fixture
+
+fun box(): String {
+    val transform: Transform<Input> = { Mark("OK") }
+    return Consumer(Input()).apply(transform).value
+}
+"#;
+
+    assert_eq!(
+        common::expect_box_run_against("same_package_generic_function_typealias", library, main,)
+            .as_deref(),
+        Some("OK"),
+    );
+}
+
+#[test]
 fn classpath_typealias_visibility_is_enforced() {
     const VISIBILITY_LIB: &str = "package visibility\n\
         class Real\n\
