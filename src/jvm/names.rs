@@ -126,6 +126,12 @@ pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     physical
 }
 
+/// Physical JVM classfile spelling of `internal`, owned by the caller. This is for class-writer
+/// output whose lifetime is bounded by the emitted class rather than the process name catalog.
+pub(super) fn owned_classfile_internal_name(internal: TypeName) -> String {
+    physical_classfile_name_of(internal)
+}
+
 fn physical_classfile_name_of(internal: TypeName) -> String {
     let mapped = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(internal);
     mapped.jvm_binary_name()

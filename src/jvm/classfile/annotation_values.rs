@@ -3,8 +3,28 @@
 
 use super::{u2, ClassWriter};
 use crate::kt_string::KtString;
+use crate::types::TypeName;
+
+/// The physical name an annotation type contributes to `InnerClasses`, and its descriptor.
+/// Both strings are owned by the class writer, so user-defined annotation identities do not enter
+/// a process-lifetime name or descriptor cache.
+fn annotation_class_text(name: TypeName) -> (String, String) {
+    let physical = crate::jvm::names::owned_classfile_internal_name(name);
+    let mut descriptor = String::with_capacity(physical.len() + 2);
+    descriptor.push('L');
+    descriptor.push_str(&physical);
+    descriptor.push(';');
+    (physical, descriptor)
+}
 
 impl ClassWriter {
+    fn record_annotation_class(&mut self, name: TypeName) -> u16 {
+        let (internal, descriptor) = annotation_class_text(name);
+        let utf8 = self.cp.utf8(&descriptor);
+        self.annotation_class_refs.insert(internal);
+        utf8
+    }
+
     pub(super) fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
         out.push(b'I');
         let idx = self.cp.integer(v);
@@ -109,20 +129,17 @@ impl ClassWriter {
             },
             AnnoValue::Enum(ty, name) => {
                 out.push(b'e');
-                let ty = ty.render();
                 // An enum value's TYPE is a reference too: kotlinc records an `InnerClasses` entry
                 // for a nested enum used purely as an annotation argument (verified on 2.4.10).
-                self.annotation_class_refs.insert(ty.clone());
-                let ti = self.cp.utf8(&format!("L{ty};"));
+                let ti = self.record_annotation_class(*ty);
                 u2(out, ti);
                 let ni = self.cp.utf8(name);
                 u2(out, ni);
             }
             AnnoValue::Class(internal) => {
                 out.push(b'c');
-                let internal = crate::jvm::jvm_class_map::to_jvm_type_name(*internal).render();
-                self.annotation_class_refs.insert(internal.clone());
-                let ci = self.cp.utf8(&format!("L{internal};"));
+                let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(*internal);
+                let ci = self.record_annotation_class(mapped);
                 u2(out, ci);
             }
             AnnoValue::Annotation(a) => {
@@ -141,15 +158,143 @@ impl ClassWriter {
 
     /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
     pub(super) fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
-        let internal = a.internal.render();
-        self.annotation_class_refs.insert(internal.clone());
-        let ti = self.cp.utf8(&format!("L{internal};"));
+        let ti = self.record_annotation_class(a.internal);
         u2(out, ti);
         u2(out, a.values.len() as u16);
         for (name, v) in &a.values {
             let ni = self.cp.utf8(name);
             u2(out, ni);
             self.ev_value(out, v);
+        }
+    }
+}
+
+#[test]
+fn repeated_annotation_reuses_one_descriptor_slot() {
+    let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
+    let annotation = crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name("sample/anno6044/Marker"),
+        values: Vec::new(),
+    };
+    let mut out = Vec::new();
+    writer.ev_annotation(&mut out, &annotation);
+    let entries = writer.cp.entries.len();
+    let slot = writer.cp.lookup_utf8("Lsample/anno6044/Marker;");
+    writer.ev_annotation(&mut out, &annotation);
+    assert_eq!(writer.cp.entries.len(), entries);
+    assert_eq!(writer.cp.lookup_utf8("Lsample/anno6044/Marker;"), slot);
+    assert!(writer
+        .annotation_class_refs
+        .contains("sample/anno6044/Marker"));
+}
+
+#[test]
+fn dotted_annotation_name_uses_its_physical_classfile_descriptor() {
+    let dotted =
+        crate::types::type_name_child(crate::types::type_name("sample/anno6044"), "Outer.Inner");
+    let (internal, descriptor) = annotation_class_text(dotted);
+    assert_eq!(internal, "sample/anno6044/Outer$Inner");
+    assert_eq!(descriptor, "Lsample/anno6044/Outer$Inner;");
+}
+
+#[test]
+fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
+    use crate::ir::AnnoValue;
+
+    let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
+    let annotation = crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name("sample/anno6044/Marker"),
+        values: vec![
+            (
+                "shade".to_string(),
+                AnnoValue::Enum(
+                    crate::types::type_name_child(
+                        crate::types::type_name("sample/anno6044"),
+                        "Color.Shade",
+                    ),
+                    "DARK".to_string(),
+                ),
+            ),
+            (
+                "token".to_string(),
+                AnnoValue::Class(crate::types::type_name("sample/anno6044/Token")),
+            ),
+            (
+                "nested".to_string(),
+                AnnoValue::Annotation(crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name_child(
+                        crate::types::type_name("sample/anno6044"),
+                        "Outer.Inner",
+                    ),
+                    values: Vec::new(),
+                }),
+            ),
+        ],
+    };
+    let mut out = Vec::new();
+    writer.ev_annotation(&mut out, &annotation);
+    for descriptor in [
+        "Lsample/anno6044/Marker;",
+        "Lsample/anno6044/Color$Shade;",
+        "Lsample/anno6044/Token;",
+        "Lsample/anno6044/Outer$Inner;",
+    ] {
+        assert!(writer.cp.lookup_utf8(descriptor).is_some(), "{descriptor}");
+    }
+    for internal in [
+        "sample/anno6044/Marker",
+        "sample/anno6044/Color$Shade",
+        "sample/anno6044/Token",
+        "sample/anno6044/Outer$Inner",
+    ] {
+        assert!(
+            writer.annotation_class_refs.contains(internal),
+            "{internal}"
+        );
+    }
+}
+
+#[test]
+fn distinct_annotation_writers_keep_only_writer_local_text() {
+    for index in 0..24 {
+        let left_internal = format!("sample/anno6044/Left{index}");
+        let right_internal = format!("sample/anno6044/Right{index}");
+        let mut left = super::ClassWriter::new("LeftUse", "java/lang/Object");
+        let mut right = super::ClassWriter::new("RightUse", "java/lang/Object");
+        let mut out = Vec::new();
+        left.ev_annotation(
+            &mut out,
+            &crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name(&left_internal),
+                values: Vec::new(),
+            },
+        );
+        right.ev_annotation(
+            &mut out,
+            &crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name(&right_internal),
+                values: Vec::new(),
+            },
+        );
+
+        assert_eq!(left.cp.lookup_utf8(&format!("L{left_internal};")), Some(5));
+        assert_eq!(left.annotation_class_refs.len(), 1);
+        assert!(left.annotation_class_refs.contains(&left_internal));
+        assert!(!left.annotation_class_refs.contains(&right_internal));
+        assert_eq!(
+            right.cp.lookup_utf8(&format!("L{right_internal};")),
+            Some(5)
+        );
+        assert_eq!(right.annotation_class_refs.len(), 1);
+        assert!(right.annotation_class_refs.contains(&right_internal));
+        assert!(!right.annotation_class_refs.contains(&left_internal));
+
+        if index % 2 == 0 {
+            drop(left);
+            drop(right);
+        } else {
+            drop(right);
+            drop(left);
         }
     }
 }
