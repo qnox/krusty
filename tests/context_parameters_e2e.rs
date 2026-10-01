@@ -690,6 +690,43 @@ fn generic_property_with_context_parameters() {
 }
 
 #[test]
+fn context_interface_delegation_forwards_both_interfaces() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        data class Language(var name: String)
+        interface LoggingContext {
+            fun log(level: Int, message: String)
+        }
+        interface SaveRepository<T> {
+            context(context: LoggingContext)
+            fun save(content: T)
+        }
+        context(context: LoggingContext, repository: SaveRepository<Language>)
+        fun startBusinessOperation() {
+            context.log(0, "Operation has started")
+            repository.save(Language("Kotlin"))
+        }
+        class CompositeContext(c1: LoggingContext, c2: SaveRepository<Language>): LoggingContext by c1, SaveRepository<Language> by c2
+        fun box(): String {
+            val loggingCtx = object : LoggingContext {
+                override fun log(level: Int, message: String) {}
+            }
+            val saveCtx = object : SaveRepository<Language> {
+                context(context: LoggingContext)
+                override fun save(content: Language) {
+                    context.log(message = "Saving $content", level = 123)
+                }
+            }
+            with(CompositeContext(loggingCtx, saveCtx)) {
+                startBusinessOperation()
+            }
+            return "OK"
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
 fn missing_context_names_the_parameter() {
     const SRC: &str = r#"
         // LANGUAGE: +ContextParameters

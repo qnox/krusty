@@ -6085,3 +6085,145 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
         ],
     );
 }
+
+fn published_context_roles(name: &str) -> Vec<crate::fir::ResolvedParameterIdentity> {
+    match name {
+        "named" | "namedMember" => vec![
+            crate::fir::ResolvedParameterIdentity::ContextValue {
+                ordinal: 0,
+                source_name: "named".into(),
+            },
+            crate::fir::ResolvedParameterIdentity::Source("value".into()),
+        ],
+        "anonymous" | "anonymousMember" => vec![
+            crate::fir::ResolvedParameterIdentity::AnonymousContextParameter { ordinal: 0 },
+            crate::fir::ResolvedParameterIdentity::Source("value".into()),
+        ],
+        "legacy" | "legacyMember" => vec![
+            crate::fir::ResolvedParameterIdentity::LegacyContextReceiver { ordinal: 0 },
+            crate::fir::ResolvedParameterIdentity::Source("value".into()),
+        ],
+        _ => panic!("unexpected callable {name}"),
+    }
+}
+
+#[test]
+fn compact_headers_publish_named_anonymous_and_legacy_parameter_identities() {
+    let source = r#"
+// LANGUAGE: +ContextReceivers
+class Box
+context(named: Box)
+fun named(value: Int): Int = value
+context(_: Box)
+fun anonymous(value: Int): Int = value
+context(Box)
+fun legacy(value: Int): Int = value
+interface Api {
+    context(named: Box)
+    fun namedMember(value: Int): Int
+    context(_: Box)
+    fun anonymousMember(value: Int): Int
+    context(Box)
+    fun legacyMember(value: Int): Int
+}
+class Impl : Api {
+    context(named: Box)
+    override fun namedMember(value: Int) = value
+    context(_: Box)
+    override fun anonymousMember(value: Int) = value
+    context(Box)
+    override fun legacyMember(value: Int) = value
+}
+class Host(delegate: Api) : Api by delegate
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ContextParameterIdentities")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::from_source(source),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+
+    for name in ["named", "anonymous", "legacy"] {
+        let expected = published_context_roles(name);
+        let signature = analysis
+            .symbols
+            .funs
+            .get(name)
+            .and_then(|overloads| overloads.first())
+            .unwrap_or_else(|| panic!("{name} must be collected from its compact header"));
+        assert_eq!(
+            signature.parameter_identities, expected,
+            "{name} signature identities"
+        );
+        assert_eq!(
+            signature.call_sig().parameter_identities,
+            expected,
+            "{name} call-signature identities"
+        );
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("context-parameter identities must finalize")
+            .module
+            .index();
+        let declaration = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .unwrap_or_else(|| panic!("stable {name} declaration"));
+        let callable = index
+            .callable_for_declaration(declaration)
+            .unwrap_or_else(|| panic!("{name} callable"));
+        let identities = (0..expected.len())
+            .map(|ordinal| {
+                index
+                    .callable_parameter_identity(callable.id, ordinal as u32)
+                    .unwrap_or_else(|| panic!("{name} parameter {ordinal} must keep its role"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(identities, expected, "{name} index identities");
+    }
+
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("delegation must close from the published identities")
+        .module
+        .index();
+    let host = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|header| header.classifier.matches("Host"))
+        })
+        .expect("stable Host classifier");
+    let members = index
+        .classifier_header(host)
+        .expect("Host header")
+        .interface_delegations
+        .first()
+        .expect("Host delegates Api")
+        .members
+        .as_ref();
+    for name in ["namedMember", "anonymousMember", "legacyMember"] {
+        let function = members
+            .iter()
+            .find_map(|member| match member {
+                crate::fir::ResolvedDelegatedMember::Function(function)
+                    if function.name.as_ref() == name =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("delegated {name}"));
+        assert_eq!(
+            function.overridden.parameter_identities.as_ref(),
+            published_context_roles(name),
+            "delegated {name}"
+        );
+    }
+}

@@ -1542,6 +1542,7 @@ mod tests {
             implicit_integer_coercion: vec![],
             param_default_values: vec![],
             param_names: vec![],
+            parameter_identities: vec![],
             lambda_param_types: vec![],
             lambda_recv: vec![],
             inline_modifiers: vec![],
