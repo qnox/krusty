@@ -2056,7 +2056,7 @@ impl IrPlugin for SerializationPlugin {
                             dispatch_receiver: Some(vrecv),
                             args: vec![],
                         });
-                        synthesized_accessor::bind_synthesized_getter(ir, v, foo_id, 0);
+                        synthesized_accessor::bind_field_getter(ir, v, foo_id, 0);
                         let call = ir.add_expr(IrExpr::Call {
                             callee: virtual_iface(
                                 "kotlinx/serialization/encoding/Encoder",

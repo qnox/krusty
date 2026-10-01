@@ -7905,10 +7905,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to `Result.isFailure-impl`; it is not a `kotlin.Result` box. A property declared as a type
   parameter stays a box once that parameter is `Result` (`class Box<T>(val value: T)` read as
   `Box<Result<Boolean>>`): the read `checkcast`s to `kotlin/Result` before `unbox-impl`, and the
-  generic getter stays `getValue`, matching kotlinc. The synthesized accessor's mangled JVM name
+  generic getter stays `getValue`, matching kotlinc.   The synthesized accessor's mangled JVM name
   is a fact of that property. A call is renamed only when it was bound to the property that owns
-  the backing field; a field that is not a property, a binding that names no expression, or a
-  bound node that is not that virtual accessor is rejected rather than left as the plain call.
+  the backing field. A serialized field with no property is an ordinary getter and is not bound.
+  When the value-class representation pass replaces the bound call, it retires that binding with
+  the call. A binding still present when names are stamped must name an expression that is still
+  the virtual accessor; a missing expression or any other node is rejected.
   A property-accessor bridge carries the selected implementation's property identity and accessor
   role, and is retargeted only when that property's layout is the synthesized member. A
   same-spelled getter of another declaration is not retargeted. A member extension that shares

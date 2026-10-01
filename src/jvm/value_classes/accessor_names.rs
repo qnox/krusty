@@ -3,16 +3,25 @@
 //! A property the backend synthesizes (`getter` absent, backing field present) has no callable
 //! of its own. Its JVM spelling is a fact of that property. A call is renamed only when an
 //! earlier pass bound that exact call to the property; a missing expression or a callee that is
-//! not that virtual accessor is a broken binding. A property-accessor bridge is retargeted only
-//! when its selected implementation is this property. Function bridges and a same-spelled
-//! accessor of another declaration keep their targets.
+//! not that virtual accessor is a broken binding. A representation rewrite that replaces the
+//! call retires the binding with it. A property-accessor bridge is retargeted only when its
+//! selected implementation is this property. Function bridges and a same-spelled accessor of
+//! another declaration keep their targets.
 
 use super::member_names::vc_mangle;
 use super::Under;
-use crate::ir::{BridgeAccessorRole, BridgeKind, Callee, IrExpr, IrFile, IrLocalPropertyLayout};
+use crate::ir::{
+    BridgeAccessorRole, BridgeKind, Callee, ExprId, IrExpr, IrFile, IrLocalPropertyLayout,
+};
 use crate::jvm::names::property_getter_name;
 use crate::names::property_setter_name;
 use crate::types::Ty;
+
+/// Drop the accessor binding on `call`. The representation pass replaced that call, so the
+/// virtual accessor it named no longer exists.
+pub(super) fn retire_replaced_accessor_call(ir: &mut IrFile, call: ExprId) {
+    ir.synthesized_accessor_calls.remove(&call);
+}
 
 pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
     for class_index in 0..ir.classes.len() {
@@ -114,7 +123,7 @@ fn retarget_property_bridges(
 
 #[cfg(test)]
 mod tests {
-    use super::{rename_bound_calls, retarget_property_bridges};
+    use super::{rename_bound_calls, retarget_property_bridges, retire_replaced_accessor_call};
     use crate::fir::PropertyId;
     use crate::ir::{
         Bridge, BridgeAccessorRole, BridgeKind, BridgePropertyImplementation, Callee, IrClass,
@@ -287,6 +296,35 @@ mod tests {
             },
         );
         rename_bound_calls(&mut ir, 0, 0, "getResult-impl");
+    }
+
+    #[test]
+    fn a_replaced_accessor_call_retires_its_binding() {
+        let mut ir = IrFile::default();
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.synthesized_accessor_calls.insert(
+            call,
+            SynthesizedAccessorCall {
+                class: 0,
+                property: 0,
+            },
+        );
+        retire_replaced_accessor_call(&mut ir, call);
+        rename_bound_calls(&mut ir, 0, 0, "getResult-impl");
+        assert!(
+            matches!(
+                &ir.exprs[call as usize],
+                IrExpr::Call {
+                    callee: Callee::Local(0),
+                    ..
+                }
+            ),
+            "a retired binding is not renamed"
+        );
     }
 
     #[test]

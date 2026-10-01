@@ -1,8 +1,8 @@
 //! A generated getter call bound to the property that owns its backing field.
 //!
-//! Serialization emits `invokevirtual Owner.getName()` for a property it did not lower itself.
-//! The value-class pass renames that call only through this binding. A field that is not a
-//! property is a broken publication, not a call that should keep the plain spelling.
+//! Serialization emits `invokevirtual Owner.getName()` for a field it did not lower itself.
+//! Only a field that is a property has a synthesized accessor. The value-class pass renames
+//! that call only through this binding, and retires the binding when it replaces the call.
 
 use crate::ir::{ClassId, ExprId, IrFile, SynthesizedAccessorCall};
 
@@ -26,9 +26,23 @@ pub(super) fn bind_synthesized_getter(ir: &mut IrFile, call: ExprId, class: Clas
     );
 }
 
+/// Publish [`bind_synthesized_getter`] when `field` is a property.
+///
+/// A serialized field with no property is an ordinary getter. Its plain spelling is the call's
+/// name, so no accessor binding is published.
+pub(super) fn bind_field_getter(ir: &mut IrFile, call: ExprId, class: ClassId, field: u32) {
+    let is_property = ir.classes[class as usize]
+        .properties
+        .iter()
+        .any(|property| property.backing_field == Some(field));
+    if is_property {
+        bind_synthesized_getter(ir, call, class, field);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::bind_synthesized_getter;
+    use super::{bind_field_getter, bind_synthesized_getter};
     use crate::ir::{IrClass, IrConst, IrExpr, IrFile, IrProperty};
     use crate::types::{type_name, Ty, Visibility};
 
@@ -70,6 +84,18 @@ mod tests {
         let binding = &ir.synthesized_accessor_calls[&call];
         assert_eq!(binding.class, class);
         assert_eq!(binding.property, 0);
+    }
+
+    #[test]
+    fn a_field_with_no_property_keeps_the_plain_getter() {
+        let mut ir = IrFile::default();
+        let class = ir.add_class(IrClass::synthetic(type_name("sample/Foo")));
+        let call = ir.add_expr(IrExpr::Const(IrConst::Null));
+        bind_field_getter(&mut ir, call, class, 0);
+        assert!(
+            !ir.synthesized_accessor_calls.contains_key(&call),
+            "a field that is not a property is not a synthesized accessor"
+        );
     }
 
     #[test]

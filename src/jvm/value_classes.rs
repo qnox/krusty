@@ -2627,6 +2627,10 @@ pub(crate) fn lower_value_classes(
             None => None,
         };
         if let Some(r) = rewrite {
+            // The replacement is the carrier access or static `-impl`, not the virtual getter
+            // the binding named. Leaving the binding would ask the later name stamp to rename
+            // a call that no longer exists.
+            accessor_names::retire_replaced_accessor_call(ir, id);
             ir.exprs[i] = r;
         }
     }
