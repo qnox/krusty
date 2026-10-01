@@ -279,7 +279,7 @@ fn parse_aliases_from_bytes(
         return Ok(());
     };
     for alias in crate::jvm::metadata::metadata_type_aliases(&class) {
-        let name = type_name(&alias.name);
+        let name = alias.name;
         index.type_aliases.insert(name, type_name(&alias.target));
         index.alias_expansions.insert(
             name,
