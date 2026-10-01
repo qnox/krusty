@@ -10466,20 +10466,16 @@ impl<'a> Emitter<'a> {
                             return;
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
-                        let member_target = self.ir.jvm_member_targets.get(&e).copied();
-                        let private_bridge = member_target.is_some_and(|function| {
-                            self.reaches_through_bridge(owner_identity, function)
-                        });
-                        let same_owner_private = !private_bridge
-                            && self.static_owner == Some(StaticOwner::Class(owner_identity))
-                            && member_target.is_some_and(|function| {
-                                self.ir.method_visibility(function).is_private()
-                            });
                         self.mark_call_start(e, code);
                         access_bridges::emit_selected_member_call(
+                            self.ir,
+                            self.run,
+                            self.static_owner,
                             self.cw,
                             code,
                             &access_bridges::SelectedMemberCall {
+                                expression: e,
+                                owner_identity,
                                 owner: &owner,
                                 name: &name,
                                 descriptor: &descriptor,
@@ -10488,8 +10484,6 @@ impl<'a> Emitter<'a> {
                                 interface_owner: interface,
                                 argument_words: aw,
                                 protected: bridge.as_ref(),
-                                private_extension_bridge: private_bridge,
-                                same_owner_private,
                             },
                         );
                         return;

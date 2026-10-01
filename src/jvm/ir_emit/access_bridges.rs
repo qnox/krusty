@@ -714,6 +714,8 @@ pub(super) fn private_member_read_access(
 /// An already-selected member call: a protected or private access bridge, a same-owner private
 /// accessor, or the ordinary interface or class invocation.
 pub(super) struct SelectedMemberCall<'a> {
+    pub(super) expression: crate::ir::ExprId,
+    pub(super) owner_identity: TypeName,
     pub(super) owner: &'a str,
     pub(super) name: &'a str,
     pub(super) descriptor: &'a str,
@@ -722,24 +724,34 @@ pub(super) struct SelectedMemberCall<'a> {
     pub(super) interface_owner: bool,
     pub(super) argument_words: i32,
     pub(super) protected: Option<&'a ProtectedMemberAccessBridge>,
-    /// The callee is a private member-extension accessor reached from another class.
-    pub(super) private_extension_bridge: bool,
-    /// The callee is a private member-extension accessor reached from its declaring class.
-    pub(super) same_owner_private: bool,
 }
 
-/// Emit [`SelectedMemberCall`]. Bridge descriptors and owners are built here; the caller has
-/// already chosen which arm applies.
+/// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
+/// invocation goes through its access bridge; descriptors and owners are built here too.
 pub(super) fn emit_selected_member_call(
+    ir: &IrFile,
+    run: &EmitRun,
+    source_owner: Option<StaticOwner>,
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
     call: &SelectedMemberCall<'_>,
 ) {
+    let member_target = ir.jvm_member_targets.get(&call.expression).copied();
+    let private_extension_bridge = member_target.is_some_and(|function| {
+        source_owner != Some(StaticOwner::Class(call.owner_identity))
+            && run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    });
+    let same_owner_private = !private_extension_bridge
+        && source_owner == Some(StaticOwner::Class(call.owner_identity))
+        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
     if let Some(bridge) = call.protected {
         emit_protected_member_invocation(cw, code, bridge, call);
-    } else if call.private_extension_bridge {
+    } else if private_extension_bridge {
         emit_private_member_extension_call(cw, code, call);
-    } else if call.same_owner_private {
+    } else if same_owner_private {
         emit_direct_private_accessor_call(cw, code, call);
     } else if call.interface_owner {
         let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
