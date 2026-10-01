@@ -55,18 +55,27 @@ pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
 
 use std::cell::UnsafeCell;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NameId(pub(crate) u32);
 
-#[derive(Debug)]
+/// `parent == NO_PARENT` is the root. A real [`NameId`] never uses this value: the arena would have
+/// to hold `u32::MAX` nodes.
+const NO_PARENT: u32 = u32::MAX;
+
+/// Three machine words. A fat `&str` plus `Option<NameId>` padded the node to 40 bytes, and the JDK
+/// name tree allocates its chunks up front (~32k slots). The segment is the interned spelling's
+/// bytes; the length fits in 16 bits because a JVM path segment cannot exceed that.
+#[repr(C)]
 struct NameNode {
-    parent: Option<NameId>,
-    sep: u8,
-    segment: std::sync::Arc<str>,
+    /// Shared spelling owned by the tree's `SegmentPool`. A cloned tree shares that pool, so its
+    /// copied nodes keep pointing at the same immutable bytes without owning them individually.
+    segment_ptr: *const u8,
     /// Exact classifier owner supplied by [`NameTree::nested_child_of`], encoded as `id + 1` (zero
     /// means the node was not created through an explicit nested relation). Kept separate from the
     /// textual cache below: a flattened spelling such as `Outer$$serializer` is ambiguous, while the
@@ -77,18 +86,93 @@ struct NameNode {
     /// no known textual relation. A separator whose owner is not interned remains uncached: another
     /// thread may intern it later.
     nested_owner: AtomicU32,
+    parent: u32,
+    segment_len: u16,
+    sep: u8,
+}
+
+impl NameNode {
+    fn new(parent: Option<NameId>, sep: u8, segment: &str) -> Self {
+        let segment_len = u16::try_from(segment.len()).expect("name segment exceeds 65535 bytes");
+        Self {
+            segment_ptr: segment.as_ptr(),
+            exact_nested_owner: AtomicU32::new(0),
+            nested_owner: AtomicU32::new(0),
+            parent: parent.map(|id| id.0).unwrap_or(NO_PARENT),
+            segment_len,
+            sep,
+        }
+    }
+
+    fn parent_id(&self) -> Option<NameId> {
+        if self.parent == NO_PARENT {
+            None
+        } else {
+            Some(NameId(self.parent))
+        }
+    }
+
+    fn segment(&self) -> &str {
+        if self.segment_len == 0 {
+            return "";
+        }
+        // SAFETY: callers can borrow this node only through its tree's arena. The tree's shared
+        // `SegmentPool` owns these immutable UTF-8 bytes for every node read, including clone
+        // snapshots, and this node records their exact checked length.
+        unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                self.segment_ptr,
+                usize::from(self.segment_len),
+            ))
+        }
+    }
 }
 
 const NO_NESTED_OWNER: u32 = u32::MAX;
 
+/// One reclaimable copy of each segment used by a tree and all of its clones. Nodes remain compact
+/// raw pointer/length views; this pool is the explicit owner that makes those pointers valid.
+const SEGMENT_SHARDS: usize = 16;
+
+struct SegmentPool {
+    shards: [RwLock<HashSet<std::sync::Arc<str>, FxBuildHasher>>; SEGMENT_SHARDS],
+}
+
+impl Default for SegmentPool {
+    fn default() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| RwLock::new(HashSet::default())),
+        }
+    }
+}
+
+impl SegmentPool {
+    fn intern(&self, segment: &str) -> std::sync::Arc<str> {
+        let mut hasher = FxHasher::default();
+        segment.hash(&mut hasher);
+        let shard = &self.shards[hasher.finish() as usize % SEGMENT_SHARDS];
+        if let Some(existing) = shard.read().unwrap().get(segment) {
+            return std::sync::Arc::clone(existing);
+        }
+        let mut values = shard.write().unwrap();
+        if let Some(existing) = values.get(segment) {
+            return std::sync::Arc::clone(existing);
+        }
+        let stored: std::sync::Arc<str> = segment.into();
+        values.insert(std::sync::Arc::clone(&stored));
+        stored
+    }
+}
+
 impl Clone for NameNode {
     fn clone(&self) -> Self {
         Self {
-            parent: self.parent,
-            sep: self.sep,
-            segment: self.segment.clone(),
+            segment_ptr: self.segment_ptr,
             exact_nested_owner: AtomicU32::new(self.exact_nested_owner.load(Ordering::Relaxed)),
             nested_owner: AtomicU32::new(self.nested_owner.load(Ordering::Relaxed)),
+            parent: self.parent,
+            segment_len: self.segment_len,
+            sep: self.sep,
         }
     }
 }
@@ -208,7 +292,7 @@ impl Table {
             if slot as u32 == tag {
                 let id = ((slot >> 32) - 1) as u32;
                 let node = arena.get(id);
-                if node.parent == Some(parent) && &*node.segment == segment {
+                if node.parent_id() == Some(parent) && node.segment() == segment {
                     return Some(NameId(id));
                 }
             }
@@ -235,8 +319,8 @@ impl Table {
             if slot as u32 == tag {
                 let id = ((slot >> 32) - 1) as u32;
                 let node = arena.get(id);
-                if node.parent == Some(parent) {
-                    let candidate = node.segment.as_bytes();
+                if node.parent_id() == Some(parent) {
+                    let candidate = node.segment().as_bytes();
                     if candidate.len() == owner.len() + nested.len() + 1
                         && candidate.get(owner.len()) == Some(&b'$')
                         && candidate[..owner.len()] == *owner.as_bytes()
@@ -325,29 +409,28 @@ struct WriterState {
 /// genuinely new insertion takes the writer lock.
 pub struct NameTree {
     arena: Arena,
+    /// Declared after `arena` so node storage is dropped before its segment owner.
+    segments: std::sync::Arc<SegmentPool>,
     current: AtomicPtr<Table>,
     writer: Mutex<WriterState>,
 }
 
-// SAFETY: readers only follow published data (acquire loads of table slots / the table pointer pairing
-// with the writer's release stores); all mutation is serialized by the writer lock.
+// SAFETY: readers only follow published data (acquire loads of table slots / the table pointer
+// pairing with the writer's release stores); all mutation is serialized by the writer lock. Every
+// node's segment pointer targets immutable bytes retained by this tree's shared `segments` owner.
 unsafe impl Sync for NameTree {}
 unsafe impl Send for NameTree {}
 
 impl Default for NameTree {
     fn default() -> Self {
+        let segments = std::sync::Arc::new(SegmentPool::default());
         let arena = Arena::new();
-        arena.push(NameNode {
-            parent: None,
-            sep: 0,
-            segment: std::sync::Arc::from(""),
-            exact_nested_owner: AtomicU32::new(0),
-            nested_owner: AtomicU32::new(0),
-        });
+        arena.push(NameNode::new(None, 0, ""));
         let table = Box::new(Table::new(BASE as usize));
         let current = AtomicPtr::new(&*table as *const Table as *mut Table);
         NameTree {
             arena,
+            segments,
             current,
             writer: Mutex::new(WriterState {
                 tables: vec![table],
@@ -383,6 +466,7 @@ impl Clone for NameTree {
         let current = AtomicPtr::new(&*table as *const Table as *mut Table);
         NameTree {
             arena,
+            segments: std::sync::Arc::clone(&self.segments),
             current,
             writer: Mutex::new(WriterState {
                 tables: vec![table],
@@ -437,9 +521,9 @@ impl NameTree {
     /// → `Outer$Inner`) without rendering the qualified parent.
     pub fn nested_child_of(&self, owner: NameId, nested: &str) -> NameId {
         let owner_node = self.node(owner);
-        let parent = owner_node.parent.unwrap_or(Self::ROOT);
-        let mut segment = String::with_capacity(owner_node.segment.len() + nested.len() + 1);
-        segment.push_str(&owner_node.segment);
+        let parent = owner_node.parent_id().unwrap_or(Self::ROOT);
+        let mut segment = String::with_capacity(owner_node.segment().len() + nested.len() + 1);
+        segment.push_str(&owner_node.segment());
         segment.push('$');
         segment.push_str(nested);
         let child = self.child_or_insert(parent, owner_node.sep, &segment);
@@ -455,8 +539,8 @@ impl NameTree {
     /// Read-only counterpart of [`Self::nested_child_of`].
     pub fn existing_nested_child_of(&self, owner: NameId, nested: &str) -> Option<NameId> {
         let owner_node = self.node(owner);
-        let parent = owner_node.parent?;
-        self.existing_nested_under(parent, &owner_node.segment, nested)
+        let parent = owner_node.parent_id()?;
+        self.existing_nested_under(parent, &owner_node.segment(), nested)
     }
 
     /// The classfile sibling `owner_segment$nested` under `parent`, without inserting it or
@@ -485,8 +569,8 @@ impl NameTree {
         let mut cur = id;
         while cur != Self::ROOT {
             let node = other.node(cur);
-            parts.push((node.sep, &*node.segment));
-            cur = node.parent.expect("non-root name node has a parent");
+            parts.push((node.sep, &*node.segment()));
+            cur = node.parent_id().expect("non-root name node has a parent");
         }
         let mut parent = Self::ROOT;
         for (sep, segment) in parts.into_iter().rev() {
@@ -508,8 +592,8 @@ impl NameTree {
         let mut cur = id;
         while cur != Self::ROOT {
             let node = other.node(cur);
-            parts.push(&*node.segment);
-            cur = node.parent.expect("non-root name node has a parent");
+            parts.push(&*node.segment());
+            cur = node.parent_id().expect("non-root name node has a parent");
         }
         let mut parent = Self::ROOT;
         for segment in parts.into_iter().rev() {
@@ -541,9 +625,9 @@ impl NameTree {
         let mut cur = id;
         while cur != Self::ROOT {
             let node = self.node(cur);
-            len += node.segment.len() + usize::from(node.sep != 0);
-            parts.push((node.sep, &*node.segment));
-            cur = node.parent.expect("non-root name node has a parent");
+            len += node.segment().len() + usize::from(node.sep != 0);
+            parts.push((node.sep, node.segment()));
+            cur = node.parent_id().expect("non-root name node has a parent");
         }
         let mut out = String::with_capacity(len);
         for (sep, segment) in parts.into_iter().rev() {
@@ -564,11 +648,11 @@ impl NameTree {
             return String::new();
         }
         let node = self.node(id);
-        if !node.segment.contains('.') {
+        if !node.segment().contains('.') {
             return self.render(id);
         }
 
-        let mut out = match node.parent {
+        let mut out = match node.parent_id() {
             Some(parent) if parent != Self::ROOT => {
                 let mut prefix = self.render(parent);
                 prefix.push(node.sep as char);
@@ -576,9 +660,9 @@ impl NameTree {
             }
             _ => String::new(),
         };
-        out.reserve(node.segment.len());
+        out.reserve(node.segment().len());
         out.extend(
-            node.segment
+            node.segment()
                 .chars()
                 .map(|ch| if ch == '.' { '$' } else { ch }),
         );
@@ -687,7 +771,7 @@ impl NameTree {
     }
 
     pub fn qualifier_matches(&self, id: NameId, qualifier: &str) -> bool {
-        self.get(qualifier) == Some(id) || &*self.node(id).segment == qualifier
+        self.get(qualifier) == Some(id) || self.node(id).segment() == qualifier
     }
 
     pub fn package_matches(&self, id: NameId, package: &str) -> bool {
@@ -726,10 +810,10 @@ impl NameTree {
         let mut current = id;
         while current != Self::ROOT {
             let node = self.node(current);
-            if expected.next() != Some(node.segment.as_ref()) {
+            if expected.next() != Some(node.segment().as_ref()) {
                 return false;
             }
-            current = node.parent.expect("non-root name node has a parent");
+            current = node.parent_id().expect("non-root name node has a parent");
         }
         expected.next().is_none()
     }
@@ -745,13 +829,13 @@ impl NameTree {
     ) -> bool {
         let (namespace, candidate) = path.rsplit_once('/').unwrap_or(("", path));
         let owner = self.node(owner);
-        let Some(parent) = owner.parent else {
+        let Some(parent) = owner.parent_id() else {
             return false;
         };
         if !self.matches_path(parent, namespace) {
             return false;
         }
-        let expected_len = owner.segment.len() + 1 + nested.len();
+        let expected_len = owner.segment().len() + 1 + nested.len();
         if candidate.len() != expected_len {
             return false;
         }
@@ -759,7 +843,7 @@ impl NameTree {
             .bytes()
             .zip(
                 owner
-                    .segment
+                    .segment()
                     .bytes()
                     .map(|byte| if byte == b'.' { b'$' } else { byte })
                     .chain(std::iter::once(b'$'))
@@ -781,10 +865,10 @@ impl NameTree {
         }
         let candidate = self.node(candidate);
         let owner = self.node(owner);
-        candidate.parent == owner.parent
+        candidate.parent_id() == owner.parent_id()
             && candidate
-                .segment
-                .strip_prefix(&*owner.segment)
+                .segment()
+                .strip_prefix(&*owner.segment())
                 .is_some_and(|suffix| suffix.starts_with('$'))
     }
 
@@ -804,7 +888,7 @@ impl NameTree {
         if cached != 0 {
             return Some(NameId(cached - 1));
         }
-        let Some(split) = node.segment.rfind(['$', '.']) else {
+        let Some(split) = node.segment().rfind(['$', '.']) else {
             // No future interning can turn this immutable segment into a nested spelling.
             let _ = node.nested_owner.compare_exchange(
                 0,
@@ -814,7 +898,7 @@ impl NameTree {
             );
             return None;
         };
-        let owner = self.child(node.parent?, &node.segment[..split])?;
+        let owner = self.child(node.parent_id()?, &node.segment()[..split])?;
         // `u32::MAX` is reserved for the definitive-negative sentinel. Reaching the one owner id
         // whose +1 encoding collides with it would require more than four billion interned names;
         // return it correctly but leave that singular result uncached.
@@ -836,12 +920,12 @@ impl NameTree {
     /// all textual boundaries against the exact declarations of the current file.
     pub(crate) fn existing_nested_owners(&self, nested: NameId) -> Vec<NameId> {
         let node = self.node(nested);
-        let Some(parent) = node.parent else {
+        let Some(parent) = node.parent_id() else {
             return Vec::new();
         };
-        node.segment
+        node.segment()
             .rmatch_indices(['$', '.'])
-            .filter_map(|(split, _)| self.child(parent, &node.segment[..split]))
+            .filter_map(|(split, _)| self.child(parent, &node.segment()[..split]))
             .collect()
     }
 
@@ -851,8 +935,8 @@ impl NameTree {
     pub(crate) fn nested_segment_within(&self, candidate: NameId, owner: NameId) -> Option<&str> {
         let candidate = self.node(candidate);
         let owner = self.node(owner);
-        (candidate.parent == owner.parent)
-            .then(|| candidate.segment.strip_prefix(&*owner.segment))
+        (candidate.parent_id() == owner.parent_id())
+            .then(|| candidate.segment().strip_prefix(&*owner.segment()))
             .flatten()?
             .strip_prefix('$')
     }
@@ -862,14 +946,14 @@ impl NameTree {
     /// external strings rather than rendering a name and interpreting it themselves.
     pub(crate) fn jvm_nested_parts(&self, nested: NameId) -> Option<(String, String)> {
         let node = self.node(nested);
-        let split = node.segment.rfind('$')?;
-        let parent = node.parent?;
+        let split = node.segment().rfind('$')?;
+        let parent = node.parent_id()?;
         let mut outer = self.render(parent);
         if parent != Self::ROOT {
             outer.push('/');
         }
-        outer.push_str(&node.segment[..split]);
-        Some((outer, node.segment[split + 1..].to_string()))
+        outer.push_str(&node.segment()[..split]);
+        Some((outer, node.segment()[split + 1..].to_string()))
     }
 
     /// Lexicographic ordering of two stored paths without allocating their rendered forms.
@@ -878,11 +962,11 @@ impl NameTree {
     }
 
     pub fn parent(&self, id: NameId) -> Option<NameId> {
-        self.node(id).parent
+        self.node(id).parent_id()
     }
 
     pub fn segment(&self, id: NameId) -> &str {
-        &self.node(id).segment
+        self.node(id).segment()
     }
 
     #[cfg(test)]
@@ -926,8 +1010,8 @@ impl NameTree {
                 if s != 0 {
                     let id = ((s >> 32) - 1) as u32;
                     let node = self.arena.get(id);
-                    let parent = node.parent.expect("child entries have a parent");
-                    grown.install(child_hash(parent, &node.segment), id);
+                    let parent = node.parent_id().expect("child entries have a parent");
+                    grown.install(child_hash(parent, &node.segment()), id);
                 }
             }
             self.current
@@ -935,14 +1019,8 @@ impl NameTree {
             w.tables.push(grown);
             table = unsafe { &*self.current.load(Ordering::Relaxed) };
         }
-        let segment: std::sync::Arc<str> = std::sync::Arc::from(segment);
-        let id = self.arena.push(NameNode {
-            parent: Some(parent),
-            sep,
-            segment,
-            exact_nested_owner: AtomicU32::new(0),
-            nested_owner: AtomicU32::new(0),
-        });
+        let segment = self.segments.intern(segment);
+        let id = self.arena.push(NameNode::new(Some(parent), sep, &segment));
         table.install(h, id);
         w.count += 1;
         NameId(id)
@@ -983,8 +1061,8 @@ impl NameTree {
         let mut cur = id;
         while cur != Self::ROOT {
             let node = self.node(cur);
-            parts.push((node.sep, node.segment.as_bytes()));
-            cur = node.parent.expect("non-root name node has a parent");
+            parts.push((node.sep, node.segment().as_bytes()));
+            cur = node.parent_id().expect("non-root name node has a parent");
         }
         parts
             .into_iter()
@@ -998,6 +1076,58 @@ impl NameTree {
 mod tests {
     use super::{NameTree, NO_NESTED_OWNER};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn name_node_stores_three_words() {
+        assert_eq!(std::mem::size_of::<super::NameNode>(), 24);
+        assert_eq!(std::mem::align_of::<super::NameNode>(), 8);
+    }
+
+    #[test]
+    fn cloned_tree_keeps_shared_segments_after_source_drop() {
+        let first = NameTree::default();
+        let left = first.insert("sample/catalog6044/List");
+        let retained = first.segments.intern("List");
+        let lifetime = std::sync::Arc::downgrade(&retained);
+        drop(retained);
+
+        let cloned = first.clone();
+        assert!(std::ptr::eq(first.segment(left), cloned.segment(left)));
+        drop(first);
+
+        assert_eq!(cloned.segment(left), "List");
+        assert_eq!(cloned.render(left), "sample/catalog6044/List");
+        assert!(lifetime.upgrade().is_some());
+        drop(cloned);
+        assert!(lifetime.upgrade().is_none());
+    }
+
+    #[test]
+    fn independent_tree_segments_survive_either_drop_order() {
+        fn assert_remaining_tree(first_drops_first: bool) {
+            let first = NameTree::default();
+            let second = NameTree::default();
+            let first_id = first.insert("sample/first6044/List");
+            let second_id = second.insert("sample/second6044/List");
+
+            assert!(!std::ptr::eq(
+                first.segment(first_id),
+                second.segment(second_id)
+            ));
+            if first_drops_first {
+                drop(first);
+                assert_eq!(second.segment(second_id), "List");
+                assert_eq!(second.render(second_id), "sample/second6044/List");
+            } else {
+                drop(second);
+                assert_eq!(first.segment(first_id), "List");
+                assert_eq!(first.render(first_id), "sample/first6044/List");
+            }
+        }
+
+        assert_remaining_tree(true);
+        assert_remaining_tree(false);
+    }
 
     #[test]
     fn compares_paths_without_rendering() {
