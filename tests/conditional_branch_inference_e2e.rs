@@ -2,15 +2,26 @@
 
 use super::common;
 
-fn assert_diagnostics(src: &str, expected: &[&str]) {
-    let diagnostics =
-        common::checker_diags_with_stdlib(src).expect("checker diagnostics available");
-    assert_eq!(
-        diagnostics.len(),
-        expected.len(),
-        "unexpected diagnostic count: {diagnostics:?}"
+fn assert_diagnostics(src: &str, expected: &[(usize, usize, &str)]) {
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", src)],
+        &[common::stdlib_jar(), common::jdk_modules()],
     );
-    assert_eq!(diagnostics, expected);
+    let expected = expected
+        .iter()
+        .map(|(line, column, message)| common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: *line,
+            column: *column,
+            message: (*message).to_string(),
+        })
+        .collect::<Vec<_>>();
+    let mut krusty = common::compiler_errors(&result.krusty_stdout);
+    krusty.extend(common::compiler_errors(&result.krusty_stderr));
+    assert_eq!(result.reference_code, 1, "kotlinc unexpectedly accepted");
+    assert_eq!(result.krusty_code, 1, "krusty unexpectedly accepted");
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_eq!(krusty, expected);
 }
 
 #[test]
@@ -22,7 +33,11 @@ fn elvis_right_side_binds_from_non_null_left() {
         }\n";
     assert_diagnostics(
         SRC,
-        &["initializer type mismatch: expected 'String', actual 'Result<Int>'."],
+        &[(
+            4,
+            15,
+            "initializer type mismatch: expected 'String', actual 'Result<Int>'.",
+        )],
     );
 }
 
@@ -35,7 +50,11 @@ fn if_branches_bind_generic_calls_from_sibling() {
         }\n";
     assert_diagnostics(
         THEN_CALL,
-        &["initializer type mismatch: expected 'String', actual 'Result<Int>?'."],
+        &[(
+            4,
+            15,
+            "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
+        )],
     );
     const ELSE_CALL: &str = "fun <T> id(x: T): T = x\n\
         fun box() {\n\
@@ -44,7 +63,11 @@ fn if_branches_bind_generic_calls_from_sibling() {
         }\n";
     assert_diagnostics(
         ELSE_CALL,
-        &["initializer type mismatch: expected 'String', actual 'Result<Int>?'."],
+        &[(
+            4,
+            15,
+            "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
+        )],
     );
 }
 
@@ -57,7 +80,11 @@ fn when_arms_bind_generic_calls_from_sibling() {
         }\n";
     assert_diagnostics(
         ELSE_CALL,
-        &["initializer type mismatch: expected 'String', actual 'Result<Int>?'."],
+        &[(
+            4,
+            15,
+            "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
+        )],
     );
     const FIRST_ARM_CALL: &str = "fun <T> id(x: T): T = x\n\
         fun box() {\n\
@@ -66,7 +93,11 @@ fn when_arms_bind_generic_calls_from_sibling() {
         }\n";
     assert_diagnostics(
         FIRST_ARM_CALL,
-        &["initializer type mismatch: expected 'String', actual 'Result<Int>?'."],
+        &[(
+            4,
+            15,
+            "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
+        )],
     );
 }
 
@@ -78,7 +109,11 @@ fn sibling_recheck_preserves_branch_narrowing() {
         }\n";
     assert_diagnostics(
         IF_SRC,
-        &["initializer type mismatch: expected 'String', actual 'Int'."],
+        &[(
+            3,
+            20,
+            "initializer type mismatch: expected 'String', actual 'Int'.",
+        )],
     );
 
     const WHEN_SRC: &str = "fun <T> from(value: String): T = throw RuntimeException()\n\
@@ -90,7 +125,11 @@ fn sibling_recheck_preserves_branch_narrowing() {
         }\n";
     assert_diagnostics(
         WHEN_SRC,
-        &["initializer type mismatch: expected 'String', actual 'Int'."],
+        &[(
+            3,
+            20,
+            "initializer type mismatch: expected 'String', actual 'Int'.",
+        )],
     );
 }
 
@@ -102,7 +141,11 @@ fn empty_list_binds_from_sibling_branch() {
         }\n";
     assert_diagnostics(
         SRC,
-        &["initializer type mismatch: expected 'String', actual 'List<String>'."],
+        &[(
+            3,
+            15,
+            "initializer type mismatch: expected 'String', actual 'List<String>'.",
+        )],
     );
 }
 
@@ -130,6 +173,81 @@ fn rebound_conditional_results_run() {
 }
 
 #[test]
+fn a_sibling_collection_instantiates_an_unbound_result_through_its_supertype() {
+    const SRC: &str = "fun <T> grow(start: Collection<T>, preserveOrder: Boolean, f: (T) -> Collection<T>): Collection<T> {\n\
+            if (start.isEmpty()) return start\n\
+            val result = if (preserveOrder) LinkedHashSet(start) else HashSet(start)\n\
+            var elementsToCheck = result\n\
+            var oldSize = 0\n\
+            while (result.size > oldSize) {\n\
+                oldSize = result.size\n\
+                val toAdd = if (preserveOrder) linkedSetOf() else hashSetOf<T>()\n\
+                elementsToCheck.forEach { toAdd.addAll(f(it)) }\n\
+                result.addAll(toAdd)\n\
+                elementsToCheck = toAdd\n\
+            }\n\
+            return result\n\
+        }\n\
+        fun <T> either(flag: Boolean): MutableCollection<T> =\n\
+            if (flag) arrayListOf<T>() else linkedSetOf()\n\
+        fun <T> reversed(flag: Boolean): MutableCollection<T> =\n\
+            if (flag) linkedSetOf() else arrayListOf<T>()\n\
+        fun <T> picked(which: Int): MutableCollection<T> = when (which) {\n\
+            0 -> arrayListOf()\n\
+            1 -> linkedSetOf()\n\
+            else -> hashSetOf<T>()\n\
+        }\n\
+        fun box(): String {\n\
+            val grown = grow(listOf(\"a\"), false) { value -> if (value == \"a\") listOf(\"b\") else emptyList() }\n\
+            val ordered = grow(listOf(1), true) { value -> if (value == 1) listOf(2) else emptyList() }\n\
+            val forward = either<String>(true)\n\
+            forward.add(\"c\")\n\
+            val backward = reversed<Int>(false)\n\
+            backward.add(3)\n\
+            val chosen = picked<String>(1)\n\
+            chosen.add(\"d\")\n\
+            val ok = grown.contains(\"a\") && grown.contains(\"b\") && grown.size == 2 &&\n\
+                ordered.contains(1) && ordered.contains(2) && ordered.size == 2 &&\n\
+                forward.contains(\"c\") && backward.contains(3) && chosen.contains(\"d\")\n\
+            return if (ok) \"OK\" else \"FAIL\"\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(SRC, "SiblingCollectionSupertype");
+}
+
+#[test]
+fn an_unrelated_sibling_still_cannot_instantiate_a_collection() {
+    const IF_SRC: &str = "fun box(flag: Boolean) {\n\
+            val mixed = if (flag) linkedSetOf() else 1\n\
+        }\n";
+    assert_diagnostics(
+        IF_SRC,
+        &[(
+            2,
+            23,
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+        )],
+    );
+    const BOTH_SRC: &str = "fun box(flag: Boolean) {\n\
+            val mixed = if (flag) linkedSetOf() else hashSetOf()\n\
+        }\n";
+    assert_diagnostics(
+        BOTH_SRC,
+        &[
+            (
+                2,
+                23,
+                "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            ),
+            (
+                2,
+                42,
+                "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            ),
+        ],
+    );
+}
+
+#[test]
 fn truly_unbound_call_still_cannot_infer() {
     const SRC: &str = "fun box(): String {\n\
         val x = Result.failure(RuntimeException(\"z\"))\n\
@@ -137,6 +255,10 @@ fn truly_unbound_call_still_cannot_infer() {
     }\n";
     assert_diagnostics(
         SRC,
-        &["cannot infer type for type parameter 'T'. Specify it explicitly."],
+        &[(
+            2,
+            16,
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+        )],
     );
 }

@@ -7,6 +7,7 @@ use nullable_actual::nullable_generic_actual;
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
+mod conditional_result;
 mod postponed_result;
 
 use bound_relations::complete_dependent_bound_bindings;
@@ -24,6 +25,7 @@ pub(crate) use call_constraints::{
     infer_generic_call_constraints_with_receiver_from_symbols, AssignabilityConstraints,
 };
 pub(crate) use call_site_variables::CallSiteVariables;
+pub(crate) use conditional_result::generic_return_expectation_from_sibling;
 pub(crate) use postponed_result::{
     instantiate_unconstrained_result, nested_result_from_concrete_parameter,
     unconstrained_result_bindings,

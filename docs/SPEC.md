@@ -2607,9 +2607,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
 - **Conditional branches contribute result-type constraints to generic calls.** For `if`, `when`,
   and elvis expressions, a selected call with unbound result formals is rechecked against a sibling
-  result type that can bind them. Branch order does not affect the binding. If no sibling can bind
-  the formals, the cannot-infer diagnostic is reported at the call. Test:
-  `tests/conditional_branch_inference_e2e.rs`.
+  result type that can bind them. The sibling does not have to use the call's own class. A result
+  that is a subtype of the sibling binds through that sibling (`linkedSetOf()` beside
+  `hashSetOf<T>()`), a more specific sibling binds through the call's applied supertype
+  (`emptyList()` beside `mutableListOf("a")`), and otherwise the two bind through their unique
+  nearest shared generic supertype (`linkedSetOf()` beside `arrayListOf<T>()`). A nullable
+  sibling and that same type without null are one face; the expectation follows the declared
+  return's nullability, so `Result.failure()` beside `Result<Int>?` is rechecked as `Result<Int>`.
+  Equally-near unrelated faces are ambiguous rather than being selected by declaration order. A `when` whose
+  arms meet only in an intersection uses the declared expected type, the same way an `if` does.
+  Branch order does not affect the binding.
+  If no sibling can bind the formals, the cannot-infer diagnostic is reported at the call. Two
+  unbound calls still cannot infer from each other. Test:
+  `tests/conditional_branch_inference_e2e.rs`, `tests/conditional_sibling_rebind_e2e.rs`.
 - **A formal that appears only inside another formal's projected bound is inferred from that
   argument.** `<R, C : MutableCollection<in R>> id(c: C)` applied to `MutableCollection<T>` or
   `ArrayList<T>` binds `R` to `T`, including when `T` belongs to the caller. A star argument
