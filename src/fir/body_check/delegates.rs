@@ -661,6 +661,7 @@ fn selected_delegate_call(
                     parameters: parameters.clone(),
                     result: resolved(*ret)?,
                     declared_result: None,
+                    overridden_results: Box::new([]),
                     suspend: false,
                     can_inline: false,
                     inline_plan: None,
@@ -731,6 +732,13 @@ fn selected_delegate_call(
                     parameters: parameters.clone(),
                     result: resolved(callable.ret)?,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
+                    overridden_results: callable
+                        .overridden_results
+                        .iter()
+                        .copied()
+                        .map(resolved)
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
                     suspend: callable.suspend,
                     can_inline: callable.inline.can_inline(),
                     inline_plan: super::inline_body_plan::publish(
@@ -801,6 +809,7 @@ fn selected_delegate_call(
                         .into_boxed_slice(),
                     result: resolved(*ret)?,
                     declared_result: declared_ret.map(resolved).transpose()?,
+                    overridden_results: Box::new([]),
                     suspend: *suspend,
                     can_inline: inline.can_inline(),
                     inline_plan: super::inline_body_plan::publish(

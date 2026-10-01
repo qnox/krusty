@@ -2404,18 +2404,18 @@ pub struct IrFile {
     /// suspension call expression.
     pub value_class_suspend_calls: std::collections::HashMap<ExprId, IrValueClassSuspendResult>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
-    /// return, before CPS erasure to `Object`). Recorded from the checked FIR call target, so the
-    /// coroutine pass recognizes a suspend call to ANOTHER file or a classpath
-    /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
-    /// calls are caught by `suspend_funs`; this is the cross-unit complement.
+    /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
+    /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: std::collections::HashMap<u32, Ty>,
+    /// A cross-unit suspend call → the declared results of the declarations its callee overrides,
+    /// nearest first, when it overrides any: how its result crosses the continuation is the target's.
+    pub suspend_call_overridden_results: std::collections::HashMap<ExprId, Box<[Ty]>>,
     /// Non-call expressions whose evaluation is a coroutine SUSPENSION POINT → their logical result
     /// type. Unlike [`Self::suspend_calls`], these nodes do not name a callee and must not have a
     /// continuation argument appended by the coroutine pass. The motivating intrinsic is an inlined
     /// `suspendCoroutineUninterceptedOrReturn` block: lowering has already materialized its continuation
-    /// use inside the block, while the coroutine pass still needs to split and resume around the block as
-    /// one atomic point. Keeping this semantic category separate prevents a structural block from being
-    /// mistaken for a cross-unit call merely because both can suspend.
+    /// use inside the block, while the coroutine pass still splits and resumes around it as one atomic
+    /// point, never mistaking it for a cross-unit call merely because both can suspend.
     pub intrinsic_suspension_points: std::collections::HashMap<u32, IrIntrinsicSuspensionPoint>,
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.

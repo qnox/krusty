@@ -150,6 +150,14 @@ impl BodyFirChecker<'_> {
                             .into_boxed_slice(),
                         result: resolved(member.ret)?,
                         declared_result: member.member.declared_ret.map(resolved).transpose()?,
+                        overridden_results: member
+                            .member
+                            .overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend: member.member.suspend(),
                         can_inline: member.member.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -201,6 +209,13 @@ impl BodyFirChecker<'_> {
                             .into_boxed_slice(),
                         result: resolved(callable.ret)?,
                         declared_result: callable.declared_ret.map(resolved).transpose()?,
+                        overridden_results: callable
+                            .overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend: callable.suspend,
                         can_inline: callable.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -237,6 +252,7 @@ impl BodyFirChecker<'_> {
                 inline_body_plan,
                 suspend,
                 declared_ret,
+                overridden_results,
                 vararg_index,
                 ..
             } if context_args.is_empty() && vararg_index.is_none() => {
@@ -272,6 +288,12 @@ impl BodyFirChecker<'_> {
                             .into_boxed_slice(),
                         result: resolved(ret)?,
                         declared_result: declared_ret.map(resolved).transpose()?,
+                        overridden_results: overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(

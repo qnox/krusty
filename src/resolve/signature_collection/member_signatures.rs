@@ -450,6 +450,7 @@ pub(in crate::resolve) fn declared_member_callable_headers(
                     external_identity: None,
                     external_default_provider: None,
                     declared_ret: None,
+                    overridden_results: Box::new([]),
                     inline_body_plan: None,
                 });
         } else {
