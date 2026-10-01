@@ -772,3 +772,132 @@ fn ci_runs_prebuilt_box_and_regression_conformance() {
         "box suite, then the other tests, then release"
     );
 }
+
+#[test]
+fn overlapping_callers_hold_distinct_servers_up_to_the_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    let pool = super::ServerPool::<usize>::new();
+    let next_id = AtomicUsize::new(0);
+    let active = AtomicUsize::new(0);
+    let max_active = AtomicUsize::new(0);
+    let seen = Mutex::new(Vec::new());
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        for _ in 0..4 {
+            let pool = &pool;
+            let next_id = &next_id;
+            let active = &active;
+            let max_active = &max_active;
+            let seen = &seen;
+            let entered_tx = entered_tx.clone();
+            let release = Arc::clone(&release);
+            scope.spawn(move || {
+                pool.with_server(
+                    2,
+                    || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+                    |id| {
+                        let now = active.fetch_add(1, Ordering::AcqRel) + 1;
+                        max_active.fetch_max(now, Ordering::Relaxed);
+                        seen.lock().unwrap_or_else(|err| err.into_inner()).push(*id);
+                        entered_tx.send(*id).expect("controller receives admission");
+
+                        let (released, available) = &*release;
+                        let released = released.lock().unwrap_or_else(|err| err.into_inner());
+                        let (released, _) = available
+                            .wait_timeout_while(released, Duration::from_secs(5), |released| {
+                                !*released
+                            })
+                            .unwrap_or_else(|err| err.into_inner());
+                        assert!(
+                            *released,
+                            "controller did not release an admitted server within 5 seconds"
+                        );
+                        active.fetch_sub(1, Ordering::AcqRel);
+                    },
+                )
+                .expect("cap allows a server");
+            });
+        }
+        drop(entered_tx);
+
+        let first = entered_rx.recv_timeout(Duration::from_secs(5));
+        let second = entered_rx.recv_timeout(Duration::from_secs(5));
+        {
+            let (released, available) = &*release;
+            *released.lock().unwrap_or_else(|err| err.into_inner()) = true;
+            available.notify_all();
+        }
+
+        let first = first.expect("first caller did not enter within 5 seconds");
+        let second = second.expect("second caller did not enter concurrently within 5 seconds");
+        assert_ne!(
+            first, second,
+            "concurrent callers must hold distinct server claims"
+        );
+    });
+
+    let seen = seen.lock().unwrap_or_else(|err| err.into_inner());
+    assert_eq!(seen.len(), 4, "every caller must complete");
+    let mut ids = seen.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids,
+        vec![0, 1],
+        "both servers must run, not a queue on the first"
+    );
+    assert_eq!(max_active.load(Ordering::Relaxed), 2);
+    assert_eq!(next_id.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_finished_server_is_reused_instead_of_growing_the_pool() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pool = super::ServerPool::new();
+    let next_id = AtomicUsize::new(0);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        pool.with_server(
+            2,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |id| seen.push(*id),
+        )
+        .expect("server");
+    }
+    assert_eq!(seen, vec![0, 0, 0, 0]);
+    assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_panicking_caller_releases_its_server_claim() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let pool = super::ServerPool::new();
+    let next_id = AtomicUsize::new(0);
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        pool.with_server(
+            1,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |_| panic!("test caller panic"),
+        )
+    }));
+    assert!(panic.is_err());
+
+    let reused = pool
+        .with_server(
+            1,
+            || Some(next_id.fetch_add(1, Ordering::Relaxed)),
+            |id| *id,
+        )
+        .expect("released server");
+    assert_eq!(reused, 0);
+    assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
