@@ -2,7 +2,8 @@ use super::delegate_calls::FirPropertyDelegatePlan;
 use super::local_callables::BodyLocalCallableDeclarationId;
 use super::local_class_names::FirGeneratedClassProvenance;
 use super::local_delegated_properties::{
-    FirLocalDelegatePlan, LocalDelegateBinding, LocalDelegatedPropertyId,
+    FirLocalDelegateDispatchParameter, FirLocalDelegatePlan, LocalDelegateBinding,
+    LocalDelegatedPropertyId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -2717,6 +2718,14 @@ impl FirBody {
                 .map(|plan| {
                     plan.storage_name.len()
                         + plan.accessor_sites.len() * std::mem::size_of::<FirLiftingSite>()
+                        + plan
+                            .get_value_dispatch
+                            .as_ref()
+                            .map_or(0, FirLocalDelegateDispatchParameter::storage_payload_bytes)
+                        + plan
+                            .set_value_dispatch
+                            .as_ref()
+                            .map_or(0, FirLocalDelegateDispatchParameter::storage_payload_bytes)
                 })
                 .sum::<usize>()
             + self

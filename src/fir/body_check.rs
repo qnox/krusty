@@ -116,14 +116,14 @@ use super::{
     FirConvertedValue, FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver,
     FirDestructureEntry, FirExpr, FirExprId, FirExprKind, FirImplicitReceiverCapture,
     FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind,
-    FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader,
-    FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget,
-    FirPropertyTarget, FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion,
-    FirStatement, FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef,
-    FirTypeSubstitution, FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore,
-    LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore,
-    PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
-    SyntheticOriginKind,
+    FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource,
+    FirLocalDelegateDispatchParameter, FirLoopHeader, FirPlatformNarrowing, FirPluginOperand,
+    FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation,
+    FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId,
+    FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
+    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
+    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the

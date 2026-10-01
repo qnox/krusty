@@ -254,6 +254,25 @@ impl BodyFirChecker<'_> {
         None
     }
 
+    /// Exact source role of one scoped receiver-tower coordinate. This is queried only while the
+    /// checked body and all enclosing receiver frames are live, then retained by consumers that
+    /// need to carry the selected receiver across a lowering boundary.
+    pub(super) fn receiver_capture_at_depth(
+        &self,
+        receiver_depth: usize,
+    ) -> Option<FirCapturedReceiver> {
+        if receiver_depth < self.owned_receiver_count as usize {
+            let semantic_depth = u32::try_from(receiver_depth).ok()?;
+            return self
+                .receiver_frame()
+                .capture_receivers
+                .get(&semantic_depth)
+                .cloned();
+        }
+        self.enclosing_receiver_capture(receiver_depth)
+            .map(|(_, _, _, receiver)| receiver)
+    }
+
     /// Translate a resolver receiver-tower coordinate beyond this callable's own receiver slots
     /// into the exact semantic `inner`-classifier path that supplies it at runtime. This publishes
     /// declaration identities only; how a backend stores each enclosing instance is deliberately
