@@ -2611,8 +2611,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that is a subtype of the sibling binds through that sibling (`linkedSetOf()` beside
   `hashSetOf<T>()`), a more specific sibling binds through the call's applied supertype
   (`emptyList()` beside `mutableListOf("a")`), and otherwise the two bind through their unique
-  nearest shared generic supertype (`linkedSetOf()` beside `arrayListOf<T>()`). Equally-near
-  unrelated faces are ambiguous rather than being selected by declaration order. A `when` whose
+  nearest shared generic supertype (`linkedSetOf()` beside `arrayListOf<T>()`). A nullable
+  sibling and that same type without null are one face; the expectation follows the declared
+  return's nullability, so `Result.failure()` beside `Result<Int>?` is rechecked as `Result<Int>`.
+  Equally-near unrelated faces are ambiguous rather than being selected by declaration order. A `when` whose
   arms meet only in an intersection uses the declared expected type, the same way an `if` does.
   Branch order does not affect the binding.
   If no sibling can bind the formals, the cannot-infer diagnostic is reported at the call. Two

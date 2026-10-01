@@ -15,7 +15,8 @@ use super::{
 /// beside `mutableListOf("a")`). Otherwise the two meet at their unique nearest generic
 /// supertype (`linkedSetOf()` beside `arrayListOf<E>()` meet at a `MutableCollection<E>` face).
 /// Equally-near unrelated faces are ambiguous and contribute no expectation; declaration order is
-/// never a type-system tie breaker.
+/// never a type-system tie breaker. A nullable type and that same type without null are one face,
+/// and the kept expectation follows the declared return's nullability.
 pub(crate) fn generic_return_expectation_from_sibling(
     source: &dyn SymbolSource,
     signature: &GenericSig,
@@ -73,8 +74,25 @@ pub(crate) fn generic_return_expectation_from_sibling(
         .map(|candidate| candidate.distance)
         .min()?;
     candidates.retain(|candidate| candidate.distance == nearest);
-    candidates.dedup_by_key(|candidate| candidate.expectation);
-    let [candidate] = candidates.as_slice() else {
+    // `Result<Int>?` and `Result<Int>` are one face. Keeping both made a nullable sibling look
+    // ambiguous beside the same non-null constructor, so `Result.failure()` next to `n: Result<Int>?`
+    // never rebound. Unrelated constructors at this distance stay ambiguous.
+    let declared_nullable = signature.ret.is_nullable();
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if let Some(existing) = unique.iter_mut().find(|existing| {
+            existing.expectation.non_null() == candidate.expectation.non_null()
+        }) {
+            let existing_matches = existing.expectation.is_nullable() == declared_nullable;
+            let candidate_matches = candidate.expectation.is_nullable() == declared_nullable;
+            if candidate_matches && !existing_matches {
+                *existing = candidate;
+            }
+            continue;
+        }
+        unique.push(candidate);
+    }
+    let [candidate] = unique.as_slice() else {
         return None;
     };
     Some(candidate.expectation)
