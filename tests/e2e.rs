@@ -701,6 +701,8 @@ mod enum_vararg_e2e;
 mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
 mod error_receiver_cascade_e2e;
+#[path = "expect_default_lambda_marker_e2e.rs"]
+mod expect_default_lambda_marker_e2e;
 #[path = "expected_return_invariant_binding_e2e.rs"]
 mod expected_return_invariant_binding_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
@@ -1303,8 +1305,6 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
-#[path = "expect_default_lambda_marker_e2e.rs"]
-mod expect_default_lambda_marker_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
