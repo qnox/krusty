@@ -2465,6 +2465,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constraint. With `class B<T> { var p: Int }` and `var B<String>.p`, `build { this.p = 1 }` writes
   the member and does not fix `T = String`. Test: `tests/builder_inference_receivers_e2e.rs`
   (`a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension`).
+- **A local class member's lambda reads the class's captured builder receiver.** In
+  `build outerBuild@ { class L { fun m() { build innerBuild@ { this@outerBuild.f(x) } } } }`
+  (KT-49160) the member's checked body resolves `this@outerBuild` to the receiver the local class
+  captured from the outer lambda, and the call adds its constraint to the outer postponed call, as
+  kotlinc's PCLA session does for declarations inside the lambda. The nested receiver lambda's own
+  receiver is the first rung of its receiver tower, so the captured receiver's coordinate there is
+  the member's coordinate plus the nested body's own receivers; checked FIR shifted it by nothing
+  and found no capture (`nested_class_receivers`). A named context parameter on a nested local
+  function is a lexical value and does not add a receiver-tower rung; only implicit context
+  receivers and an extension receiver shift the captured coordinate. Known gap: the
+  implicit-return-type engine does not yet bind a lambda's `this@label`, so
+  `fun f() = build outerBuild@ { this@outerBuild.g() }` still needs a declared result type. Tests:
+  `tests/nested_receiver_lambda_captures_e2e.rs`; box: `inference/pcla/issues/kt49160a.kt`.
+- **An anonymous object captures a receiver lambda's receiver under the lambda's label.** In
+  `withOuter(o) outer@{ object { fun read() = this@outer.left() } }` the object's member names the
+  lambda's receiver by its label, as it would in a local class. The capture recorded for that
+  receiver took the rung's binding name `this` as its label, so checking the object's body added a
+  second label rung for the same receiver; the member's `this@outer` then resolved one rung too far
+  out, the use was never counted as a capture and FIR lowering had no receiver to read. A receiver
+  lambda's scope rung now carries its label (`implicit_receiver_lambda_label`), which the capture
+  takes before the binding name. Tests: `tests/nested_receiver_lambda_captures_e2e.rs`; box:
+  `inference/pcla/issues/kt49160b.kt`.
 - **A source extension's signature-stage candidate carries its declared receiver.** The module
   provider keys top-level extensions by the erased receiver classifier, and the candidate it built
   for an implicit return type used that key as the receiver. `Crate<Apple>.label()` and
@@ -2849,6 +2871,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checked again. A hard cast narrows a stable operand only when the target refines that operand's
   type (`a: Any as String`); `x: R as Any` and an unrelated cast leave the original type in place.
   `tests/invoke_receiver_smartcast_e2e.rs`.
+- **A cast statement proves its explicitly applied target.** After `this as Buildee<ETV>` on a
+  `Buildee<out ETV>` receiver (or the same cast of any stable path), the path reads as
+  `Buildee<ETV>` for the rest of the block, so `setTypeVariable(value: ETV)` applies through the
+  implicit and the explicit receiver instead of the out-projected `setTypeVariable(Nothing)`. Only
+  a target spelled without type arguments (`as Sm`) takes them from the path's declared supertype
+  (`Opt<T>` to `Sm<T>`); an explicit application is the proven type as written. Test:
+  `tests/this_smartcast_e2e.rs`; box: `inference/pcla/issues/kt57707.kt`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.

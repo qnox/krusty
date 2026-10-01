@@ -371,9 +371,9 @@ fn a_null_check_kotlinc_cannot_match_does_not_hold_back_the_temporaries() {
 
 #[test]
 fn a_protected_start_past_a_removed_instruction_is_not_the_null_targets_own() {
-    // The `ifnonnull` target is an `aload; pop` the cleanup removes, so its label ends up in front
-    // of the protected range's start. In kotlinc the two are still distinct labels: the target
-    // reloads nothing, kotlinc's matcher leaves the check alone, and the temporary folds.
+    // The `ifnonnull` target is an `aload; pop` the cleanup turns into a `nop`, which stays: a
+    // label stands on each side of it (the later `nop` cleanup drops it). The target reloads
+    // nothing, kotlinc's matcher leaves the check alone, and the temporary folds.
     let code = Code::new(&[
         aload(0),
         astore(1),
@@ -395,6 +395,7 @@ fn a_protected_start_past_a_removed_instruction_is_not_the_null_targets_own() {
         jump(IFNONNULL, 6),
         op(ICONST_0),
         op(IRETURN),
+        op(NOP),
         op(ICONST_1),
         op(IRETURN),
         astore(2),
@@ -537,6 +538,16 @@ fn an_unread_temporary_is_popped() {
 fn a_load_discarded_at_once_is_removed() {
     let code = Code::new(&[aload(0), op(POP), op(RETURN)]);
     let expected = code.insns(&[op(RETURN)]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+/// A read written as a statement (`value` alone on its line) is the line's only instruction:
+/// kotlinc replaces the `aload; pop` by a `nop`, and nothing but labels stands on either side of
+/// it, so the `nop` stays for the debugger.
+#[test]
+fn a_load_discarded_as_its_lines_only_instruction_leaves_a_nop() {
+    let code = Code::new(&[aload(0), op(POP), op(RETURN)]).line(0).line(2);
+    let expected = code.insns(&[op(NOP), op(RETURN)]);
     assert_eq!(code.run(), Some(expected));
 }
 

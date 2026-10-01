@@ -357,13 +357,30 @@ impl BodyFirChecker<'_> {
             .min_by_key(|binding| binding.enclosing_depth)
     }
 
+    /// The local-class receiver fields a nested lambda or local function reads through this body.
+    /// The nested body's own receivers (`nested_owned`: a receiver lambda's receiver, its context
+    /// receivers) sit in front of this body's rungs in the resolver's receiver tower, so each
+    /// field's semantic coordinate moves out by that many rungs. `build { … }` inside a local-class
+    /// member names the local class's captured `this@outer` one rung further out than the member.
     pub(super) fn nested_class_receivers(
         &self,
+        nested_owned: u32,
     ) -> Result<Vec<ClassCaptureBinding>, BodyCheckFailure> {
         self.class_receivers
             .iter()
             .copied()
-            .map(|binding| self.nested_class_binding(binding))
+            .map(|binding| {
+                let mut binding = self.nested_class_binding(binding)?;
+                binding.semantic_receiver_depth = binding
+                    .semantic_receiver_depth
+                    .map(|depth| {
+                        depth.checked_add(nested_owned).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::UnsupportedCallShape)
+                        })
+                    })
+                    .transpose()?;
+                Ok(binding)
+            })
             .collect()
     }
 
