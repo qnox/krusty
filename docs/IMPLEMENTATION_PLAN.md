@@ -4958,3 +4958,22 @@ The JVM backend keeps building a `PropertyReference0Impl` at each use. An inline
 delegate inlined twice into one body keeps one identity for both copies, as for any other checked
 node an inlined body copies. Tests: `fir/body_check/delegate_tests.rs`,
 `fir_lower/local_property_reference_tests.rs`.
+
+## Complete property layouts and capture holders  ✅
+
+Common IR proves two tables complete before it crosses into a backend
+(`IrFile::validate_complete_facts`, called at the end of common lowering beside
+`validate_determined_types`). Every property the file declares, and every checked property read,
+write or reference that is not realized from another file's module fact, has a
+`local_property_layouts` entry; a companion `const val` is top-level storage qualified by its
+companion. A holder reaches a parameter through a capture edge. A slot holds a shared holder when
+its frame declares it with `IrExpr::RefNew`, or when it is a parameter already recorded as one.
+A lambda capture, a same-file local or class-static call argument, and a callable-reference
+capture each name the receiving function and parameter ordinal, and each obliges that parameter
+to be recorded in `shared_capture_parameters`, whether or not the function reads the holder. A
+local function that only forwards the holder to an object constructor is covered by the call that
+passes it in. A parameter read or written through `IrExpr::RefGet`/`RefSet` must be recorded too. A backend therefore realizes a property from its layout and
+types a holder parameter from the record alone; it neither matches accessor or field spellings nor
+scans a body for holder operations. A missing entry fails lowering with
+`FirFileLoweringFailure::IncompleteFact`. Tests: `ir/semantic_validation/completeness_tests.rs`,
+`fir_lower/fact_completeness_tests.rs`.

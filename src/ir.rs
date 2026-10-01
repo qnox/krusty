@@ -2749,7 +2749,7 @@ mod clone;
 pub use clone::*;
 mod semantic_validation;
 pub use semantic_validation::{
-    InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
+    IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
 };
 #[cfg(test)]
 pub(crate) mod test_support;
