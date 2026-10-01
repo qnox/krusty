@@ -12,31 +12,38 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::name_tree::{NameId, NameTree};
 
+use super::jimage_locations::JimageLocations;
 use super::{entry_stamp, EntryKey, JarPackages};
 
-/// One jimage resource: `(file offset, on-disk byte size, zlib-compressed?)`.
-pub(super) type JimageEntry = (u64, usize, bool);
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct JimageIndex {
     names: Arc<NameTree>,
-    by_name: HashMap<NameId, JimageEntry>,
+    locations: JimageLocations,
+}
+
+impl Default for JimageIndex {
+    fn default() -> Self {
+        Self {
+            names: Arc::new(NameTree::default()),
+            locations: JimageLocations::default(),
+        }
+    }
 }
 
 impl JimageIndex {
     pub(super) fn len(&self) -> usize {
-        self.by_name.len()
+        self.locations.class_count()
     }
 
-    pub(super) fn entry(&self, internal: &str) -> Option<JimageEntry> {
+    pub(super) fn entry(&self, internal: &str) -> Option<(u64, usize, bool)> {
         let id = self.names.get(internal)?;
-        self.by_name.get(&id).copied()
+        self.locations.get(id)
     }
 
     /// Project the completed location index into the package view without copying its name tree.
     pub(super) fn package_catalog(&self) -> JarPackages {
         let mut catalog = JarPackages::with_names(Arc::clone(&self.names));
-        for &class in self.by_name.keys() {
+        for class in self.locations.class_ids() {
             let Some(package) = self.names.parent(class) else {
                 continue;
             };
@@ -45,7 +52,7 @@ impl JimageIndex {
                 catalog.packages.entry(package).or_default().has_classes = true;
             }
         }
-        catalog.complete = !self.by_name.is_empty();
+        catalog.complete = !self.locations.is_empty();
         catalog
     }
 }
@@ -157,6 +164,7 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
     };
 
     let mut index = JimageIndex::default();
+    index.locations.reserve_classes(table_length);
     for slot in 0..table_length {
         let location_offset = table_word(offsets + slot * 4) as usize;
         if location_offset == 0 {
@@ -179,9 +187,8 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
         };
         let class = class_id(&index.names, parent, base);
         index
-            .by_name
-            .entry(class)
-            .or_insert(((content + offset) as u64, stored, compressed != 0));
+            .locations
+            .insert(class, (content + offset) as u64, stored, compressed != 0);
     }
     Some(index)
 }
@@ -194,10 +201,13 @@ mod tests {
     fn index_and_catalog_share_exact_class_and_package_identities() {
         let mut index = JimageIndex::default();
         let class = class_id(&index.names, "sample/catalog", "Widget");
-        index.by_name.insert(class, (1, 2, false));
+        index.locations.insert(class, 1, 2, false);
+        index.locations.insert(class, 9, 8, true);
 
         assert_eq!(index.entry("sample/catalog/Widget"), Some((1, 2, false)));
+        assert_eq!(index.locations.class_count(), 1);
         let package = index.names.parent(class).expect("class package");
+        assert_eq!(index.locations.get(package), None);
         let catalog = index.package_catalog();
 
         assert!(Arc::ptr_eq(&catalog.names, &index.names));
