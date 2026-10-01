@@ -70,6 +70,15 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> crate::libraries::Callables {
+        // A receiver over a postponed call's type variables is matched against extension receivers
+        // with those variables free. The variable set is checker state, so it bypasses the cache.
+        let type_variables = self.postponed_type_variables_in(receiver);
+        if !type_variables.is_empty() {
+            return self
+                .resolver()
+                .with_type_variables(&type_variables)
+                .receiver_callables(receiver, name);
+        }
         if self.resolved_index.is_none() {
             return self.resolver().receiver_callables(receiver, name);
         }
@@ -106,6 +115,21 @@ impl Checker<'_> {
                 candidate
             })
             .collect()
+    }
+
+    /// The type variables of active postponed calls that `ty` mentions.
+    pub(super) fn postponed_type_variables_in(&self, ty: Ty) -> Vec<String> {
+        let mut variables = Vec::new();
+        for frame in &self.postponed_call_constraints {
+            for formal in &frame.formals {
+                if !variables.contains(formal)
+                    && ty_mentions_param(ty, std::slice::from_ref(formal))
+                {
+                    variables.push(formal.clone());
+                }
+            }
+        }
+        variables
     }
 
     pub(super) fn stable_classifier_callable_signatures(&self, ty: Ty) -> Vec<Ty> {

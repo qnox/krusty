@@ -40,6 +40,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            type_variables: &[],
         }
     }
 
@@ -53,6 +54,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            type_variables: &[],
         }
     }
 
@@ -70,6 +72,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            type_variables: &[],
         }
     }
 
@@ -86,6 +89,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            type_variables: &[],
         }
     }
 

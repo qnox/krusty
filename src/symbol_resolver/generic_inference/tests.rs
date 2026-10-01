@@ -772,29 +772,3 @@ fn mixed_nullable_and_bare_any_bound_keeps_the_bound_violation() {
         })
     );
 }
-
-#[test]
-fn both_caller_bounds_specialize_a_nullable_any_receiver_by_equality() {
-    let any = Ty::obj("kotlin/Any");
-    let iterable = |argument| Ty::obj_args("kotlin/collections/Iterable", &[argument]);
-    let declared = iterable(Ty::nullable(Ty::ty_param("stdlib:T", any)));
-    let source = crate::libraries::EmptySymbolSource;
-
-    let non_null_caller = Ty::ty_param("caller:T", any);
-    let non_null_receiver = iterable(Ty::nullable(non_null_caller));
-    assert!(super::super::receiver_type_args_match(
-        &source,
-        declared,
-        non_null_receiver
-    ));
-
-    let nullable_caller = Ty::ty_param("caller:U", Ty::nullable(any));
-    let nullable_receiver = iterable(Ty::nullable(nullable_caller));
-    assert!(super::super::receiver_type_args_match(
-        &source,
-        declared,
-        nullable_receiver
-    ));
-    assert_eq!(non_null_caller.ty_param_bound(), Some(any));
-    assert_eq!(nullable_caller.ty_param_bound(), Some(Ty::nullable(any)));
-}

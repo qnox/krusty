@@ -1253,10 +1253,11 @@ impl SymbolSource for ModuleSymbols<'_> {
                 if !package.is_some_and(|package| package == sig.package) {
                     continue;
                 }
+                // `ext_funs` is keyed by the erased receiver; the candidate carries the declared one.
                 overloads.push(fn_info(
                     FnKind::Extension,
                     sig,
-                    Some(*recv),
+                    Some(sig.source_receiver.unwrap_or(*recv)),
                     owner,
                     &name,
                     rank,

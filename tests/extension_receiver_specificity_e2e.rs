@@ -55,3 +55,26 @@ fun box(): String {\n\
 }\n";
     assert_both_run(SRC, "ExtensionSpecificityReceiver");
 }
+
+const RECEIVER_ARGUMENT_OVERLOADS: &str = "class Crate<T>\n\
+    class Apple\n\
+    class Pear\n\
+    fun Crate<Apple>.label() = \"apple\"\n\
+    @JvmName(\"pearLabel\")\n\
+    fun Crate<Pear>.label() = 1\n\
+    fun inferred(crate: Crate<Pear>) = crate.label()\n\
+    fun box(): String = if (inferred(Crate<Pear>()) == 1) \"OK\" else \"fail\"\n";
+
+/// Source extensions that differ only in their receiver's type arguments stay distinct while an
+/// expression body's result type is inferred: `Crate<Pear>.label()` is the only candidate for a
+/// `Crate<Pear>` receiver, so `inferred` returns `Int`. The comparison covers code only: the
+/// `@JvmName` function's metadata record differs from kotlinc independently of inference.
+#[test]
+fn receiver_type_arguments_select_an_inferred_bodys_extension() {
+    common::assert_class_code_matches_kotlinc(
+        "ReceiverArgumentOverloads",
+        RECEIVER_ARGUMENT_OVERLOADS,
+        "ReceiverArgumentOverloadsKt",
+    );
+    common::expect_box_same_as_kotlinc(RECEIVER_ARGUMENT_OVERLOADS, "ReceiverArgumentOverloadsRun");
+}
