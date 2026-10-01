@@ -1325,12 +1325,16 @@ mod suspend_value_class_delegation_e2e;
 mod suspend_value_class_results_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
+#[path = "value_class_bound_reference_receiver_e2e.rs"]
+mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
 #[path = "value_class_constructor_bodies_e2e.rs"]
 mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
 mod value_class_constructor_default_e2e;
+#[path = "value_class_constructor_reference_e2e.rs"]
+mod value_class_constructor_reference_e2e;
 #[path = "value_class_delegated_result_e2e.rs"]
 mod value_class_delegated_result_e2e;
 #[path = "value_class_dependency_bridge_e2e.rs"]
@@ -1355,6 +1359,8 @@ mod value_class_interface_entry_e2e;
 mod value_class_lambda_class_e2e;
 #[path = "value_class_nested_carrier_e2e.rs"]
 mod value_class_nested_carrier_e2e;
+#[path = "value_class_nested_property_to_string_e2e.rs"]
+mod value_class_nested_property_to_string_e2e;
 #[path = "value_class_nested_sole_property_e2e.rs"]
 mod value_class_nested_sole_property_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
