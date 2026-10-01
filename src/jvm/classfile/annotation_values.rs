@@ -7,17 +7,22 @@ use crate::types::TypeName;
 
 /// The internal name an annotation type contributes to `InnerClasses`, and the `L…;` descriptor
 /// written for it. Both use the physical classfile spelling; metadata's dotted nested spelling is
-/// a semantic identity and must not escape into a descriptor or `InnerClasses` lookup.
-fn annotation_class_text(name: TypeName) -> (&'static str, &'static str) {
-    let physical = crate::jvm::names::classfile_internal_name_of(name);
-    (physical, crate::jvm::names::reference_descriptor(physical))
+/// a semantic identity and must not escape into a descriptor or `InnerClasses` lookup. The caller
+/// owns both strings. The class writer keeps them in this class's pool and inner-class set.
+fn annotation_class_text(name: TypeName) -> (String, String) {
+    let physical = crate::jvm::names::owned_classfile_internal_name(name);
+    let mut descriptor = String::with_capacity(physical.len() + 2);
+    descriptor.push('L');
+    descriptor.push_str(&physical);
+    descriptor.push(';');
+    (physical, descriptor)
 }
 
 impl ClassWriter {
     fn record_annotation_class(&mut self, name: TypeName) -> u16 {
         let (internal, descriptor) = annotation_class_text(name);
-        let utf8 = self.cp.utf8(descriptor);
-        self.annotation_class_refs.insert(internal.to_owned());
+        let utf8 = self.cp.utf8(&descriptor);
+        self.annotation_class_refs.insert(internal);
         utf8
     }
 
@@ -169,23 +174,110 @@ impl ClassWriter {
 fn repeated_annotation_reuses_one_descriptor_slot() {
     let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
     let annotation = crate::ir::AppliedAnnotation {
-        internal: crate::types::type_name("kotlin/Metadata"),
+        internal: crate::types::type_name("sample/anno6044/Marker"),
         values: Vec::new(),
     };
     let mut out = Vec::new();
     writer.ev_annotation(&mut out, &annotation);
     let entries = writer.cp.entries.len();
-    let slot = writer.cp.lookup_utf8("Lkotlin/Metadata;");
+    let slot = writer.cp.lookup_utf8("Lsample/anno6044/Marker;");
     writer.ev_annotation(&mut out, &annotation);
     assert_eq!(writer.cp.entries.len(), entries);
-    assert_eq!(writer.cp.lookup_utf8("Lkotlin/Metadata;"), slot);
-    assert!(writer.annotation_class_refs.contains("kotlin/Metadata"));
+    assert_eq!(writer.cp.lookup_utf8("Lsample/anno6044/Marker;"), slot);
+    assert!(writer
+        .annotation_class_refs
+        .contains("sample/anno6044/Marker"));
 }
 
 #[test]
 fn dotted_annotation_name_uses_its_physical_classfile_descriptor() {
-    let dotted = crate::types::type_name_child(crate::types::type_name("java/util"), "Map.Entry");
+    let dotted =
+        crate::types::type_name_child(crate::types::type_name("sample/anno6044"), "Outer.Inner");
     let (internal, descriptor) = annotation_class_text(dotted);
-    assert_eq!(internal, "java/util/Map$Entry");
-    assert_eq!(descriptor, "Ljava/util/Map$Entry;");
+    assert_eq!(internal, "sample/anno6044/Outer$Inner");
+    assert_eq!(descriptor, "Lsample/anno6044/Outer$Inner;");
+}
+
+#[test]
+fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
+    use crate::ir::AnnoValue;
+
+    let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
+    let annotation = crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name("sample/anno6044/Marker"),
+        values: vec![
+            (
+                "shade".to_string(),
+                AnnoValue::Enum(
+                    crate::types::type_name_child(
+                        crate::types::type_name("sample/anno6044"),
+                        "Color.Shade",
+                    ),
+                    "DARK".to_string(),
+                ),
+            ),
+            (
+                "token".to_string(),
+                AnnoValue::Class(crate::types::type_name("sample/anno6044/Token")),
+            ),
+            (
+                "nested".to_string(),
+                AnnoValue::Annotation(crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name_child(
+                        crate::types::type_name("sample/anno6044"),
+                        "Outer.Inner",
+                    ),
+                    values: Vec::new(),
+                }),
+            ),
+        ],
+    };
+    let mut out = Vec::new();
+    writer.ev_annotation(&mut out, &annotation);
+    for descriptor in [
+        "Lsample/anno6044/Marker;",
+        "Lsample/anno6044/Color$Shade;",
+        "Lsample/anno6044/Token;",
+        "Lsample/anno6044/Outer$Inner;",
+    ] {
+        assert!(writer.cp.lookup_utf8(descriptor).is_some(), "{descriptor}");
+    }
+    for internal in [
+        "sample/anno6044/Marker",
+        "sample/anno6044/Color$Shade",
+        "sample/anno6044/Token",
+        "sample/anno6044/Outer$Inner",
+    ] {
+        assert!(
+            writer.annotation_class_refs.contains(internal),
+            "{internal}"
+        );
+    }
+}
+
+#[test]
+fn distinct_annotation_writers_do_not_grow_the_descriptor_cache() {
+    let _warmup = super::ClassWriter::new("Use", "java/lang/Object");
+    let names_before = crate::jvm::names::remembered_classfile_name_count();
+    let descriptors_before = crate::jvm::names::remembered_descriptor_count();
+    for index in 0..24 {
+        let mut writer = super::ClassWriter::new("Use", "java/lang/Object");
+        let internal = format!("sample/anno6044/Marker{index}");
+        let annotation = crate::ir::AppliedAnnotation {
+            internal: crate::types::type_name(&internal),
+            values: Vec::new(),
+        };
+        let mut out = Vec::new();
+        writer.ev_annotation(&mut out, &annotation);
+        assert!(writer.cp.lookup_utf8(&format!("L{internal};")).is_some());
+        assert!(writer.annotation_class_refs.contains(&internal));
+    }
+    assert_eq!(
+        crate::jvm::names::remembered_classfile_name_count(),
+        names_before
+    );
+    assert_eq!(
+        crate::jvm::names::remembered_descriptor_count(),
+        descriptors_before
+    );
 }

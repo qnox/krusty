@@ -155,21 +155,34 @@ pub fn classfile_internal_name(internal: &str) -> Cow<'static, str> {
     }
 }
 
+thread_local! {
+    static CLASSFILE_NAMES: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
+        std::cell::RefCell::default();
+}
+
 /// Physical JVM classfile name of an interned classifier. The spelling is retained once per
 /// emitting thread. A repeated lookup returns that same text and does not render or allocate.
 /// Callers that already hold a [`TypeName`] use this instead of rendering the name into
 /// [`classfile_internal_name`].
 pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
-    thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
-            std::cell::RefCell::default();
-    }
-    if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
+    if let Some(physical) = CLASSFILE_NAMES.with(|known| known.borrow().get(&internal).copied()) {
         return physical;
     }
     let physical = Box::leak(physical_classfile_name_of(internal).into_boxed_str());
-    INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
+    CLASSFILE_NAMES.with(|known| known.borrow_mut().insert(internal, physical));
     physical
+}
+
+/// How many physical classfile spellings this emitting thread has retained.
+#[cfg(test)]
+pub(crate) fn remembered_classfile_name_count() -> usize {
+    CLASSFILE_NAMES.with(|known| known.borrow().len())
+}
+
+/// Physical classfile spelling of `internal`, owned by the caller. A one-class annotation does not
+/// enter [`classfile_internal_name_of`]'s retained catalog.
+pub(crate) fn owned_classfile_internal_name(internal: TypeName) -> String {
+    physical_classfile_name_of(internal)
 }
 
 fn physical_classfile_name_of(internal: TypeName) -> String {
@@ -431,7 +444,7 @@ pub(crate) fn boxed_descriptor(ty: Ty) -> &'static str {
 
 /// `Lname;` for an interned classfile internal name. The first use formats it; later uses return
 /// that same spelling. `classfile_name` must already be the physical class spelling.
-pub(crate) fn reference_descriptor(classfile_name: &'static str) -> &'static str {
+fn reference_descriptor(classfile_name: &'static str) -> &'static str {
     remembered_descriptor(DescriptorSpell::Reference, classfile_name, |name| {
         format!("L{name};")
     })
@@ -455,22 +468,31 @@ enum DescriptorSpell {
     Array,
 }
 
+thread_local! {
+    static DESCRIPTOR_SPELLINGS: std::cell::RefCell<
+        std::collections::HashMap<(DescriptorSpell, &'static str), &'static str>,
+    > = std::cell::RefCell::default();
+}
+
 fn remembered_descriptor(
     spell: DescriptorSpell,
     key: &'static str,
     format_spelling: impl FnOnce(&str) -> String,
 ) -> &'static str {
-    thread_local! {
-        static CACHE: std::cell::RefCell<
-            std::collections::HashMap<(DescriptorSpell, &'static str), &'static str>,
-        > = std::cell::RefCell::default();
-    }
-    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&(spell, key)).copied()) {
+    if let Some(found) =
+        DESCRIPTOR_SPELLINGS.with(|cache| cache.borrow().get(&(spell, key)).copied())
+    {
         return found;
     }
     let remembered = Box::leak(format_spelling(key).into_boxed_str());
-    CACHE.with(|cache| cache.borrow_mut().insert((spell, key), remembered));
+    DESCRIPTOR_SPELLINGS.with(|cache| cache.borrow_mut().insert((spell, key), remembered));
     remembered
+}
+
+/// How many descriptor spellings this emitting thread has retained.
+#[cfg(test)]
+pub(crate) fn remembered_descriptor_count() -> usize {
+    DESCRIPTOR_SPELLINGS.with(|cache| cache.borrow().len())
 }
 
 /// Whether `left` and `right` emit the same JVM descriptor.
