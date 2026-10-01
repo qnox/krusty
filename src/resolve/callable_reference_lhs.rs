@@ -35,10 +35,7 @@ impl Checker<'_> {
                 });
             }
             InheritedNestedClassifier::NotFound => {
-                if let Some(classifier) = self.scoped_source_alias_classifier(scope, root_name) {
-                    root_alias = true;
-                    ResolvedQualifier::Classifier(classifier)
-                } else if self.fed_source().package_exists(TypeName::ROOT, root_name) {
+                if self.fed_source().package_exists(TypeName::ROOT, root_name) {
                     ResolvedQualifier::Package(crate::types::type_name_child(
                         TypeName::ROOT,
                         root_name,
