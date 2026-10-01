@@ -3920,7 +3920,10 @@ pub(crate) fn lower_value_classes(
         box_vc_tail(ir, body, &callable_under, &orig_rets, false);
     }
 
-    accessor_names::stamp_synthesized(ir, &under);
+    // Synthesized accessors use the same callable universe as property operations. In particular,
+    // built-in value classes such as UInt are callable value classes even though they are not
+    // declarations owned by this source module.
+    accessor_names::stamp_synthesized(ir, &callable_under);
 
     property_references::realize(ir, &callable_under, property_reference_realizations)
 }
