@@ -40,6 +40,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     // representation wrapper, so leaving a copy there would both orphan the real call and let a
     // later consumer mistake the wrapper for the operation that owns the provider decision.
     move_fact!(ext_call_source_receiver);
+    move_fact!(call_dispatch_owner);
     move_fact!(semantic_call_roles);
     move_fact!(call_declared_ret);
     move_fact!(call_declared_params);
@@ -80,6 +81,7 @@ mod tests {
         let source = ir.add_expr(IrExpr::UnitInstance);
         let unbox_receiver = ir.add_expr(IrExpr::UnitInstance);
         ir.ext_call_source_receiver.insert(source, Ty::String);
+        ir.call_dispatch_owner.insert(source, Ty::Int);
         ir.semantic_call_roles.insert(
             source,
             crate::libraries::SemanticCallRole::KotlinAnyToString,
@@ -99,6 +101,8 @@ mod tests {
 
         assert!(!ir.ext_call_source_receiver.contains_key(&source));
         assert_eq!(ir.ext_call_source_receiver.get(&target), Some(&Ty::String));
+        assert!(!ir.call_dispatch_owner.contains_key(&source));
+        assert_eq!(ir.call_dispatch_owner.get(&target), Some(&Ty::Int));
         assert!(!ir.semantic_call_roles.contains_key(&source));
         assert_eq!(
             ir.semantic_call_roles.get(&target),

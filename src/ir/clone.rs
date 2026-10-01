@@ -351,6 +351,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(physical_types);
     copy_map!(reified_call_subst);
     copy_map!(ext_call_source_receiver);
+    copy_map!(call_dispatch_owner);
     copy_map!(call_declared_ret);
     copy_map!(synthesized_accessor_calls);
     copy_map!(call_declared_params);

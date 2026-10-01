@@ -884,6 +884,9 @@ impl super::IrFile {
         self.ext_call_source_receiver
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
+        self.call_dispatch_owner
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
         self.call_declared_ret
             .values_mut()
             .for_each(|value| *value = ty(*value, names));

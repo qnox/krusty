@@ -704,6 +704,10 @@ impl IrFile {
             self.ext_call_source_receiver.values().copied(),
         )?;
         reject_all(
+            "call dispatch owner",
+            self.call_dispatch_owner.values().copied(),
+        )?;
+        reject_all(
             "declared call result",
             self.call_declared_ret.values().copied(),
         )?;

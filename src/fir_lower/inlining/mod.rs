@@ -1169,15 +1169,14 @@ fn specialize_expression_facts(
     expression: ExprId,
     bindings: &HashMap<String, Ty>,
 ) {
-    // The dispatch class of a member call is the class selected at the declaration.
-    // Substituting a type argument (`T : Number` with `Long`, `T : IntProgression` with
-    // `IntRange`) does not retarget it: the expanded body keeps that invoke owner. A lambda
-    // parameter stays erased to the bound, so retargeting `toDouble` to `Long.doubleValue`
-    // asks a `Number` to be a `Long`.
+    // `call_dispatch_owner` is the declaration-selected invoke class. Substituting a type
+    // argument (`T : Number` with `Long`) must not retarget it; the source receiver below is a
+    // representation fact and still specializes.
     for ty in [
         ir.logical_types.get_mut(&expression),
         ir.whens.exhaustive.get_mut(&expression),
         ir.physical_types.get_mut(&expression),
+        ir.ext_call_source_receiver.get_mut(&expression),
         ir.call_declared_ret.get_mut(&expression),
         ir.suspend_calls.get_mut(&expression),
     ]
@@ -1475,15 +1474,20 @@ fn specialize_checked_operation(
             }
         }
         IrCheckedOperation::ExternalPropertyRead {
-            parameters, result, ..
+            parameters,
+            result,
+            source_receiver,
+            ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
-            parameters, result, ..
+            parameters,
+            result,
+            source_receiver,
+            ..
         } => {
-            // `source_receiver` is the declaration's dispatch class. See
-            // `specialize_expression_facts`.
             specialize_tys(parameters, bindings);
             specialize_ty(result, bindings);
+            specialize_optional_ty(source_receiver, bindings);
         }
         IrCheckedOperation::RangeConstruction {
             start_type,

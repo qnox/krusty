@@ -697,6 +697,7 @@ impl BodyLowering<'_> {
             self.ir
                 .ext_call_source_receiver
                 .insert(expression, receiver_ty);
+            self.ir.call_dispatch_owner.insert(expression, receiver_ty);
         }
         if call.suspend {
             self.ir.suspend_calls.insert(expression, call.result.get());

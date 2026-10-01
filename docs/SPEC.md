@@ -10965,8 +10965,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type parameter (`T : Number`, `T : IntProgression`) names that bound's class. Substituting the
   caller's type argument does not retarget the invoke: kotlinc copies `Number.doubleValue` and
   `IntProgression.getFirst` into the caller. The lambda parameter stays erased to the bound, so
-  a retargeted `Long.doubleValue` is unverifiable. Reified markers are specialized on their own
-  and are not this owner. Test: `tests/inline_bound_dispatch_e2e.rs`.
+  a retargeted `Long.doubleValue` is unverifiable. That class is a checked fact of its own
+  (`IrFile::call_dispatch_owner`): inline expansion copies it and does not substitute it, and JVM
+  virtual dispatch reads it. The extension and property source receivers stay representation facts
+  and are substituted, so a value-class receiver still boxes against the caller's type arguments.
+  Reified markers are specialized on their own and are not this owner. Test:
+  `tests/inline_bound_dispatch_e2e.rs`.
 
 - **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
   supertype declaration and the override the same physical shape — a trailing `Continuation`

@@ -594,8 +594,9 @@ fn delegated_call(
             );
         }
         ResolvedDelegatedCallTarget::External(_) => {
-            ir.ext_call_source_receiver
-                .insert(expression, call.receiver.get());
+            let receiver = call.receiver.get();
+            ir.ext_call_source_receiver.insert(expression, receiver);
+            ir.call_dispatch_owner.insert(expression, receiver);
             if let Some(declared) = call.declared_result {
                 ir.call_declared_ret.insert(expression, declared.get());
             }

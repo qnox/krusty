@@ -428,6 +428,7 @@ pub(super) fn realize(
             };
             let parts = vec![*receiver, argument];
             ir.ext_call_source_receiver.remove(&expression);
+            ir.call_dispatch_owner.remove(&expression);
             ir.exprs[index] = IrExpr::StringConcat(parts);
             continue;
         }
@@ -472,6 +473,7 @@ pub(super) fn realize(
                 )
                 .ok_or(target)?;
                 ir.ext_call_source_receiver.remove(&expression);
+                ir.call_dispatch_owner.remove(&expression);
                 ir.exprs[index] = operation;
                 continue;
             }
@@ -745,6 +747,7 @@ pub(super) fn realize(
             continue;
         }
         let mut extension_receiver_at = None;
+        let dispatch_owner = declaration_dispatch_receiver(ir, expression);
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -896,7 +899,7 @@ pub(super) fn realize(
                         };
                     } else if let Some((owner, descriptor)) = (semantic_role
                         == Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode))
-                    .then(|| ir.ext_call_source_receiver.get(&expression).copied())
+                    .then_some(dispatch_owner)
                     .flatten()
                     .and_then(primitive_hash_code)
                     {
@@ -917,7 +920,7 @@ pub(super) fn realize(
                                 classpath,
                                 callable.owner,
                                 callable.owner_is_interface,
-                                ir.ext_call_source_receiver.get(&expression).copied(),
+                                dispatch_owner,
                             )
                         };
                         *callee = Callee::Virtual {
@@ -966,7 +969,7 @@ pub(super) fn realize(
                 crate::libraries::MemberRealization::Intrinsic(
                     crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext,
                 ) => {
-                    let receiver = ir.ext_call_source_receiver.get(&expression).copied();
+                    let receiver = dispatch_owner;
                     *callee = match primitive_iterator_next(callable.owner, receiver) {
                         Some((name, element)) => {
                             physical_result = element;
@@ -1000,7 +1003,7 @@ pub(super) fn realize(
                 crate::libraries::MemberRealization::Intrinsic(
                     crate::libraries::CompilerIntrinsic::PrimitiveHashCode,
                 ) => {
-                    let receiver = ir.ext_call_source_receiver.get(&expression).copied();
+                    let receiver = dispatch_owner;
                     *callee = match receiver.and_then(primitive_hash_code) {
                         Some((owner, descriptor)) => {
                             args.insert(0, dispatch_receiver.take().ok_or(target)?);
@@ -1151,6 +1154,18 @@ fn primitive_iterator_next(
         _ => return None,
     };
     Some((format!("next{element_name}"), element))
+}
+
+/// The class selected when the member was resolved. Inline expansion does not substitute it;
+/// the specialized [`IrFile::ext_call_source_receiver`] remains the value-class representation.
+fn declaration_dispatch_receiver(
+    ir: &IrFile,
+    expression: crate::ir::ExprId,
+) -> Option<crate::types::Ty> {
+    ir.call_dispatch_owner
+        .get(&expression)
+        .copied()
+        .or_else(|| ir.ext_call_source_receiver.get(&expression).copied())
 }
 
 fn call_site_owner(
@@ -1316,6 +1331,9 @@ fn copy_call_facts(ir: &mut IrFile, source: crate::ir::ExprId, target: crate::ir
     }
     if let Some(value) = ir.ext_call_source_receiver.get(&source).copied() {
         ir.ext_call_source_receiver.insert(target, value);
+    }
+    if let Some(value) = ir.call_dispatch_owner.get(&source).copied() {
+        ir.call_dispatch_owner.insert(target, value);
     }
     if let Some(value) = ir.call_declared_ret.get(&source).copied() {
         ir.call_declared_ret.insert(target, value);

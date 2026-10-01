@@ -1021,8 +1021,9 @@ fn delegated_call(
                 args: arguments,
             });
             if let Some(declared_receiver) = declared_receiver {
-                ir.ext_call_source_receiver
-                    .insert(expression, declared_receiver.get());
+                let receiver = declared_receiver.get();
+                ir.ext_call_source_receiver.insert(expression, receiver);
+                ir.call_dispatch_owner.insert(expression, receiver);
             }
             if let Some(declared_result) = declared_result {
                 ir.call_declared_ret

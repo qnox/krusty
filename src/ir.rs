@@ -2537,6 +2537,13 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Call `ExprId` → the declaration-selected dispatch type of a member call or property.
+    ///
+    /// Inline expansion copies this fact and does not substitute it. JVM virtual dispatch reads it,
+    /// so `T : Number` substituted with `Long` keeps `Number.doubleValue`.
+    /// [`Self::ext_call_source_receiver`] and a property `source_receiver` stay representation facts
+    /// and are substituted, so a value-class receiver still boxes against the caller's type arguments.
+    pub call_dispatch_owner: std::collections::HashMap<ExprId, Ty>,
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: std::collections::HashMap<ExprId, crate::libraries::SemanticCallRole>,

@@ -327,6 +327,9 @@ impl BodyLowering<'_> {
             }
         };
         let access = self.ir.add_expr(IrExpr::Checked(operation));
+        if let Some(owner) = source_receiver {
+            self.ir.call_dispatch_owner.insert(access, owner);
+        }
         Some(self.wrap_call_statements(statements, access))
     }
 
@@ -418,9 +421,9 @@ impl BodyLowering<'_> {
             args,
         });
         if let Some(receiver) = source_receiver {
-            self.ir
-                .ext_call_source_receiver
-                .insert(call, receiver.get());
+            let receiver = receiver.get();
+            self.ir.ext_call_source_receiver.insert(call, receiver);
+            self.ir.call_dispatch_owner.insert(call, receiver);
         }
         if let Some(result) = declared_result {
             self.ir.call_declared_ret.insert(call, result.get());
@@ -633,9 +636,11 @@ impl BodyLowering<'_> {
                     dispatch_receiver: Some(receiver),
                     args: vec![default],
                 });
+                let receiver = call.source_receiver.get();
                 self.ir
                     .ext_call_source_receiver
-                    .insert(capacity_call, call.source_receiver.get());
+                    .insert(capacity_call, receiver);
+                self.ir.call_dispatch_owner.insert(capacity_call, receiver);
                 vec![capacity_call]
             }
         };
@@ -797,6 +802,9 @@ impl BodyLowering<'_> {
         });
         self.ir
             .ext_call_source_receiver
+            .insert(append_call, append_source_receiver);
+        self.ir
+            .call_dispatch_owner
             .insert(append_call, append_source_receiver);
         body_statements.push(append_call);
         let mut loop_statements = Vec::with_capacity(body_statements.len() + 2);
