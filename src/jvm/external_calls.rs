@@ -1,89 +1,23 @@
 use super::classpath::{Classpath, ExternalCallableKind};
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
 use crate::types::InlineParameterModifier;
 
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
-/// Realize already-selected dependency declarations through the provider table shared with the
-/// frontend. This is an exact identity lookup, not name resolution or overload selection.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum ExternalDependencyTarget {
-    Callable(ExternalCallableId),
-    Property(ExternalPropertyId),
-}
-
-impl From<ExternalCallableId> for ExternalDependencyTarget {
-    fn from(target: ExternalCallableId) -> Self {
-        Self::Callable(target)
-    }
-}
-
-impl std::fmt::Display for ExternalDependencyTarget {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Callable(target) => write!(formatter, "callable {}", target.raw()),
-            Self::Property(target) => write!(formatter, "property {}", target.raw()),
-        }
-    }
-}
-
-fn materialize_omitted_arguments(
-    ir: &mut IrFile,
-    parameters: &[crate::types::Ty],
-    supplied: Vec<crate::ir::ExprId>,
-    omitted: &[u32],
-    target: ExternalCallableId,
-) -> Result<Vec<crate::ir::ExprId>, ExternalCallableId> {
-    if omitted.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(target);
-    }
-    if omitted
-        .last()
-        .is_some_and(|parameter| *parameter as usize >= parameters.len())
-    {
-        return Err(target);
-    }
-    let mut supplied = supplied.into_iter();
-    let mut arguments = Vec::with_capacity(parameters.len());
-    for (parameter, ty) in parameters.iter().copied().enumerate() {
-        if omitted.contains(&(parameter as u32)) {
-            arguments.push(
-                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
-                    ty.canonical_semantic(),
-                ))),
-            );
-        } else {
-            arguments.push(supplied.next().ok_or(target)?);
-        }
-    }
-    if supplied.next().is_some() {
-        return Err(target);
-    }
-    Ok(arguments)
-}
-
-fn materialize_constructor_defaults(
-    ir: &mut IrFile,
-    parameters: &[crate::types::Ty],
-    supplied: Vec<crate::ir::ExprId>,
-    defaults: &[u32],
-    prefix_count: u32,
-    target: ExternalCallableId,
-) -> Result<Vec<crate::ir::ExprId>, ExternalCallableId> {
-    let omitted = defaults
-        .iter()
-        .map(|parameter| parameter.checked_add(prefix_count).ok_or(target))
-        .collect::<Result<Vec<_>, _>>()?;
-    materialize_omitted_arguments(ir, parameters, supplied, &omitted, target)
-}
+mod arguments;
+pub(super) use arguments::ExternalRealizationError;
+use arguments::{
+    copy_call_facts, materialize_constructor_defaults, materialize_omitted_arguments,
+    ExternalDependencyTarget,
+};
 
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
     callables: &crate::backend::CheckedBackendCallables,
     default_call_operands: &mut DefaultCallOperands,
-) -> Result<(), ExternalDependencyTarget> {
+) -> Result<(), ExternalRealizationError> {
     let expression_count = ir.exprs.len();
     for index in 0..expression_count {
         let expression = u32::try_from(index).expect("too many common IR expressions");
@@ -630,8 +564,25 @@ pub(super) fn realize(
                 if callable.context_count >= default_parameters.len() {
                     return Err(target.into());
                 }
+                // The extension receiver is a source slot the call already supplied. Masks and the
+                // marker stay on the realization and are appended after this prefix.
                 default_parameters.remove(callable.context_count);
             }
+            let source_plan = crate::libraries::physical_parameter_plan::source_parameter_plan(
+                default_parameters.len(),
+            );
+            let default_parameters = super::physical_call_arguments::publish_dependency_parameters(
+                ir,
+                expression,
+                default_parameters,
+                Some(source_plan.as_ref()),
+                supplied.len(),
+                &omitted_parameters,
+            )
+            .map_err(|detail| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail,
+            })?;
             let mut realized_arguments = materialize_omitted_arguments(
                 ir,
                 &default_parameters,
@@ -747,6 +698,60 @@ pub(super) fn realize(
             default_call_operands.record(physical_call, operand_plan);
             continue;
         }
+        let supplied = match &ir.exprs[index] {
+            IrExpr::Call { args, .. } => args.len(),
+            _ => unreachable!(),
+        };
+        // The provider named which physical slots are source parameters. A continuation or a
+        // dispatch receiver stored in the vector is not one of them. A `$DefaultImpls` receiver
+        // is absent from the vector; the emitter inserts it from `pass_receiver`.
+        let source_parameters =
+            crate::libraries::physical_parameter_plan::source_physical_parameters(
+                &callable.physical_params,
+                callable.physical_parameter_plan.as_deref(),
+            )
+            .map_err(|detail| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail,
+            })?;
+        let source_arity = source_parameters.len();
+        let omitted = if supplied == source_arity {
+            Vec::new()
+        } else if kind == ExternalCallableKind::Extension {
+            let receiver = u32::try_from(callable.context_count).map_err(|_| {
+                ExternalRealizationError::Arguments {
+                    target: target.into(),
+                    detail: format!(
+                        "call {expression} ({kind:?} {}.{}) extension receiver does not fit a parameter ordinal",
+                        callable.physical_owner.render(),
+                        callable.name
+                    ),
+                }
+            })?;
+            vec![receiver]
+        } else {
+            return Err(ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail: format!(
+                    "call {expression} ({kind:?} {}.{}) supplies {supplied} arguments for {} physical parameters",
+                    callable.physical_owner.render(),
+                    callable.name,
+                    source_arity
+                ),
+            });
+        };
+        super::physical_call_arguments::publish_dependency_parameters(
+            ir,
+            expression,
+            callable.physical_params.clone(),
+            callable.physical_parameter_plan.as_deref(),
+            supplied,
+            &omitted,
+        )
+        .map_err(|detail| ExternalRealizationError::Arguments {
+            target: target.into(),
+            detail,
+        })?;
         let mut extension_receiver_at = None;
         let IrExpr::Call {
             callee,
@@ -1361,59 +1366,6 @@ pub(super) fn bridge_external_result(
         type_operand: semantic,
     };
     call
-}
-
-/// Keep checker-selected call facts attached to the selected call when a backend boundary wraps it.
-/// The wrapper retains the source expression identity; the cloned node retains the operation identity
-/// consumed by value-class lowering and the bytecode inliner.
-fn copy_call_facts(ir: &mut IrFile, source: crate::ir::ExprId, target: crate::ir::ExprId) {
-    if let Some(value) = ir.fir_origins.get(&source).copied() {
-        ir.fir_origins.insert(target, value);
-    }
-    if let Some(value) = ir.expr_lines.get(&source).copied() {
-        ir.expr_lines.insert(target, value);
-    }
-    if let Some(value) = ir.expr_source_lines.get(&source).copied() {
-        ir.expr_source_lines.insert(target, value);
-    }
-    if let Some(value) = ir.expr_end_lines.get(&source).copied() {
-        ir.expr_end_lines.insert(target, value);
-    }
-    if let Some(value) = ir.logical_types.get(&source).copied() {
-        ir.logical_types.insert(target, value);
-    }
-    if let Some(value) = ir.physical_types.get(&source).copied() {
-        ir.physical_types.insert(target, value);
-    }
-    if let Some(value) = ir.ext_call_source_receiver.get(&source).copied() {
-        ir.ext_call_source_receiver.insert(target, value);
-    }
-    if let Some(value) = ir.call_declared_ret.get(&source).copied() {
-        ir.call_declared_ret.insert(target, value);
-    }
-    if let Some(value) = ir.call_declared_params.get(&source).cloned() {
-        ir.call_declared_params.insert(target, value);
-    }
-    if let Some(value) = ir.static_extension_receivers.get(&source).copied() {
-        ir.static_extension_receivers.insert(target, value);
-    }
-    if let Some(value) = ir.call_inline_modifiers.get(&source).cloned() {
-        ir.call_inline_modifiers.insert(target, value);
-    }
-    // A suspension point identifies the selected call operation, not the semantic result wrapper.
-    // Keeping the identity on both nodes makes later representation rewrites ambiguous: value-class
-    // lowering can move the inner operation again while coroutine lowering still mistakes the outer
-    // coercion for the call and appends no continuation. Move this single-owner fact with the call,
-    // just like `clone_expr_with_type_facts` does for value-class wrappers.
-    if let Some(value) = ir.suspend_calls.remove(&source) {
-        ir.suspend_calls.insert(target, value);
-    }
-    if let Some(value) = ir.suspend_call_overridden_results.remove(&source) {
-        ir.suspend_call_overridden_results.insert(target, value);
-    }
-    if let Some(value) = ir.reified_call_subst.get(&source).cloned() {
-        ir.reified_call_subst.insert(target, value);
-    }
 }
 
 /// Attach the selected declaration's parameter shape to the realized call. The provider shape omits
