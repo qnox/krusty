@@ -818,6 +818,7 @@ impl BodyFirChecker<'_> {
                 declaration_ty,
                 context_access,
                 compiler_intrinsic,
+                owner_storage,
                 ..
             }) => {
                 // A classifier-qualified companion property has a syntactic qualifier but no
@@ -929,6 +930,21 @@ impl BodyFirChecker<'_> {
                             extension_receiver_parameter: None,
                         })
                     });
+                if owner_storage {
+                    // The owner reads its explicit backing field itself, typed as the field.
+                    let target = stable_declaration
+                        .and_then(|declaration| self.index.property_for_declaration(declaration))
+                        .ok_or_else(|| {
+                            self.failure(
+                                self.file.expr_span(expression),
+                                BodyCheckFailureKind::MissingStablePropertyTarget,
+                            )
+                        })?;
+                    return Ok(Some(FirExprKind::BackingFieldRead {
+                        target,
+                        dispatch_receiver: Some(dispatch_receiver),
+                    }));
+                }
                 if stable_declaration.is_none() && external.is_none() {
                     let mut getter = resolved_member.clone().ok_or_else(|| {
                         self.failure(

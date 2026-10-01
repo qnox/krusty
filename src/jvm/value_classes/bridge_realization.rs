@@ -22,7 +22,7 @@ pub(super) struct Inputs<'a> {
     /// override result).
     pub(super) lowered_member_targets: &'a HashMap<u32, (String, Vec<Ty>, Ty)>,
     /// The value-class members an interface entry now stands for.
-    pub(super) interface_entries: &'a HashSet<u32>,
+    pub(super) interface_entries: &'a HashMap<u32, String>,
 }
 
 /// Retarget every bridge of `classes` onto its realized target and record its adapter plan.
@@ -233,11 +233,13 @@ pub(super) fn realize(
                     b.target_ret = Some(target_ret);
                 }
                 // Only the entry calls the static member; any other bridge calls the entry,
-                // which has the member's physical name and parameters on the box itself.
-                if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry
-                    && b.target_function
-                        .is_some_and(|function| interface_entries.contains(&function))
-                {
+                // with the member's physical parameters on the box, under its own name.
+                let entry = b
+                    .target_function
+                    .and_then(|function| interface_entries.get(&function))
+                    .filter(|_| b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry);
+                if let Some(entry) = entry {
+                    b.target_name = Some(entry.clone());
                     b.target_function = None;
                 }
             }
