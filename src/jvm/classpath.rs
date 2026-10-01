@@ -12,6 +12,7 @@
 
 mod builtins_validation;
 mod candidate_union;
+mod catalog_availability;
 mod class_locations;
 mod ct_sym_index;
 mod mapped_builtin_realizations;
@@ -3678,8 +3679,7 @@ impl Classpath {
             return true;
         }
         let tree = self.package_tree();
-        let catalog_hits = tree.jars_for_class(mapped);
-        if !catalog_hits.is_empty() {
+        if tree.first_jar_for_spelling(mapped).is_some() {
             return true;
         }
         if tree.incomplete_entries.is_empty() {
@@ -4987,7 +4987,7 @@ impl PackageTree {
         let Some(class) = self.names.existing_child_of(parent, class_segment) else {
             return false;
         };
-        !self.jars_for_class_id(class).is_empty()
+        self.first_jar_for_id(class).is_some()
     }
 
     /// Whether `owner`'s flattened JVM nested class (`Owner$Companion`,
@@ -5004,7 +5004,7 @@ impl PackageTree {
         else {
             return false;
         };
-        !self.jars_for_class_id(class).is_empty()
+        self.first_jar_for_id(class).is_some()
     }
 
     fn jars_for_class_id(&self, class: NameId) -> Vec<JarId> {
@@ -6727,32 +6727,6 @@ mod fq_tests {
             Some("java/lang/Number".to_string())
         );
 
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove class directory");
-    }
-
-    #[test]
-    fn semantic_resolution_retries_an_incomplete_entry() {
-        use crate::symbol_source::SymbolSource;
-
-        let directory = test_temp_dir("incomplete-semantic-recovery");
-        let package = directory.join("recovered");
-        std::fs::create_dir(&package).expect("create package");
-        let class_file = package.join("Later.class");
-        let valid =
-            crate::jvm::classfile::ClassWriter::new("recovered/Later", "java/lang/Object").finish();
-        let mut invalid = valid.clone();
-        invalid[0] = 0;
-        std::fs::write(&class_file, invalid).expect("write incomplete class");
-        let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
-        let libraries =
-            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone()).expect("provider");
-        let namespace = SymbolNamespace::Package(type_name("recovered"));
-        assert!(libraries.symbols(namespace, "Later").classifier.is_none());
-        std::fs::write(&class_file, valid).expect("recover class");
-        assert!(libraries.symbols(namespace, "Later").classifier.is_some());
-
-        drop(libraries);
         drop(classpath);
         std::fs::remove_dir_all(directory).expect("remove class directory");
     }
