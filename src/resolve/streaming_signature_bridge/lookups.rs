@@ -750,7 +750,10 @@ impl ProductionSignatureSemantics<'_> {
             let mut advance = |candidate| {
                 let (selected, failed_segment) =
                     resolver.classifier_path_from_selected_root(candidate, &segments[1..]);
-                if selected.is_none() {
+                // A nearer rung that binds the root owns the diagnostic when no complete path is
+                // applicable. Lower rungs may still supply a complete candidate, but their misses
+                // must not replace this candidate's exact failed suffix.
+                if selected.is_none() && failure.is_none() {
                     failure = failed_segment;
                 }
                 selected
@@ -811,7 +814,7 @@ impl ProductionSignatureSemantics<'_> {
                     return Some((None, failed_segment));
                 }
                 crate::symbol_resolver::CandidateSelection::None => {
-                    if failed_segment.is_some() {
+                    if failure.is_none() && failed_segment.is_some() {
                         failure = failed_segment;
                     }
                 }
