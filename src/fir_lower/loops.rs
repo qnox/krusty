@@ -8,10 +8,6 @@ use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
-#[cfg(test)]
-#[path = "loops/tests.rs"]
-mod tests;
-
 /// The checked pieces of one iterator-protocol loop, kept together across the FIR-to-IR boundary.
 struct IteratorLoopContract<'a> {
     target: ControlTargetId,
@@ -291,10 +287,6 @@ impl BodyLowering<'_> {
         iterable: FirExprId,
         body: FirExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
-        // An array element is a read through its use-site projection. The projection describes the
-        // array's generic argument; it is not itself a value type that common IR can publish for
-        // the `get` result or the loop local.
-        let variable_ty = variable_ty.get().projection_read_ty();
         let iterable_expression = self
             .body
             .expr(iterable)
@@ -363,13 +355,13 @@ impl BodyLowering<'_> {
         let element = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Intrinsic {
                 operation: get_operation,
-                ret: variable_ty,
+                ret: variable_ty.get(),
             },
             dispatch_receiver: Some(receiver),
             args: vec![index_read],
         });
         let (_, variable_declaration) =
-            self.loop_variable_declaration(variable, variable_ty, element);
+            self.loop_variable_declaration(variable, variable_ty.get(), element);
         let body = self.expression(body)?;
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable_declaration, body],

@@ -82,7 +82,7 @@ fn return_expression_in_argument_position() {
     const SRC: &str = "class Token\n\
         fun consume(first: Token, second: Token) {}\n\
         fun box(): String { consume(Token(), return \"OK\") }\n";
-    common::expect_box_ok_with_stdlib(SRC, "return_expression_argument_position");
+    common::expect_box_same_as_kotlinc(SRC, "return_expression_argument_position");
 }
 
 #[test]

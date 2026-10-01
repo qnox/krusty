@@ -55,6 +55,7 @@ use field_nullability::{
     field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
+mod diverging_value_type;
 mod enclosure;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -11629,7 +11630,6 @@ impl<'a> Emitter<'a> {
                     Ty::Boolean
                 }
             }
-            IrExpr::BottomValue { .. } => Ty::Nothing,
             IrExpr::Block { value, .. } => {
                 let Some(value) = *value else {
                     return Ty::Unit;
@@ -11646,16 +11646,12 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand, .. } => self.value_ty(*operand),
             IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
-            IrExpr::Return(_)
-            | IrExpr::Throw { .. }
-            | IrExpr::Break { .. }
-            | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
             IrExpr::CurrentContinuation => Ty::obj("kotlin/coroutines/Continuation"),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
-            _ => Ty::Error,
+            other => diverging_value_type::diverging_value_ty(other).unwrap_or(Ty::Error),
         }
     }
 }
