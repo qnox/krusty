@@ -3053,6 +3053,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
   `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
 
+  A **member** property whose type is one of these classes mangles the accessor the backend
+  synthesizes, the same way any other value-class member accessor does. The classes stay out of
+  the expression erasure map, so a use keeps the primitive carrier, and they are value classes
+  only at a callable boundary — the map a property reference already mangles against.
+  `class C { val uInt = 1u }` therefore declares `getUInt-pVg5ArA()I`, and `var uVar: UInt`
+  declares `setUVar-WZ4Q5Ns(int)`. A plain `getUInt()I` is a method the reference does not call
+  (`NoSuchMethodError` from `KProperty0<UInt>.get`). A top-level unsigned getter stays plain:
+  return mangling is suppressed on a file facade. A value class whose own underlying property is
+  unsigned follows the member rule too (`value class Z(val x: UInt)` declares `getX-pVg5ArA()I`).
+  Test: `tests/unsigned_property_getter_e2e.rs`.
+
   Still unmodeled, all of them REJECTED or skipped rather than miscompiled: `UIntRange` value iteration;
   and, for the narrow pair specifically, a `when` on a `UByte`/`UShort` subject (the arms-must-be-literals
   gate can't be satisfied — a bare `200u` arm types as `UInt`, and `200u.toUByte()` is not a literal),
