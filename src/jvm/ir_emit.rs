@@ -10470,48 +10470,28 @@ impl<'a> Emitter<'a> {
                         let private_bridge = member_target.is_some_and(|function| {
                             self.reaches_through_bridge(owner_identity, function)
                         });
-                        if let Some(bridge) = bridge {
-                            let mut bridge_params =
-                                Vec::with_capacity(bridge.bridge_parameters.len() + 1);
-                            bridge_params.push(Ty::obj_name(bridge.owner));
-                            bridge_params.extend(bridge.bridge_parameters.iter().copied());
-                            let bridge_descriptor = method_descriptor(&bridge_params, ret);
-                            let bridge_name = format!("access${name}");
-                            let method = self.cw.methodref(
-                                &bridge.owner.render(),
-                                &bridge_name,
-                                &bridge_descriptor,
-                            );
-                            self.mark_call_start(e, code);
-                            code.invokestatic(method, aw + 1, physical_call_result_words(ret));
-                        } else if private_bridge {
-                            // A private member-extension accessor is an instance method. Another
-                            // class calls `access$<name>(Owner, …)`, which `invokespecial`s it.
-                            let mut bridge_params = Vec::with_capacity(ptys.len() + 1);
-                            bridge_params.push(Ty::obj(&owner));
-                            bridge_params.extend(ptys.iter().copied());
-                            let bridge_descriptor = method_descriptor(&bridge_params, ret);
-                            let bridge_name = format!("access${name}");
-                            let method = if interface {
-                                self.cw.interface_methodref(
-                                    &owner,
-                                    &bridge_name,
-                                    &bridge_descriptor,
-                                )
-                            } else {
-                                self.cw.methodref(&owner, &bridge_name, &bridge_descriptor)
-                            };
-                            self.mark_call_start(e, code);
-                            code.invokestatic(method, aw + 1, physical_call_result_words(ret));
-                        } else if interface {
-                            let m = self.cw.interface_methodref(&owner, &name, &descriptor);
-                            self.mark_call_start(e, code);
-                            code.invokeinterface(m, aw, physical_call_result_words(ret));
-                        } else {
-                            let m = self.cw.methodref(&owner, &name, &descriptor);
-                            self.mark_call_start(e, code);
-                            code.invokevirtual(m, aw, physical_call_result_words(ret));
-                        }
+                        let same_owner_private = !private_bridge
+                            && self.static_owner == Some(StaticOwner::Class(owner_identity))
+                            && member_target.is_some_and(|function| {
+                                self.ir.method_visibility(function).is_private()
+                            });
+                        self.mark_call_start(e, code);
+                        access_bridges::emit_selected_member_call(
+                            self.cw,
+                            code,
+                            &access_bridges::SelectedMemberCall {
+                                owner: &owner,
+                                name: &name,
+                                descriptor: &descriptor,
+                                parameters: &ptys,
+                                result: ret,
+                                interface_owner: interface,
+                                argument_words: aw,
+                                protected: bridge.as_ref(),
+                                private_extension_bridge: private_bridge,
+                                same_owner_private,
+                            },
+                        );
                         return;
                     }
                     let (owner, name, descriptor) = (

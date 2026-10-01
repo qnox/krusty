@@ -6299,12 +6299,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
-  accessor is an instance method of the declaring class (`setFoo(Int, String)` for `var Int.foo`).
+  accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
   The JVM realization records the exact getter or setter the access reaches, and the cross-class
-  walk emits `public static final synthetic access$<name>(Owner, …)`, which `invokespecial`s the
-  accessor. A call in the declaring class stays direct. A public member extension stays a direct
-  call. Verified against kotlinc 2.4.20 (`extensionProperties/accessorForPrivateSetter.kt`). Test:
+  walk emits `access$<name>(Owner, …)`, which `invokespecial`s the accessor. On a class the bridge
+  is `public static final synthetic`; on an interface it is `public static synthetic` and the call
+  is an `InterfaceMethodref`. A call in the declaring class stays a direct `invokespecial`. A
+  public member extension stays a direct `invokevirtual`. A use from an unrelated class is an
+  unresolved reference. Verified against kotlinc 2.4.20
+  (`extensionProperties/accessorForPrivateSetter.kt`). Test:
   `tests/private_member_extension_accessor_e2e.rs`.
 - **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
   is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
