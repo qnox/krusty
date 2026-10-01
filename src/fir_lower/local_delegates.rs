@@ -4,9 +4,13 @@
 //! intentionally not an `IrFunction`; targets decide whether and how to materialize a helper.
 
 use crate::fir::{
-    DeclarationId, FirDelegateCall, FirDelegateDispatchReceiver, FirExprId, FirExprKind,
+    DeclarationId, FirCallTarget, FirDelegateCall, FirDelegateDispatchReceiver, FirExprId,
+    FirExprKind,
 };
-use crate::ir::{IrExpr, IrGeneratedParameterRole, IrParameterIdentity, IrTypeOp};
+use crate::ir::{
+    IrCheckedArgument, IrExpr, IrGeneratedParameterRole, IrLocalPropertyReference,
+    IrParameterIdentity, IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
@@ -15,7 +19,8 @@ struct LocalDelegateAccessorRequest<'a> {
     storage_name: &'a str,
     storage_type: Ty,
     result: Ty,
-    reference: FirExprId,
+    reference: &'a IrLocalPropertyReference,
+    reference_type: Ty,
     call: &'a FirDelegateCall,
     value_type: Option<Ty>,
     site: crate::fir::FirLiftingSite,
@@ -28,21 +33,15 @@ impl BodyLowering<'_> {
         if plans.is_empty() {
             return Ok(());
         }
-        let declaration = DeclarationId::from_raw(self.body.owner().raw());
-        let source = self
-            .index
-            .declaration_anchor(declaration)
-            .map(|anchor| anchor.source)
-            .ok_or(FirLoweringFailure::InvalidLocalDelegatePlan(
-                self.body.owner(),
-            ))?;
         for plan in plans {
             let plan_declaration = plan.declaration;
+            let (reference, reference_type) = self.local_property_reference_plan(plan.reference)?;
             let getter = self.local_delegate_accessor(LocalDelegateAccessorRequest {
                 storage_name: &plan.storage_name,
                 storage_type: plan.storage_type.get(),
                 result: plan.property_type.get(),
-                reference: plan.reference,
+                reference: &reference,
+                reference_type,
                 call: &plan.get_value,
                 value_type: None,
                 site: plan
@@ -62,7 +61,8 @@ impl BodyLowering<'_> {
                         storage_name: &plan.storage_name,
                         storage_type: plan.storage_type.get(),
                         result: Ty::Unit,
-                        reference: plan.reference,
+                        reference: &reference,
+                        reference_type,
                         call,
                         value_type: Some(plan.property_type.get()),
                         site: plan
@@ -81,7 +81,7 @@ impl BodyLowering<'_> {
             self.ir
                 .local_delegate_plans
                 .push(crate::ir::IrLocalDelegatePlan {
-                    source,
+                    reference,
                     storage_name: plan.storage_name,
                     getter,
                     setter,
@@ -109,6 +109,7 @@ impl BodyLowering<'_> {
             storage_type,
             result,
             reference,
+            reference_type,
             call,
             value_type,
             site,
@@ -116,7 +117,9 @@ impl BodyLowering<'_> {
         } = request;
         // Each convention operand is a distinct use. Sharing one expression identity would let an
         // inline accessor's unread-operand marker alias into the provider or the other accessor.
-        let (reference, reference_type) = self.fresh_local_property_reference(reference)?;
+        let reference = self
+            .ir
+            .add_expr(IrExpr::LocalPropertyReference(reference.clone()));
         // The enclosing instance occupies slot 0 when the convention is a member extension.
         // The delegate follows it, which is also slot 0 when there is no dispatch receiver.
         let dispatch_type = call.dispatch_receiver.as_ref().and_then(dispatch_type);
@@ -130,16 +133,8 @@ impl BodyLowering<'_> {
             arguments.push((self.ir.add_expr(IrExpr::GetValue(value_slot)), value_type));
         }
         let declaration = DeclarationId::from_raw(self.body.owner().raw());
-        let mut body = super::delegated_properties::delegated_call_with_dispatch(
-            self.index,
-            self.ir,
-            declaration,
-            call,
-            delegate,
-            dispatch,
-            arguments,
-        )
-        .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()))?;
+        let mut body =
+            self.local_delegate_call(declaration, call, delegate, dispatch, arguments)?;
         if result != Ty::Unit && call.result.get() != result {
             body = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -175,10 +170,10 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn fresh_local_property_reference(
-        &mut self,
+    fn local_property_reference_plan(
+        &self,
         reference: FirExprId,
-    ) -> Result<(crate::ir::ExprId, Ty), FirLoweringFailure> {
+    ) -> Result<(IrLocalPropertyReference, Ty), FirLoweringFailure> {
         let expression =
             self.body
                 .expr(reference)
@@ -203,10 +198,89 @@ impl BodyLowering<'_> {
             (name, property_type.get()),
             (*mutable, *ordinal),
         )?;
-        Ok((
-            self.ir.add_expr(IrExpr::LocalPropertyReference(reference)),
-            reference_type,
-        ))
+        Ok((reference, reference_type))
+    }
+
+    fn local_delegate_call(
+        &mut self,
+        declaration: DeclarationId,
+        call: &FirDelegateCall,
+        delegate: crate::ir::ExprId,
+        dispatch: Option<crate::ir::ExprId>,
+        arguments: Vec<(crate::ir::ExprId, Ty)>,
+    ) -> Result<crate::ir::ExprId, FirLoweringFailure> {
+        let dispatch = match (&call.dispatch_receiver, dispatch) {
+            (Some(FirDelegateDispatchReceiver::Singleton { classifier, .. }), None) => {
+                Some(self.ir.add_expr(IrExpr::SingletonValue {
+                    classifier: *classifier,
+                }))
+            }
+            (_, dispatch) => dispatch,
+        };
+        if let FirCallTarget::Module(target) = &call.target {
+            let target = *target;
+            let inline = {
+                let callable = self
+                    .index
+                    .callable(target)
+                    .ok_or(FirLoweringFailure::MissingCallable(target))?;
+                callable.is_inline()
+            };
+            if !inline {
+                return super::delegated_properties::delegated_call_with_dispatch(
+                    self.index,
+                    self.ir,
+                    declaration,
+                    call,
+                    delegate,
+                    dispatch,
+                    arguments,
+                )
+                .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()));
+            }
+            let checked = arguments
+                .iter()
+                .enumerate()
+                .map(|(parameter, &(value, _))| {
+                    Ok(IrCheckedArgument::Expression {
+                        parameter: u32::try_from(parameter)
+                            .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?,
+                        value,
+                    })
+                })
+                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+            let selected_parameters = call
+                .parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect::<Vec<_>>();
+            let (dispatch_receiver, extension_receiver) = if call.extension {
+                (dispatch, Some(delegate))
+            } else {
+                (Some(delegate), None)
+            };
+            let expression = self
+                .same_file_call(
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    &checked,
+                    &selected_parameters,
+                    &call.substitutions,
+                )
+                .ok_or(FirLoweringFailure::MissingCallable(target))??;
+            return Ok(expression);
+        }
+        super::delegated_properties::delegated_call_with_dispatch(
+            self.index,
+            self.ir,
+            declaration,
+            call,
+            delegate,
+            dispatch,
+            arguments,
+        )
+        .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()))
     }
 }
 

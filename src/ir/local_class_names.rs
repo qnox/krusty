@@ -535,6 +535,10 @@ impl super::IrFile {
             }
         }
         for plan in &mut self.local_delegate_plans {
+            if let Some(class) = &mut plan.reference.class {
+                name(class, names);
+            }
+            plan.reference.property_type = ty(plan.reference.property_type, names);
             for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
                 tys(&mut accessor.parameters, names);
                 accessor.result = ty(accessor.result, names);

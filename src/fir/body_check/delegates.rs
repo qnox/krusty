@@ -766,11 +766,14 @@ fn selected_delegate_call(
     };
     match target {
         DelegateGetValueTarget::Member {
+            applied_receiver,
+            declared_receiver,
             stable_declaration,
             external_identity,
             external_default_provider,
             params,
             declared_params,
+            declared_ret,
             ret,
             ..
         } => {
@@ -794,8 +797,16 @@ fn selected_delegate_call(
                 let callable = index
                     .callable_for_declaration(*declaration)
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+                let substitutions = delegate_substitutions(
+                    index,
+                    span,
+                    std::iter::once((*declared_receiver, *applied_receiver))
+                        .chain(declared_params.iter().copied().zip(params.iter().copied()))
+                        .chain(std::iter::once((*declared_ret, *ret))),
+                )?;
                 return Ok(FirDelegateCall {
                     target: callable.id.into(),
+                    substitutions,
                     parameters,
                     declared_parameters,
                     result: resolved(*ret)?,
@@ -822,6 +833,7 @@ fn selected_delegate_call(
                     inline_plan: None,
                     extension_receiver_parameter: None,
                 },
+                substitutions: Box::new([]),
                 parameters,
                 declared_parameters,
                 result: resolved(*ret)?,
@@ -864,8 +876,32 @@ fn selected_delegate_call(
                 let header = index
                     .callable_for_declaration(*declaration)
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+                let substitutions = callable
+                    .generic_sig
+                    .as_deref()
+                    .map(|generic| {
+                        delegate_substitutions(
+                            index,
+                            span,
+                            generic
+                                .receiver
+                                .into_iter()
+                                .zip(Some(receiver.get()))
+                                .chain(
+                                    generic
+                                        .params
+                                        .iter()
+                                        .copied()
+                                        .zip(callable.params.iter().copied().skip(1)),
+                                )
+                                .chain(std::iter::once((generic.ret, callable.ret))),
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| Box::new([]));
                 return Ok(FirDelegateCall {
                     target: header.id.into(),
+                    substitutions,
                     parameters,
                     declared_parameters,
                     result,
@@ -903,6 +939,7 @@ fn selected_delegate_call(
                     .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: None,
                 },
+                substitutions: Box::new([]),
                 parameters,
                 declared_parameters,
                 result: resolved(callable.ret)?,
@@ -936,7 +973,7 @@ fn selected_delegate_call(
                 .into_boxed_slice();
             let declared_parameters =
                 declared_parameters(declared_params, call_parameters.len(), resolved)?;
-            let target = if let Some(declaration) = stable_declaration {
+            let (target, substitutions) = if let Some(declaration) = stable_declaration {
                 let callable = index
                     .callable_for_declaration(*declaration)
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
@@ -945,41 +982,65 @@ fn selected_delegate_call(
                     "delegate member-extension declaration={declaration:?} callable={:?} result={ret:?}",
                     callable.id,
                 );
-                callable.id.into()
+                let signature = index
+                    .signature(callable.declaration)
+                    .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+                let substitutions = delegate_substitutions(
+                    index,
+                    span,
+                    callable
+                        .shape
+                        .extension_receiver
+                        .into_iter()
+                        .map(|receiver| (receiver.get(), *extension_receiver))
+                        .chain(
+                            signature
+                                .parameters
+                                .iter()
+                                .map(|parameter| parameter.get())
+                                .zip(params.iter().copied()),
+                        )
+                        .chain(std::iter::once((signature.result.get(), *ret))),
+                )?;
+                (callable.id.into(), substitutions)
             } else {
                 let declaration = external_identity
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
                 let mut parameters = params.clone();
                 let extension_parameter = (*context_count).min(parameters.len());
                 parameters.insert(extension_parameter, *extension_receiver);
-                FirCallTarget::External {
-                    declaration,
-                    default_provider: *external_default_provider,
-                    receiver: Some(resolved(dispatch_receiver.ty)?),
-                    declared_receiver: None,
-                    parameters: parameters
-                        .into_iter()
-                        .map(resolved)
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                    result: resolved(*ret)?,
-                    declared_result: declared_ret.map(resolved).transpose()?,
-                    overridden_results: Box::new([]),
-                    suspend: *suspend,
-                    can_inline: inline.can_inline(),
-                    inline_plan: super::inline_body_plan::publish(
-                        inline_body_plan.as_deref(),
-                        None,
-                    )
-                    .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
-                    extension_receiver_parameter: Some(
-                        u32::try_from(extension_parameter)
-                            .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
-                    ),
-                }
+                (
+                    FirCallTarget::External {
+                        declaration,
+                        default_provider: *external_default_provider,
+                        receiver: Some(resolved(dispatch_receiver.ty)?),
+                        declared_receiver: None,
+                        parameters: parameters
+                            .into_iter()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                        result: resolved(*ret)?,
+                        declared_result: declared_ret.map(resolved).transpose()?,
+                        overridden_results: Box::new([]),
+                        suspend: *suspend,
+                        can_inline: inline.can_inline(),
+                        inline_plan: super::inline_body_plan::publish(
+                            inline_body_plan.as_deref(),
+                            None,
+                        )
+                        .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
+                        extension_receiver_parameter: Some(
+                            u32::try_from(extension_parameter)
+                                .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
+                        ),
+                    },
+                    Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
+                )
             };
             Ok(FirDelegateCall {
                 target,
+                substitutions,
                 parameters: call_parameters,
                 declared_parameters,
                 result: resolved(*ret)?,
@@ -990,6 +1051,39 @@ fn selected_delegate_call(
             })
         }
     }
+}
+
+/// Serialize the generic bindings convention selection already fixed. Every pair is the
+/// declaration shape followed by its selected shape; this is not another applicability pass.
+fn delegate_substitutions(
+    index: &ResolvedModuleIndex,
+    span: Option<crate::diag::Span>,
+    shapes: impl IntoIterator<Item = (Ty, Ty)>,
+) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
+    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    for (declared, selected) in shapes {
+        crate::symbol_resolver::unify_inferred_ty(declared, selected, &mut bindings);
+    }
+    let failure = |kind| BodyCheckFailure { span, kind };
+    let mut substitutions = bindings
+        .into_iter()
+        .map(|(name, value)| {
+            let parameter = index
+                .type_parameter_by_semantic_name(&name)
+                .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            Ok(FirTypeSubstitution {
+                parameter: parameter.into(),
+                value: ResolvedTy::new(value)
+                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
+                additional_bounds: Box::new([]),
+            })
+        })
+        .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
+    substitutions.sort_unstable_by_key(|substitution| match substitution.parameter {
+        FirTypeParameterRef::Module(parameter) => parameter.raw(),
+        FirTypeParameterRef::External { ordinal, .. } => ordinal,
+    });
+    Ok(substitutions.into_boxed_slice())
 }
 
 fn delegate_dispatch_receiver(

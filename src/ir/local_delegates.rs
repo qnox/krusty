@@ -19,7 +19,9 @@ pub(crate) struct IrLocalDelegateAccessorPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct IrLocalDelegatePlan {
-    pub(crate) source: crate::fir::SourceFileId,
+    /// Lexical declaration identity and source order of the property. A copied inline accessor may
+    /// be realized at another physical owner, but an ordinary nested-class use remains owned here.
+    pub(crate) reference: super::IrLocalPropertyReference,
     pub(crate) storage_name: Box<str>,
     pub(crate) getter: IrLocalDelegateAccessorPlan,
     pub(crate) setter: Option<IrLocalDelegateAccessorPlan>,

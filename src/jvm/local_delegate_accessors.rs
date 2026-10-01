@@ -32,16 +32,26 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
     // A copied inline body belongs to the caller for JVM reflection/storage. Rehome the copied
     // reference identity before the property-reference pass chooses its physical array.
     for (&expression, &owner) in &live {
-        if let IrExpr::LocalPropertyReference(reference) = &mut ir.exprs[expression as usize] {
-            reference.class = owner;
-            reference.source = current_source;
+        if ir.is_inline_copy(expression) {
+            if let IrExpr::LocalPropertyReference(reference) = &mut ir.exprs[expression as usize] {
+                reference.class = owner;
+                reference.source = current_source;
+            }
         }
     }
 
     let mut accesses = live
         .iter()
-        .filter_map(|(&expression, &owner)| match ir.expr(expression) {
-            IrExpr::LocalDelegateAccess(access) => Some((expression, access.plan, owner)),
+        .filter_map(|(&expression, &physical_owner)| match ir.expr(expression) {
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = plans.get(access.plan as usize)?;
+                let owner = if ir.is_inline_copy(expression) {
+                    physical_owner
+                } else {
+                    plan.reference.class
+                };
+                Some((expression, access.plan, owner))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -50,27 +60,54 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
     // Lift helpers in checked declaration-plan order so unrelated expression allocation does not
     // perturb kotlinc-compatible local/lambda numbering. Within a plan, retain the first emitted
     // owner order (important when an inline template has copies in more than one classifier).
-    let mut uses = Vec::new();
+    let mut uses = plans
+        .iter()
+        .enumerate()
+        .filter(|(_, plan)| plan.reference.source == current_source)
+        .map(|(plan, declaration)| {
+            Ok((
+                PlanUse {
+                    plan: u32::try_from(plan).map_err(|_| ())?,
+                    owner: declaration.reference.class,
+                },
+                declaration.reference.member_order,
+                declaration.reference.ordinal,
+            ))
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+    uses.sort_unstable_by_key(|&(key, member_order, ordinal)| (member_order, ordinal, key.plan));
+    let mut uses = uses.into_iter().map(|(key, _, _)| key).collect::<Vec<_>>();
     for &(_, plan, owner) in &accesses {
         let key = PlanUse { plan, owner };
         if !uses.contains(&key) {
             uses.push(key);
         }
     }
-    uses.sort_by_key(|use_| use_.plan);
 
     let mut realizations = HashMap::new();
     for key in uses {
         let plan = plans.get(key.plan as usize).ok_or(())?;
         let owner = key.owner;
         let getter_plan = rehome_accessor(ir, &plan.getter, owner, current_source);
-        let getter = realize_accessor(ir, &plan.storage_name, owner, plan.source, getter_plan)?;
+        let getter = realize_accessor(
+            ir,
+            &plan.storage_name,
+            owner,
+            plan.reference.source.source,
+            getter_plan,
+        )?;
         let setter = plan
             .setter
             .as_ref()
             .map(|accessor| {
                 let accessor = rehome_accessor(ir, accessor, owner, current_source);
-                realize_accessor(ir, &plan.storage_name, owner, plan.source, accessor)
+                realize_accessor(
+                    ir,
+                    &plan.storage_name,
+                    owner,
+                    plan.reference.source.source,
+                    accessor,
+                )
             })
             .transpose()?;
         realizations.insert(
