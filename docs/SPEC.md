@@ -7425,10 +7425,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
   they also carry a superclass capture that their own body never mentions.
+
+  An inner class is the case that does not carry the capture itself. A local class declared in an
+  extension, or in a receiver lambda, stores that receiver even when none of its own members read
+  it, so the enclosing class already has the field. The inner constructor receives that instance
+  as its enclosing-instance parameter and passes the field to `super`, read from the parameter.
+  `getfield` on the uninitialized inner instance is illegal, and a second prefix parameter on the
+  inner constructor is not the calling convention kotlinc uses (`Inner.<init>(Outer)` still takes
+  only the enclosing instance). A subclass that does hold the closure identity keeps forwarding
+  its own prefix parameter; the field read fills only an identity that parameter list lacks.
+  The enclosing-instance parameter is marked with that role; lowering does not infer it from an
+  unnamed parameter. An implicit receiver capture carries the checker's receiver-rung identity,
+  shared by every classifier that captured that rung. The super argument reads the enclosing
+  field with that identity. Callable and lambda labels are not identities: two receivers may share
+  a label, and one receiver may be rendered under more than one label. Lexical values stay on
+  their own field coordinate, so two shadowed locals are never joined by spelling.
   Tests: `tests/local_superclass_capture_e2e.rs`, each cross-checked against the
   reference compiler, including
-  `a_subclass_passes_a_capture_to_a_secondary_constructor` and
-  `a_subclass_uses_the_selected_secondary_constructor_capture_prefix`. Corpus:
+  `a_subclass_passes_a_capture_to_a_secondary_constructor`,
+  `a_subclass_uses_the_selected_secondary_constructor_capture_prefix`, and
+  `an_inner_class_reads_a_superclass_capture_from_the_enclosing_instance`,
+  `same_spelled_extension_receivers_do_not_cross_on_the_enclosing_instance`, and
+  `same_spelled_lambda_receivers_do_not_cross_on_the_enclosing_instance`. Corpus:
   `codegen/box/localClass/localHierarchy.kt`,
   `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and

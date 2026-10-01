@@ -79,7 +79,10 @@ pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub(crate) use constructors::IrSecondaryConstructorRole;
-pub use constructors::{IrCapturedReceiver, IrConstructorCapture, IrJvmValueClassSecondaryCtor};
+pub use constructors::{
+    IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
+    IrJvmValueClassSecondaryCtor,
+};
 pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
@@ -1192,6 +1195,12 @@ pub struct IrCtorArg {
     pub anonymous_super_forward: Option<u32>,
     /// The captured value a local or anonymous class's synthetic constructor prefix carries.
     pub capture: Option<IrConstructorCapture>,
+    /// Why this parameter exists. An enclosing instance is selected by
+    /// [`IrCtorParameterProvenance::EnclosingInstance`], not by the lack of a name.
+    pub provenance: IrCtorParameterProvenance,
+    /// Semantic closure coordinate of a capture parameter. Absent for source parameters and for
+    /// the enclosing instance, whose role is [`IrCtorParameterProvenance::EnclosingInstance`].
+    pub(crate) capture_identity: Option<crate::fir::ClassCaptureIdentity>,
 }
 
 /// The executable scope a local, anonymous or generated class is declared in. A backend realizes it
@@ -1667,6 +1676,8 @@ impl IrClass {
                 check: None,
                 anonymous_super_forward: None,
                 capture: None,
+                provenance: IrCtorParameterProvenance::Value,
+                capture_identity: None,
             })
             .collect::<Vec<_>>();
         let context_count =

@@ -365,6 +365,8 @@ impl BodyLowering<'_> {
                     source_name: capture.name.clone(),
                     receiver,
                 }),
+                provenance: crate::ir::IrCtorParameterProvenance::Capture,
+                capture_identity: capture.capture_identity,
             });
             if let Some(identity) = capture.capture_identity {
                 self.ir

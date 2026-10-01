@@ -65,6 +65,8 @@ impl BodyLowering<'_> {
                 check: None,
                 anonymous_super_forward: None,
                 capture: None,
+                provenance: crate::ir::IrCtorParameterProvenance::Value,
+                capture_identity: None,
             }));
         let delegate_count = u32::try_from(delegates.len())
             .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?;
@@ -140,6 +142,8 @@ impl BodyLowering<'_> {
                     check: None,
                     anonymous_super_forward: Some(ordinal),
                     capture: None,
+                    provenance: crate::ir::IrCtorParameterProvenance::Value,
+                    capture_identity: None,
                 });
             }
             let count = u32::try_from(forwards.len())

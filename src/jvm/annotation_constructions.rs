@@ -153,6 +153,8 @@ fn annotation_implementation(
                 check: None,
                 anonymous_super_forward: None,
                 capture: None,
+                provenance: crate::ir::IrCtorParameterProvenance::Value,
+                capture_identity: None,
             })
             .collect(),
         ctor_param_annotations: Vec::new(),

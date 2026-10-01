@@ -551,6 +551,8 @@ fn constructor_argument(ty: Ty) -> IrCtorArg {
         check: None,
         anonymous_super_forward: None,
         capture: None,
+        provenance: crate::ir::IrCtorParameterProvenance::Value,
+        capture_identity: None,
     }
 }
 

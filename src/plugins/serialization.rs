@@ -1526,6 +1526,8 @@ impl IrPlugin for SerializationPlugin {
                     check: None,
                     anonymous_super_forward: None,
                     capture: None,
+                    provenance: crate::ir::IrCtorParameterProvenance::Value,
+                    capture_identity: None,
                 })
                 .collect();
             // kotlinc's `$serializer` member order is `<init>`, `serialize`, `deserialize`,
