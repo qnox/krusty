@@ -10851,6 +10851,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   application consumes them—never as fabricated names and never at inert property, field,
   parameter, or local positions. Tests: `tests/annotation_emission_e2e.rs`.
 
+- **A vararg constructor property is an array; a body property at the same index is not.**
+  `class Bag(vararg val values: Int)` stores `values` as `IntArray`. Constructor parameters and
+  body properties are each numbered from zero, so the first body property is not that parameter.
+  `class Version(private vararg val numbers: Int) { val major: Int = numbers.getOrNull(0) ?: -1 }`
+  keeps `major` as `Int`. The same holds when the vararg is a later parameter and the body
+  property at that index has its own declared type. Test:
+  `tests/vararg_constructor_property_e2e.rs`.
+
 - **Shared diagnostic text uses the Kotlin frontend's emitted wording.** Template extraction is an
   audit lead, not proof that a source construct emits that template: tests compile the same source
   with krusty and kotlinc and compare their complete diagnostics. The verified messages are

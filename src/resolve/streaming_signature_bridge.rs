@@ -32,6 +32,7 @@ mod source_contracts;
 mod stable_function_index;
 mod type_parameter_publication;
 mod value_parameter_publication;
+mod vararg_constructor_property;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -4559,24 +4560,8 @@ pub(crate) fn finalized_streamed_signature_index(
             // module-finalization failure.
             continue;
         }
-        let constructor_property_vararg = (stub.kind == DeclarationKind::Property)
-            .then_some(anchor.owner)
-            .flatten()
-            .and_then(|owner| headers.syntax.declaration(owner))
-            .and_then(|owner| match owner.kind {
-                crate::fir::HeaderDeclarationKind::Classifier {
-                    primary_parameters, ..
-                } => headers
-                    .syntax
-                    .parameters(primary_parameters)
-                    .get(anchor.sibling as usize)
-                    .map(|parameter| parameter.flags.is_property() && parameter.flags.is_vararg()),
-                crate::fir::HeaderDeclarationKind::Callable { .. }
-                | crate::fir::HeaderDeclarationKind::Property { .. }
-                | crate::fir::HeaderDeclarationKind::Constructor { .. }
-                | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
-            })
-            .unwrap_or(false);
+        let constructor_property_vararg =
+            vararg_constructor_property::is_vararg(headers, stub, anchor);
         let compact_declaration = headers.syntax.declaration(stub.id).map(|value| value.kind);
         let has_compact_declaration = compact_declaration.is_some();
         let (parameter_types, result_type, receiver_type, backing_field_type) =
