@@ -71,6 +71,16 @@ pub(super) fn erased_result_slot(ir: &IrFile, call: ExprId, declared: Ty) -> Opt
     })
 }
 
+/// The reference slot a checked call leaves before the coercion to its substituted result. A call
+/// whose declaration the IR carries leaves that declaration's selected erasure; a realized
+/// dependency call leaves the slot its external realization recorded.
+pub(super) fn checked_result_slot(ir: &IrFile, call: ExprId) -> Option<Ty> {
+    match realized_call_result(ir, call) {
+        Some(_) => erased_result_slot(ir, call, *ir.call_declared_ret.get(&call)?),
+        None => ir.physical_types.get(&call).copied(),
+    }
+}
+
 pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
     let mut coercions = ir
         .declaration_result_coercions

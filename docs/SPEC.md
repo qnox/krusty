@@ -5129,6 +5129,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   publishes the holder as the declaration's nonvirtual realization; resolution keeps the selected
   declaration's identity and the JVM super-call realization reads the holder from it. Tests:
   `tests/legacy_interface_calls_e2e.rs`.
+- **`!!` over a generic call checks before it casts.** A call to a generic Kotlin function or
+  member returns its erased slot (`Object`); kotlinc asserts that slot non-null
+  (`dup; Intrinsics.checkNotNull`) and only then applies the `checkcast` to the substituted type.
+  The assertion reads the call's selected erasure, whether the declaration is in the same file,
+  another file of the module, or a dependency. Tests: `tests/generic_result_assertion_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.

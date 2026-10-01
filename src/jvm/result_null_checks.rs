@@ -24,8 +24,10 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             else {
                 return None;
             };
-            crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, arg)?;
-            let slot = ir_ty_to_jvm(ir.physical_types.get(&arg)?);
+            let call = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, arg)?;
+            let slot = ir_ty_to_jvm(&crate::jvm::call_result_boundaries::checked_result_slot(
+                ir, call,
+            )?);
             let target = ir_ty_to_jvm(&type_operand);
             (slot.is_reference() && target.is_reference() && slot != target)
                 .then_some((assertion, operand))
