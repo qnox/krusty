@@ -350,6 +350,20 @@ impl<'p, B> Scope<'p, B> {
         }
     }
 
+    pub(super) fn parent(&self) -> Option<&'p Scope<'p, B>> {
+        self.parent
+    }
+
+    /// Flow facts recorded in THIS frame, not inherited ones.
+    pub(super) fn own_local_flow_facts(&self) -> Vec<(String, Ty)> {
+        self.flow
+            .borrow()
+            .locals
+            .iter()
+            .map(|(name, ty)| (name.clone(), *ty))
+            .collect()
+    }
+
     pub(crate) fn child(&'p self, kind: ScopeKind) -> Scope<'p, B> {
         debug_assert!(
             !matches!(kind, ScopeKind::File),
@@ -771,6 +785,13 @@ impl<'p, B> Scope<'p, B> {
             flow.intersections.retain(|path, _| path.root != *root);
             flow.exclusions.retain(|path, _| path.root != *root);
         }
+    }
+
+    /// Record a continuation fact on THIS frame only. A control-flow join uses this for a type
+    /// every completing edge proved: the fact must not wipe an enclosing frame the way a nested
+    /// write does, because the enclosing frame outlives the conditional.
+    pub(super) fn record_local_flow_fact(&self, name: &str, ty: Ty) {
+        self.flow.borrow_mut().locals.insert(name.to_string(), ty);
     }
 
     /// Record the straight-line read type of `name` for the rest of THIS scope, or with `None`

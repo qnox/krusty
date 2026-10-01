@@ -75,6 +75,7 @@ mod constant_evaluation;
 mod context_capture;
 mod context_receiver_priority;
 mod context_sensitive_resolution;
+mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
@@ -89,6 +90,7 @@ mod function_exit;
 pub(crate) mod function_type_parameters;
 mod function_value_conversions;
 mod generic_call_bindings;
+mod if_expression;
 mod implicit_rungs;
 mod inspection_analysis;
 mod integer_constants;
@@ -25093,7 +25095,9 @@ impl<'a> Checker<'a> {
                     );
                     // A write replaces the prior data-flow fact with the assigned value's exact
                     // subtype, or clears it when the value is as wide as storage / unstable.
-                    if is_var {
+                    // An unreachable write is erased and must not replace the fact a `finally`
+                    // that actually runs will read.
+                    if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
                         self.set_local_narrow(scope, &name, narrowing);
                         // A write under a live smart-cast shadow must also move the PROOF binding:
@@ -66497,42 +66501,6 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    /// Check an `if` branch with its condition narrowings.
-    fn if_branch_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        branch: ExprId,
-        then: bool,
-        wanted: Wanted,
-    ) -> Ty {
-        let (casts, declined) = self.condition_narrowings(scope, cond, then);
-        let compound = matches!(self.file.expr(cond), Expr::Binary { op, .. } if *op
-            == if then { BinOp::And } else { BinOp::Or });
-        let branch_scope = scope.child(ScopeKind::Block);
-        let scope = &branch_scope;
-        self.apply_narrowings(scope, &casts, &declined, compound);
-        self.apply_condition_exclusions(scope, cond, then);
-        // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
-        self.with_this_narrow(self.this_is_narrowing(scope, cond, !then), |c| {
-            let actual = c.expr_result(scope, branch, wanted.expected, wanted.value_required);
-            let Some(expected) = wanted.expected else {
-                return actual;
-            };
-            // A branch read may expose one projection of a proven intersection even though the
-            // conditional's context asks for another. `v: T` in the false branch of `v !is A`
-            // reads as `A`, but the same value is still `T`; project it while this branch's lexical
-            // flow frame is alive so the enclosing join does not widen `T & A` to `Any?`.
-            let projected =
-                c.recorded_expression_type_for_expected(scope, branch, actual, expected);
-            if projected != actual {
-                c.set(branch, projected)
-            } else {
-                actual
-            }
-        })
-    }
-
     /// Report a conditional branch whose selected generic call remains symbolic after sibling
     /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
     /// diagnosed here.
@@ -66561,61 +66529,6 @@ impl<'a> Checker<'a> {
                 crate::types::type_parameter_source_name(formal)
             ),
         );
-    }
-
-    fn expr_inner_if(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        wanted: Wanted,
-        cond: ExprId,
-        then_branch: ExprId,
-        else_branch: Option<ExprId>,
-    ) -> Ty {
-        let t = {
-            let ct = self.expr(scope, cond);
-            self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-            let tt = self.if_branch_ty(scope, cond, then_branch, true, wanted);
-            match else_branch {
-                Some(eb) => {
-                    let et = self.if_branch_ty(scope, cond, eb, false, wanted);
-                    let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
-                    let tt =
-                        self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
-                            c.if_branch_ty(
-                                scope,
-                                cond,
-                                then_branch,
-                                true,
-                                Wanted {
-                                    expected: Some(exp),
-                                    value_required: wanted.value_required,
-                                },
-                            )
-                        });
-                    let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
-                        c.if_branch_ty(
-                            scope,
-                            cond,
-                            eb,
-                            false,
-                            Wanted {
-                                expected: Some(exp),
-                                value_required: wanted.value_required,
-                            },
-                        )
-                    });
-                    self.report_unbound_conditional_branch(scope, then_branch);
-                    self.report_unbound_conditional_branch(scope, eb);
-                    conditional_branch::join_types(self, scope, wanted.expected, tt, et, e)
-                }
-                None => {
-                    self.report_unbound_conditional_branch(scope, then_branch);
-                    Ty::Unit
-                }
-            }
-        };
-        self.set(e, t)
     }
 
     fn expr_inner_block(
@@ -66665,6 +66578,10 @@ impl<'a> Checker<'a> {
             // body throws before its trailing would be typed by the dead trailing, and the lowerer
             // would emit that dead code (an unframed branch target → VerifyError).
             let mut diverged = false;
+            // A non-completing `try` does not publish the next statement's write, but that
+            // statement is still lowered. Erasing it leaves the backend's jump to the
+            // continuation aimed past the last instruction (`null as Nothing` in `try`/`catch`).
+            let mut suppressed_continuation = false;
             let signature_default_cutoff = self
                 .signature_defaults_only
                 .then(|| {
@@ -66681,15 +66598,22 @@ impl<'a> Checker<'a> {
             let mut signature_defaults_complete = false;
             for s in &stmts {
                 let unreachable = diverged;
-                if unreachable {
+                let suppress_flow = suppressed_continuation && !unreachable;
+                if unreachable || suppress_flow {
                     self.unreachable_statement_depth += 1;
                     self.stmt(scope, *s);
                     self.unreachable_statement_depth -= 1;
-                    self.stmt_lowers.insert(*s, StmtLowering::Erased);
+                    if unreachable {
+                        self.stmt_lowers.insert(*s, StmtLowering::Erased);
+                    }
                 } else {
                     self.stmt(scope, *s);
                 }
                 diverged = diverged || self.stmt_diverges(*s);
+                if let Stmt::Expr(expression) = self.file.stmt(*s) {
+                    suppressed_continuation =
+                        suppressed_continuation || self.try_never_completes(*expression);
+                }
                 // Early-return guard: `if (x !is T) return …` (a diverging then) narrows a
                 // stable `x` to `T` for the remaining statements of this block. An `else if`
                 // CHAIN narrows level by level — `if (x is A) return …; else if (x !is B)
@@ -66798,7 +66722,14 @@ impl<'a> Checker<'a> {
                 // reaching a `{ … ; lambda }` result).
                 Some(_) if trailing_contract.is_some() => Ty::Unit,
                 Some(te) => {
-                    let trailing_ty = self.expr_result(scope, te, expected, value_required);
+                    let trailing_ty = if suppressed_continuation && !diverged {
+                        self.unreachable_statement_depth += 1;
+                        let ty = self.expr_result(scope, te, expected, value_required);
+                        self.unreachable_statement_depth -= 1;
+                        ty
+                    } else {
+                        self.expr_result(scope, te, expected, value_required)
+                    };
                     // Only where the block's VALUE is used. A statement block after a diverging
                     // statement transfers control and produces nothing — `fun f() { return "OK"; …
                     // }` is the shape — and calling it by its trailing statement's type says the
@@ -66836,6 +66767,7 @@ impl<'a> Checker<'a> {
             };
             t
         };
+        self.promote_block_flow(scope);
         self.set(e, t)
     }
 
@@ -66870,7 +66802,17 @@ impl<'a> Checker<'a> {
                 );
             }
             // A later subjectless arm runs only when every earlier arm's conditions were false.
-            // Carry those false-branch facts into its conditions and body.
+            // Carry those false-branch facts into its conditions and body. Arms are alternative
+            // edges, so each one is checked from the `when`'s entry facts; a write in an earlier
+            // arm must not leak into a later arm.
+            let entry = scope.flow_snapshot();
+            let locals = self.stable_local_vars(scope);
+            let declared = locals
+                .iter()
+                .map(|local| local.declared)
+                .collect::<Vec<_>>();
+            let entry_reads = self.local_edge_reads(scope, &locals, &declared);
+            let mut arm_exits = Vec::with_capacity(arms.len());
             let mut fallthrough_casts: Vec<(NarrowPath, Ty)> = Vec::new();
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
             for arm in &arms {
@@ -66983,6 +66925,13 @@ impl<'a> Checker<'a> {
                     arm_declined,
                     this_narrow: arm_this_narrow,
                 });
+                let reads = self.local_edge_reads(&arm_scope, &locals, &entry_reads);
+                arm_exits.push(self.take_local_flow_exit(
+                    scope,
+                    &entry,
+                    reads,
+                    self.normal_completion(arm.body),
+                ));
             }
             // Recheck a symbolic generic call against the other arms' common result type. Conditions
             // and guards are not rechecked.
@@ -67010,22 +66959,32 @@ impl<'a> Checker<'a> {
                     let arm_casts = record.arm_casts.clone();
                     let arm_declined = record.arm_declined.clone();
                     let this_narrow = record.this_narrow;
+                    let mut replaced_exit = None;
                     let rebound =
                         self.rebind_conditional_branch(body, sibling, current, fixed, |c, exp| {
-                            let arm_scope = scope.child(ScopeKind::Block);
-                            let scope = &arm_scope;
-                            c.apply_narrowings(
-                                scope,
-                                &fallthrough_casts,
-                                &fallthrough_declined,
-                                false,
-                            );
-                            c.apply_narrowings(scope, &arm_casts, &arm_declined, false);
-                            c.with_this_narrow(this_narrow, |c2| {
-                                c2.expr_result(scope, body, Some(exp), value_required)
-                            })
+                            let (ty, reads, completes) = {
+                                let arm_scope = scope.child(ScopeKind::Block);
+                                c.apply_narrowings(
+                                    &arm_scope,
+                                    &fallthrough_casts,
+                                    &fallthrough_declined,
+                                    false,
+                                );
+                                c.apply_narrowings(&arm_scope, &arm_casts, &arm_declined, false);
+                                let ty = c.with_this_narrow(this_narrow, |c2| {
+                                    c2.expr_result(&arm_scope, body, Some(exp), value_required)
+                                });
+                                let reads = c.local_edge_reads(&arm_scope, &locals, &entry_reads);
+                                (ty, reads, c.normal_completion(body))
+                            };
+                            replaced_exit =
+                                Some(c.take_local_flow_exit(scope, &entry, reads, completes));
+                            ty
                         });
                     arm_results[i].ty = rebound;
+                    if let Some(exit) = replaced_exit {
+                        arm_exits[i] = exit;
+                    }
                 }
             }
             for record in &arm_results {
@@ -67047,6 +67006,14 @@ impl<'a> Checker<'a> {
             };
             let exhaustive =
                 has_else || missing.as_ref().is_some_and(|branches| branches.is_empty());
+            if !exhaustive {
+                arm_exits.push(control_flow_join::LocalFlowExit {
+                    completes: true,
+                    parent_flow: entry.clone(),
+                    reads: entry_reads.clone(),
+                });
+            }
+            self.publish_joined_local_flow(scope, &locals, &entry_reads, &arm_exits);
             if exhaustive {
                 self.exhaustive_whens.insert(e);
                 result.unwrap_or(Ty::Unit)

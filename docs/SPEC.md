@@ -2725,14 +2725,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver lambda or inner class); and the bare/`this.`-qualified forms of an own member `val`
   share one narrowing.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
-  (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type, while writes in
-  nested control flow join with the prior fact. Inline-spliced lambdas follow the same ordered flow;
-  a lambda declared later does not invalidate an earlier proof. Assigning `null` narrows the read to
-  `Nothing?`, while a null initializer keeps the declared type. Member selection still uses that
-  declared type before reporting nullable-receiver diagnostics against the flow type. When an active
-  capturing closure makes a cast unstable, every receiver use that needs it reports the exact
-  smart-cast-impossible diagnostic instead of a generic unsafe-call error. The null branch may still
-  narrow to `Nothing?` when every interfering closure write also stores null.
+  (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
+  lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.
+  Assigning `null` narrows the read to `Nothing?`, while a null initializer keeps the declared type.
+  Member selection still uses that declared type before reporting nullable-receiver diagnostics
+  against the flow type. When an active capturing closure makes a cast unstable, every receiver use
+  that needs it reports the exact smart-cast-impossible diagnostic instead of a generic unsafe-call
+  error. The null branch may still narrow to `Nothing?` when every interfering closure write also
+  stores null.
+- **After `if` or `when`, a stable local `var` keeps a flow type only when every normally completing
+  edge agrees on it.** Each edge's type is the condition facts that hold there plus the assignments
+  that edge performs. A block always runs, so an assignment in it is the enclosing edge's type.
+  A `return`, `break`, `continue`, or `Nothing` edge does not complete and is left out of the
+  join, so `if (x == null) return` and `if (x == null) { x = next }` both leave `x`
+  non-null afterwards when the other edge already proved that. Edges that disagree, including a
+  one-sided assignment whose other edge is still nullable, leave the declared type and drop a fact
+  the entry had proven. A non-exhaustive `when` has an extra edge on which no arm ran. Parent-frame
+  facts that a completing edge invalidated stay invalid; the agreed type itself is recorded on the
+  continuation. A `try` whose result is `Nothing`, or whose `finally` is `Nothing`, does not
+  complete, so the assignment after it is unreachable and does not change that type:
+  `try { throw … } finally { x = "OK" }; x = 117` does not publish `117` into the outer `finally`,
+  which still reads the value the inner `finally` stored. The statement is still lowered. A
+  `try`/`catch` around `null as Nothing` jumps to the following `return`, and deleting that
+  `return` leaves the jump past the last instruction. `tests/var_smartcast_e2e.rs`.
 - **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:
   `if (x is A) return …; else if (x !is B) return …` proves `x !is A && x is B` afterwards, because
   falling through a level whose then-branch diverges means that level's condition was false. The walk
