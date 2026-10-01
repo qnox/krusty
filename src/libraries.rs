@@ -4,6 +4,7 @@ mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
+mod call_realization;
 mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
@@ -13,6 +14,7 @@ mod generic_signature;
 mod inline_body;
 mod platform_contract;
 mod property_producer;
+pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
 pub use classifier_kind::TypeKind;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -331,9 +333,10 @@ pub struct LibraryMember {
     /// value-class pass reads this to decide the result's representation. `None` when the provider
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
-    /// Language-defined classifier callable synthesized for this declaration. This is semantic
-    /// identity, not a backend spelling: each backend decides how the selected operation is realized.
-    /// Ordinary declared members carry `None`.
+    /// See [`LibraryCallable::overridden_results`].
+    pub overridden_results: Box<[Ty]>,
+    /// Language-defined classifier callable synthesized for this declaration (`None` for an ordinary
+    /// one): a semantic identity, each backend deciding how the selected operation is realized.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
     /// A compiled `companion { … }` block member's classifier; see `FunctionInfo`'s field.
     pub associated_classifier: Option<TypeName>,
@@ -773,6 +776,7 @@ impl LibraryMember {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            overridden_results: Box::new([]),
             implicit_classifier_callable: None,
             associated_classifier: None,
             associated_access_owner: None,
@@ -943,6 +947,7 @@ impl LibraryCallable {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            overridden_results: Box::new([]),
         }
     }
 
@@ -1123,12 +1128,17 @@ pub struct LibraryCallable {
     /// external callable keeps target realization from inferring either modifier from an
     /// argument's type or from bytecode shape.
     pub inline_modifiers: Box<[InlineParameterModifier]>,
-    /// The callee's DECLARED (un-erased, pre-substitution) return type — the return analogue of
-    /// [`Self::source_receiver`], carried for the same reason and read by the same pass. See
-    /// [`LibraryMember::declared_ret`]: [`Self::ret`] is the SUBSTITUTED type, which cannot say whether
-    /// a value-class result is the erased CARRIER (declared to return it) or a BOX out of a generic
-    /// slot. Only non-null declared returns are recorded; a nullable value class really is boxed.
+    /// The callee's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
+    /// the return analogue of [`Self::source_receiver`], carried for the same reason and read by the
+    /// same pass. [`Self::ret`] is the SUBSTITUTED type, so `List<TokenBox>.get` and `A.create():
+    /// A<String>` both look like "returns a value class, physically `Object`", though `get` hands back
+    /// a BOX out of the generic slot `E` and `create` the erased carrier. Only non-null declared
+    /// returns are recorded; a nullable value class really is boxed.
     pub declared_ret: Option<Ty>,
+    /// The declared results of the declarations this suspend callable overrides, as the core member
+    /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
+    /// how the callable's own result crosses its continuation boundary.
+    pub overridden_results: Box<[Ty]>,
     /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
     /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
     pub context_count: usize,
@@ -1162,30 +1172,6 @@ pub struct LibraryCallable {
     /// Exact nonvirtual target selected by the provider (see [`LibraryMember::nonvirtual_realization`]):
     /// present only when the ordinary physical descriptor is not the legal nonvirtual entry point.
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NonvirtualCallRealization {
-    pub owner: TypeName,
-    pub descriptor: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct DefaultCallRealization {
-    /// Exact platform invocation identity selected by the provider. Consumers must not reconstruct
-    /// any part of this target from the source declaration.
-    pub owner: TypeName,
-    pub name: String,
-    pub descriptor: String,
-    /// Classfile that declares the target body. This can differ from `owner` when a public facade is
-    /// the legal invocation owner for a method stored on one of its package parts.
-    pub declaration_owner: TypeName,
-    pub real_params: Vec<Ty>,
-    /// Number of platform mask words before the trailing marker. Zero denotes a marker-only
-    /// realization; consumers must not infer this ABI fact from the source parameter count.
-    pub mask_count: usize,
-    pub ret: Ty,
-    pub suspend: bool,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
@@ -2170,6 +2156,7 @@ impl FunctionInfo {
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
         callable.declared_ret = member.declared_ret;
+        callable.overridden_results = member.overridden_results.clone();
         callable.context_count = member.context_count;
         callable.contract = member.contract.clone();
         callable.equality_bound = member.equality_bound;
@@ -2223,14 +2210,14 @@ impl FunctionInfo {
         member.physical_params = self.callable.physical_params.clone();
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
-        // Preserve the selected declaration's pre-substitution return when a generic `FunctionInfo`
+        // Preserve the selected declaration's pre-substitution results when a generic `FunctionInfo`
         // is materialized as an instance-member emit handle. The logical `ret` above is deliberately
-        // caller-specialized, so it cannot replace this fact: `Factory.invoke(): TokenBox<String>` and
-        // `List<TokenBox<String>>.get()` may both specialize to `TokenBox<String>` and physically return
-        // `Object`, while only the declaration says the former hands back an unboxed carrier. Dropping
-        // the fact here makes every downstream consumer—including the operator-invoke path—guess from
-        // indistinguishable substituted/physical types and unbox a real carrier as though it were a box.
+        // caller-specialized: `Factory.invoke(): TokenBox<String>` and `List<TokenBox<String>>.get()`
+        // both specialize to `TokenBox<String>` and physically return `Object`, and only the
+        // declarations say the former hands back an unboxed carrier. Without them every consumer,
+        // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
+        member.overridden_results = self.callable.overridden_results.clone();
         member.signature = self.callable.signature.clone();
         member.default_values = self.default_values.clone();
         member.default_realization = self.callable.default_realization.clone();

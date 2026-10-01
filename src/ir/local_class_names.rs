@@ -881,6 +881,10 @@ impl super::IrFile {
         self.suspend_calls
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
+        self.suspend_call_overridden_results
+            .values_mut()
+            .flat_map(|results| results.iter_mut())
+            .for_each(|value| *value = ty(*value, names));
         self.ext_call_source_receiver
             .values_mut()
             .for_each(|value| *value = ty(*value, names));

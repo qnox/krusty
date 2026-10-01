@@ -254,6 +254,29 @@ fn a_parameter_bound_to_a_caller_local_reads_it_and_keeps_no_entry() {
 }
 
 #[test]
+fn an_own_local_follows_zero_temporaries_at_frame_zero() {
+    let parameters = Parameters {
+        parameters: vec![Parameter {
+            category: Category::Int,
+            binding: Binding::CallerLocal {
+                slot: 2,
+                category: Category::Int,
+                checkcast: None,
+            },
+        }],
+        captured: Vec::new(),
+    };
+    let inlined =
+        inline_plain(&plus_one(), &parameters, false, 0, &Default::default()).expect("inlines");
+    let locals: Vec<(&str, u16)> = inlined
+        .local_variables
+        .iter()
+        .map(|local| (local.name.as_str(), local.slot))
+        .collect();
+    assert_eq!(locals, vec![("$i$f$f", 0), ("y$iv", 1)]);
+}
+
+#[test]
 fn a_return_under_other_values_stores_its_value_and_pops_the_rest() {
     // iconst_1; lconst_0; iconst_2; ireturn — a long and an int under the returned int.
     let mut node = MethodNode::new(ACC_STATIC, "g", "()I");

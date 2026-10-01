@@ -4903,11 +4903,9 @@ pub struct ResolvedMember {
     pub context_args: Vec<Option<crate::resolve::ResolvedContextArgument>>,
     pub ret: Ty,
     pub projected_return_hazard: bool,
-    /// The resolved member is a `suspend fun` — the caller (a suspend body) must thread a
-    /// `Continuation` into the emitted call and treat the (Object-erased) result as `ret`.
+    /// A `suspend fun`: the caller threads a `Continuation` and reads the erased result as `ret`.
     pub suspend: bool,
-    /// Declaration origin affects linkage only. Keeping it on the selected target removes the old
-    /// module/dependency variant split without conflating local lifted functions with members.
+    /// Declaration origin, which affects linkage only; it keeps local lifted functions apart.
     pub origin: Origin,
 }
 
@@ -4965,6 +4963,7 @@ impl ResolvedMember {
         member.inline = callable.inline;
         member.inline_body_plan = callable.inline_body_plan;
         member.declared_ret = callable.declared_ret;
+        member.overridden_results = callable.overridden_results;
         member.contract = callable.contract;
         member.default_realization = callable.default_realization;
         member.nonvirtual_realization = callable.nonvirtual_realization;
@@ -8446,6 +8445,7 @@ mod tests {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            overridden_results: Box::new([]),
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

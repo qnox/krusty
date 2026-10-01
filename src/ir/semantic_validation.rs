@@ -668,6 +668,12 @@ impl IrFile {
         }
         reject_all("suspend call", self.suspend_calls.values().copied())?;
         reject_all(
+            "overridden suspend result",
+            self.suspend_call_overridden_results
+                .values()
+                .flat_map(|results| results.iter().copied()),
+        )?;
+        reject_all(
             "intrinsic suspension point",
             self.intrinsic_suspension_points
                 .values()

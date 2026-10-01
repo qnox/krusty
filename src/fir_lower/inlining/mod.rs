@@ -936,6 +936,7 @@ impl BodyLowering<'_> {
         };
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
+        self.ir.suspend_call_overridden_results.remove(&invocation);
         Some(())
     }
 }

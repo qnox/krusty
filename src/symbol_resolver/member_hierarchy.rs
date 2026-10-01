@@ -431,6 +431,7 @@ pub(crate) fn normalize_inherited_member_functions(
         }
     }
     inherit_overridden_default_arguments(source, functions);
+    inherit_overridden_results(source, functions);
     retain_covariant_inherited_overrides(source, functions);
 }
 
@@ -501,39 +502,90 @@ fn leftmost_default_supplier<'a>(
 /// derived receiver selects the override's covariant result and parameter contract, while omitted
 /// slots obtain their expressions from an overridden declaration. The provider coordinate is kept
 /// as realization data; it must never replace the selected callable during overload resolution.
+/// The declarations of one receiver-ranked member family whose slot `implementation` occupies:
+/// those it overrides, and an abstract sibling it implements as one fake override.
+fn inherited_declarations<'a>(
+    source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
+    declarations: &'a [FunctionInfo],
+) -> Vec<&'a FunctionInfo> {
+    let implementation_result = implementation.ret.apply(implementation.callable.ret);
+    let implementation_parameters = implementation.semantic_params();
+    declarations
+        .iter()
+        .filter(|candidate| {
+            let owner_override = implementation.callable.owner != candidate.callable.owner
+                && resolution_subtype(
+                    source,
+                    Ty::obj_name(implementation.callable.owner),
+                    Ty::obj_name(candidate.callable.owner),
+                );
+            // Unrelated inherited declarations can still contribute one fake-override slot.
+            // In particular, a concrete/delegated implementation from one interface inherits
+            // default availability declared by an abstract sibling interface.  Two unrelated
+            // concrete bodies remain a conflict and are deliberately not joined here.
+            let same_rank_fake_override = candidate.receiver_rank == implementation.receiver_rank
+                && (candidate.flags.is_abstract || implementation.flags.is_abstract);
+            (candidate.receiver_rank > implementation.receiver_rank
+                || owner_override
+                || same_rank_fake_override)
+                && candidate.context_count == implementation.context_count
+                && candidate.semantic_params() == implementation_parameters
+                && resolution_subtype(
+                    source,
+                    implementation_result,
+                    candidate.ret.apply(candidate.callable.ret),
+                )
+        })
+        .collect()
+}
+
+/// The normalizer records a non-null classifier or a declared type parameter. Anything else
+/// (`Unit`, a function type) has no carrier to publish, and a nullable result is left unrecorded
+/// because the box is what crosses the continuation.
+fn expects_recorded_suspend_result(candidate: &FunctionInfo) -> bool {
+    if candidate.ret.nullable {
+        return false;
+    }
+    matches!(
+        candidate.callable.ret.non_null(),
+        Ty::Obj(..) | Ty::TyParam(..)
+    )
+}
+
+/// Publish on each dependency suspend declaration the declared results of the declarations it
+/// overrides (a current-module override's are the checked override graph's). A declared result is
+/// the overridden declaration's own, before its owner's type arguments apply: `Base<T>.value(): T`
+/// is recorded as `T` whatever the receiver binds it to.
+fn inherit_overridden_results(source: &dyn SymbolSource, functions: &mut FunctionSet) {
+    let declarations = functions.overloads.clone();
+    for implementation in &mut functions.overloads {
+        if !implementation.flags.suspend || implementation.callable.external_identity.is_none() {
+            continue;
+        }
+        let results = inherited_declarations(source, implementation, &declarations)
+            .into_iter()
+            .filter(|candidate| candidate.callable.owner != implementation.callable.owner)
+            .filter_map(|candidate| match candidate.callable.declared_ret {
+                Some(result) => Some(result),
+                // Nullable results, and results that are not a classifier or a type parameter,
+                // are deliberately unrecorded. A nullable result crosses the continuation as a
+                // box. `Unit` is not a classifier (`Ty::Unit`, not `kotlin/Unit`), so neither is
+                // an overridden carrier to publish.
+                None if !expects_recorded_suspend_result(candidate) => None,
+                None => panic!(
+                    "a normalized dependency suspend declaration carries its declared result"
+                ),
+            })
+            .collect::<Vec<_>>();
+        implementation.callable.overridden_results = results.into_boxed_slice();
+    }
+}
+
 fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &mut FunctionSet) {
     let declarations = functions.overloads.clone();
     for implementation in &mut functions.overloads {
-        let implementation_result = implementation.ret.apply(implementation.callable.ret);
-        let implementation_parameters = implementation.semantic_params();
-        let inherited = declarations
-            .iter()
-            .filter(|candidate| {
-                let owner_override = implementation.callable.owner != candidate.callable.owner
-                    && resolution_subtype(
-                        source,
-                        Ty::obj_name(implementation.callable.owner),
-                        Ty::obj_name(candidate.callable.owner),
-                    );
-                // Unrelated inherited declarations can still contribute one fake-override slot.
-                // In particular, a concrete/delegated implementation from one interface inherits
-                // default availability declared by an abstract sibling interface.  Two unrelated
-                // concrete bodies remain a conflict and are deliberately not joined here.
-                let same_rank_fake_override = candidate.receiver_rank
-                    == implementation.receiver_rank
-                    && (candidate.flags.is_abstract || implementation.flags.is_abstract);
-                (candidate.receiver_rank > implementation.receiver_rank
-                    || owner_override
-                    || same_rank_fake_override)
-                    && candidate.context_count == implementation.context_count
-                    && candidate.semantic_params() == implementation_parameters
-                    && resolution_subtype(
-                        source,
-                        implementation_result,
-                        candidate.ret.apply(candidate.callable.ret),
-                    )
-            })
-            .collect::<Vec<_>>();
+        let inherited = inherited_declarations(source, implementation, &declarations);
         if inherited.is_empty() {
             continue;
         }

@@ -114,9 +114,8 @@ impl Classpath {
                         descriptor,
                         realization,
                         signature: None,
-                        // A builtin member carries no JVM `Signature` string, so its DECODED signature
-                        // is the only record of a type-parameter return/parameter — without it a
-                        // generic member would resolve with an `Any`-erased return.
+                        // A builtin member has no JVM `Signature`: its DECODED signature alone keeps a
+                        // generic member from resolving with an `Any`-erased return.
                         generic_sig: Some(m.generic_sig.clone()),
                         projected_return_hazard: false,
                         // `ret_nullable` — the declared return nullability from the `.kotlin_builtins`
@@ -156,6 +155,7 @@ impl Classpath {
                         default_realization: None,
                         nonvirtual_realization: None,
                         declared_ret: None,
+                        overridden_results: Box::new([]),
                         implicit_classifier_callable: None,
                         associated_classifier: None,
                         associated_access_owner: None,

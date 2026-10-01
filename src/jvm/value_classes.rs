@@ -1090,18 +1090,16 @@ pub(crate) fn lower_value_classes(
     for (call, classifier) in boxed_calls {
         ir.physical_types.insert(call, Ty::obj_name(classifier));
     }
-    // `suspendCoroutine<T>` invokes its block with `SafeContinuation<T>` and obtains the result from
-    // `SafeContinuation.getOrThrow(): Object`. A value-class `T` therefore crosses this generic slot as
-    // its box (or null for `T?`), never as the carrier. Preserve that physical fact on the exact FIR-
-    // selected intrinsic point so a value-class suspend-function tail does not descend into the
-    // inlined `Unit`-returning user block and attempt to box that block's `Unit` result.
-    let safe_intrinsic_boxes = ir
+    // An intrinsic point's value comes through a generic slot: `suspendCoroutine<T>` reads
+    // `SafeContinuation.getOrThrow(): Object`, and `suspendCoroutineUninterceptedOrReturn<T>`'s block
+    // returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
+    // carrier, on either path. Preserve that physical fact on the exact FIR-selected intrinsic point
+    // so a value-class suspend-function tail does not descend into the inlined user block and attempt
+    // to box that block's own result.
+    let intrinsic_boxes = ir
         .intrinsic_suspension_points
         .iter()
         .filter_map(|(&expression, point)| {
-            if point.kind != crate::ir::IrIntrinsicSuspensionKind::Safe {
-                return None;
-            }
             point
                 .result
                 .non_null()
@@ -1110,7 +1108,7 @@ pub(crate) fn lower_value_classes(
                 .map(|classifier| (expression, classifier))
         })
         .collect::<Vec<_>>();
-    for (expression, classifier) in safe_intrinsic_boxes {
+    for (expression, classifier) in intrinsic_boxes {
         ir.physical_types
             .insert(expression, Ty::obj_name(classifier));
     }

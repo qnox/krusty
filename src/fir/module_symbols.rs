@@ -588,6 +588,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            overridden_results: Box::new([]),
         }
     }
 

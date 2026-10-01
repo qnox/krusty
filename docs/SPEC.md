@@ -717,7 +717,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   therefore keeps its declared result like any other, so a call through `Base<X>.value(): T` knows
   it reads a box. When the caller returns that same box it forwards its continuation, with neither
   an unbox nor a cast (`jvm/value_classes/suspend_results.rs`,
-  `jvm/suspend/value_class_results.rs`). Tests: `tests/suspend_value_class_results_e2e.rs`.
+  `jvm/suspend/value_class_results.rs`). A dependency callee or a `$default` stub that returns the
+  carrier is resumed with the box just the same. The provider publishes on each dependency suspend
+  member the results its overridden declarations declare, found by the core member hierarchy
+  (`symbol_resolver/member_hierarchy.rs`), so a call to a dependency `Impl : Base<X>` whose
+  `value(): X` overrides `Base<T>.value(): T` also reads the box. An overridden nullable result is
+  not among them: a nullable declaration records no non-null result, and the box is what crosses.
+  An overridden `Unit` result is not among them either: `Unit` is not a classifier, and the
+  normalizer records only a non-null classifier or a type parameter
+  (`tests/classpath_tail_forward_e2e.rs`).
+  A call that reads a box keeps it as the value its checked coercion to `X` names, as a call to a
+  same-module box-returning callee
+  does: each consumer takes the carrier at its own boundary, and `suspend fun f(i: Impl): Any =
+  i.value()` forwards its continuation (`aload_0; aload_1; invokevirtual Impl.value-…; areturn`). An intrinsic point
+  (`suspendCoroutineUninterceptedOrReturn<X>`, `suspendCoroutine<X>`) yields the box on either
+  path, since its block returns `Any?`, so a function returning the carrier unboxes it and does not
+  forward its continuation to it. A suspend lambda returns `X` boxed, as every lambda does, so its
+  continuation does not box it again. Tests: `tests/suspend_value_class_results_e2e.rs`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.

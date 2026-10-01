@@ -2682,6 +2682,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     external_identity: None,
                                     external_default_provider: None,
                                     declared_ret: None,
+                                    overridden_results: Box::new([]),
                                     inline_body_plan: None,
                                 });
                         } else {
@@ -2691,9 +2692,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .push(signature);
                         }
                     }
-                    // Kotlin's generated object overrides are ordinary semantic declarations. Give
-                    // them the same stable identity and callable shape as written members; common IR
-                    // alone owns their synthesized bodies.
+                    // Kotlin's generated object overrides are ordinary declarations with a written
+                    // member's stable identity and callable shape; common IR owns their bodies.
                     if classifier_is_data {
                         for (name, params, ret) in [
                             ("toString", Vec::new(), Ty::String),

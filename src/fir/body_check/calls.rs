@@ -19,6 +19,7 @@ struct ExternalCallTarget<'a> {
     parameters: Vec<Ty>,
     result: Ty,
     declared_result: Option<Ty>,
+    overridden_results: &'a [Ty],
     suspend: bool,
     can_inline: bool,
     inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
@@ -643,6 +644,7 @@ impl BodyFirChecker<'_> {
                     parameters: parameters.clone(),
                     result: member.ret,
                     declared_result: member.declared_ret,
+                    overridden_results: &member.overridden_results,
                     suspend: member.suspend(),
                     can_inline: member.inline.can_inline(),
                     inline_plan: member.inline_body_plan.as_deref(),
@@ -911,6 +913,7 @@ impl BodyFirChecker<'_> {
                         parameters: target_parameters,
                         result: extension.callable.ret,
                         declared_result: extension.callable.declared_ret,
+                        overridden_results: &extension.callable.overridden_results,
                         suspend: extension.callable.suspend,
                         can_inline: extension.callable.inline.can_inline(),
                         inline_plan,
@@ -1101,6 +1104,14 @@ impl BodyFirChecker<'_> {
                             .into_boxed_slice(),
                         result: resolved(selected.ret)?,
                         declared_result: selected.member.declared_ret.map(resolved).transpose()?,
+                        overridden_results: selected
+                            .member
+                            .overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend: selected.member.suspend(),
                         can_inline: selected.member.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
@@ -1176,6 +1187,14 @@ impl BodyFirChecker<'_> {
                             .declared_ret
                             .map(resolved)
                             .transpose()?,
+                        overridden_results: selected
+                            .callable
+                            .overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend: selected.callable.suspend,
                         can_inline: selected.callable.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
@@ -1220,6 +1239,7 @@ impl BodyFirChecker<'_> {
                 context_args,
                 ret,
                 declared_ret,
+                overridden_results,
                 suspend,
                 inline,
                 inline_body_plan,
@@ -1262,6 +1282,12 @@ impl BodyFirChecker<'_> {
                             .into_boxed_slice(),
                         result: resolved(*ret)?,
                         declared_result: declared_ret.map(resolved).transpose()?,
+                        overridden_results: overridden_results
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
@@ -1390,6 +1416,7 @@ impl BodyFirChecker<'_> {
                 parameters: parameters.into_iter().collect(),
                 result: callable.ret,
                 declared_result: callable.declared_ret,
+                overridden_results: &callable.overridden_results,
                 suspend: callable.suspend,
                 can_inline: callable.inline.can_inline(),
                 inline_plan,
@@ -1430,6 +1457,7 @@ impl BodyFirChecker<'_> {
             inline_body_plan,
             suspend,
             declared_ret,
+            overridden_results,
             vararg_index,
             ..
         } = selected
@@ -1512,6 +1540,7 @@ impl BodyFirChecker<'_> {
                 parameters: target_parameters,
                 result: *ret,
                 declared_result: *declared_ret,
+                overridden_results,
                 suspend: *suspend,
                 can_inline: inline.can_inline(),
                 inline_plan: inline_body_plan.as_deref(),
@@ -1581,6 +1610,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result,
             declared_result,
+            overridden_results,
             suspend,
             can_inline,
             inline_plan,
@@ -1648,6 +1678,12 @@ impl BodyFirChecker<'_> {
                 parameters: parameters.clone().into_boxed_slice(),
                 result: resolved(result)?,
                 declared_result: declared_result.map(resolved).transpose()?,
+                overridden_results: overridden_results
+                    .iter()
+                    .copied()
+                    .map(resolved)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
                 suspend,
                 can_inline,
                 inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
@@ -2287,6 +2323,7 @@ impl BodyFirChecker<'_> {
                 parameters: selected.member.params.clone(),
                 result: selected.ret,
                 declared_result: selected.member.declared_ret,
+                overridden_results: &selected.member.overridden_results,
                 suspend: selected.member.suspend(),
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: selected.member.inline_body_plan.as_deref(),
