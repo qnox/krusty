@@ -1315,6 +1315,8 @@ mod splice_nullable_value_class_lambda_e2e;
 mod suspend_function_boxing_e2e;
 #[path = "suspend_under_try_e2e.rs"]
 mod suspend_under_try_e2e;
+#[path = "suspend_value_class_delegation_e2e.rs"]
+mod suspend_value_class_delegation_e2e;
 #[path = "suspend_value_class_results_e2e.rs"]
 mod suspend_value_class_results_e2e;
 #[path = "unsigned_operations_e2e.rs"]
@@ -1327,6 +1329,8 @@ mod value_class_constructor_bodies_e2e;
 mod value_class_constructor_default_e2e;
 #[path = "value_class_delegated_result_e2e.rs"]
 mod value_class_delegated_result_e2e;
+#[path = "value_class_dependency_bridge_e2e.rs"]
+mod value_class_dependency_bridge_e2e;
 #[path = "value_class_equality_e2e.rs"]
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
@@ -1367,6 +1371,10 @@ mod value_class_secondary_constructor_default_e2e;
 mod value_class_secondary_constructor_return_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
+#[path = "value_class_suspend_member_reentry_e2e.rs"]
+mod value_class_suspend_member_reentry_e2e;
+#[path = "value_class_suspend_resume_e2e.rs"]
+mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
 

@@ -53,6 +53,7 @@ use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
+pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -1271,13 +1272,13 @@ pub(crate) fn lower_value_classes(
             } = e
             {
                 let id = id as ExprId;
+                let is_suspend = ir.suspend_calls.contains_key(&id);
                 // The underlying property's getter is no static implementation: it is the carrier.
                 if dispatch_receiver.is_some()
                     && module_value_classes.contains_key(owner)
                     && !cls_by_name.contains_key(owner)
                     && vc_getters.get(owner) != Some(name)
                 {
-                    let is_suspend = ir.suspend_calls.contains_key(&id);
                     let impl_name =
                         vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
                     sibling_member_impls.insert(id, impl_name);
@@ -1285,7 +1286,7 @@ pub(crate) fn lower_value_classes(
                         .entry(id)
                         .or_insert_with(|| params.clone().into_boxed_slice());
                 }
-                let mangled = vc_mangle_once(name, params, ret, &callable_under, false, false);
+                let mangled = vc_mangle_once(name, params, ret, &callable_under, false, is_suspend);
                 if &mangled != name {
                     *name = mangled;
                 }
@@ -3608,17 +3609,18 @@ pub(crate) fn lower_value_classes(
                 box_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
             }
-            BoxOp::Unbox(x)
+            BoxOp::Unbox(x) | BoxOp::UnboxNull(x)
                 if matches!(
                     ir.value_class_suspend_calls.get(&id).copied(),
                     Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
-                        if carrier.canonical_semantic()
+                        if carrier.non_null().canonical_semantic()
                             == erase(&under[&x], &under).canonical_semantic()
                 ) =>
             {
                 // The erased CPS method descriptor says `Object`, but the continuation carries the
-                // already-unboxed representation recorded for this exact call. A boundary collected
-                // from the pre-CPS descriptor must not insert a value-class `unbox-impl` around it.
+                // already-unboxed representation recorded for this exact call, null or not. A boundary
+                // collected from the pre-CPS descriptor must not insert a value-class `unbox-impl`
+                // around it.
             }
             BoxOp::Unbox(x) => {
                 if matches!(

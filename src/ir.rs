@@ -1792,9 +1792,11 @@ pub struct IrFile {
     /// the anonymous constructor around the forwarded value)`.
     pub(crate) anonymous_super_forwards:
         std::collections::HashMap<(crate::fir::DeclarationId, u32), (u32, u8)>,
-    /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
-    /// ordinary function marker rather than constructor/value-class markers.
-    pub class_static_local_functions: std::collections::HashSet<FunId>,
+    /// Body-local static functions physically owned by a class, by exact function and owner
+    /// identity. Their `$default` ABI uses the ordinary function marker rather than
+    /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
+    /// without scanning classes or recovering ownership from its generated name.
+    pub(crate) class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
@@ -2147,6 +2149,11 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// Functions that exist only to forward an interface member to its delegate (`: I by d`).
+    /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
+    /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
+    /// after returning `COROUTINE_SUSPENDED` unchanged.
+    pub(crate) interface_delegation_forwarders: std::collections::HashSet<u32>,
     /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
     /// The declaration promises constant stack and the body still recurses, so a backend that
     /// cannot supply the guarantee itself must decline the function rather than emit a program that
