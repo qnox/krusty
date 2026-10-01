@@ -3,7 +3,11 @@ use crate::ast::ExprId;
 use crate::types::TypeName;
 
 impl Checker<'_> {
-    fn classifier_enum_entry_ordinal(&self, owner: TypeName, name: &str) -> Option<usize> {
+    pub(super) fn classifier_enum_entry_ordinal(
+        &self,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<usize> {
         self.resolver()
             .classifier(owner)?
             .enum_entries

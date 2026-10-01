@@ -950,6 +950,7 @@ mod tests {
                     internal: stamp,
                     values: vec![],
                 },
+                facts: Default::default(),
             }]);
         let mut ir = IrFile::default();
         ir.add_class(object);
@@ -959,6 +960,7 @@ mod tests {
                 vec![crate::types::ResolvedAnnotation {
                     annotation: serial_info,
                     arguments: vec![],
+                    facts: Default::default(),
                 }],
             )]),
             ..FakeClassifierFacts::default()
@@ -1047,6 +1049,7 @@ mod tests {
                 internal: crate::types::type_name(name),
                 values,
             },
+            facts: Default::default(),
         };
         let mut ir = IrFile::default();
         let class = ir.add_class(synthetic_class("demo/Record"));
@@ -1126,6 +1129,7 @@ mod tests {
                         "with".to_owned(),
                         crate::types::AnnotationValue::Class(serializer),
                     )],
+                    facts: Default::default(),
                 }],
             )]),
             objects: std::collections::HashSet::from([serializer]),
@@ -1171,6 +1175,7 @@ mod tests {
                         crate::types::ResolvedAnnotation {
                             annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
                             arguments: Vec::new(),
+                            facts: Default::default(),
                         },
                         crate::types::ResolvedAnnotation {
                             annotation: payload,
@@ -1178,6 +1183,7 @@ mod tests {
                                 "value".to_owned(),
                                 crate::types::AnnotationValue::string("kept"),
                             )],
+                            facts: Default::default(),
                         },
                     ],
                 ),
@@ -1186,6 +1192,7 @@ mod tests {
                     vec![crate::types::ResolvedAnnotation {
                         annotation: crate::types::type_name("kotlinx/serialization/SerialInfo"),
                         arguments: Vec::new(),
+                        facts: Default::default(),
                     }],
                 ),
             ]),
@@ -1232,10 +1239,12 @@ mod tests {
                         crate::types::ResolvedAnnotation {
                             annotation: serializable,
                             arguments: Vec::new(),
+                            facts: Default::default(),
                         },
                         crate::types::ResolvedAnnotation {
                             annotation: unknown,
                             arguments: Vec::new(),
+                            facts: Default::default(),
                         },
                     ],
                 ),

@@ -1483,6 +1483,7 @@ pub struct FieldAnnotations {
 pub struct RetainedAnnotation {
     pub retention: AnnoRetention,
     pub annotation: AppliedAnnotation,
+    pub facts: crate::types::AnnotationSemanticFacts,
 }
 
 /// Backend-agnostic annotations on any declaration kind. A HIDDEN-deprecated declaration is
@@ -1533,15 +1534,7 @@ impl DeclarationAnnotations {
     /// kotlinc removes such a declaration from resolution and emits its realization
     /// `ACC_SYNTHETIC`; both facts follow from this one annotation.
     pub fn deprecated_hidden(&self) -> bool {
-        self.iter().any(|retained| {
-            let annotation = &retained.annotation;
-            annotation.internal.matches("kotlin/Deprecated")
-                && annotation.values.iter().any(|(name, value)| {
-                    name == "level"
-                        && matches!(value, AnnoValue::Enum(ty, constant)
-                            if ty.matches("kotlin/DeprecationLevel") && constant == "HIDDEN")
-                })
-        })
+        self.iter().any(|retained| retained.facts.deprecated_hidden)
     }
 }
 

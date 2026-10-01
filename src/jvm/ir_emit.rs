@@ -44,6 +44,7 @@ use constructor_defaults::{constructor_default_masks, emit_constructor_default_a
 mod copied_code;
 mod coroutine_machine;
 mod debug_lines;
+mod declaration_annotations;
 mod declaration_types;
 mod declared_nullability;
 mod delegated_property_array;
@@ -4065,10 +4066,7 @@ fn emit_annotation_class(
                 }
                 kotlin_retention_stamp
                     .clone()
-                    .map(|annotation| crate::ir::RetainedAnnotation {
-                        retention: retained.retention,
-                        annotation,
-                    })
+                    .map(|annotation| declaration_annotations::replace(retained, annotation))
             })
             .collect(),
     );
