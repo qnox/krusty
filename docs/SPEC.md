@@ -10961,6 +10961,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after relocation (compact `ldc` when the host index fits), and the erased placeholder stays for
   the host's own caller to reify. Test: `tests/reified_parameter_forwarding_e2e.rs`.
 
+- **An expanded inline body keeps the declaration's dispatch class.** A member selected on a
+  type parameter (`T : Number`, `T : IntProgression`) names that bound's class. Substituting the
+  caller's type argument does not retarget the invoke: kotlinc copies `Number.doubleValue` and
+  `IntProgression.getFirst` into the caller. The lambda parameter stays erased to the bound, so
+  a retargeted `Long.doubleValue` is unverifiable. Reified markers are specialized on their own
+  and are not this owner. Test: `tests/inline_bound_dispatch_e2e.rs`.
+
 - **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
   supertype declaration and the override the same physical shape — a trailing `Continuation`
   parameter and an `Object` return — so a type parameter appearing only in RETURN position erases
