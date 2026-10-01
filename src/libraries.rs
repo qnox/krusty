@@ -484,8 +484,7 @@ pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
     match expansion.non_null() {
         Ty::Unit => Some(crate::types::type_name("kotlin/Unit")),
         Ty::Nothing => Some(crate::types::type_name("kotlin/Nothing")),
-        expansion => crate::libraries::function_classifiers::supertype_classifier(expansion)
-            .kotlin_class_internal(),
+        expansion => function_classifiers::supertype_classifier(expansion).kotlin_class_internal(),
     }
 }
 
