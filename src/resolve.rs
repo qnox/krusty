@@ -84,6 +84,7 @@ mod dependency_platform;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod enum_entries;
+mod enum_entry_method_owner;
 mod expression_getter;
 mod finalized_projection;
 mod for_loop_iteration;
@@ -48221,14 +48222,12 @@ impl<'a> Checker<'a> {
             return;
         };
         let receiver = Ty::obj_name(type_name(&class_internal(self.file, &owner.name)));
-        let entry_owner = type_name(&format!(
-            "{}${}",
+        let entry_owner = enum_entry_method_owner::for_entry(
             receiver
                 .obj_internal()
-                .expect("enum receiver has a classifier")
-                .render(),
-            entry.name
-        ));
+                .expect("enum receiver has a classifier"),
+            &entry.name,
+        );
         for (method_index, method) in entry.methods.iter().enumerate() {
             let stable_declaration = match self.active_declarations {
                 Some(active) => active.enum_entry_method_declaration(

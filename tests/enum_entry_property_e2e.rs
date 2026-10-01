@@ -28,6 +28,32 @@ fun box(): String = E.A.f() + E.B.f()\n";
 }
 
 #[test]
+fn dollar_named_entries_keep_their_qualified_method_owners() {
+    const SRC: &str = r#"
+enum class Choice {
+    `ENTRY$PART` {
+        override fun value(): String = "O"
+        inner class Inner { fun read(): String = value() }
+        override fun result(): String = Inner().read()
+    };
+    abstract fun value(): String
+    abstract fun result(): String
+}
+enum class Other {
+    `ENTRY$PART` {
+        override fun value(): String = "K"
+        inner class Inner { fun read(): String = value() }
+        override fun result(): String = Inner().read()
+    };
+    abstract fun value(): String
+    abstract fun result(): String
+}
+fun box(): String = Choice.`ENTRY$PART`.result() + Other.`ENTRY$PART`.result()
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "DollarNamedEnumEntries");
+}
+
+#[test]
 fn int_entry_property() {
     const SRC: &str =
         "enum class E { A { val n = 42; override fun f() = n }; abstract fun f(): Int }\n\
