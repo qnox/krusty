@@ -730,7 +730,10 @@ pub(crate) fn lower_value_classes(
                     // type PARAMETER there (`I<Result>.foo(T)`), so the arg is boxed. A value class that is
                     // CONCRETE in the supertype (`Core.getFor(id: Aid)`) erases to its OWN underlying
                     // (`String`), the method is mangled, and its param arrives UNBOXED — do NOT mark it.
-                    let supertype_generic = ep.is_erased_top();
+                    let supertype_generic = ep
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(super::jvm_class_map::is_jvm_erased_top);
                     if under.contains_key(&x) && supertype_generic && !generic_vcs.contains(&x) {
                         // Mark BOXED in the body's slot repr AND the call-boundary target, so a
                         // CALLER boxes into this generic slot and the BODY unboxes it.
@@ -3761,7 +3764,7 @@ pub(crate) fn lower_value_classes(
             .non_null()
             .obj_internal()
             .is_some_and(|fq_name| {
-                fq_name.matches("kotlin/Any") || vc_interfaces.contains(&fq_name)
+                fq_name == crate::types::wk::any() || vc_interfaces.contains(&fq_name)
             })
         {
             // A function declared to return `Any` or an interface a value class implements (NOT the
@@ -4118,7 +4121,7 @@ fn record_value_boundary(
                         && underlying
                             .as_ref()
                             .and_then(|ty| ty.obj_internal())
-                            .is_none_or(|name| !name.matches("java/lang/Object"));
+                            .is_none_or(|name| name != crate::types::wk::java_object());
                     parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
                 }
                 Repr::NotVc => false,
@@ -4281,7 +4284,7 @@ fn value_class_equals_argument(exprs: &[IrExpr], argument: ExprId) -> ExprId {
         } if type_operand
             .non_null()
             .obj_internal()
-            .is_some_and(|classifier| classifier.matches("kotlin/Any")) =>
+            .is_some_and(|classifier| classifier == crate::types::wk::any()) =>
         {
             *arg
         }
@@ -4299,7 +4302,7 @@ fn target(t: &Ty, under: &Under) -> Target {
                 Target::UnboxedX(fq_name)
             };
         }
-        if fq_name.matches("kotlin/Any") {
+        if fq_name == crate::types::wk::any() {
             return Target::Boxed;
         }
     }

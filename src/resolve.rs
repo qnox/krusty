@@ -58394,7 +58394,7 @@ impl<'a> Checker<'a> {
             || probed
                 .non_null()
                 .obj_internal()
-                .is_some_and(|owner| owner.matches("kotlin/Any"))
+                .is_some_and(|owner| owner == crate::types::wk::any())
     }
 
     fn lambda_parameters_are_contextual(&self, expression: ExprId) -> bool {
@@ -60669,7 +60669,7 @@ impl<'a> Checker<'a> {
         if expected
             .non_null()
             .obj_internal()
-            .is_some_and(|owner| owner.matches("kotlin/Any"))
+            .is_some_and(|owner| owner == crate::types::wk::any())
         {
             return false;
         }

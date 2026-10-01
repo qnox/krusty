@@ -852,6 +852,30 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
         .map_or(internal, |(_, id)| *id)
 }
 
+/// Whether a semantic classifier is represented by the JVM root reference classifier.
+pub(super) fn is_jvm_erased_top(internal: TypeName) -> bool {
+    to_jvm_type_name(internal) == crate::types::wk::java_object()
+}
+
+/// Declaration owner for a member of a classifier realized by `java/lang/Object`.
+///
+/// `kotlin/Any` is loaded from `java/lang/Object.class`. A member without its own owner
+/// therefore keeps that classfile identity, while the semantic classifier stays `kotlin/Any`.
+/// Recorded owners and every other mapped builtin are unchanged.
+pub(super) fn erased_top_member_owner(
+    classifier: TypeName,
+    recorded: Option<TypeName>,
+) -> TypeName {
+    if let Some(owner) = recorded {
+        return owner;
+    }
+    if is_jvm_erased_top(classifier) {
+        to_jvm_type_name(classifier)
+    } else {
+        classifier
+    }
+}
+
 /// Physical classifier identity written to a JVM classfile for a semantic classifier. Unlike
 /// [`to_jvm_type_name`], this also covers function-classifier families and intrinsic companions,
 /// whose physical names are computed from semantic facts rather than the fixed erasure table.

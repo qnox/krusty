@@ -10,6 +10,8 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
+#[cfg(test)]
+mod provider_normalization_tests;
 mod static_properties;
 mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
@@ -29,7 +31,7 @@ use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
-use super::jvm_class_map::to_kotlin_internal;
+use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
@@ -2181,7 +2183,9 @@ impl JvmLibraries {
                     supertypes.push_name(s);
                 }
                 if let Some(s) = ci.super_class {
-                    supertypes.push_name(s);
+                    // ClassInfo retains the physical hierarchy for backend work; the common class
+                    // model receives the mapping table's canonical source declaration identity.
+                    supertypes.push_name(super::jvm_class_map::to_kotlin_type_name(s));
                 }
             }
             if !kotlin_supertypes_are_authoritative {
@@ -5152,7 +5156,7 @@ impl JvmLibraries {
                         } else {
                             None
                         };
-                        let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
+                        let physical_owner = erased_top_member_owner(cn, m.owner.as_ref().copied());
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
@@ -6100,29 +6104,6 @@ mod tests {
             actual,
             Ty::obj_args("kotlin/collections/List", &[Ty::String]),
         ));
-    }
-
-    #[test]
-    fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
-        let (Some(stdlib), Some(jdk)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::jdk_modules(),
-        ) else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
-        ));
-        let classifier = libraries
-            .classifier_record(type_name("java/util/ArrayList"))
-            .expect("ArrayList classifier");
-        assert!(
-            classifier
-                .supertypes
-                .contains("kotlin/collections/MutableList"),
-            "ArrayList supertypes: {:?}",
-            classifier.supertypes
-        );
     }
 
     #[test]

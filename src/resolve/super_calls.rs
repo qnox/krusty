@@ -59,6 +59,13 @@ impl ResolvedSuperCall {
         let suspend = member.suspend();
         let physical_owner = member.owner?;
         let (owner, interface) = match realization {
+            // `kotlin/Any` has no class file. Its provider-normalized members already carry the
+            // `java/lang/Object` declaration owner, and `invokespecial` has to name that class.
+            crate::libraries::MemberRealization::Dispatch
+                if !interface && crate::types::same(dispatch_owner, crate::types::wk::any()) =>
+            {
+                (physical_owner, false)
+            }
             // A dispatched `super` call names the supertype it is qualified with, as kotlinc's
             // `invokespecial` does, and the JVM resolves the declaration from there: an interface
             // declaration through the InterfaceMethodref search path, a class declaration inherited
