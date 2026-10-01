@@ -349,8 +349,56 @@ mod tests {
             Some(ResolvedCall::Member(member))
                 if matches!(member.origin, Origin::Module { .. })
                     && member.member.name == "unaryMinus"
-                    && member.member.stable_declaration.is_some()
+                    && matches!(
+                        member.member.source_member,
+                        Some(crate::libraries::SourceMember::Class {
+                            file: 0,
+                            owner: 0,
+                            method: 0,
+                        })
+                    )
         ));
+    }
+
+    #[test]
+    fn overflowing_int_constant_initializers_widen_to_long() {
+        let source = "fun box(): String {\n\
+                          val sum: Long = 2147483647 + 1\n\
+                          val shifted: Long = -(1 shl 31)\n\
+                          val typed: Int = 1\n\
+                          val widened: Long = typed\n\
+                          return \"OK\"\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let messages = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec!["initializer type mismatch: expected 'Long', actual 'Int'.".to_string()]
+        );
+        let sums = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| match expression {
+                Expr::Binary { op: BinOp::Add, .. } => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sums.len(), 1);
+        assert_eq!(info.expr_types[sums[0].0 as usize], Ty::Int);
+        assert_eq!(
+            info.selected_numeric_conversions.get(&sums[0]),
+            Some(&Ty::Long)
+        );
     }
 
     #[test]

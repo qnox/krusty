@@ -32,6 +32,9 @@
 [out_of_range_constant_is_not_adapted]
 2.4.20:
 
+[overflowing_int_constant_expression_wraps_before_adapting_to_long]
+2.4.20:
+
 [same_spelled_user_unary_member_is_not_an_integer_constant]
 2.4.20:
   Main.kt:4:40: return type mismatch: expected 'Byte', actual 'Int'.

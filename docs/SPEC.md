@@ -6498,6 +6498,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   conditional is still computed as `Int` and widened at the use, so an overflowing `Int` addition
   inside a branch wraps before that widening. Test:
   `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`.
+- **An overflowing `Int` constant expression widens after it wraps.** `2147483647 + 1` and
+  `-(1 shl 31)` are `Int` computations: the addition and the shift overflow in 32 bits, unary minus
+  of `Int.MIN_VALUE` stays `Int.MIN_VALUE`, and only then does the value become `Long`
+  (`-2147483648L`). A non-constant `Int` does not become `Long`. The addition stays typed `Int`
+  and the initializer records a numeric conversion. Tests:
+  `resolve::integer_constants::tests::overflowing_int_constant_initializers_widen_to_long`,
+  `tests/integer_literal_branch_join_e2e.rs::overflowing_int_constant_expression_wraps_before_adapting_to_long`.
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
