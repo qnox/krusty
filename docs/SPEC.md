@@ -3395,7 +3395,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot that is not a semantic value, and the debug-name boundary (`jvm/debug_local_names.rs`)
   spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`. The class is the naming walk's
   `class_provenance`, realized by the JVM naming pass (`Kt$f$r$1` for a lambda bound to `val r`,
-  `Kt$f$2` in a suspend function whose continuation takes position 1). A marker whose provenance
+  `Kt$f$2` in a suspend function whose continuation takes position 1). A default lambda written on
+  an `expect` declaration is named from the actual classifier that survives actualization
+  (`Foo$member$1`, `PlatformKt$topLevel$1`), because the expect header is gone before the default
+  is checked (`tests/expect_default_lambda_marker_e2e.rs`). A marker whose provenance
   was not realized is an error; the name is not rebuilt from the owner and an ordinal. A frame's
   marker is listed ahead of the locals binding its
   operands, a lambda's also ahead of the locals its body declares, and a cloned lambda marker gains `$iv` per enclosing expansion while a function
@@ -3404,9 +3407,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that line. Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
   evaluated first and stored in reverse, kotlinc spills the operand stack before a lambda body
   splices into an expression, the inline body's lines are not remapped through a source map, and a
-  suspend function that the coroutine transformer does not route records no locals. Tests:
+  suspend function that the coroutine transformer does not route records no locals.   Tests:
   `tests/same_module_inline_frame_markers_e2e.rs` (instructions and local tables against kotlinc,
-  and a run), `jvm::debug_local_names::tests`.
+  and a run), `tests/expect_default_lambda_marker_e2e.rs`, `jvm::debug_local_names::tests`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
