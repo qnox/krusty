@@ -35,8 +35,15 @@ impl Emitter<'_> {
             return;
         };
         // The block ran as an inlined body, after which kotlinc writes the call's line afresh.
+        // A spliced lambda already anchors that line on its closing `nop`. A second entry on the
+        // `dup` would make the `nop` the only instruction of its debug stretch, so nop cleanup
+        // would keep it and the probe would start one byte later than kotlinc. Leaving the line
+        // in effect lets that cleanup drop the `nop` and attach the line to the `dup`.
         if let Some(&line) = self.ir.expr_source_lines.get(&point) {
-            if line != 0 {
+            let already = u16::try_from(line)
+                .ok()
+                .is_some_and(|line| code.current_line() == Some(line));
+            if line != 0 && !already {
                 code.forget_line();
                 code.mark_line(line);
             }

@@ -737,7 +737,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
   if_acmpne; <continuation>; probeCoroutineSuspended`, at the call's own line, leaving the value on
-  the stack. The continuation is the one the block was given: `$completion` in a function without a
+  the stack. The spliced lambda's line-carrying `nop` is not kept once that probe instruction
+  carries the line, so the `dup` begins at the same bytecode offset as kotlinc's. The continuation is the one the block was given: `$completion` in a function without a
   state machine, the machine's continuation cast to `Continuation` in one with it. The JVM CPS pass
   records that physical value in JVM emission facts while common IR retains only the semantic
   suspension kind; the emitter writes the check (`jvm/suspend/intrinsic_probes.rs`,
