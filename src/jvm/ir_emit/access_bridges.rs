@@ -75,8 +75,26 @@ fn set_bridge_locals(
     descriptor: &str,
     cw: &mut ClassWriter,
 ) {
+    let extension_receivers = ir
+        .function_parameter_identities(fid)
+        .expect("an access bridge target carries exact parameter identities")
+        .iter()
+        .map(|identity| matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver))
+        .collect::<Vec<_>>();
     let names = crate::jvm::parameter_names::function_locals(ir, fid, parameters)
         .expect("an access bridge target carries exact parameter identities");
+    // The accessor's own table spells an extension receiver `$this$<name>`. The bridge that
+    // forwards to it spells that same slot `$receiver`, as kotlinc's `access$` local table does.
+    let names = names
+        .into_iter()
+        .zip(extension_receivers)
+        .map(|(name, extension)| {
+            if extension {
+                Some("$receiver".to_string())
+            } else {
+                name
+            }
+        });
     let mut locals = Vec::with_capacity(parameters.len() + 1);
     let mut slot = 0u16;
     if !ir.functions[fid as usize].is_static {
@@ -691,6 +709,128 @@ pub(super) fn private_member_read_access(
         takes_receiver: true,
         inline_uninitialized_guard: None,
     }
+}
+
+/// An already-selected member call: a protected or private access bridge, a same-owner private
+/// accessor, or the ordinary interface or class invocation.
+pub(super) struct SelectedMemberCall<'a> {
+    pub(super) expression: crate::ir::ExprId,
+    pub(super) owner_identity: TypeName,
+    pub(super) owner: &'a str,
+    pub(super) name: &'a str,
+    pub(super) descriptor: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) result: Ty,
+    pub(super) interface_owner: bool,
+    pub(super) argument_words: i32,
+    pub(super) protected: Option<&'a ProtectedMemberAccessBridge>,
+}
+
+/// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
+/// invocation goes through its access bridge; descriptors and owners are built here too.
+pub(super) fn emit_selected_member_call(
+    ir: &IrFile,
+    run: &EmitRun,
+    source_owner: Option<StaticOwner>,
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    call: &SelectedMemberCall<'_>,
+) {
+    let member_target = ir.jvm_member_targets.get(&call.expression).copied();
+    let private_extension_bridge = member_target.is_some_and(|function| {
+        source_owner != Some(StaticOwner::Class(call.owner_identity))
+            && run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    });
+    let same_owner_private = !private_extension_bridge
+        && source_owner == Some(StaticOwner::Class(call.owner_identity))
+        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
+    if let Some(bridge) = call.protected {
+        emit_protected_member_invocation(cw, code, bridge, call);
+    } else if private_extension_bridge {
+        emit_private_member_extension_call(cw, code, call);
+    } else if same_owner_private {
+        emit_direct_private_accessor_call(cw, code, call);
+    } else if call.interface_owner {
+        let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
+        code.invokeinterface(
+            method,
+            call.argument_words,
+            physical_call_result_words(call.result),
+        );
+    } else {
+        let method = cw.methodref(call.owner, call.name, call.descriptor);
+        code.invokevirtual(
+            method,
+            call.argument_words,
+            physical_call_result_words(call.result),
+        );
+    }
+}
+
+fn emit_protected_member_invocation(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    bridge: &ProtectedMemberAccessBridge,
+    call: &SelectedMemberCall<'_>,
+) {
+    let mut bridge_parameters = Vec::with_capacity(bridge.bridge_parameters.len() + 1);
+    bridge_parameters.push(Ty::obj_name(bridge.owner));
+    bridge_parameters.extend(bridge.bridge_parameters.iter().copied());
+    let bridge_descriptor = method_descriptor(&bridge_parameters, call.result);
+    let bridge_name = format!("access${}", call.name);
+    let method = cw.methodref(&bridge.owner.render(), &bridge_name, &bridge_descriptor);
+    code.invokestatic(
+        method,
+        call.argument_words + 1,
+        physical_call_result_words(call.result),
+    );
+}
+
+/// `invokespecial` of a private accessor from its declaring class.
+fn emit_direct_private_accessor_call(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    call: &SelectedMemberCall<'_>,
+) {
+    let method = if call.interface_owner {
+        cw.interface_methodref(call.owner, call.name, call.descriptor)
+    } else {
+        cw.methodref(call.owner, call.name, call.descriptor)
+    };
+    code.invokespecial(
+        method,
+        call.argument_words,
+        physical_call_result_words(call.result),
+    );
+}
+
+/// `invokestatic access$<name>(Owner, …)` for a private member-extension accessor.
+///
+/// An interface owner is an `InterfaceMethodref`; a class owner is a `Methodref`. The bridge method
+/// itself, including its `invokespecial` of the accessor, is emitted with the other access bridges.
+fn emit_private_member_extension_call(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    call: &SelectedMemberCall<'_>,
+) {
+    let mut bridge_parameters = Vec::with_capacity(call.parameters.len() + 1);
+    bridge_parameters.push(Ty::obj(call.owner));
+    bridge_parameters.extend(call.parameters.iter().copied());
+    let descriptor = method_descriptor(&bridge_parameters, call.result);
+    let name = format!("access${}", call.name);
+    let method = if call.interface_owner {
+        cw.interface_methodref(call.owner, &name, &descriptor)
+    } else {
+        cw.methodref(call.owner, &name, &descriptor)
+    };
+    code.invokestatic(
+        method,
+        call.argument_words + 1,
+        physical_call_result_words(call.result),
+    );
 }
 
 /// Emit the Java-8 realization of a Kotlin private member used by a lexically related class.
