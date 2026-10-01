@@ -5,13 +5,13 @@
 
 mod arguments;
 mod arrays;
-mod blocks;
 #[cfg(test)]
 mod assignment_tests;
 mod assignments;
 #[cfg(test)]
 mod binary_operator_tests;
 mod binary_operators;
+mod blocks;
 #[cfg(test)]
 mod branch_exhaustiveness_tests;
 #[cfg(test)]
