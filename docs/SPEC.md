@@ -3243,6 +3243,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   literal, local, and call-result receivers plus the separate host-produced element shape; declining
   either case is not accepted as a substitute for realizing the boundary.
 
+  That boxed element is the lambda parameter. An inlined lambda stores a non-null unsigned parameter
+  as the primitive carrier: the `invoke` boundary is `checkcast kotlin/UInt; unbox-impl`, and a use
+  that calls a carrier function (`listOf(0u, 2147483648u).map { testUInt(it) }`) passes the `int`.
+  Returning the parameter (`map { it }`) boxes it again with `box-impl` on the way back to `Object`.
+  A nullable unsigned parameter stays the box. Test:
+  `tests/unsigned_generic_erasure_e2e.rs` (`unsigned_inlined_map_argument_unboxes_before_a_carrier_call`).
+
   A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
   `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
   name, a fully qualified call) each decide separately whether a substituted result needs coercing at

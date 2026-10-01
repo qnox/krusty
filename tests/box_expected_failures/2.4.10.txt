@@ -197,5 +197,4 @@ unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/kt43286.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-unsignedTypes/whenByUnsigned.kt
 vararg/kt10926.kt
