@@ -229,7 +229,13 @@ fn foreign_scope(ir: &IrFile, scope: crate::ir::IrEnclosure) -> bool {
         | IrEnclosure::Constructor { class, .. } => ir.classes[class as usize]
             .enclosure
             .is_some_and(|outer| foreign_scope(ir, outer)),
-        IrEnclosure::PropertyAccessor { .. } | IrEnclosure::File => false,
+        IrEnclosure::PropertyAccessor { property, setter } => {
+            ir.foreign_inline_templates
+                .contains(&crate::jvm::ir_emit::property_accessor_function(
+                    ir, property, setter,
+                ))
+        }
+        IrEnclosure::File => false,
     }
 }
 

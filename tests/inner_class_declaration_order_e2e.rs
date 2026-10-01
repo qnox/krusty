@@ -141,7 +141,29 @@ fn a_caller_lists_no_local_class_of_an_inline_function_in_another_file() {
                         \x20   override fun run() { block() }\n\
                         }\n";
     let caller = "class Box { val task = wrap { } }\n\
-                  fun use(): Int = 1\n";
+                  fun callerMarker(): Int = 1\n";
+    let sources = [("Declarations.kt", declarations), ("Caller.kt", caller)];
+    for class in ["DeclarationsKt", "CallerKt"] {
+        let pair = common::ModuleClassPair::compile(&sources, class);
+        let rows = |bytes: &[u8]| parse_class(bytes).expect("a parseable class").inner_classes;
+        assert_eq!(
+            rows(&pair.krusty),
+            rows(&pair.kotlinc),
+            "{class}'s InnerClasses rows"
+        );
+    }
+}
+
+/// A foreign inline property's object belongs to the file declaring its getter, just like one from
+/// a foreign inline function. The caller's otherwise unrelated facade must not gain that local
+/// class merely because the accessor body remains in its IR as an inline template.
+#[test]
+fn a_caller_lists_no_local_class_of_an_inline_property_in_another_file() {
+    let declarations = "interface Task { fun run() }\n\
+                        inline val wrapped: Task\n\
+                        \x20   get() = object : Task { override fun run() {} }\n";
+    let caller = "class Box { val task = wrapped }\n\
+                  fun callerMarker(): Int = 1\n";
     let sources = [("Declarations.kt", declarations), ("Caller.kt", caller)];
     for class in ["DeclarationsKt", "CallerKt"] {
         let pair = common::ModuleClassPair::compile(&sources, class);

@@ -119,7 +119,7 @@ use class_pool_seed::{
     seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
     PlainClassPoolSeed,
 };
-pub(super) use enclosure::class_enclosure;
+pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };

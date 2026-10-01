@@ -25,6 +25,40 @@ pub(in crate::jvm) fn class_enclosure(
     scope_enclosure(ir, override_results, c.enclosure?, facade)
 }
 
+/// Resolve a source property's accessor role to the exact finalized IR function the JVM emits.
+///
+/// Common IR keeps the semantic property identity and side. The finalized layout is the JVM
+/// boundary that chooses its physical accessor function; consumers must share that decision rather
+/// than reconstructing an accessor from its spelling.
+pub(in crate::jvm) fn property_accessor_function(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+    is_setter: bool,
+) -> crate::ir::FunId {
+    let layout = ir.local_property_layouts.get(&property).unwrap_or_else(|| {
+        panic!("property accessor enclosure has no finalized property realization")
+    });
+    match layout {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+        | crate::ir::IrLocalPropertyLayout::Member { getter, setter, .. } => {
+            if is_setter {
+                *setter
+            } else {
+                *getter
+            }
+        }
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+        | crate::ir::IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+            if is_setter {
+                *setter
+            } else {
+                Some(*getter)
+            }
+        }
+    }
+    .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"))
+}
+
 fn scope_enclosure(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
@@ -46,59 +80,12 @@ fn scope_enclosure(
         crate::ir::IrEnclosure::PropertyAccessor {
             property,
             setter: is_setter,
-        } => {
-            let layout = ir.local_property_layouts.get(&property).unwrap_or_else(|| {
-                panic!("property accessor enclosure has no finalized property realization")
-            });
-            let function = match layout {
-                crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                    getter,
-                    setter: accessor_setter,
-                    ..
-                } => {
-                    if is_setter {
-                        *accessor_setter
-                    } else {
-                        *getter
-                    }
-                }
-                crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-                    getter,
-                    setter: accessor_setter,
-                    ..
-                } => {
-                    if is_setter {
-                        *accessor_setter
-                    } else {
-                        Some(*getter)
-                    }
-                }
-                crate::ir::IrLocalPropertyLayout::Member {
-                    getter,
-                    setter: accessor_setter,
-                    ..
-                } => {
-                    if is_setter {
-                        *accessor_setter
-                    } else {
-                        *getter
-                    }
-                }
-                crate::ir::IrLocalPropertyLayout::MemberExtension {
-                    getter,
-                    setter: accessor_setter,
-                    ..
-                } => {
-                    if is_setter {
-                        *accessor_setter
-                    } else {
-                        Some(*getter)
-                    }
-                }
-            }
-            .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"));
-            function_enclosure(ir, override_results, function, facade)
-        }
+        } => function_enclosure(
+            ir,
+            override_results,
+            property_accessor_function(ir, property, is_setter),
+            facade,
+        ),
         crate::ir::IrEnclosure::Constructor { class, ordinal } => {
             let declaration = &ir.classes[class as usize];
             let mut parameters = if ordinal == 0 {
