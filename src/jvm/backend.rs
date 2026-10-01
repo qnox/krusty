@@ -119,6 +119,7 @@ pub(crate) fn run_backend_passes(
     facade: &str,
     plugins: BackendPassPlugins<'_>,
     classifiers: &CheckedBackendClassifiers<'_>,
+    callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
     facts: &mut BackendPassFacts,
@@ -130,13 +131,22 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
-    run_backend_passes_after_plugins(ir, facade, classifiers, classpath, Some(stems), facts)
+    run_backend_passes_after_plugins(
+        ir,
+        facade,
+        classifiers,
+        callables,
+        classpath,
+        Some(stems),
+        facts,
+    )
 }
 
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
+    callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: Option<&[String]>,
     facts: &mut BackendPassFacts,
@@ -186,6 +196,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
+        callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
     )?;
@@ -641,6 +652,7 @@ impl JvmBackend {
             mut ir,
             source,
             classifiers,
+            callables,
             native_plugins,
             module_name,
             stems,
@@ -661,6 +673,7 @@ impl JvmBackend {
                 module_name,
             },
             &classifiers,
+            &callables,
             &self.cp,
             stems,
             &mut pass_facts,
@@ -845,7 +858,7 @@ impl Backend for JvmBackend {
             return Vec::new();
         }
         if let Err(target) =
-            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
+            crate::jvm::function_references::realize(&mut file.ir, &file.callables, &facade)
         {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -901,9 +914,12 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
-        {
+        if let Err(target) = crate::jvm::external_calls::realize(
+            &mut file.ir,
+            &self.cp,
+            &file.callables,
+            &mut default_call_operands,
+        ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: missing JVM dependency realization for {target}"),
@@ -1301,6 +1317,23 @@ mod tests {
             assert!(
                 !text.contains("EmitOptions {"),
                 "{relative} must start from jvm::backend::shipping_emit_options instead of duplicating the shipping configuration",
+            );
+        }
+    }
+
+    #[test]
+    fn selected_dependency_callables_are_not_requeried_during_realization() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/jvm/external_calls.rs",
+            "src/jvm/function_references.rs",
+            "src/jvm/bridges.rs",
+        ] {
+            let text = std::fs::read_to_string(root.join(relative))
+                .expect("read dependency-callable realization pass");
+            assert!(
+                !text.contains(".external_callable("),
+                "{relative} must consume CheckedBackendCallables by ExternalCallableId"
             );
         }
     }
