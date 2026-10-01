@@ -1023,3 +1023,53 @@ fn same_type_context_dispatch_and_extension_stay_distinct() {
     "#;
     common::expect_box_ok_with_stdlib(SRC, "SameTypeContextDispatchAndExtension");
 }
+
+/// `getValue`, `setValue`, and `provideDelegate` are separate convention calls, and each one can
+/// bind a different dispatch receiver. The context receiver is lexically nearer, but the ordinary
+/// `with` receiver declares the same delegate operators and wins all three.
+#[test]
+fn ordinary_delegate_operator_beats_a_nearer_context_receiver() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextParameters
+        class Ordinary(val tag: String) {
+            operator fun Cell.getValue(thisRef: Any?, property: Any?): String = "get-" + tag
+            operator fun VarCell.getValue(thisRef: Any?, property: Any?): String = "get"
+            operator fun VarCell.setValue(thisRef: Any?, property: Any?, value: String) {
+                seen = "set-" + tag
+            }
+            operator fun Factory.provideDelegate(thisRef: Any?, property: Any?): Provided =
+                Provided("provide-" + tag)
+        }
+        class Contextual(val tag: String) {
+            operator fun Cell.getValue(thisRef: Any?, property: Any?): String = "get-" + tag
+            operator fun VarCell.getValue(thisRef: Any?, property: Any?): String = "get"
+            operator fun VarCell.setValue(thisRef: Any?, property: Any?, value: String) {
+                seen = "set-" + tag
+            }
+            operator fun Factory.provideDelegate(thisRef: Any?, property: Any?): Provided =
+                Provided("provide-" + tag)
+        }
+        class Cell
+        class VarCell { var seen: String = "unset" }
+        class Factory
+        class Provided(val tag: String) {
+            operator fun getValue(thisRef: Any?, property: Any?): String = tag
+        }
+        fun <A, R> context(value: A, block: context(A) () -> R): R = block(value)
+        fun box(): String {
+            val seen = with(Ordinary("ordinary")) {
+                context(Contextual("context")) {
+                    val read: String by Cell()
+                    val cell = VarCell()
+                    var slot: String by cell
+                    slot = "x"
+                    val made: String by Factory()
+                    read + "|" + cell.seen + "|" + made
+                }
+            }
+            val expected = "get-ordinary|set-ordinary|provide-ordinary"
+            return if (seen == expected) "OK" else seen
+        }
+    "#;
+    common::expect_box_same_as_kotlinc(SRC, "OrdinaryDelegateBeforeContext");
+}

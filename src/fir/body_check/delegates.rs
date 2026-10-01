@@ -74,34 +74,17 @@ impl BodyFirChecker<'_> {
             let property = self.local_property_reference(origin, name, property_ty);
             let owner = self.synthetic_null(origin);
             let result = provide.result;
+            let kind = self.delegate_convention_call(
+                origin,
+                span,
+                &provide,
+                initializer,
+                vec![owner, property],
+            )?;
             initializer = self.body.add_expr(FirExpr {
                 origin,
                 ty: result,
-                kind: FirExprKind::Call(FirCall {
-                    target: provide.target,
-                    dispatch_receiver: (!provide.extension).then_some(FirReceiver {
-                        value: initializer,
-                        conversion: None,
-                    }),
-                    extension_receiver: provide.extension.then_some(FirReceiver {
-                        value: initializer,
-                        conversion: None,
-                    }),
-                    parameter_types: provide.parameters,
-                    arguments: Box::new([
-                        FirCallArgument::Expression {
-                            parameter: 0,
-                            value: owner,
-                            conversion: None,
-                        },
-                        FirCallArgument::Expression {
-                            parameter: 1,
-                            value: property,
-                            conversion: None,
-                        },
-                    ]),
-                    substitutions: Box::new([]),
-                }),
+                kind,
             });
             result
         } else {
@@ -151,13 +134,13 @@ impl BodyFirChecker<'_> {
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
         let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
-        let call = self.delegate_call(
-            delegate.get_value.target,
-            delegate.get_value.extension,
-            delegate.get_value.parameters,
+        let call = self.delegate_convention_call(
+            origin,
+            self.file.expr_span(expression),
+            &delegate.get_value,
             receiver,
             vec![owner, property],
-        );
+        )?;
         self.add_expression_with_type(expression, delegate.property_ty, call)
     }
 
@@ -191,13 +174,13 @@ impl BodyFirChecker<'_> {
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
         let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
-        Ok(self.delegate_call(
-            target.target,
-            target.extension,
-            target.parameters,
+        self.delegate_convention_call(
+            origin,
+            span,
+            &target,
             receiver,
             vec![owner, property, value],
-        ))
+        )
     }
 
     pub(super) fn delegated_inc_dec_expression(
@@ -433,25 +416,31 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    fn delegate_call(
-        &self,
-        target: FirCallTarget,
-        extension: bool,
-        parameter_types: Box<[ResolvedTy]>,
-        receiver: FirExprId,
+    fn delegate_convention_call(
+        &mut self,
+        origin: OriginId,
+        span: Option<Span>,
+        convention: &FirDelegateCall,
+        delegate: FirExprId,
         arguments: Vec<FirExprId>,
-    ) -> FirExprKind {
-        FirExprKind::Call(FirCall {
-            target,
-            dispatch_receiver: (!extension).then_some(FirReceiver {
-                value: receiver,
-                conversion: None,
-            }),
-            extension_receiver: extension.then_some(FirReceiver {
-                value: receiver,
-                conversion: None,
-            }),
-            parameter_types,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let delegate_receiver = FirReceiver {
+            value: delegate,
+            conversion: None,
+        };
+        let dispatch_receiver = if let Some(selected) = &convention.dispatch_receiver {
+            Some(self.member_extension_dispatch_receiver(origin, span, selected)?)
+        } else if !convention.extension {
+            Some(delegate_receiver)
+        } else {
+            None
+        };
+        let extension_receiver = convention.extension.then_some(delegate_receiver);
+        Ok(FirExprKind::Call(FirCall {
+            target: convention.target.clone(),
+            dispatch_receiver,
+            extension_receiver,
+            parameter_types: convention.parameters.clone(),
             arguments: arguments
                 .into_iter()
                 .enumerate()
@@ -463,7 +452,53 @@ impl BodyFirChecker<'_> {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             substitutions: Box::new([]),
-        })
+        }))
+    }
+
+    fn member_extension_dispatch_receiver(
+        &mut self,
+        origin: OriginId,
+        span: Option<Span>,
+        selected: &FirDelegateDispatchReceiver,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        let selection = match selected {
+            FirDelegateDispatchReceiver::Scoped { ty, current, depth } => {
+                crate::resolve::ImplicitReceiverSelection {
+                    ty: ty.get(),
+                    current: *current,
+                    receiver_depth: *depth as usize,
+                    classifier: None,
+                    context_binding: None,
+                    singleton: None,
+                }
+            }
+            FirDelegateDispatchReceiver::ContextBinding {
+                ty,
+                name,
+                shadow_depth,
+            } => crate::resolve::ImplicitReceiverSelection {
+                ty: ty.get(),
+                current: false,
+                receiver_depth: 0,
+                classifier: None,
+                context_binding: Some((name.to_string(), *shadow_depth as usize)),
+                singleton: None,
+            },
+            FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
+                crate::resolve::ImplicitReceiverSelection {
+                    ty: ty.get(),
+                    current: false,
+                    receiver_depth: 0,
+                    classifier: None,
+                    context_binding: None,
+                    singleton: Some(crate::resolve::SingletonValue {
+                        classifier: classifier.clone(),
+                    }),
+                }
+            }
+        };
+        self.materialize_implicit_receiver(origin, span, &selection)?
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))
     }
 
     fn delegate_call_target(

@@ -11089,8 +11089,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `context(A("c ")) { A("e ").funMember() }`, with a class or `with` receiver `A("d ")`, the call's
   dispatch receiver is `A("d ")`: the named context parameter is `"c "`, `this@A` is the class or
   `with` value, and the explicit extension is `"e "`. Ranking the context lambda's receiver first
-  made `this@A` that context value. Test:
-  `tests/context_parameters_e2e.rs::same_type_context_dispatch_and_extension_stay_distinct`.
+  made `this@A` that context value. Delegated `getValue`, `setValue`, and `provideDelegate` use
+  that same order. Inside `with(Ordinary("ordinary")) { context(Contextual("context")) { ... } }`,
+  the context receiver is nearer and both types declare the operator for the same delegate, but
+  the ordinary receiver's operator is selected for each convention. Test:
+  `tests/context_parameters_e2e.rs::same_type_context_dispatch_and_extension_stay_distinct` and
+  `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
 
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
