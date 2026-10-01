@@ -53,6 +53,19 @@ pub(super) fn declaration_is_inline_only(
     })
 }
 
+/// A static call the byte splice may absorb. `@InlineOnly` is decided here, from the defining
+/// class, so the emitter facade does not assemble that target itself.
+pub(super) struct StaticSpliceRequest<'a> {
+    pub(super) call_expression: u32,
+    pub(super) owner: &'a str,
+    pub(super) name: &'a str,
+    pub(super) descriptor: &'a str,
+    pub(super) args: &'a [u32],
+    pub(super) dispatch_receiver: Option<u32>,
+    pub(super) inline: crate::libraries::InlineKind,
+    pub(super) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+}
+
 /// The clean failure of a reified inline body whose call shape only the byte splice handles: only
 /// the MethodNode inliner specializes reified type parameters.
 pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
@@ -89,6 +102,68 @@ pub(super) fn check_byte_splice_body(
 }
 
 impl Emitter<'_> {
+    /// Splice a static inline call. Privacy for `@InlineOnly` is the defining class's bit, including
+    /// a multifile part the facade extends.
+    pub(super) fn try_splice_static_inline(
+        &mut self,
+        request: StaticSpliceRequest<'_>,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let StaticSpliceRequest {
+            call_expression,
+            owner,
+            name,
+            descriptor,
+            args,
+            dispatch_receiver,
+            inline,
+            reified,
+        } = request;
+        if let Some(recv) = dispatch_receiver {
+            let recv_desc = type_descriptor(self.value_ty(recv));
+            let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(recv);
+            all.extend(args.iter().copied());
+            let target = super::inline_call::InlineStaticTarget {
+                owner,
+                name,
+                descriptor,
+                splice_desc: &splice_desc,
+                inline_only: declaration_is_inline_only(
+                    self.bodies,
+                    owner,
+                    name,
+                    descriptor,
+                    inline,
+                ),
+                allow_owner_bridge: true,
+            };
+            self.try_inline_static_as(call_expression, target, &all, 1, code, reified)
+        } else {
+            let has_lambda_arg = args.iter().any(|&argument| {
+                matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    || self.function_ref_class_and_captures(argument).is_some()
+                    || self.property_ref_class_and_captures(argument).is_some()
+            });
+            let target = super::inline_call::InlineStaticTarget {
+                owner,
+                name,
+                descriptor,
+                splice_desc: descriptor,
+                inline_only: declaration_is_inline_only(
+                    self.bodies,
+                    owner,
+                    name,
+                    descriptor,
+                    inline,
+                ),
+                allow_owner_bridge: inline.must_inline() || has_lambda_arg,
+            };
+            self.try_inline_static_as(call_expression, target, args, 0, code, reified)
+        }
+    }
+
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
     /// constructor of an anonymous object the body creates (`Continuation(ctx){…}`'s
     /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. Whether

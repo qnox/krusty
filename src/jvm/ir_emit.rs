@@ -10212,49 +10212,19 @@ impl<'a> Emitter<'a> {
                     if inline.can_inline() && (!name.ends_with("$default") || inline.must_inline())
                     {
                         let call_frame = self.frame.mark();
-                        let spliced = if let Some(&recv) = dispatch_receiver.as_ref() {
-                            let recv_desc = type_descriptor(self.value_ty(recv));
-                            let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
-                            let mut all = Vec::with_capacity(args.len() + 1);
-                            all.push(recv);
-                            all.extend(args.iter().copied());
-                            let target = InlineStaticTarget {
+                        let spliced = self.try_splice_static_inline(
+                            bytecode_inline_call::StaticSpliceRequest {
+                                call_expression: e,
                                 owner: &owner,
                                 name: &name,
                                 descriptor: &descriptor,
-                                splice_desc: &splice_desc,
-                                inline_only: bytecode_inline_call::declaration_is_inline_only(
-                                    self.bodies,
-                                    &owner,
-                                    &name,
-                                    &descriptor,
-                                    inline,
-                                ),
-                                allow_owner_bridge: true,
-                            };
-                            self.try_inline_static_as(e, target, &all, 1, code, &reified)
-                        } else {
-                            let has_lambda_arg = args.iter().any(|&a| {
-                                matches!(self.ir.expr(a), IrExpr::Lambda { .. })
-                                    || self.function_ref_class_and_captures(a).is_some()
-                                    || self.property_ref_class_and_captures(a).is_some()
-                            });
-                            let target = InlineStaticTarget {
-                                owner: &owner,
-                                name: &name,
-                                descriptor: &descriptor,
-                                splice_desc: &descriptor,
-                                inline_only: bytecode_inline_call::declaration_is_inline_only(
-                                    self.bodies,
-                                    &owner,
-                                    &name,
-                                    &descriptor,
-                                    inline,
-                                ),
-                                allow_owner_bridge: inline.must_inline() || has_lambda_arg,
-                            };
-                            self.try_inline_static_as(e, target, &args, 0, code, &reified)
-                        };
+                                args: &args,
+                                dispatch_receiver,
+                                inline,
+                                reified: &reified,
+                            },
+                            code,
+                        );
                         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
                         self.frame.drop_to(call_frame);
                         if spliced {
