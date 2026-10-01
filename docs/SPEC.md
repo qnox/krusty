@@ -8358,6 +8358,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
   `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
   `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
+- **An owner reads its explicit backing field, typed as the field.** Inside the class that
+  declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
+  kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
+  `V(val x: Int)` is `aload_0; getfield a:I`. krusty read the property as `Any` and narrowed it
+  back, boxing the carrier and unboxing it again. The field is private to the declaring class and
+  visible to every expression compiled into it: bare `a`, `this.a`, `this@Owner.a` in a local
+  function or lambda, and `other.a` when `other` has exactly the declaring class's type
+  (`aload_1; getfield a:I`, then `box-impl` when the use site wants the public type). The field's
+  type stays visible in a nested or inner class, but the access is the getter (`getA()`, then
+  `checkcast` back to the field type); kotlinc does not emit a synthetic field accessor. A
+  subclass value (`child.a`), a subclass reading an inherited property, and any read outside the
+  class see the public type and call the getter. Tests: `tests/explicit_backing_field_e2e.rs`.
+  Corpus:
+  six `properties/backingField/*ValueClassExplicitBackingField` tests.
+- **A value class's erased bridge calls its interface entry by the entry's name.** A value class
+  implementing `Comparable<Int>` has the static `compareTo-impl(II)I`, the instance entry
+  `compareTo(I)I` on the box, and the erased `compareTo(Object)I` bridge, which unboxes the
+  argument and calls the entry. krusty named the static function from the bridge
+  (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
+  Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
