@@ -64,6 +64,34 @@ sources, module name, processor inputs, per-module JDK selection, friend paths, 
 because silently ignoring any of those can cache a short or semantically different artifact. An
 environment that cannot honor a recorded input must refuse the unit before computing a cache key.
 
+Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
+Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
+`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
+`krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
+can use `--include-build`; releases include a portable local Maven repository with the implementation
+and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `project()` edges,
+compiler options, classpaths, friend paths,
+and compile outputs. The public Kotlin task is disabled and depends on a typed, cacheable replacement
+task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
+the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
+`.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
+are not started. The plugin does not invoke krusty-build, inspect task implementation classes, or
+mutate private action lists. `.kts` files are not compilation inputs.
+
+The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
+Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
+override which would make those semantics diverge; it does not use the experimental compiler path.
+
+Gradle owns incremental invalidation. An unchanged replacement task is UP-TO-DATE and does not run
+krusty. Once any source, classpath, friend path, plugin, compiler option, or compiler binary changes,
+the task cleans its Kotlin output directory and recompiles the complete source set. That deliberately
+coarse boundary keeps source additions and removals, multifile facades, generated classes, and
+`.kotlin_module` metadata correct without reconstructing Kotlin's dependency graph from class files.
+Compiler plugins are outside this adapter boundary: applied public
+`KotlinCompilerPluginSupportPlugin` implementations and plugin CLI switches are rejected. KGP's raw
+`pluginClasspath` and `pluginOptions` collections are not treated as activation signals because a
+plain Kotlin/JVM compilation can populate them with implementation plumbing.
+
 Build correctness rests on these contracts:
 
 - A dependency graph edge is a relation. Providers may repeat an edge, but the graph canonicalizes

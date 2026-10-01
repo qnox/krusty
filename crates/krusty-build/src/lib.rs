@@ -22,14 +22,18 @@
 //!   not `Send`.
 //! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
 //!   process per module.
+//! * [`gradle`] — runs `./gradlew` with `--include-build tools/krusty-gradle`. That directory is
+//!   the `krusty` Gradle plugin, a drop-in for the Kotlin JVM plugin: the build changes the plugin
+//!   id and version, and the Kotlin DSL stays. The plugin applies the Kotlin JVM plugin, removes
+//!   the Kotlin compile action, and execs the krusty binary. It does not call back into this
+//!   crate, and it does not start kotlinc or the Kotlin compile daemon.
 //!
 //! # What is NOT here
 //!
-//! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling. The providers are
-//! ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change;
-//! this crate establishes the types they will populate. Parallelism needs a process pool with
-//! crash isolation and interleaved diagnostics, and the sequential driver is its oracle: the same
-//! graph must produce the same artifacts either way.
+//! No Maven, BSP, or JPS providers, and no parallel scheduling. Those providers are ~10,000 lines
+//! living in `crates/krusty-lsp/src/project/` and lifting them is its own change. Parallelism needs
+//! a process pool with crash isolation and interleaved diagnostics, and the sequential driver is
+//! its oracle: the same graph must produce the same artifacts either way.
 //!
 //! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
 //! standalone.
@@ -46,6 +50,7 @@ pub mod cache;
 pub mod compiler;
 pub mod digest;
 pub mod driver;
+pub mod gradle;
 pub mod graph;
 pub mod model;
 pub mod store;
@@ -57,6 +62,7 @@ pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use compiler::KrustyCli;
 pub use digest::{digest_bytes, Digest, Hasher};
 pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome, PublishedAbi};
+pub use gradle::{repository_plugin_project, GradleBuild, GradleError};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
 pub use store::{ArtifactStore, CachedModule, MissReason, StoreLookup};
