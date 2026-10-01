@@ -607,13 +607,21 @@ fn emit_lateinit_use_guard(name: &str, code: &mut CodeBuilder, cw: &mut ClassWri
 }
 
 impl Emitter<'_> {
+    /// Straight-line expressions, except a private top-level `lateinit` read that inlines its guard.
+    pub(super) fn static_expr_branches(&self, expr: u32, node: &crate::ir::IrExpr) -> bool {
+        let crate::ir::IrExpr::GetStatic(index) = node else {
+            return false;
+        };
+        self.static_lateinit_read_branches(*index, expr)
+    }
+
     /// Whether this `GetStatic` inlines the uninitialized guard. A public getter hides the branch;
-    /// a private read, including the one after `access$get<X>$p`, does not. `::prop.isInitialized`
-    /// is a raw load and does not branch here.
+    /// a private read, including the one after `access$get<X>$p`, does not. An initialization probe
+    /// loads the field and does not branch here.
     pub(super) fn static_lateinit_read_branches(&self, index: u32, expr: u32) -> bool {
         let is_lateinit = self.ir.statics[index as usize].is_lateinit;
         is_lateinit
-            && !self.ir.raw_lateinit_static_reads.contains(&expr)
+            && !self.ir.lateinit_initialization_probes.contains(&expr)
             && !self.ir.has_jvm_default_static_getter(index)
     }
 
@@ -626,8 +634,8 @@ impl Emitter<'_> {
         let is_lateinit = s.is_lateinit;
         let is_private = s.visibility.is_private();
         let facade = self.facade.clone();
-        let raw = self.ir.raw_lateinit_static_reads.contains(&expr);
-        let calls_getter = is_lateinit && !raw && self.ir.has_jvm_default_static_getter(i);
+        let probe = self.ir.lateinit_initialization_probes.contains(&expr);
+        let calls_getter = is_lateinit && !probe && self.ir.has_jvm_default_static_getter(i);
         // A PRIVATE property's field, or the backing field of a source-declared getter, read from
         // another class, goes through its owner's accessor. Calling the declared getter would
         // re-enter it: the read is inside that getter.
@@ -645,7 +653,7 @@ impl Emitter<'_> {
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
             // `access$get<X>$p` is a raw `getstatic`. The use site throws; `isInitialized` does not.
-            if is_lateinit && !raw {
+            if is_lateinit && !probe {
                 emit_lateinit_use_guard(&name, code, self.cw);
             }
             return;
@@ -693,7 +701,7 @@ impl Emitter<'_> {
         // field. A private `lateinit` inlines the guard on the raw read.
         else if (self.static_owner == Some(StaticOwner::Facade)
             || is_const
-            || (raw && !is_private))
+            || (probe && !is_private))
             && !calls_getter
         {
             let fref = self.cw.fieldref(
@@ -702,7 +710,7 @@ impl Emitter<'_> {
                 &type_descriptor(jt),
             );
             code.getstatic(fref, slot_words(jt) as i32);
-            if is_lateinit && !raw {
+            if is_lateinit && !probe {
                 emit_lateinit_use_guard(&name, code, self.cw);
             }
         } else {

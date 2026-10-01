@@ -2787,7 +2787,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
   and cross-file reads call that getter. A private one keeps a `private static` field and inlines the
   guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
-  aconst_null`). `::prop.isInitialized` loads that field with no guard. An `object` member `lateinit`
+  aconst_null`). `::prop.isInitialized` is an initialization probe recorded when
+  `LateinitFieldRead` is lowered, and the JVM loads that field with no guard. An `object` member `lateinit`
   stays on the instance-field path. `tests/top_level_lateinit_e2e.rs`,
   `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed

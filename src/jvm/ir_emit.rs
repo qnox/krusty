@@ -11375,8 +11375,7 @@ impl<'a> Emitter<'a> {
                 stmts.iter().any(|&s| self.emits_control_flow(s))
                     || value.is_some_and(|v| self.emits_control_flow(v))
             }
-            IrExpr::GetStatic(index) => self.static_lateinit_read_branches(*index, e),
-            _ => false, // Const, GetValue, EnumEntry, EnumValues — straight-line
+            other => self.static_expr_branches(e, other),
         }
     }
 

@@ -9,19 +9,24 @@ use super::common::{
     method_instructions,
 };
 
-const SHAPES: &str = r#"
-lateinit var str: String
-private lateinit var hidden: String
-internal lateinit var inside: String
+const PAYLOAD: &str = "class Payload(val token: String)\n";
+const THROW: &str = "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\nimport kotlin.UninitializedPropertyAccessException\n";
 
-fun readHidden(): String = hidden
-fun ready(): Boolean = ::str.isInitialized
+const SHAPES: &str = r#"
+class Payload(val token: String)
+
+lateinit var item: Payload
+private lateinit var hidden: Payload
+internal lateinit var inside: Payload
+
+fun readHidden(): Payload = hidden
+fun ready(): Boolean = ::item.isInitialized
 fun hiddenReady(): Boolean = ::hidden.isInitialized
-fun box(): String = str
-fun readInside(): String = inside
+fun box(): String = item.token
+fun readInside(): Payload = inside
 
 object C {
-    fun getS(): String = hidden
+    fun getS(): Payload = hidden
     fun ready(): Boolean = ::hidden.isInitialized
 }
 "#;
@@ -29,23 +34,24 @@ object C {
 #[test]
 fn an_uninitialized_top_level_read_throws() {
     expect_box_same_as_kotlinc(
-        r#"
-@file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
-import kotlin.UninitializedPropertyAccessException
+        &format!(
+            r#"
+{THROW}
+{PAYLOAD}
+lateinit var item: Payload
 
-lateinit var str: String
-
-fun box(): String {
-    try {
-        val str2 = str
-        return "Should throw an exception, got $str2"
-    } catch (e: UninitializedPropertyAccessException) {
+fun box(): String {{
+    try {{
+        val seen = item
+        return "Should throw an exception, got ${{seen.token}}"
+    }} catch (e: UninitializedPropertyAccessException) {{
         return "OK"
-    } catch (e: Throwable) {
-        return "Unexpected exception: ${e::class}"
-    }
-}
-"#,
+    }} catch (e: Throwable) {{
+        return "Unexpected exception: ${{e::class}}"
+    }}
+}}
+"#
+        ),
         "TopLevelLateinitRead",
     );
 }
@@ -53,23 +59,24 @@ fun box(): String {
 #[test]
 fn an_uninitialized_top_level_member_access_throws() {
     expect_box_same_as_kotlinc(
-        r#"
-@file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
-import kotlin.UninitializedPropertyAccessException
+        &format!(
+            r#"
+{THROW}
+{PAYLOAD}
+lateinit var item: Payload
 
-lateinit var str: String
-
-fun box(): String {
-    try {
-        val i = str.length
-        return "Should throw an exception, got $i"
-    } catch (e: UninitializedPropertyAccessException) {
+fun box(): String {{
+    try {{
+        val token = item.token
+        return "Should throw an exception, got $token"
+    }} catch (e: UninitializedPropertyAccessException) {{
         return "OK"
-    } catch (e: Throwable) {
-        return "Unexpected exception: ${e::class}"
-    }
-}
-"#,
+    }} catch (e: Throwable) {{
+        return "Unexpected exception: ${{e::class}}"
+    }}
+}}
+"#
+        ),
         "TopLevelLateinitMember",
     );
 }
@@ -77,27 +84,28 @@ fun box(): String {
 #[test]
 fn a_private_top_level_read_from_another_class_throws() {
     expect_box_same_as_kotlinc(
-        r#"
-@file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
-import kotlin.UninitializedPropertyAccessException
+        &format!(
+            r#"
+{THROW}
+{PAYLOAD}
+private lateinit var item: Payload
 
-private lateinit var s: String
+object C {{
+    fun getItem() = item
+}}
 
-object C {
-    fun getS() = s
-}
-
-fun box(): String {
-    try {
-        val str2 = C.getS()
-        return "Should throw an exception, got $str2"
-    } catch (e: UninitializedPropertyAccessException) {
+fun box(): String {{
+    try {{
+        val seen = C.getItem()
+        return "Should throw an exception, got ${{seen.token}}"
+    }} catch (e: UninitializedPropertyAccessException) {{
         return "OK"
-    } catch (e: Throwable) {
-        return "Unexpected exception: ${e::class}"
-    }
-}
-"#,
+    }} catch (e: Throwable) {{
+        return "Unexpected exception: ${{e::class}}"
+    }}
+}}
+"#
+        ),
         "TopLevelLateinitBridge",
     );
 }
@@ -105,16 +113,19 @@ fun box(): String {
 #[test]
 fn an_assigned_top_level_lateinit_reads_back() {
     expect_box_same_as_kotlinc(
-        r#"
-lateinit var str: String
-private lateinit var hidden: String
+        &format!(
+            r#"
+{PAYLOAD}
+lateinit var item: Payload
+private lateinit var hidden: Payload
 
-fun box(): String {
-    str = "O"
-    hidden = "K"
-    return str + hidden
-}
-"#,
+fun box(): String {{
+    item = Payload("O")
+    hidden = Payload("K")
+    return item.token + hidden.token
+}}
+"#
+        ),
         "TopLevelLateinitAssigned",
     );
 }
@@ -122,23 +133,26 @@ fun box(): String {
 #[test]
 fn top_level_is_initialized_reads_the_field_without_throwing() {
     expect_box_same_as_kotlinc(
-        r#"
-lateinit var str: String
-private lateinit var hidden: String
+        &format!(
+            r#"
+{PAYLOAD}
+lateinit var item: Payload
+private lateinit var hidden: Payload
 
-object C {
+object C {{
     fun ready() = ::hidden.isInitialized
-    fun set(value: String) { hidden = value }
-}
+    fun set(value: Payload) {{ hidden = value }}
+}}
 
-fun box(): String {
-    if (::str.isInitialized) return "str already"
+fun box(): String {{
+    if (::item.isInitialized) return "item already"
     if (C.ready()) return "hidden already"
-    str = "O"
-    C.set("K")
-    return if (::str.isInitialized && C.ready()) str + "K" else "not ready"
-}
-"#,
+    item = Payload("O")
+    C.set(Payload("K"))
+    return if (::item.isInitialized && C.ready()) item.token + "K" else "not ready"
+}}
+"#
+        ),
         "TopLevelLateinitInitialized",
     );
 }
@@ -146,15 +160,19 @@ fun box(): String {
 #[test]
 fn a_private_top_level_read_spills_an_earlier_operand() {
     expect_box_same_as_kotlinc(
-        r#"
-private lateinit var hidden: String
+        &format!(
+            r#"
+{PAYLOAD}
+private lateinit var hidden: Payload
 
-fun box(): String {
-    hidden = "K"
-    val parts = listOf("O", hidden)
-    return parts[0] + parts[1]
-}
-"#,
+fun join(left: Payload, right: Payload): String = left.token + right.token
+
+fun box(): String {{
+    hidden = Payload("K")
+    return join(Payload("O"), hidden)
+}}
+"#
+        ),
         "TopLevelLateinitSpill",
     );
 }
@@ -173,10 +191,10 @@ fn top_level_lateinit_matches_kotlinc_bytecode() {
         return;
     };
     for member in [
-        "java.lang.String getStr();",
+        "Payload getItem();",
         "java.lang.String box();",
-        "java.lang.String readHidden();",
-        "java.lang.String readInside();",
+        "Payload readHidden();",
+        "Payload readInside();",
         "boolean ready();",
         "boolean hiddenReady();",
     ] {
@@ -207,7 +225,7 @@ fn top_level_lateinit_matches_kotlinc_bytecode() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    for member in ["java.lang.String getS();", "boolean ready();"] {
+    for member in ["Payload getS();", "boolean ready();"] {
         assert_eq!(
             method_instructions(&holder.krusty, member),
             method_instructions(&holder.reference, member),
