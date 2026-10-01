@@ -25,23 +25,6 @@ impl crate::jvm::inline::MethodBodies for Classpath {
             _ => None,
         }
     }
-    fn owner_is_interface(&self, owner: &str) -> bool {
-        // Prefer the real class flag; otherwise the mapped builtin's own `.kotlin_builtins`
-        // `CLASS_KIND`. A Kotlin builtin and the JVM class it maps to always agree on interface-ness
-        // (`List`/`java.util.List`, `Number`/`java.lang.Number`), so no curated per-name table is
-        // needed — the one this replaced omitted every `java/util/*` and answered "class" for them,
-        // which emitted `invokevirtual` on an interface whenever no JDK supplied the class file.
-        self.find(owner)
-            .map(|ci| ci.is_interface())
-            .or_else(|| {
-                let owner_id = type_name(owner);
-                let kotlin =
-                    crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(owner_id)
-                        .unwrap_or(owner_id);
-                self.builtin_is_interface_name(kotlin)
-            })
-            .unwrap_or(false)
-    }
     fn owner_is_interface_name(&self, owner: TypeName) -> bool {
         let owner_id = crate::jvm::jvm_class_map::to_jvm_type_name(owner);
         self.find_name(owner_id)
@@ -170,5 +153,35 @@ impl crate::jvm::inline::MethodBodies for Classpath {
             descriptor: callable.descriptor,
             is_static,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Classpath;
+    use crate::jvm::inline::MethodBodies;
+    use crate::types::type_name;
+
+    #[test]
+    fn interned_interface_probe_maps_physical_builtin_owners() {
+        let Some(jar) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let classpath = Classpath::new(vec![jar]);
+        for (spelling, expected) in [
+            ("kotlin/collections/List", true),
+            ("java/util/List", true),
+            ("kotlin/Number", false),
+            ("java/lang/Number", false),
+            ("kotlin/String", false),
+            ("java/lang/String", false),
+            ("sample/Class", false),
+        ] {
+            assert_eq!(
+                classpath.owner_is_interface_name(type_name(spelling)),
+                expected,
+                "{spelling}"
+            );
+        }
     }
 }
