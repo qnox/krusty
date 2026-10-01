@@ -115,6 +115,7 @@ fn retained_annotation(
         retention => Some(crate::ir::RetainedAnnotation {
             retention,
             annotation: applied_annotation(annotation),
+            facts: annotation.facts,
         }),
     }
 }

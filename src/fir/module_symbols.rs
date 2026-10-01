@@ -479,6 +479,10 @@ impl<'a> StreamedModuleSymbols<'a> {
                 flags.has(DeclarationFlags::INTERFACE),
                 name,
             );
+            if stable_functions.is_empty() && self.declares_hidden_deprecated_function(owner, name)
+            {
+                projected.hidden_deprecated_callables.insert(name.clone());
+            }
             projected.members.extend(stable_members);
             let functions = FunctionSet {
                 overloads: direct_function_names
@@ -510,6 +514,30 @@ impl<'a> StreamedModuleSymbols<'a> {
             .borrow_mut()
             .insert(internal, projected.clone());
         Some(projected)
+    }
+
+    /// A hidden-deprecated declaration stays in emitted binary form and is absent from Kotlin
+    /// candidate collection. Its provider published that meaning as an annotation fact.
+    fn declaration_is_deprecated_hidden(&self, declaration: DeclarationId) -> bool {
+        self.index
+            .declaration_applied_annotations(declaration)
+            .iter()
+            .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+    }
+
+    fn declares_hidden_deprecated_function(&self, owner: DeclarationId, name: &str) -> bool {
+        self.index
+            .owned_declarations(owner)
+            .iter()
+            .any(|declaration| {
+                self.index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header.kind == DeclarationKind::Function && header.owner == Some(owner)
+                    })
+                    && self.index.declaration_name(*declaration) == Some(name)
+                    && self.declaration_is_deprecated_hidden(*declaration)
+            })
     }
 
     fn semantic_callable(
@@ -844,6 +872,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             if header.kind != DeclarationKind::Function
                 || header.owner != Some(owner)
                 || self.index.declaration_name(declaration) != Some(name)
+                || self.declaration_is_deprecated_hidden(declaration)
             {
                 continue;
             }

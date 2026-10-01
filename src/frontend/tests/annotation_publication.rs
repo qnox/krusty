@@ -33,6 +33,7 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
                     crate::types::AnnotationValue::Boolean(true),
                 ),
             ],
+            facts: Default::default(),
         }]
     );
 }

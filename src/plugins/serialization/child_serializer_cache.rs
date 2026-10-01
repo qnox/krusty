@@ -405,6 +405,7 @@ pub(super) fn add_child_serializer_cache(
                             internal: type_name("kotlin/jvm/JvmField"),
                             values: Vec::new(),
                         },
+                        facts: Default::default(),
                     },
                 ]),
             });

@@ -52768,7 +52768,7 @@ impl<'a> Checker<'a> {
                 }
                 _ => {
                     let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
-                    let values = self.fold_annotation_values(internal, args, Some(e))?;
+                    let (values, _) = self.fold_annotation_values(internal, args, Some(e))?;
                     AnnotationValue::Annotation { internal, values }
                 }
             },
@@ -52830,114 +52830,6 @@ impl<'a> Checker<'a> {
             LibConst::Float(value) => AnnotationValue::Float(*value),
             LibConst::Double(value) => AnnotationValue::Double(*value),
             LibConst::Str(value) => AnnotationValue::String(value.clone()),
-        })
-    }
-
-    fn fold_annotation_values(
-        &mut self,
-        internal: TypeName,
-        arguments: &[ExprId],
-        nested_call: Option<ExprId>,
-    ) -> Option<Vec<(String, crate::types::AnnotationValue)>> {
-        let (elements, parameters, policy) = self.annotation_shape(internal)?;
-        let argument_names = self.annotation_argument_names(arguments, nested_call);
-        let parameter_indices = self
-            .annotation_argument_parameter_indices(&parameters, arguments, &argument_names)
-            .ok()?;
-        let mut values = Vec::with_capacity(arguments.len());
-        for ((&argument, index), argument_name) in
-            arguments.iter().zip(parameter_indices).zip(&argument_names)
-        {
-            let (element_name, declared) = elements.get(index)?.clone();
-            // Same rule as the checker: a vararg element takes its ELEMENT type only when the
-            // argument is POSITIONAL. Folding a named one against the element type dropped the
-            // expectation inside the array, so a `boolean[]` element fed constants was written
-            // with the `I` tag and threw AnnotationTypeMismatchException on read-back.
-            let named = argument_name.is_some();
-            let expected =
-                if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
-                {
-                    declared.array_read_elem()?
-                } else {
-                    declared
-                };
-            let value = self.fold_annotation_value(argument, Some(expected))?;
-            if parameters.vararg == Some(index) {
-                let item_values = match value {
-                    crate::types::AnnotationValue::Array(values) => values,
-                    value => vec![value],
-                };
-                if let Some((_, _, crate::types::AnnotationValue::Array(existing))) =
-                    values.iter_mut().find(|(slot, _, _)| *slot == index)
-                {
-                    existing.extend(item_values);
-                } else {
-                    values.push((
-                        index,
-                        element_name,
-                        crate::types::AnnotationValue::Array(item_values),
-                    ));
-                }
-            } else {
-                values.push((index, element_name, value));
-            }
-        }
-        // An omitted vararg element materializes as an empty array only when the DECLARATION is a
-        // Kotlin `vararg val`. The Java `value` vararg is synthesized here from an array-typed
-        // element, and kotlinc never writes an omitted Java element: emitting `value=[]` would
-        // override the `AnnotationDefault` the classfile already carries (`@Dfl()` must keep
-        // `value=[x]`, not become `value=[]`).
-        if let Some(index) = parameters
-            .vararg
-            .filter(|_| policy.materialize_omitted_vararg)
-        {
-            if !values.iter().any(|(slot, _, _)| *slot == index) {
-                let (name, _) = elements.get(index)?.clone();
-                values.push((
-                    index,
-                    name,
-                    crate::types::AnnotationValue::Array(Vec::new()),
-                ));
-            }
-        }
-        values.sort_by_key(|(index, _, _)| *index);
-        Some(
-            values
-                .into_iter()
-                .map(|(_, name, value)| (name, value))
-                .collect(),
-        )
-    }
-
-    fn fold_annotation_application(
-        &mut self,
-        internal: TypeName,
-        arguments: &[ExprId],
-    ) -> Option<crate::types::AppliedAnnotation> {
-        let values = self.fold_annotation_values(internal, arguments, None)?;
-        let module_retention = self.module.annotation_retention(internal);
-        let classifier = self.resolver().classifier(internal)?;
-        let retention = module_retention.or_else(|| {
-            Some(match classifier.retention.as_deref() {
-                Some("SOURCE") => crate::types::AnnotationRetention::Source,
-                Some("BINARY" | "CLASS") => crate::types::AnnotationRetention::Binary,
-                Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
-                None => crate::types::AnnotationRetention::Default,
-                Some(_) => return None,
-            })
-        })?;
-        let targets = if module_retention.is_some() {
-            self.module.annotation_targets(internal)
-        } else {
-            classifier
-                .annotation_targets
-                .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
-        };
-        Some(crate::types::AppliedAnnotation {
-            internal,
-            values,
-            retention,
-            targets,
         })
     }
 
@@ -54431,6 +54323,24 @@ impl<'a> Checker<'a> {
                     self.check_annotation_application(scope, annotation, arguments);
                 }
             }
+            // Method annotations are declaration facts for later candidate collection. Fold only
+            // those applications: this fragment retains their arguments and releases value-parameter
+            // annotations. The method's body unit checks the parameter applications, and a fold this
+            // restricted checker cannot complete is not a diagnostic.
+            let diagnostics_before_methods = self.diags.diags.len();
+            for method in &cl.methods {
+                if method.annotations.iter().any(|annotation| {
+                    self.module
+                        .legacy_symbols()
+                        .and_then(|symbols| {
+                            symbols.resolved_annotation(self.file_index, annotation)
+                        })
+                        .is_some()
+                }) {
+                    self.check_classifier_method_annotations(scope, method);
+                }
+            }
+            self.diags.diags.truncate(diagnostics_before_methods);
             self.active_statement_suppressions
                 .truncate(class_suppression_depth);
             return;
@@ -73291,23 +73201,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         function: &FunDecl,
     ) -> usize {
-        let suppression_depth = self.push_declaration_suppressions(
-            scope,
-            &function.annotations,
-            &function.annotation_args,
-        );
-        self.check_declaration_type_parameter_annotations(scope, function.signature_span.lo);
-        for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        for parameter in &function.params {
-            for (annotation, arguments) in
-                parameter.annotations.iter().zip(&parameter.annotation_args)
-            {
-                self.check_annotation_application(scope, annotation, arguments);
-            }
-        }
-        suppression_depth
+        self.fold_function_annotation_applications(scope, function, true)
     }
 
     /// Materialize only declaration annotations for a class method whose checked body was retained
@@ -73318,27 +73212,7 @@ impl<'a> Checker<'a> {
         class_scope: &CheckerScope<'_>,
         function: &FunDecl,
     ) {
-        let method_scope = class_scope.child(ScopeKind::Function { receiver: None });
-        let type_parameters = method_scope
-            .visible_tparams()
-            .symbolic_extended_with(
-                &function.type_params,
-                &function.type_param_bounds,
-                &|name| self.select_classifier(&method_scope, name).found(),
-            )
-            .alpha_renamed_declaration(
-                &function.type_params,
-                self.compilation_id,
-                self.file_index,
-                function.signature_span.lo,
-            );
-        method_scope.declare_tparams(&function.type_params, &type_parameters, |name| {
-            function.reified_type_params.contains(name)
-        });
-        let suppression_depth =
-            self.check_function_annotation_applications(&method_scope, function);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.fold_method_annotations_in_temporary_scope(class_scope, function, true);
     }
 
     fn access_owner_display(owner: TypeName) -> String {
