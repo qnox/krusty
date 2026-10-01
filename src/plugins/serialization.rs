@@ -28,6 +28,7 @@ mod property_default;
 mod runtime_abi;
 mod serial_elements;
 mod serialize_body;
+mod synthesized_accessor;
 mod transient_initializer;
 mod type_parameter_serializers;
 mod value_class_types;
@@ -43,6 +44,7 @@ use crate::plugins::{
     PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
+
 use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
@@ -1578,6 +1580,7 @@ impl IrPlugin for SerializationPlugin {
                     barrier_plan: None,
                     special: false,
                     target_name: None,
+                    property_implementation: None,
                 },
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
@@ -1597,6 +1600,7 @@ impl IrPlugin for SerializationPlugin {
                     barrier_plan: None,
                     special: false,
                     target_name: None,
+                    property_implementation: None,
                 },
             ];
             let serializer_identity = ser.fq_name_id();
@@ -2040,18 +2044,14 @@ impl IrPlugin for SerializationPlugin {
                         let Some(getter_desc) = ty_descriptor(ctx, &uty) else {
                             continue;
                         };
-                        let v = ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner: class_classifier,
-                                name: property_getter_name(&pname),
-                                descriptor: format!("(){getter_desc}"),
-                                params: None,
-                                interface: false,
-                                module_target: None,
-                            },
-                            dispatch_receiver: Some(vrecv),
-                            args: vec![],
-                        });
+                        let v = synthesized_accessor::getter(
+                            ir,
+                            vrecv,
+                            class_classifier,
+                            &pname,
+                            getter_desc,
+                            (foo_id, 0),
+                        );
                         let call = ir.add_expr(IrExpr::Call {
                             callee: virtual_iface(
                                 "kotlinx/serialization/encoding/Encoder",

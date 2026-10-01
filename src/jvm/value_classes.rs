@@ -13,6 +13,7 @@
 //! genuinely operate on the boxed object, so they are NOT
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
 
+mod accessor_names;
 mod bridge_names;
 mod bridge_parameters;
 mod bridge_realization;
@@ -2626,6 +2627,10 @@ pub(crate) fn lower_value_classes(
             None => None,
         };
         if let Some(r) = rewrite {
+            // The replacement is the carrier access or static `-impl`, not the virtual getter
+            // the binding named. Leaving the binding would ask the later name stamp to rename
+            // a call that no longer exists.
+            accessor_names::retire_replaced_accessor_call(ir, id);
             ir.exprs[i] = r;
         }
     }
@@ -3915,86 +3920,10 @@ pub(crate) fn lower_value_classes(
         box_vc_tail(ir, body, &callable_under, &orig_rets, false);
     }
 
-    // A property whose declared type is a VALUE CLASS has a `@JvmName`-mangled accessor. The backend
-    // synthesizes the accessors for a plain property and cannot know the value classes, so stamp the
-    // mangled spelling onto the declaration here, where the map exists.
-    for ci in 0..ir.classes.len() {
-        let props: Vec<(usize, String, Ty)> = ir.classes[ci]
-            .properties
-            .iter()
-            .enumerate()
-            // Only a property the backend SYNTHESIZES an accessor for needs a stamped name. An abstract
-            // or interface property keeps a real IR method, which this pass mangles like any other.
-            .filter(|(_, p)| p.getter.is_none() && p.backing_field.is_some())
-            .map(|(i, p)| (i, p.name.clone(), p.ty))
-            .collect();
-        for (index, name, ty) in props {
-            let is_vc_ty = |t: &Ty| {
-                t.non_null()
-                    .obj_internal()
-                    .is_some_and(|fq_name| callable_under.contains_key(&fq_name))
-            };
-            // The property's own accessor is mangled only when its own type is a value class. When it
-            // merely overrides a value-class property (`override val p: Nothing?`), the own accessor
-            // keeps the plain spelling and its bridge carries the supertype's mangled name.
-            if !is_vc_ty(&ty) {
-                continue;
-            }
-            let plain = property_getter_name(&name);
-            let getter = vc_mangle(&plain, &[], &ty, &callable_under, false, false);
-            let setter = vc_mangle(
-                &crate::names::property_setter_name(&name),
-                std::slice::from_ref(&ty),
-                &Ty::Unit,
-                &callable_under,
-                false,
-                false,
-            );
-            // Any call already built against the PLAIN spelling (a plugin emits `getX()` before this pass
-            // runs) must move to the mangled one too — this is the single place that decides the name.
-            let owner = ir.classes[ci].fq_name;
-            let plain_getter = plain;
-            let plain_setter = crate::names::property_setter_name(&name);
-            for e in ir.exprs.iter_mut() {
-                if let IrExpr::Call {
-                    callee:
-                        Callee::Virtual {
-                            owner: call_owner,
-                            name: call_name,
-                            ..
-                        },
-                    ..
-                } = e
-                {
-                    if *call_owner != owner {
-                        continue;
-                    }
-                    if *call_name == plain_getter {
-                        *call_name = getter.clone();
-                    } else if *call_name == plain_setter {
-                        *call_name = setter.clone();
-                    }
-                }
-            }
-            // A bridge delegating to the accessor must target the mangled spelling too — an unmangled
-            // `getProp()Bse` bridge over a value-class property calls `getProp-<hash>()I`.
-            for bridge in ir.classes[ci].bridges.iter_mut() {
-                let target = bridge
-                    .target_name
-                    .as_deref()
-                    .unwrap_or(&bridge.name)
-                    .to_string();
-                if target == plain_getter {
-                    bridge.target_name = Some(getter.clone());
-                } else if target == plain_setter {
-                    bridge.target_name = Some(setter.clone());
-                }
-            }
-            let p = &mut ir.classes[ci].properties[index];
-            p.getter_jvm_name = Some(getter);
-            p.setter_jvm_name = Some(setter);
-        }
-    }
+    // Synthesized accessors use the same callable universe as property operations. In particular,
+    // built-in value classes such as UInt are callable value classes even though they are not
+    // declarations owned by this source module.
+    accessor_names::stamp_synthesized(ir, &callable_under);
 
     property_references::realize(ir, &callable_under, property_reference_realizations)
 }
@@ -4459,8 +4388,11 @@ fn repr(
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         // A property read carries its own declared type. Whatever accessor or field the target picks for
         // it yields the value class's ERASED underlying — the same representation a field read of one has.
-        IrExpr::PropertyRead { ty, .. } => {
-            if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
+        IrExpr::PropertyRead { ty, operation, .. } => {
+            let recorded = operation.unwrap_or(id);
+            if let Some(declared) = types.unboxed_declared_property(recorded, under) {
+                repr_of_ty(&declared, under)
+            } else if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
                 ty.non_null()
                     .obj_internal()
                     .filter(|owner| under.contains_key(owner))
@@ -4765,9 +4697,17 @@ impl ReprCtx<'_> {
                 .get(*class as usize)
                 .and_then(|fs| fs.get(*index as usize))
                 .is_some_and(|t| matches!(repr_of_ty(t, under), Repr::Boxed(c) if c == x)),
-            IrExpr::PropertyRead { ty, .. } => {
-                (is_x(ty) && physical.get(&id).is_some_and(|ty| ty.is_erased_top()))
-                    || matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
+            IrExpr::PropertyRead { ty, operation, .. } => {
+                let recorded = operation.unwrap_or(id);
+                if types
+                    .unboxed_declared_property(recorded, under)
+                    .is_some_and(|declared| declared.non_null().obj_internal() == Some(x))
+                {
+                    false
+                } else {
+                    (is_x(ty) && physical.get(&id).is_some_and(|ty| ty.is_erased_top()))
+                        || matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
+                }
             }
             IrExpr::Call {
                 callee: Callee::Static { owner, name, .. },

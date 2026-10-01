@@ -35,6 +35,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(reified_call_subst);
     move_fact!(construction_declared_params);
     move_fact!(construction_targets);
+    move_fact!(synthesized_accessor_calls);
     // These facts identify the selected call operation. The source expression is now the
     // representation wrapper, so leaving a copy there would both orphan the real call and let a
     // later consumer mistake the wrapper for the operation that owns the provider decision.
