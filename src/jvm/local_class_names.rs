@@ -214,11 +214,7 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
             ))
         })
         .collect::<Vec<_>>();
-    for (function, name) in lambdas {
-        if let Some(origin) = ir.lambda_origins.get_mut(&function) {
-            origin.class_name = Some(name);
-        }
-    }
+    ir.lambda_class_names = lambdas.into_iter().collect();
     let identities = physical
         .into_iter()
         .map(|(class, physical)| (ir.classes[class as usize].fq_name, physical))

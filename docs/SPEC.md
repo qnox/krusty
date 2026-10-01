@@ -3386,15 +3386,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   e.g. `StringBuilder` — are skipped). `throw e` emits `athrow` (`tests/throw_e2e.rs`).
 
 - **A same-module inline expansion opens kotlinc's inline frames.** Common lowering
-  (`fir_lower/inlining.rs`) declares, once an expansion's operands are bound, a zero `Int` local
-  whose provenance is `FunctionFrameMarker` and whose retained name is the callee's; a lambda
-  spliced into it keeps each named parameter in a local of its own and then declares an
-  `LambdaFrameMarker` for the callee it was passed to (for `suspendCoroutineUninterceptedOrReturn`
-  too, whose selected name the checker keeps on the intrinsic). The JVM debug-name boundary
-  (`jvm/debug_local_names.rs`) spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`,
-  the class being the one the naming walk gave the lambda's position (`Kt$f$r$1` for a lambda bound
-  to `val r`, `Kt$f$2` in a suspend function whose continuation takes position 1), the same name
-  the classpath route now uses. A frame's marker is listed ahead of the locals binding its
+  (`fir_lower/inlining.rs`) records, once an expansion's operands are bound, a frame boundary
+  whose provenance is `FunctionFrameMarker` and whose retained name is the callee's. The boundary
+  is not a value and allocates no temporary. A lambda spliced into it keeps each named parameter
+  in a local of its own and then records a `LambdaFrameMarker` for the callee it was passed to
+  (for `suspendCoroutineUninterceptedOrReturn` too, whose selected name the checker keeps on the
+  intrinsic). The JVM emission boundary materializes each boundary as `iconst_0; istore` into a
+  slot that is not a semantic value, and the debug-name boundary (`jvm/debug_local_names.rs`)
+  spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`. The class is the naming walk's
+  `class_provenance`, realized by the JVM naming pass (`Kt$f$r$1` for a lambda bound to `val r`,
+  `Kt$f$2` in a suspend function whose continuation takes position 1). A marker whose provenance
+  was not realized is an error; the name is not rebuilt from the owner and an ordinal. A frame's
+  marker is listed ahead of the locals binding its
   operands, a lambda's also ahead of the locals its body declares, and a cloned lambda marker gains `$iv` per enclosing expansion while a function
   marker never does, as kotlinc's tables read. A spliced lambda's block ends with kotlinc's return
   to the invocation's line and a `nop`, which the nop cleanup keeps only when nothing else runs on

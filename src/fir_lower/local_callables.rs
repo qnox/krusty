@@ -1009,7 +1009,6 @@ impl BodyLowering<'_> {
                         }
                     },
                     class_provenance: None,
-                    class_name: None,
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");

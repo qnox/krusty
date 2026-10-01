@@ -127,11 +127,10 @@ pub struct IrLambdaOrigin {
     pub label: Option<String>,
     /// Which source form the implementation was written in.
     pub form: IrLambdaForm,
-    /// The naming walk's position for the class the lambda WOULD compile to. A lambda spliced into
-    /// an inline call writes no class, but its inline-depth marker is spelled after that class.
+    /// The naming walk's position for the class the lambda would compile to. A lambda spliced into
+    /// an inline call writes no class, but a target spells its inline-depth marker from this
+    /// provenance. The realized spelling stays in that target's own state.
     pub(crate) class_provenance: Option<super::IrLocalClassNameProvenance>,
-    /// The class name a target chose from `class_provenance`.
-    pub(crate) class_name: Option<TypeName>,
 }
 
 /// The source form of a lowered function literal.

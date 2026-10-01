@@ -674,7 +674,6 @@ mod tests {
             label: label.map(str::to_owned),
             form: crate::ir::IrLambdaForm::Literal,
             class_provenance: None,
-            class_name: None,
         };
 
         ir.lambda_origins.insert(function, origin(None));

@@ -28,45 +28,32 @@ pub(super) fn spliced_local_name(name: &str) -> String {
 ///
 /// kotlinc spells it `$i$a$-<inline callee>-<the lambda's own class>`. The lambda is inlined and no
 /// such class is emitted, so this string is the only place the name exists. The class is the one
-/// the naming walk gave the lambda's position (`Kt$f$r$1` for a lambda bound to `val r`, `Kt$f$2`
-/// in a suspend function whose continuation takes the first position); a lambda with no position
-/// is named after the implementation method it lowered to, in `owner`.
+/// the JVM naming pass realized from the lambda's `class_provenance` (`Kt$f$r$1` for a lambda
+/// bound to `val r`, `Kt$f$2` in a suspend function whose continuation takes the first position).
+/// `None` when that provenance was never realized: the name is not reconstructed from the owner.
 pub(super) fn spliced_lambda_marker_name(
     ir: &IrFile,
     callee: &str,
     implementation: FunId,
-    owner: &str,
 ) -> Option<String> {
-    let origin = ir.lambda_origins.get(&implementation)?;
     // A debug-table name is an UNQUALIFIED name (JVMS 4.2.2): `/` is illegal in one, and a class
     // loader rejects the whole class over it. The class contributes its simple name only.
-    let class = match origin.class_name {
-        Some(class) => class.segment_ref().to_owned(),
-        None => {
-            let owner = owner.rsplit('/').next().unwrap_or(owner);
-            format!(
-                "{owner}${}${}",
-                origin.implementation_name,
-                origin.implementation_ordinal + 1
-            )
-        }
-    };
-    Some(format!("$i$a$-{callee}-{class}"))
+    let class = ir.lambda_class_names.get(&implementation)?.segment_ref();
+    (!class.is_empty()).then(|| format!("$i$a$-{callee}-{class}"))
 }
 
 /// The debug name of the local `declaration` declares in code emitted into the class `owner`: an
 /// inline-depth marker's, or any other local's as [`name`] spells it.
-pub(super) fn declared_name(ir: &IrFile, declaration: ExprId, owner: &str) -> Option<String> {
+pub(super) fn declared_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
     match ir.debug_local_provenance(declaration) {
-        Some(provenance) if provenance.is_inline_marker() => marker_name(ir, declaration, owner),
+        Some(provenance) if provenance.is_inline_marker() => marker_name(ir, declaration),
         _ => name(ir, declaration),
     }
 }
 
-/// The name of an inline-depth marker local, or `None` for any other local. A lambda's marker is
-/// spelled after the class the code is emitted into when the lambda has no class of its own, so
-/// that class is `owner`.
-fn marker_name(ir: &IrFile, declaration: ExprId, owner: &str) -> Option<String> {
+/// The name of an inline-depth marker local, or `None` for any other local and for a lambda
+/// marker whose class provenance was never realized.
+fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
     let callee = ir.value_names.get(&declaration)?;
     match ir.debug_local_provenance(declaration)? {
         IrDebugLocalProvenance::FunctionFrameMarker => Some(format!("$i$f${callee}")),
@@ -74,7 +61,7 @@ fn marker_name(ir: &IrFile, declaration: ExprId, owner: &str) -> Option<String> 
             implementation,
             depth,
         } => {
-            let mut name = spliced_lambda_marker_name(ir, callee, implementation, owner)?;
+            let mut name = spliced_lambda_marker_name(ir, callee, implementation)?;
             for _ in 0..depth {
                 name.push_str("$iv");
             }
@@ -236,9 +223,12 @@ mod tests {
                 label: None,
                 form: crate::ir::IrLambdaForm::Literal,
                 class_provenance: None,
-                class_name: class_name.map(crate::types::type_name),
             },
         );
+        if let Some(class_name) = class_name {
+            ir.lambda_class_names
+                .insert(implementation, crate::types::type_name(class_name));
+        }
         implementation
     }
 
@@ -260,7 +250,7 @@ mod tests {
         );
         let value = local(&mut ir, "x");
         assert_eq!(name(&ir, function), None);
-        assert_eq!(marker_name(&ir, value, "LpKt"), None);
+        assert_eq!(marker_name(&ir, value), None);
     }
 
     /// An inline function's marker keeps its spelling however deep the expansion it opens is
@@ -283,31 +273,28 @@ mod tests {
             }
             .nested_inline(),
         );
+        assert_eq!(marker_name(&ir, function).as_deref(), Some("$i$f$twice"));
         assert_eq!(
-            marker_name(&ir, function, "LpKt").as_deref(),
-            Some("$i$f$twice")
-        );
-        assert_eq!(
-            marker_name(&ir, spliced, "LpKt").as_deref(),
+            marker_name(&ir, spliced).as_deref(),
             Some("$i$a$-twice-LpKt$g$1$iv")
         );
     }
 
-    /// The lambda's class is the naming walk's; a packaged class or owner contributes only its
-    /// simple name: a debug-table name may not contain `/`, and a class carrying one is rejected at
-    /// load with `Illegal field name`.
+    /// The lambda's class is the naming walk's, realized by the JVM naming pass. A packaged class
+    /// contributes only its simple name: a debug-table name may not contain `/`. A lambda whose
+    /// provenance was never realized has no name — it is not rebuilt from the owner.
     #[test]
-    fn a_spliced_lambda_marker_never_carries_a_qualified_name() {
+    fn a_spliced_lambda_marker_uses_only_a_realized_class() {
         let mut ir = IrFile::default();
         let named = lambda(&mut ir, Some("lib/Catalog$findResource$r$1"));
         let unnamed = lambda(&mut ir, None);
         assert_eq!(
-            spliced_lambda_marker_name(&ir, "firstOrNull", named, "lib/Other").as_deref(),
+            spliced_lambda_marker_name(&ir, "firstOrNull", named).as_deref(),
             Some("$i$a$-firstOrNull-Catalog$findResource$r$1")
         );
         assert_eq!(
-            spliced_lambda_marker_name(&ir, "firstOrNull", unnamed, "lib/Catalog").as_deref(),
-            Some("$i$a$-firstOrNull-Catalog$findResource$1")
+            spliced_lambda_marker_name(&ir, "firstOrNull", unnamed),
+            None
         );
     }
 
@@ -337,7 +324,6 @@ mod tests {
                 label: None,
                 form: crate::ir::IrLambdaForm::Literal,
                 class_provenance: None,
-                class_name: None,
             },
         );
         let declaration = ir.add_expr(IrExpr::Variable {

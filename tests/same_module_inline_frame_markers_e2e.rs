@@ -96,8 +96,9 @@ fn same_module_inline_frames_run() {
     );
 }
 
-/// Instructions and local variable tables, kotlinc's exactly. Line numbers are not compared: a
-/// same-module expansion does not yet remap the inline body's lines through a source map.
+/// Instructions and local variable tables, kotlinc's exactly. This is not a whole-class byte
+/// comparison: line numbers are not remapped through a source map, and the rest of the class file
+/// is outside what these frames decide.
 #[test]
 fn same_module_inline_frames_are_the_reference_compilers() {
     for method in [

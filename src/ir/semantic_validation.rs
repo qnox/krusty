@@ -349,6 +349,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }

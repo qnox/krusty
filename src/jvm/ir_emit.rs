@@ -75,6 +75,7 @@ mod implicit_reference_coercion;
 mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
+mod inline_frame_marker;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
@@ -7373,20 +7374,18 @@ impl<'a> Emitter<'a> {
                     scratch.push_int(0, self.cw);
                     store(Ty::Int, depth_marker, &mut scratch);
                     if self.record_locals {
-                        if let Some(marker) =
-                            crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                                self.ir,
-                                callee,
-                                impl_fn,
-                                &self.owner,
-                            )
-                        {
-                            lam_locals_declared.push((
+                        match crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                            self.ir, callee, impl_fn,
+                        ) {
+                            Some(marker) => lam_locals_declared.push((
                                 u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
                                 depth_marker,
                                 marker,
                                 "I".to_string(),
-                            ));
+                            )),
+                            None => self.run.set_emit_error(
+                                "a spliced lambda frame has no realized class provenance".into(),
+                            ),
                         }
                     }
                     let body_ret =
@@ -8088,6 +8087,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => self.emit_local_variable(e, index, ty, init, code),
+            IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
                     self.run.set_emit_error(

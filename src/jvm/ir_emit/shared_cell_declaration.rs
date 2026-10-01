@@ -142,9 +142,7 @@ impl Emitter<'_> {
     ) {
         let Some(name) = self
             .record_locals
-            .then(|| {
-                super::super::debug_local_names::declared_name(self.ir, declaration, &self.owner)
-            })
+            .then(|| super::super::debug_local_names::declared_name(self.ir, declaration))
             .flatten()
         else {
             return;

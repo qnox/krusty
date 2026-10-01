@@ -818,17 +818,11 @@ impl BodyLowering<'_> {
         expression
     }
 
-    /// Declare an inline-depth marker: a zero the debugger reads as the start of the frame named
-    /// `callee`, live to the end of the block that declares it. Its spelling is the target's.
+    /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
+    /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
+    /// store, and the spelling.
     fn inline_marker(&mut self, callee: String, provenance: IrDebugLocalProvenance) -> ExprId {
-        let slot = self.allocate_temporary();
-        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: slot,
-            ty: Ty::Int,
-            init: Some(zero),
-            named: true,
-        });
+        let declaration = self.ir.add_expr(IrExpr::InlineFrameMarker);
         self.ir.value_names.insert(declaration, callee);
         self.ir.set_debug_local_provenance(declaration, provenance);
         declaration
@@ -1196,6 +1190,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::Lambda { sam: None, .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }

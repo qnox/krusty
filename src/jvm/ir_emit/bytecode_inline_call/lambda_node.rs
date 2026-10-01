@@ -512,20 +512,16 @@ impl Emitter<'_> {
         if self.record_locals {
             let end = u16::try_from(scratch.bytes.len())
                 .map_err(|_| "an inline lambda's code is too long")?;
-            if let Some(marker) = crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                self.ir,
-                callee,
-                impl_fn,
-                &self.owner,
-            ) {
-                scratch.add_local_entry(
-                    marker_start,
-                    Some(end - marker_start),
-                    args_size,
-                    &marker,
-                    "I",
-                );
-            }
+            let marker =
+                crate::jvm::debug_local_names::spliced_lambda_marker_name(self.ir, callee, impl_fn)
+                    .ok_or("a spliced lambda frame has no realized class provenance")?;
+            scratch.add_local_entry(
+                marker_start,
+                Some(end - marker_start),
+                args_size,
+                &marker,
+                "I",
+            );
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
             for (index, &ty) in parameter_types.iter().enumerate() {
                 let name = identities
