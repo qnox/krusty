@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::model::{SourceModuleGraph, SourceModuleGraphKey};
+use super::source_digest::{DigestedJavaSource, DigestedSource};
 
 const MAX_CACHED_SOURCE_ENTRIES: usize = 32 * 1024;
 const MAX_CACHED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
@@ -12,7 +13,32 @@ const MAX_CACHED_MODULE_KEYS: usize = 32 * 1024;
 /// so reports must be rare enough that rendering them never competes with the walk itself.
 const SCAN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>);
+/// Kotlin support borrowed from the cache, how many of those files are the inferred prefix, and
+/// the Java stubs that fit the remaining budget. Java entries borrow the cache; the budget filter
+/// does not clone their text.
+pub struct LoadedProjectSources<'a> {
+    pub kotlin: &'a [DigestedSource],
+    pub inferred_count: usize,
+    pub java: Vec<&'a DigestedJavaSource>,
+}
+
+impl LoadedProjectSources<'_> {
+    #[cfg(test)]
+    pub(crate) fn kotlin_pairs(&self) -> Vec<(String, String)> {
+        self.kotlin
+            .iter()
+            .map(|source| (source.uri().to_string(), source.text().to_string()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn java_texts(&self) -> Vec<String> {
+        self.java
+            .iter()
+            .map(|source| source.text().to_string())
+            .collect()
+    }
+}
 
 #[derive(Default)]
 pub struct ProjectSources {
@@ -23,8 +49,8 @@ pub struct ProjectSources {
 
 struct Cache {
     key: CacheKey,
-    documents: Vec<(String, String)>,
-    java_documents: Vec<(String, String)>,
+    documents: Vec<DigestedSource>,
+    java_documents: Vec<DigestedJavaSource>,
     inferred_count: usize,
     kotlin_bytes: usize,
 }
@@ -41,7 +67,7 @@ impl Cache {
         self.kotlin_bytes.saturating_add(
             self.java_documents
                 .iter()
-                .map(|(_, source)| source.len())
+                .map(|source| source.text().len())
                 .sum::<usize>(),
         )
     }
@@ -172,7 +198,11 @@ impl ProjectSources {
             }
             let java_sources =
                 sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
-            return Ok((&cache.documents, cache.inferred_count, java_sources));
+            return Ok(LoadedProjectSources {
+                kotlin: &cache.documents,
+                inferred_count: cache.inferred_count,
+                java: java_sources,
+            });
         }
 
         // Every root in one walk: a source root is usually a few dozen package directories, and a
@@ -271,11 +301,18 @@ impl ProjectSources {
         inferred_paths.extend(dependency_paths);
 
         let (documents, kotlin_bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
+        let documents = documents
+            .into_iter()
+            .map(|(uri, text)| DigestedSource::kotlin(uri, text))
+            .collect();
         let java_documents = load_java_documents_by_import_closure(
             java_paths,
             &cache_key.import_seed,
             max_bytes - kotlin_bytes,
-        );
+        )
+        .into_iter()
+        .map(|(uri, text)| DigestedJavaSource::at(uri, text))
+        .collect();
         let cache = Cache {
             key: cache_key,
             documents,
@@ -298,7 +335,11 @@ impl ProjectSources {
         let cache = self.caches.last().unwrap();
         let java_sources =
             sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
-        Ok((&cache.documents, cache.inferred_count, java_sources))
+        Ok(LoadedProjectSources {
+            kotlin: &cache.documents,
+            inferred_count: cache.inferred_count,
+            java: java_sources,
+        })
     }
 
     #[cfg(test)]
@@ -679,12 +720,15 @@ fn load_documents_best_effort(paths: Vec<PathBuf>, mut remaining: usize) -> Vec<
     documents
 }
 
-fn sources_within_budget(documents: &[(String, String)], mut remaining: usize) -> Vec<String> {
+fn sources_within_budget(
+    documents: &[DigestedJavaSource],
+    mut remaining: usize,
+) -> Vec<&DigestedJavaSource> {
     let mut sources = Vec::new();
-    for (_, source) in documents {
-        if source.len() <= remaining {
-            remaining -= source.len();
-            sources.push(source.clone());
+    for source in documents {
+        if source.text().len() <= remaining {
+            remaining -= source.text().len();
+            sources.push(source);
         }
     }
     sources
@@ -858,10 +902,11 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, inferred_count, _java) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        let loaded = loaded.to_vec();
+        let inferred_count = loaded_sources.inferred_count;
+        let loaded = loaded_sources.kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(inferred_count, 0);
@@ -887,10 +932,10 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, _inferred, _java) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        let loaded = loaded.to_vec();
+        let loaded = loaded_sources.kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -918,10 +963,10 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, _, _) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        let loaded = loaded.to_vec();
+        let loaded = loaded_sources.kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
@@ -936,10 +981,10 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, _inferred, _java) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        let loaded = loaded.to_vec();
+        let loaded = loaded_sources.kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
@@ -962,9 +1007,10 @@ mod tests {
         let open_uris = [kt_uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (_loaded, _inferred, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 1);
@@ -991,9 +1037,12 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let max_bytes = 18;
-        let (loaded, inferred_count, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
+        let inferred_count = loaded_sources.inferred_count;
+        let loaded = loaded_sources.kotlin_pairs();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(loaded, [(file_uri(&support_kt), "val s=1".to_string())]);
@@ -1038,9 +1087,10 @@ mod tests {
         let imported_bytes = "package p.q; public class Widget {}".len()
             + "package p.q.other; public class Star {}".len();
         let max_bytes = open_text.len() + imported_bytes;
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert!(java_docs.iter().any(|s| s.contains("class Widget")));
@@ -1077,7 +1127,7 @@ mod tests {
         let documents = [(uri.as_str(), open_text)];
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(
                 &model,
                 &documents,
@@ -1085,6 +1135,7 @@ mod tests {
                 open_text.len() + widget.len() + base.len(),
             )
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert!(java_docs.iter().any(|s| s.contains("class Widget")));
@@ -1122,9 +1173,10 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let max_bytes = open_text.len() + widget.len() + plain.len();
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert!(java_docs.iter().any(|s| s.contains("class Widget")));
@@ -1159,9 +1211,10 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let max_bytes = open_text.len() + widget.len() + widget_base.len() + base.len();
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert!(java_docs.iter().any(|s| s.contains("class Widget ")));
@@ -1192,15 +1245,17 @@ mod tests {
 
         let long_source = "fun use() = \"123456789012345678\"";
         let documents = [(uri.as_str(), long_source)];
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, 64)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
         assert_eq!(java_docs, ["class A{}"]);
 
         let documents = [(uri.as_str(), "fun u()=0")];
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, 64)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 2);
@@ -1237,13 +1292,11 @@ mod tests {
         let first_loaded = sources
             .load_model(&model, &first_documents, &open_uris, MAX_BYTES)
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
         let second_loaded = sources
             .load_model(&model, &second_documents, &open_uris, MAX_BYTES)
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
         assert_eq!(sources.caches.len(), 2);
         let first_only = [first_uri.as_str()];
         sources
@@ -1254,8 +1307,7 @@ mod tests {
         let first_cached = sources
             .load_model(&model, &first_documents, &first_only, MAX_BYTES)
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -1301,13 +1353,11 @@ mod tests {
         let with_dependency = sources
             .load_model(&model(true), &documents, &open_uris, MAX_BYTES)
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
         let without_dependency = sources
             .load_model(&model(false), &documents, &open_uris, MAX_BYTES)
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -1366,13 +1416,15 @@ mod tests {
         let before = sources
             .load_model(&model(false), &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        assert_eq!(before.1, 1);
-        assert_eq!(before.0[0].0, file_uri(&first));
+        let first_uri = file_uri(&first);
+        assert_eq!(before.inferred_count, 1);
+        assert_eq!(before.kotlin[0].uri(), first_uri.as_str());
         let after = sources
             .load_model(&model(true), &documents, &open_uris, MAX_BYTES)
             .unwrap();
-        assert_eq!(after.1, 1);
-        assert_eq!(after.0[0].0, file_uri(&second));
+        let second_uri = file_uri(&second);
+        assert_eq!(after.inferred_count, 1);
+        assert_eq!(after.kotlin[0].uri(), second_uri.as_str());
 
         fs::remove_dir_all(directory).ok();
     }
@@ -1394,9 +1446,10 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (_, _, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, 128)
             .unwrap();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 1);
@@ -1423,9 +1476,12 @@ mod tests {
         let open_uris = [active_uri.as_str(), blocked_uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, inferred_count, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
+        let inferred_count = loaded_sources.inferred_count;
+        let loaded = loaded_sources.kotlin_pairs();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -1495,9 +1551,12 @@ mod tests {
         let open_uris = [consumer_uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, inferred_count, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
+        let inferred_count = loaded_sources.inferred_count;
+        let loaded = loaded_sources.kotlin_pairs();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -1550,9 +1609,12 @@ mod tests {
         let open_uris = [consumer_uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (loaded, inferred_count, java_docs) = sources
+        let loaded_sources = sources
             .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
+        let inferred_count = loaded_sources.inferred_count;
+        let loaded = loaded_sources.kotlin_pairs();
+        let java_docs = loaded_sources.java_texts();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(
@@ -1567,6 +1629,62 @@ mod tests {
     }
 
     #[test]
+    fn a_cached_load_reuses_the_stored_digest() {
+        let directory = temp_path("support-digest");
+        let package = directory.join("p");
+        fs::create_dir_all(&package).unwrap();
+        let open = directory.join("Use.kt");
+        let support = directory.join("Support.kt");
+        let java = package.join("Widget.java");
+        let open_text = "import p.Widget\nfun use() {}";
+        fs::write(&open, open_text).unwrap();
+        fs::write(&support, "fun support() = 1\n").unwrap();
+        fs::write(&java, "package p; public class Widget {}\n").unwrap();
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![SourceRoot::source(directory.clone())];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&open);
+        let documents = [(uri.as_str(), open_text)];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (kotlin_ptr, kotlin_digest, java_digest) = {
+            let first = sources
+                .load_model(&model, &documents, &open_uris, MAX_BYTES)
+                .unwrap();
+            assert!(!first.kotlin.is_empty());
+            assert!(!first.java.is_empty());
+            assert_eq!(
+                first.kotlin[0].digest(),
+                DigestedSource::kotlin(first.kotlin[0].uri(), first.kotlin[0].text()).digest()
+            );
+            assert_eq!(
+                first.java[0].digest(),
+                DigestedJavaSource::at("ignored", first.java[0].text()).digest()
+            );
+            (
+                first.kotlin.as_ptr(),
+                first.kotlin[0].digest(),
+                first.java[0].digest(),
+            )
+        };
+        let digests_after_miss = super::super::source_digest::digest_operations();
+        let again = sources
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        assert_eq!(again.kotlin.as_ptr(), kotlin_ptr);
+        assert_eq!(again.kotlin[0].digest(), kotlin_digest);
+        assert_eq!(again.java[0].digest(), java_digest);
+        assert_eq!(
+            super::super::source_digest::digest_operations(),
+            digests_after_miss,
+            "a cache hit reuses the stored digest instead of hashing the text again"
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
     fn source_cache_eviction_is_byte_entry_and_metadata_bounded() {
         let cache = |module_index: usize, bytes: usize, entries: usize| Cache {
             key: CacheKey {
@@ -1576,7 +1694,7 @@ mod tests {
             },
             documents: (0..entries)
                 .map(|index| {
-                    (
+                    DigestedSource::kotlin(
                         format!("{module_index}/{index}.kt"),
                         "x".repeat(bytes / entries),
                     )

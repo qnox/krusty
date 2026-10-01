@@ -24,8 +24,9 @@ pub use dependency_symbols::{
 };
 pub use options::*;
 pub use project::{
-    detect, model_json, resolve_jdk, JdkRequest, LoadedProjectSources, ProcessRunner, ProjectModel,
-    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
+    detect, model_json, resolve_jdk, DigestedJavaSource, DigestedSource, JdkRequest,
+    LoadedProjectSources, ProcessRunner, ProjectModel, ProjectSources, ProjectSync, ProviderKind,
+    RefreshOutcome, SupportText, SystemEnvironment,
 };
 pub use server::*;
 pub use worker::*;
