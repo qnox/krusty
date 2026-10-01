@@ -10219,7 +10219,7 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 args: &args,
-                                dispatch_receiver,
+                                dispatch_receiver: *dispatch_receiver,
                                 inline,
                                 reified: &reified,
                             },
