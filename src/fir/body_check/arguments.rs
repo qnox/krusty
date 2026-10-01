@@ -16,6 +16,15 @@ fn property_platform_check_name(
     producer.platform_check_name(property, getter_name)
 }
 
+/// The selected parameters one source call's arguments are checked against: their types, the
+/// leading parameters no source argument names, and the vararg parameter, if any.
+#[derive(Clone, Copy)]
+struct SourceCallParameters<'a> {
+    types: &'a [Ty],
+    offset: usize,
+    vararg_index: Option<usize>,
+}
+
 impl BodyFirChecker<'_> {
     /// Whether an exact-Unit expression is an effect that still needs the language-level singleton
     /// at a value boundary. Stored reads and `Unit` itself already produce that value; calls,
@@ -195,9 +204,11 @@ impl BodyFirChecker<'_> {
                         cause,
                         *argument,
                         parameter,
-                        parameters,
-                        parameter_offset,
-                        vararg_index,
+                        SourceCallParameters {
+                            types: parameters,
+                            offset: parameter_offset,
+                            vararg_index,
+                        },
                     )
                 })
                 .collect::<Result<Vec<_>, BodyCheckFailure>>()
@@ -221,9 +232,11 @@ impl BodyFirChecker<'_> {
                 cause,
                 *argument,
                 parameter,
-                parameters,
-                parameter_offset,
-                vararg_index,
+                SourceCallParameters {
+                    types: parameters,
+                    offset: parameter_offset,
+                    vararg_index,
+                },
             )?);
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
@@ -348,10 +361,13 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         argument: ExprId,
         parameter: usize,
-        parameters: &[Ty],
-        parameter_offset: usize,
-        vararg_index: Option<usize>,
+        shape: SourceCallParameters<'_>,
     ) -> Result<FirCallArgument, BodyCheckFailure> {
+        let SourceCallParameters {
+            types: parameters,
+            offset: parameter_offset,
+            vararg_index,
+        } = shape;
         let parameter_id = self.call_parameter_ordinal(expression, parameter, parameter_offset)?;
         let physical_parameter = parameter
             .checked_add(parameter_offset)
@@ -430,8 +446,9 @@ impl BodyFirChecker<'_> {
         let Some(sam) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
             return Ok(None);
         };
+        let span = self.file.expr_span(argument);
         let nullable = self.info.semantic_ty(argument).is_nullable();
-        let conversion = self.fir_sam_conversion(self.file.expr_span(argument), sam, nullable)?;
+        let conversion = self.published_sam_conversion(span, &sam, nullable)?;
         let conversion = self.body.add_sam_conversion(conversion);
         Ok(Some(FirConversion {
             origin: cause,
@@ -1012,9 +1029,11 @@ impl BodyFirChecker<'_> {
                     cause,
                     *argument,
                     visible_parameter,
-                    parameters,
-                    context.len(),
-                    vararg_index,
+                    SourceCallParameters {
+                        types: parameters,
+                        offset: context.len(),
+                        vararg_index,
+                    },
                 )?);
                 continue;
             }
@@ -1141,7 +1160,7 @@ impl BodyFirChecker<'_> {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
         let cause = self.expression_origin(expression)?;
-        let conversion = self.fir_sam_conversion(span, *sam, false)?;
+        let conversion = self.published_sam_conversion(span, &sam, false)?;
         let conversion = self.body.add_sam_conversion(conversion);
         let value = self.expression(*operand)?;
         Ok(FirExprKind::ImplicitConversion {
@@ -1153,29 +1172,56 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    /// Publish a selected functional-interface method as the FIR conversion to that interface.
-    pub(super) fn fir_sam_conversion(
+    /// The checked FIR for a conversion to the functional interface `sam` selected, naming the
+    /// abstract method it implements by that method's declaration identity. A provider member
+    /// published without an identity cannot be named, so such a conversion is rejected.
+    pub(super) fn published_sam_conversion(
         &self,
         span: Option<Span>,
-        sam: crate::symbol_resolver::SamSignature,
+        sam: &crate::symbol_resolver::SamSignature,
         nullable: bool,
     ) -> Result<FirSamConversion, BodyCheckFailure> {
         let resolved = |ty| {
             ResolvedTy::new(ty)
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
         };
-        let resolved_all = |types: Vec<Ty>| {
+        let resolved_all = |types: &[crate::types::Ty]| {
             types
-                .into_iter()
+                .iter()
+                .copied()
                 .map(resolved)
                 .collect::<Result<Box<[_]>, _>>()
         };
+        let method_target = match sam.declaration {
+            Some(crate::symbol_resolver::SamMethodDeclaration::Module(declaration)) => {
+                crate::fir::FirSamMethod::Declared(
+                    crate::fir::ResolvedFunctionOverrideTarget::Module(
+                        self.index
+                            .callable_for_declaration(declaration)
+                            .ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                            })?
+                            .id,
+                    ),
+                )
+            }
+            Some(crate::symbol_resolver::SamMethodDeclaration::External(callable)) => {
+                crate::fir::FirSamMethod::Declared(
+                    crate::fir::ResolvedFunctionOverrideTarget::External(callable),
+                )
+            }
+            Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke) => {
+                crate::fir::FirSamMethod::FunctionTypeInvoke
+            }
+            None => return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)),
+        };
         Ok(FirSamConversion {
             classifier: sam.internal,
-            method: sam.method.into_boxed_str(),
-            parameters: resolved_all(sam.params)?,
+            method: sam.method.as_str().into(),
+            method_target,
+            parameters: resolved_all(&sam.params)?,
             result: resolved(sam.ret)?,
-            declared_parameters: resolved_all(sam.declared_params)?,
+            declared_parameters: resolved_all(&sam.declared_params)?,
             declared_result: resolved(sam.declared_ret)?,
             context_count: u32::try_from(sam.context_count)
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,

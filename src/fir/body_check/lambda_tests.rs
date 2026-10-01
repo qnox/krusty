@@ -3,6 +3,7 @@ use super::test_support::{
     jvm_stdlib_semantics, root_expression,
 };
 use super::*;
+use crate::fir::{CallableId, FirSamConversionId, FirSamMethod, ResolvedFunctionOverrideTarget};
 
 #[test]
 fn valueless_nullable_unit_lambda_return_retains_its_unit_value() {
@@ -942,5 +943,264 @@ fn nullable_function_value_to_nullable_sam_records_conditional_conversion() {
         body.sam_conversion(sam)
             .expect("body-local SAM target")
             .nullable
+    );
+}
+
+/// Every SAM conversion the checker published in `body`, in publication order.
+fn sam_conversions(body: &FirBody) -> Vec<FirSamConversion> {
+    (0..)
+        .map_while(|raw| {
+            body.sam_conversion(FirSamConversionId::from_raw(raw))
+                .cloned()
+        })
+        .collect()
+}
+
+/// The callable of the member function `name` whose single parameter is `parameter`, declared
+/// directly in the classifier named `owner`.
+fn member_callable(
+    index: &ResolvedModuleIndex,
+    owner: &str,
+    name: &str,
+    parameter: crate::types::Ty,
+) -> CallableId {
+    let owner = crate::types::type_name(owner);
+    let matches = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| {
+            index.declaration_name(*declaration) == Some(name)
+                && index
+                    .declaration_anchor(*declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| index.classifier_header(owner))
+                    .is_some_and(|classifier| classifier.classifier == owner)
+                && index.signature(*declaration).is_some_and(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .eq([parameter])
+                })
+        })
+        .filter_map(|declaration| index.callable_for_declaration(declaration))
+        .map(|callable| callable.id)
+        .collect::<Vec<_>>();
+    let [callable] = matches[..] else {
+        panic!("one {owner:?}.{name}({parameter:?}), found {matches:?}")
+    };
+    callable
+}
+
+#[test]
+fn a_sam_conversion_names_the_selected_abstract_method_among_same_named_members() {
+    let (body, index) = checked_function_body(
+        "class Other(val size: Int)\n\
+         fun interface Pick {\n\
+             fun choose(value: Int): Int\n\
+             fun choose(value: Other): Int = value.size\n\
+         }\n\
+         class Chooser { fun choose(value: Int): Int = value }\n\
+         fun pick(p: Pick): Int = p.choose(2)\n\
+         fun direct(): Int = pick { it + 1 }\n",
+        "direct",
+    );
+    let abstract_choose = member_callable(&index, "Pick", "choose", crate::types::Ty::Int);
+    assert_ne!(
+        abstract_choose,
+        member_callable(&index, "Pick", "choose", crate::types::Ty::obj("Other"))
+    );
+    assert_ne!(
+        abstract_choose,
+        member_callable(&index, "Chooser", "choose", crate::types::Ty::Int)
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!("one SAM conversion")
+    };
+    assert_eq!(
+        (
+            conversion.classifier,
+            conversion.method_target,
+            conversion.nullable
+        ),
+        (
+            crate::types::type_name("Pick"),
+            FirSamMethod::Declared(ResolvedFunctionOverrideTarget::Module(abstract_choose)),
+            false
+        )
+    );
+}
+
+#[test]
+fn a_function_type_supertype_contributes_its_invoke_as_the_sam_method() {
+    let (body, _) = checked_function_body(
+        "fun interface Task : () -> Unit\nfun task(): Task = Task { }\n",
+        "task",
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!("one SAM conversion")
+    };
+    assert_eq!(
+        (&*conversion.method, conversion.method_target),
+        ("invoke", FirSamMethod::FunctionTypeInvoke)
+    );
+}
+
+#[test]
+fn a_nullable_function_value_conversion_names_the_dependency_method() {
+    let mut paths = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
+    paths.extend(crate::toolchain::jdk_modules());
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let (body, _) = checked_function_body_with_platform(
+        "fun start(g: (() -> Unit)?): Thread = Thread(g)\n",
+        "start",
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!("one SAM conversion")
+    };
+    let FirSamMethod::Declared(ResolvedFunctionOverrideTarget::External(method)) =
+        conversion.method_target
+    else {
+        panic!("a dependency method, found {:?}", conversion.method_target)
+    };
+    let realization = classpath
+        .external_callable(method)
+        .expect("the provider answers for its own identity");
+    assert_eq!(
+        (
+            realization.callable.owner,
+            realization.callable.name.as_str(),
+            realization.kind,
+            conversion.classifier,
+            conversion.nullable,
+        ),
+        (
+            crate::types::type_name("java/lang/Runnable"),
+            "run",
+            crate::libraries::ExternalCallableKind::Member,
+            crate::types::type_name("java/lang/Runnable"),
+            true,
+        )
+    );
+}
+
+/// A provider fun interface whose only abstract member publishes neither a module declaration nor
+/// an external callable. The checker cannot name that method, so the conversion fails closed.
+struct UnidentifiedSam {
+    action: crate::types::TypeName,
+    classifier: std::sync::Arc<crate::libraries::LibraryType>,
+}
+
+impl crate::symbol_source::SymbolSource for UnidentifiedSam {
+    fn package_exists(&self, parent: crate::types::TypeName, name: &str) -> bool {
+        parent == crate::types::TypeName::ROOT && name == "test"
+    }
+
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let package =
+            crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("test"));
+        if namespace == package && name == "Action" {
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                classifier_name: Some(self.action),
+                classifier: Some(std::sync::Arc::clone(&self.classifier)),
+                ..crate::libraries::ResolvedSymbols::default()
+            })
+        } else {
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols::default())
+        }
+    }
+}
+
+impl crate::libraries::SemanticPlatform for UnidentifiedSam {}
+
+fn unidentified_action() -> UnidentifiedSam {
+    let mut member = crate::libraries::LibraryMember::new(
+        "run".to_string(),
+        Vec::new(),
+        crate::types::Ty::Int,
+        String::new(),
+    );
+    member.set_is_abstract(true);
+    let mut classifier = crate::libraries::LibraryType::declaration_header();
+    classifier.is_kotlin = true;
+    classifier.kind = crate::libraries::TypeKind::Interface;
+    classifier.sam_eligible = true;
+    classifier.members = vec![member];
+    UnidentifiedSam {
+        action: crate::types::type_name("test/Action"),
+        classifier: std::sync::Arc::new(classifier),
+    }
+}
+
+struct DiscardBodies;
+
+impl CheckedBodySink for DiscardBodies {
+    fn accept_finalized(&mut self, _owner: BodyOwnerId, _body: FirBody) {}
+}
+
+#[test]
+fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
+    const SOURCE: &str = "fun feed(action: test.Action) {}\nfun use() { feed { 1 } }\n";
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[crate::source::SourceInput::kotlin(SOURCE).with_file_stem("UnidentifiedSam")],
+        Box::new(unidentified_action()),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(
+        diagnostics.diags.is_empty(),
+        "pass 1 accepts the provider shape: {:?}",
+        diagnostics.diags
+    );
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    let mut sink = DiscardBodies;
+    let failures = ordinary
+        .into_iter()
+        .filter_map(|work| {
+            check_and_dispatch_body(
+                &analysis.files[0],
+                info,
+                SourceFileId::from_raw(0),
+                work,
+                &index,
+                sources.origins_mut(),
+                &mut inline_bodies,
+                &mut sink,
+            )
+            .err()
+        })
+        .collect::<Vec<_>>();
+    let [CheckedBodyDriverFailure::Check(failure)] = &failures[..] else {
+        panic!("one body-check failure, got {failures:?}")
+    };
+    let file = &analysis.files[0];
+    let lambda_spans = (0..file.expr_arena.len())
+        .filter_map(|raw| {
+            let id = crate::ast::ExprId(raw as u32);
+            matches!(file.expr(id), crate::ast::Expr::Lambda { .. })
+                .then(|| file.expr_span(id))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let [lambda_span] = lambda_spans[..] else {
+        panic!("one lambda, got {lambda_spans:?}")
+    };
+    assert_eq!(
+        (failure.span, &failure.kind),
+        (
+            Some(lambda_span),
+            &BodyCheckFailureKind::MissingStableCallTarget
+        )
     );
 }

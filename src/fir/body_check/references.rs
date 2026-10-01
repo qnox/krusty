@@ -120,16 +120,16 @@ impl BodyFirChecker<'_> {
         if let Some(ExprLowering::SamConstructorReference { signature, sam }) =
             self.info.expr_lowers.get(&expression).cloned()
         {
+            let internal = sam.internal;
             let Ty::Fun(function) = signature.non_null() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
-            let internal = sam.internal;
-            let conversion = self.fir_sam_conversion(span, *sam, false)?;
             let mut resolved = |ty| {
                 ResolvedTy::new(ty).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                 })
             };
+            let conversion = self.published_sam_conversion(span, &sam, false)?;
             let parameters = function
                 .params
                 .iter()

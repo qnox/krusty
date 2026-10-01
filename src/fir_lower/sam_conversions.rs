@@ -100,6 +100,7 @@ impl BodyLowering<'_> {
                 sam: Some(IrSamTarget {
                     classifier: conversion.classifier,
                     method: conversion.method.to_string(),
+                    method_target: conversion.method_target,
                     parameters: conversion
                         .parameters
                         .iter()
@@ -117,6 +118,7 @@ impl BodyLowering<'_> {
                     suspend: conversion.suspend,
                     overrides_non_primitive_result: conversion.overrides_non_primitive_result,
                     function_adapter,
+                    wraps_function_value: true,
                 }),
                 inline_body: None,
             }),

@@ -13,11 +13,25 @@ use super::{
     ty_subst_keep_unbound, GSigBinds,
 };
 
+/// The abstract method a functional-interface conversion implements, as the declaration identity
+/// its provider published: a current-module declaration or a dependency callable, or the `invoke`
+/// the interface inherits from a function-type supertype (`fun interface F : () -> Unit`), which is
+/// a semantic callable shape with no declaration of its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SamMethodDeclaration {
+    Module(crate::fir::DeclarationId),
+    External(crate::fir::ExternalCallableId),
+    FunctionTypeInvoke,
+}
+
 /// The specialized callable shape of a functional-interface target.
 #[derive(Clone, Debug)]
 pub struct SamSignature {
     pub(crate) internal: TypeName,
     pub(crate) method: String,
+    /// The selected abstract method itself. `None` only for a provider member published without a
+    /// declaration identity, which a consumer that needs the identity must reject.
+    pub(crate) declaration: Option<SamMethodDeclaration>,
     /// Call-site-specialized logical method shape used to type the converted function.
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
@@ -32,10 +46,16 @@ pub struct SamSignature {
     pub(crate) overrides_non_primitive_result: bool,
 }
 
-/// One declaration of a member slot: its depth in the hierarchy, and its specialized parameters
-/// and result.
-type Declaration = (u32, LibraryMember, Vec<Ty>, Ty);
-/// The declarations, at any depth, that share one name and specialized parameter list.
+/// One inherited declaration of an abstract-method candidate: its hierarchy depth, the member, its
+/// parameters and result specialized to the target application, and its declaration identity.
+type Declaration = (
+    u32,
+    LibraryMember,
+    Vec<Ty>,
+    Ty,
+    Option<SamMethodDeclaration>,
+);
+/// Every declaration of one override slot, keyed by its name and specialized parameters.
 type OverrideSlot = ((String, Vec<Ty>), Vec<Declaration>);
 
 pub(crate) fn semantic_sam_signature(
@@ -68,9 +88,18 @@ pub(crate) fn semantic_sam_signature(
             }
         }
         let occurrence_bounds = classifier_type_parameter_bounds(&classifier);
+        // A function-type classifier (`FunctionN`, `SuspendFunctionN`) declares only the function
+        // type's own `invoke`, whichever provider published it: the same normalized method as the
+        // `invoke` a functional supertype contributes below.
+        let function_type = classifier.represents_function_type();
         for member in &classifier.members {
             collect_member(
                 member,
+                if function_type {
+                    Some(SamMethodDeclaration::FunctionTypeInvoke)
+                } else {
+                    member_declaration(member)
+                },
                 depth,
                 depth == 0 && classifier.is_kotlin,
                 &bindings,
@@ -96,6 +125,7 @@ pub(crate) fn semantic_sam_signature(
             invoke.set_is_abstract(true);
             collect_member(
                 &invoke,
+                Some(SamMethodDeclaration::FunctionTypeInvoke),
                 depth,
                 false,
                 &bindings,
@@ -120,22 +150,29 @@ pub(crate) fn semantic_sam_signature(
         if nearest.iter().any(|(_, member, ..)| !member.is_abstract()) {
             continue;
         }
-        let (_, member, params, ret) = nearest.into_iter().next()?;
+        let (_, member, params, ret, declaration) = nearest.into_iter().next()?;
         let overrides_non_primitive_result = is_primitive(declared_result(&member))
             && overridden_results
                 .into_iter()
                 .any(|result| !is_primitive(result));
         if abstract_method
-            .replace((member, params, ret, overrides_non_primitive_result))
+            .replace((
+                member,
+                params,
+                ret,
+                declaration,
+                overrides_non_primitive_result,
+            ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, ret, overrides_non_primitive_result) = abstract_method?;
+    let (sam, params, ret, declaration, overrides_non_primitive_result) = abstract_method?;
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
+        declaration,
         params,
         ret,
         declared_params: sam.params.clone(),
@@ -160,8 +197,18 @@ fn is_primitive(ty: Ty) -> bool {
     ty.is_numeric_or_char() || ty == Ty::Boolean
 }
 
+/// The declaration identity a provider published for a classifier member.
+fn member_declaration(member: &LibraryMember) -> Option<SamMethodDeclaration> {
+    match (member.stable_declaration, member.external_identity) {
+        (Some(declaration), None) => Some(SamMethodDeclaration::Module(declaration)),
+        (None, Some(callable)) => Some(SamMethodDeclaration::External(callable)),
+        (None, None) | (Some(_), Some(_)) => None,
+    }
+}
+
 fn collect_member(
     member: &LibraryMember,
+    declaration: Option<SamMethodDeclaration>,
     depth: u32,
     retain_direct_kotlin_object_method: bool,
     classifier_bindings: &GSigBinds,
@@ -207,11 +254,11 @@ fn collect_member(
                 .all(|(&left, &right)| crate::assignable::same_flexible_type(left, right))
     });
     if let Some((_, declarations)) = slot {
-        declarations.push((depth, member.clone(), params, ret));
+        declarations.push((depth, member.clone(), params, ret, declaration));
     } else {
         declarations.push((
             (member.name.clone(), params.clone()),
-            vec![(depth, member.clone(), params, ret)],
+            vec![(depth, member.clone(), params, ret, declaration)],
         ));
     }
 }
