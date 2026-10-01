@@ -20,6 +20,7 @@ pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
 pub use selections::*;
 mod classifier_headers;
 mod declaration_metadata;
+mod result_expectation;
 mod source_packages;
 
 /// A half-open slice in the signature graph's shared operand arena.
@@ -246,6 +247,14 @@ pub enum SigExpr {
         /// The argument is the CONDITION `value != null` rather than the value itself: the proof
         /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
         condition: bool,
+    },
+    /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
+    /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
+    /// when the cast actually narrows.
+    CastNarrowed {
+        value: SigExprId,
+        target: SigExprId,
+        scope: SignatureScopeId,
     },
     Substitute {
         base: SigExprId,
@@ -496,42 +505,6 @@ impl SignatureGraph {
 
     pub fn value_selection(&self, id: DeferredValueSelectionId) -> Option<DeferredValueSelection> {
         self.value_selections.get(id.raw() as usize).copied()
-    }
-
-    /// Attach a declaration's expected result type to the outer deferred selection that owns
-    /// contextual generic inference. Both nodes live only in the temporary signature graph. This
-    /// is used by an inferred explicit backing field: its initializer is checked against the
-    /// property's declared public type exactly as in an ordinary typed initializer, without
-    /// retaining either body syntax or a source coordinate.
-    pub fn apply_result_expectation(&mut self, result: SigExprId, expected: SigExprId) -> bool {
-        match self.expr(result) {
-            Some(SigExpr::Value(selection)) => {
-                self.value_selections[selection.raw() as usize].expected = Some(expected);
-                true
-            }
-            Some(SigExpr::Call { target, .. })
-            | Some(SigExpr::CallableReference(target))
-            | Some(SigExpr::BoundCallableReference { target, .. }) => {
-                self.callable_selections[target.raw() as usize].expected = Some(expected);
-                true
-            }
-            Some(SigExpr::Member { lookup, .. })
-            | Some(SigExpr::MemberCall { target: lookup, .. }) => {
-                self.member_selections[lookup.raw() as usize].expected = Some(expected);
-                true
-            }
-            Some(SigExpr::Sequence { result, .. })
-            | Some(SigExpr::ScopedReceiver { result, .. }) => {
-                self.apply_result_expectation(result, expected)
-            }
-            Some(SigExpr::Join { operands, .. }) => {
-                let operands = self.operands(operands).to_vec();
-                operands
-                    .into_iter()
-                    .all(|operand| self.apply_result_expectation(operand, expected))
-            }
-            _ => false,
-        }
     }
 
     /// Add the graph root extracted for an inferred declaration stub. Explicit signatures and
@@ -1146,6 +1119,17 @@ pub trait SignatureSemantics {
     fn make_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
 
     fn make_non_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// The type of a value after a successful non-null `as` cast to `target`. A cast never
+    /// widens: when `original` is already `target` or a subtype, it stays `original`.
+    fn narrow_successful_cast(
+        &self,
+        _scope: SignatureScope,
+        _original: ResolvedTy,
+        target: ResolvedTy,
+    ) -> Result<ResolvedTy, DiagnosticId> {
+        Ok(target)
+    }
 
     /// Whether the callable selected for the call at `origin` carries a
     /// `returns() implies (<parameter> != null)` contract effect for source `argument`.

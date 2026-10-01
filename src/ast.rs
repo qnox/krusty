@@ -14,6 +14,7 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
 mod constructors;
+pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
 mod type_refs;
