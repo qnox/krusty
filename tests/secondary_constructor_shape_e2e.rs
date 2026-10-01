@@ -62,38 +62,50 @@ class Derived : Base {
 #[test]
 fn a_class_without_a_primary_constructor_orders_its_pool_like_kotlinc() {
     let src = r#"
-fun measure(s: String): Int = 1
+class Token
+
+fun measure(token: Token): Int = 1
 
 class Only {
     val v: Int
-    var w: String = ""
+    var w: Token = Token()
     val u: Int =
-        measure("u")
+        measure(Token())
 
-    constructor(s: String) {
-        v = measure(s)
+    constructor(token: Token) {
+        v = measure(token)
     }
 
-    constructor(a: Int, b: String) : this("x") {
-        w = b
+    constructor(a: Int, token: Token) : this(Token()) {
+        w = token
     }
 }
 "#;
-    common::assert_classes_identical_to_kotlinc("NoPrimary", src, &["Only", "NoPrimaryKt"]);
+    common::assert_classes_identical_to_kotlinc(
+        "NoPrimary",
+        src,
+        &["Token", "Only", "NoPrimaryKt"],
+    );
 }
 
 /// A body property's initializer store sits on its initializer's line, not its declaration's.
 #[test]
 fn a_multiline_property_initializer_stores_on_its_initializer_line() {
     let src = r#"
-fun measure(s: String): Int = 1
+class Token
+
+fun measure(token: Token): Int = 1
 
 class Primary(val x: Int) {
     val a: Int =
-        measure("q")
+        measure(Token())
     val c: Int
         = 3
 }
 "#;
-    common::assert_classes_identical_to_kotlinc("MultilineInit", src, &["Primary"]);
+    common::assert_classes_identical_to_kotlinc(
+        "MultilineInit",
+        src,
+        &["Token", "Primary", "MultilineInitKt"],
+    );
 }
