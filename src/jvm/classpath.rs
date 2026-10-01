@@ -15,6 +15,7 @@ mod candidate_union;
 mod catalog_availability;
 mod class_locations;
 mod ct_sym_index;
+mod jimage_catalog;
 mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
@@ -30,6 +31,7 @@ pub(crate) use crate::libraries::{
 };
 
 use self::ct_sym_index::cached_ct_sym_index;
+use self::jimage_catalog::{cached_jimage_index, JimageIndex};
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
 };
@@ -482,43 +484,6 @@ pub fn trace_cache_stats() {
             s.inline_plans.line("hits"),
         );
     }
-}
-
-/// One jimage resource: `(file offset, ON-DISK byte size, zlib-compressed?)`. The size is the stored
-/// (compressed) length when the resource uses the "zip" decompressor, else the raw class length; the
-/// flag is set ONLY for the "zip" decompressor (authoritatively, from the strings table) so the reader
-/// never inflates a resource compressed by some other scheme.
-type JimageEntry = (u64, usize, bool);
-
-#[derive(Default, Debug)]
-struct JimageIndex {
-    names: NameTree,
-    by_name: HashMap<NameId, JimageEntry>,
-}
-
-/// Process-global jimage index (name id → file offset/size), keyed by the jimage path. The jimage is
-/// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
-fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<JimageIndex>>>
-{
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<JimageIndex>>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn cached_jimage_index(path: &Path) -> Option<std::sync::Arc<JimageIndex>> {
-    let key = EntryKey {
-        path: path.to_path_buf(),
-        stamp: entry_stamp(path),
-        jdk_release: None,
-    };
-    let mut cache = global_jimage_cache().lock().unwrap();
-    if let Some(index) = cache.get(&key) {
-        return Some(index.clone());
-    }
-    let index = std::sync::Arc::new(build_jimage_index(path)?);
-    cache.insert(key, index.clone());
-    Some(index)
 }
 
 /// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
@@ -1777,9 +1742,9 @@ pub struct Classpath {
     /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
     /// cache keyed by the entry set, so a cp that adds one library reuses every other jar's catalog.
     pkg_tree: RefCell<Option<std::sync::Arc<PackageTree>>>,
-    /// Lazily-built index of the JDK jimage: internal class-name id → [`JimageEntry`], so JDK class bytes
-    /// can be seek-read (and inflated, for a compressed image) on demand. Shared via `Arc` from a
-    /// process-global cache so the 146 MB parse happens once.
+    /// Lazily-built index of the JDK jimage: internal class-name id → physical resource location, so
+    /// JDK class bytes can be seek-read (and inflated, for a compressed image) on demand. Shared via
+    /// `Arc` from a process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
     /// Cache of lazily-read method bodies (`(internal-name, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
@@ -2204,7 +2169,7 @@ impl Classpath {
             .jimage
             .borrow()
             .as_ref()
-            .map_or(0, |(_, i)| i.by_name.len());
+            .map_or(0, |(_, index)| index.len());
         let types = self
             .types
             .borrow()
@@ -3510,8 +3475,7 @@ impl Classpath {
         self.ensure_jimage_index();
         let guard = self.jimage.borrow();
         let (path, index) = guard.as_ref()?;
-        let id = index.names.get(internal)?;
-        let &(offset, size, compressed) = index.by_name.get(&id)?;
+        let (offset, size, compressed) = index.entry(internal)?;
         use std::io::{Read, Seek, SeekFrom};
         let mut f = File::open(path).ok()?;
         f.seek(SeekFrom::Start(offset)).ok()?;
@@ -4814,7 +4778,7 @@ struct PkgEntry {
 /// central-directory package-name pass (entry names only — no decompression, no class parse).
 #[derive(Default)]
 struct JarPackages {
-    names: NameTree,
+    names: std::sync::Arc<NameTree>,
     /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
     packages: HashMap<NameId, PkgEntry>,
     /// Exact internal class names declared by this entry.
@@ -4827,6 +4791,16 @@ struct JarPackages {
 }
 
 impl JarPackages {
+    fn with_names(names: std::sync::Arc<NameTree>) -> Self {
+        Self {
+            names,
+            packages: HashMap::new(),
+            classes: Vec::new(),
+            facades: HashSet::new(),
+            complete: false,
+        }
+    }
+
     fn entry(&self, pkg: &str) -> Option<&PkgEntry> {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
     }
@@ -5037,19 +5011,7 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
             let Some(idx) = cached_jimage_index(p) else {
                 return jp;
             };
-            for &internal in idx.by_name.keys() {
-                let Some(pkg) = idx.names.parent(internal) else {
-                    continue;
-                };
-                let class = jp.names.insert_from(&idx.names, internal);
-                jp.classes.push(class);
-                if pkg == NameTree::ROOT {
-                    continue;
-                }
-                let pkg = jp.names.insert_from(&idx.names, pkg);
-                jp.packages.entry(pkg).or_default().has_classes = true;
-            }
-            jp.complete = !idx.by_name.is_empty();
+            jp = idx.package_catalog();
         }
         Entry::CtSym { path, release } => {
             let Some(index) = cached_ct_sym_index(path, *release) else {
@@ -5536,105 +5498,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
     }
 }
 
-/// Build the jimage class index: internal name id → [`JimageEntry`] (content offset + on-disk size +
-/// compressed flag) for each `.class` resource, read from the jimage location table directly — the
-/// bootclasspath equivalent of a jar's central directory — so JDK class bytes can be seek-read on demand.
-/// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
-/// ImageLocation.
-fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
-    use std::io::Read;
-    // Read ONLY the header + location/string tables (a few MB), NOT the ~146 MB content blob that follows
-    // — the index just stores each resource's content OFFSET; the bytes are seek-read on demand
-    // (`jimage_bytes`). Reading the whole image was a ~146 MB peak-RSS spike per worker thread.
-    let mut f = File::open(path).ok()?;
-    let mut head = [0u8; 28];
-    f.read_exact(&mut head).ok()?;
-    let h =
-        |o: usize| u32::from_le_bytes([head[o], head[o + 1], head[o + 2], head[o + 3]]) as usize;
-    if h(0) != 0xCAFE_DADA {
-        return None;
-    }
-    let table_length = h(16);
-    let locations_size = h(20);
-    let strings_size = h(24);
-    let header = 28;
-    let offsets = header + table_length * 4;
-    let locations = offsets + table_length * 4;
-    let strings = locations + locations_size;
-    let content = strings + strings_size;
-    let mut b = vec![0u8; content];
-    use std::io::Seek;
-    f.rewind().ok()?;
-    f.read_exact(&mut b).ok()?;
-    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    let read_str = |off: usize| -> &str {
-        if off == 0 {
-            return "";
-        }
-        let s = strings + off;
-        let mut e = s;
-        while e < b.len() && b[e] != 0 {
-            e += 1;
-        }
-        std::str::from_utf8(&b[s..e]).unwrap_or("")
-    };
-    // Decode an ImageLocation into attributes by kind: 2=PARENT, 3=BASE, 4=EXTENSION, 5=OFFSET,
-    // 6=COMPRESSED, 7=UNCOMPRESSED.
-    let decode = |mut p: usize| -> [usize; 8] {
-        let mut a = [0usize; 8];
-        while p < b.len() {
-            let byte = b[p];
-            p += 1;
-            let kind = (byte >> 3) as usize;
-            if kind == 0 {
-                break;
-            }
-            let len = ((byte & 0x7) + 1) as usize;
-            let mut v = 0usize;
-            for _ in 0..len {
-                if p >= b.len() {
-                    break;
-                }
-                v = (v << 8) | b[p] as usize;
-                p += 1;
-            }
-            if kind < 8 {
-                a[kind] = v;
-            }
-        }
-        a
-    };
-    let mut idx = JimageIndex::default();
-    for i in 0..table_length {
-        let lo = u32le(offsets + i * 4) as usize;
-        if lo == 0 {
-            continue;
-        }
-        let a = decode(locations + lo);
-        if read_str(a[4]) != "class" {
-            continue;
-        }
-        let parent = read_str(a[2]);
-        if parent.is_empty() {
-            continue;
-        }
-        let internal = format!("{parent}/{}", read_str(a[3]));
-        let (off, comp, unc) = (a[5], a[6], a[7]);
-        let abs = content + off;
-        // Store the ON-DISK byte count: the compressed size for a compressed resource (a JetBrains
-        // Runtime / `jlink --compress` image), else the uncompressed size. `compressed` (comp != 0) comes
-        // from the location table alone — the `CompressedResourceHeader` magic check that CONFIRMS the
-        // "zip" scheme is deferred to `jimage_bytes` (which reads the content anyway), so the index build
-        // needs only the tables, not the content.
-        let stored = if comp != 0 { comp } else { unc };
-        let internal = idx.names.insert(&internal);
-        idx.by_name
-            .entry(internal)
-            .or_insert((abs as u64, stored, comp != 0));
-    }
-    Some(idx)
-}
-
 #[cfg(test)]
 mod fq_tests {
     use super::test_support::{
@@ -5800,24 +5663,6 @@ mod fq_tests {
             vec!["kotlin/collections/CollectionsKt", "demo/DemoKt"]
         );
         assert!(cp.find_extension_owners("Lother;").is_empty());
-    }
-
-    #[test]
-    fn jimage_index_uses_name_ids_for_class_lookup_and_package_parent() {
-        let mut idx = JimageIndex::default();
-        let string = idx.names.insert("java/lang/String");
-        idx.by_name.insert(string, (1, 2, false));
-
-        let lookup = idx.names.get("java/lang/String").expect("indexed class");
-        assert_eq!(idx.by_name.get(&lookup), Some(&(1, 2, false)));
-
-        let package = idx.names.parent(string).expect("class has package parent");
-        let mut packages = JarPackages::default();
-        let package = packages.names.insert_from(&idx.names, package);
-        packages.packages.entry(package).or_default().has_classes = true;
-
-        assert_eq!(packages.names.render(package), "java/lang");
-        assert!(packages.packages[&package].has_classes);
     }
 
     #[test]
