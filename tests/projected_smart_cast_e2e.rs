@@ -4,8 +4,8 @@
 
 use super::common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "ProjectedSmartCast")
+fn run(src: &str) {
+    common::expect_box_same_as_kotlinc(src, "ProjectedSmartCast");
 }
 
 #[test]
@@ -33,8 +33,7 @@ fun box(): String {\n\
     if (sb.toString() != expected) return sb.toString()\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("a nested projected array loop should compile and run");
-    assert_eq!(out, "OK");
+    run(SRC);
 }
 
 #[test]
@@ -62,6 +61,5 @@ fun box(): String {\n\
     if (outAny(values) != 10) return \"out\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("an explicit projection smart cast should compile and run");
-    assert_eq!(out, "OK");
+    run(SRC);
 }
