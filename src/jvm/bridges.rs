@@ -15,7 +15,7 @@ use crate::ir::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation, IrFile,
 };
 use crate::jvm::backend::SkipReason;
-use crate::jvm::names::{method_descriptor, type_descriptor};
+use crate::jvm::names::method_descriptor;
 use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty};
 
@@ -435,9 +435,14 @@ fn property_bridges(
         );
         let declared_receiver = edge.declared_receiver.map(bridge_erasure);
         let implementation_receiver = edge.implementation_receiver.map(bridge_erasure);
-        if type_descriptor(edge.declared_type) == type_descriptor(edge.implementation_type)
-            && declared_receiver.map(type_descriptor)
-                == implementation_receiver.map(type_descriptor)
+        if crate::jvm::names::same_type_descriptor(edge.declared_type, edge.implementation_type)
+            && match (declared_receiver, implementation_receiver) {
+                (None, None) => true,
+                (Some(declared), Some(implementation)) => {
+                    crate::jvm::names::same_type_descriptor(declared, implementation)
+                }
+                _ => false,
+            }
             && bridge_getter == target_getter
         {
             continue;
