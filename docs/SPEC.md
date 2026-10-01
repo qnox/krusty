@@ -1703,10 +1703,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `C$x$2` — where a raw-context counter would number both `$1` and one class file would silently
   overwrite the other (`tests/class_lambda_e2e.rs`, the `Collide` fixture, pinned at runtime). A
   DELEGATED property's initializer is property-scoped the same way (`val z by lazy { … }` →
-  `C$z$…`, impl `z$lambda$0`); one recorded gap: kotlinc numbers that delegate lambda `C$z$2` where
-  krusty emits `C$z$1` — kotlinc's delegate ordinal counts a slot krusty does not model
-  (`tests/class_lambda_e2e.rs::delegated_property_lambda_takes_the_property_name` asserts krusty's
-  deterministic set). The synthetic impl METHOD prefix in
+  `C$z$…`, impl `z$lambda$0`; kotlinc numbers it `C$z$2`,
+  `tests/class_lambda_e2e.rs::delegated_property_lambda_takes_the_property_name`). The synthetic impl METHOD prefix in
   that context is a different name: the PROPERTY name for a property initializer (`h$lambda$0`, and
   same-named declarations share one sequence — `val member` + `fun member` → `member$lambda$0/1`)
   and kotlinc's `_init_` for an `init` block (`_init_$lambda$0`), never whichever function the
@@ -8123,6 +8121,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
   `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
   `tests/module_override_boxed_result_e2e.rs`.
+- **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
+  `LambdaMetafactoryArguments` rejects a lambda whose function type takes or returns a value class
+  over a non-null, non-primitive underlying type (a reference, `UInt`, or a type parameter bounded
+  by a non-null type): its `invoke` takes the carrier where `FunctionN.invoke` takes the box, and
+  the factory only adapts boxing of primitives. Such a lambda becomes `final class
+  <enclosing>$<name>$1 implements FunctionN<…>` over `Object`, never `kotlin/jvm/internal/Lambda`,
+  and takes no `$lambda$N` number. Its package-private constructor stores each capture in a final
+  synthetic field before calling `Object()`, naming a captured `this` `$receiver`; the lambda body is
+  its specialized `invoke-<hash>`, whose primitive result is boxed and whose `Unit` result is
+  `void`; the erased `invoke(Object)Object` bridge unboxes and boxes the value class, null-safely
+  for `X?`; a captureless one has a static `INSTANCE`. The call site loads `INSTANCE` or constructs
+  the class and casts it to `FunctionN`. A private member of the enclosing class read from the body
+  goes through its `access$` accessor, like any nested class's. A captured value class is a field
+  and constructor parameter of its carrier type, and never hides the constructor behind the
+  `DefaultConstructorMarker` accessor (see the next entry). A lambda passed to an inline
+  function, a library one included, is spliced and gets no class. A value class over a primitive
+  or a nullable type keeps the indy lambda; a type parameter is nullable when a bound is, or when it
+  has none, and a dependency's value class reads that from its metadata's type-parameter bounds
+  (`Wrap<T>(val a: T)` keeps indy). A lambda passed to a same-file inline function's `noinline`
+  parameter is materialized by that expansion before lambda classes are realized, so it is the
+  class (`NoinlineLambdaClassKt$box$1`). Two shapes are not realized as the class yet: a body that
+  declares a lambda or local function, whose lifted function kotlinc moves into the class; and a
+  `crossinline` lambda an inline function's anonymous object captures, which kotlinc inlines into
+  the object it regenerates per call site. Each of those is a compile error naming the lambda,
+  never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
+  against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
+  `tests/inline_value_class_lambda_e2e.rs`.
+- **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
+  it from the slots a constructor has when it lowers value classes: declared parameters, an inner
+  class's outer instance (`Z.Inner(y)` of a value class `Z` is `Z$Inner(int, int, DCM)`), and a
+  local class's captured values. An anonymous object's captures and a lambda class's are added
+  after that lowering, as carriers, so `object : R { … }` capturing a value class keeps a plain
+  constructor. Tests: `tests/value_class_hidden_constructor_e2e.rs`. Corpus:
+  `inlineClasses/functionNameMangling/localClassInFunctionWithMangledName`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

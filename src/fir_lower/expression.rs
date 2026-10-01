@@ -1386,8 +1386,8 @@ impl BodyLowering<'_> {
                     crate::types::Ty::Fun(signature) if signature.suspend
                 );
                 let lambda = self.checked_lambda(*callable, body, suspend)?;
+                self.record_generated_class_provenance(expression_id, lambda as usize);
                 if suspend {
-                    self.record_generated_class_provenance(expression_id, lambda as usize);
                     let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
                         unreachable!("a checked lambda lowers to a lambda")
                     };
@@ -1402,8 +1402,8 @@ impl BodyLowering<'_> {
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
-        // A suspend lambda's own provenance went to its node above; the references in its body
-        // carry theirs.
+        // A lambda's own provenance went to its node above; the references in its body carry
+        // theirs.
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }

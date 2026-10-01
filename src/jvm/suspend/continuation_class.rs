@@ -275,6 +275,7 @@ pub(super) fn build_continuation_class(
         enum_entry_of: None,
         prop_ref: None,
         func_ref: None,
+        lambda: None,
         bridges: vec![],
         interfaces: Default::default(),
         is_object: false,

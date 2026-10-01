@@ -319,9 +319,7 @@ fn class_lambdas_run() {
 
 /// A DELEGATED property's initializer lambda (`val z by lazy { 7 }`) carries the property name, so
 /// it cannot share the bare `C$<ordinal>` family with unbound init-block lambdas (where a shared
-/// counter once let names collide). krusty emits `Deleg$z$1`; kotlinc emits `Deleg$z$2` — its
-/// delegate ordinals count something krusty does not model yet, so this asserts krusty's own
-/// deterministic set rather than a kotlinc diff (the ordinal gap is recorded in docs/SPEC.md).
+/// counter once let names collide). kotlinc names it `Deleg$z$2`.
 #[test]
 fn delegated_property_lambda_takes_the_property_name() {
     let source_text = r#"
@@ -366,7 +364,7 @@ fun box(): String {
     synthetic.sort_unstable();
     assert_eq!(
         synthetic,
-        ["Deleg$1", "Deleg$z$1"],
+        ["Deleg$1", "Deleg$z$2"],
         "delegate initializer lambda must carry the property name"
     );
     let classes: Vec<(String, Vec<u8>)> = names

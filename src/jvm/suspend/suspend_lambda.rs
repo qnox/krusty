@@ -24,19 +24,12 @@ use super::{
     rewrite_current_continuation,
 };
 use crate::ir::{
-    Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
+    ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
+use crate::jvm::lambda_classes::{nests_lifted_functions, site, Site};
 use crate::types::{Ty, TypeName};
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
-
-/// The expression that builds the lambda value, and what the lambda class is named and enclosed by.
-struct Site {
-    node: ExprId,
-    class: TypeName,
-    function_type: Ty,
-    captures: Vec<ExprId>,
-}
 
 /// The value a captured field holds.
 struct Capture {
@@ -262,95 +255,6 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
     let mut ordered = fids;
     ordered.sort_by_key(|&fid| std::cmp::Reverse(depth(fid)));
     ordered
-}
-
-/// The one expression that builds `fid`'s lambda value, when the lambda compiles to a class of its
-/// own: a plain Kotlin function value the source's naming walk named, not one an inline call's
-/// splice consumes.
-fn site(ir: &IrFile, fid: u32) -> Option<Site> {
-    let mut sites = reachable_lambdas(ir, fid).into_iter();
-    let (Some(node), None) = (sites.next(), sites.next()) else {
-        crate::trace_compiler!(
-            "suspend",
-            "suspend lambda fid={fid}: reachable lambda nodes {:?}",
-            reachable_lambdas(ir, fid)
-        );
-        return None;
-    };
-    let lambda = &ir.exprs[node as usize];
-    let IrExpr::Lambda {
-        arity,
-        captures,
-        sam: None,
-        ..
-    } = lambda
-    else {
-        return None;
-    };
-    let class = crate::jvm::local_class_names::callable_reference_name(ir, node)?;
-    let function_type = ir.logical_types.get(&node).copied()?;
-    let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
-    (fits && !inline_call_argument(ir, node)).then(|| Site {
-        node,
-        class,
-        function_type,
-        captures: captures.clone(),
-    })
-}
-
-/// The `Lambda` nodes building `fid`'s value that some function body still reaches. Earlier
-/// passes rebuild a body into fresh nodes and leave the old ones behind in the arena, so a node
-/// that no body reaches builds no value.
-fn reachable_lambdas(ir: &IrFile, fid: u32) -> Vec<ExprId> {
-    let mut nodes = ir
-        .functions
-        .iter()
-        .filter_map(|function| function.body)
-        .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
-        .filter(|&node| {
-            matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
-        })
-        .collect::<Vec<_>>();
-    nodes.sort_unstable();
-    nodes.dedup();
-    nodes
-}
-
-/// Whether the body declares a lambda or local function of its own. Its lifted function would have
-/// to move into the lambda's class with it, which kotlinc does and this step does not yet.
-fn nests_lifted_functions(ir: &IrFile, body: ExprId) -> bool {
-    crate::ir::value_namespace_expressions(ir, body)
-        .iter()
-        .any(|&expression| match &ir.exprs[expression as usize] {
-            IrExpr::Lambda { .. } => true,
-            IrExpr::Call {
-                callee:
-                    Callee::Local(function)
-                    | Callee::LocalDefault(function)
-                    | Callee::LocalWithDefaults { function, .. },
-                ..
-            } => ir.lifted_functions.contains_key(function),
-            _ => false,
-        })
-}
-
-/// Whether `node` is an argument of a call an inline splice expands, which consumes the lambda's
-/// body in place of its value.
-fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
-    ir.exprs.iter().enumerate().any(|(call, expression)| {
-        let IrExpr::Call { callee, args, .. } = expression else {
-            return false;
-        };
-        let inline = matches!(
-            callee,
-            Callee::Static {
-                inline: crate::libraries::InlineKind::MustInline,
-                ..
-            }
-        ) || u32::try_from(call)
-            .is_ok_and(|call| ir.module_inline_calls.contains(&call));
-        inline && args.contains(&node)
-    })
 }
 
 /// The class's captured values and the lambda's own parameters, when every one of them has the
