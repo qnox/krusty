@@ -9,7 +9,7 @@ use super::{
     desc, descriptor_parameters, erase, is_value_class_internal, record_value_boundary, BoxOp,
     Repr, ReprCtx, Under,
 };
-use crate::ir::{Callee, ExprId};
+use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::types::Ty;
 
 pub(super) fn record_boundaries(
@@ -84,6 +84,26 @@ pub(super) fn record_boundaries(
             && carrier_descriptor.as_deref() != Some("Ljava/lang/Object;");
         if references.get(index).copied().unwrap_or(false) && !own_carrier {
             operations.push((value, context.box_op(value, value_class)));
+        }
+    }
+}
+
+/// Record the declared parameters of each member call into `functions`, overrides whose value-class
+/// parameter holds its box in the overridden declaration's generic slot. The emitter then passes
+/// the box a caller makes there as it is, rather than unboxing it to the carrier the slot shares.
+pub(super) fn record_method_parameters(
+    ir: &mut IrFile,
+    functions: &std::collections::HashSet<FunId>,
+    parameters: &[Vec<Ty>],
+) {
+    for (id, expression) in ir.exprs.iter().enumerate() {
+        let IrExpr::MethodCall { class, index, .. } = expression else {
+            continue;
+        };
+        let function = ir.classes[*class as usize].methods[*index as usize];
+        if functions.contains(&function) {
+            let declared = parameters[function as usize].clone().into_boxed_slice();
+            ir.call_declared_params.insert(id as ExprId, declared);
         }
     }
 }

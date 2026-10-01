@@ -1,8 +1,8 @@
 //! Stable provider projection for value-class adaptation of inherited default calls.
 
 use crate::fir::{CallableId, ResolvedFunctionOverrideTarget};
-use crate::ir::IrFile;
-use crate::types::Ty;
+use crate::ir::{Callee, IrFile};
+use crate::types::{Ty, TypeName};
 
 pub(super) fn module_provider(
     target: CallableId,
@@ -12,6 +12,20 @@ pub(super) fn module_provider(
         panic!("external inherited-default call for {target:?} survived JVM realization");
     };
     provider
+}
+
+/// The class declaring the default provider of an inherited-default call.
+pub(super) fn provider_owner(ir: &IrFile, callee: &Callee) -> Option<TypeName> {
+    let Callee::ModuleWithDefaults {
+        target,
+        default_provider,
+        ..
+    } = callee
+    else {
+        return None;
+    };
+    let provider = module_provider(*target, *default_provider);
+    ir.referenced_module_callables.get(&provider)?.owner
 }
 
 pub(super) fn supplied_provider_parameters<'a>(

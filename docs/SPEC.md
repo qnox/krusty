@@ -8168,6 +8168,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after that lowering, as carriers, so `object : R { … }` capturing a value class keeps a plain
   constructor. Tests: `tests/value_class_hidden_constructor_e2e.rs`. Corpus:
   `inlineClasses/functionNameMangling/localClassInFunctionWithMangledName`.
+- **An inner class holds its outer value class as the carrier.** `this$0` of `Z.Inner` for a value
+  class `Z(val x: Int)` is `final int this$0`, and a read of the outer instance inside the inner
+  class loads that field as `getfield this$0:I`; a read of `x` is the carrier itself. krusty read
+  the field as `LZ;` and failed with `NoSuchFieldError`. Tests:
+  `tests/value_class_hidden_constructor_e2e.rs`. Corpus: `inlineClasses/kt27705`, `kt27706` and
+  their `Generic` forms, `fullValueClasses/inner`.
+- **A generic `T?` slot holds a value class as its box.** A read of `val held: T?` coerced to a
+  nullable value class `X?` is the erased reference: when `X?` is itself the box (a primitive
+  carrier), kotlinc narrows it with `checkcast X` and returns it as is; when `X?` is the carrier
+  (a non-null reference carrier), it unboxes null-safely (`dup; ifnull; unbox-impl`). krusty treated
+  the read as the carrier and passed it through `box-impl`, or unboxed it without the null check.
+  Tests: `tests/value_class_generic_slot_read_e2e.rs`. Corpus: `inlineClasses/boxNullableValueOf…Generic2`,
+  `unboxNullableValueOf…Generic` and `…GWI2`.
+- **A collection bridge checks its argument's type first.** kotlinc's type-safe barrier guards the
+  erased bridge of `contains`, `remove`, `containsKey`, `containsValue`, `get`, `indexOf` and
+  `lastIndexOf` when the override narrows the parameter: a foreign argument answers `false`, `null`
+  or `-1` instead of failing the `checkcast`. Whether a bridge narrows is decided on declared types,
+  before value-class lowering; for a value class the check is `instanceof` its box, which the bridge
+  then unboxes for the mangled override. A value class that delegates `MutableList` or
+  `MutableMap` still forwards `addAll` and `putAll` to the underlying collection, and an override
+  of `addAll` is the method the caller hits. Tests: `tests/collection_bridge_barrier_e2e.rs`.
+  Corpus: `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic`
+  forms, and `inlineMutableCollectionBulkAdd`).
+- **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
+  with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
+  carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
+  read for a box and cast the enum to `Z1`. Tests: `tests/value_class_nested_carrier_e2e.rs`.
+  Corpus: `inlineClasses/kt27096_enum`, `kt27096_functional`, `kt27096_reference`.
+- **A null-safe unbox yields the nullable carrier.** Where an erased result that is a value
+  class's box becomes `X?` carried as its reference carrier (`Map.get` in a `Map<K, X>` delegation),
+  the null-safe `unbox-impl` is the carrier: kotlinc unboxes once and returns it. krusty kept the
+  box's physical type on the unboxed result, so the return unboxed the carrier again and the class
+  failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
+  `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
+- **A value class's constructors build the value in a temporary.** The static `constructor-impl`
+  that runs a value class's `init` block first stores its parameter in an unnamed temporary typed
+  as the value class; `this` and the class's property in the block read it, a `this` passed as a
+  reference is boxed with `box-impl`, and the temporary is returned. A secondary constructor's
+  delegated value is the same kind of temporary. A class or lambda declared in a constructor is
+  enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
+  `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
+  `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
@@ -8233,6 +8275,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type with the generic slot; the realized `unbox-impl` of that class marks the value as
   already the carrier, so no second unbox is inserted at the return. Tests:
   `tests/value_class_object_carrier_generic_result_e2e.rs`.
+- **A nullable value class over `Any?` passed as `Any?` keeps its box.** `W?` for
+  `value class W(val a: Any?)` is the box, since a null carrier cannot tell `W(null)` from a null
+  `W?`. Its coercion to `Any?` has the carrier's type, yet only a recorded read of the class's sole
+  property unboxes to the carrier; `result = vc` stores the box as it is, as kotlinc does. Tests:
+  `tests/value_class_nullable_any_carrier_e2e.rs`.
+- **An inherited default call boxes a value-class receiver for an interface's stub.** For
+  `value class B(val x: Long) : Sum` overriding `Sum.f(a: Long = 1L)`, `B(2L).f()` calls
+  `Sum.f$default(Sum, long, int, Object)`, so the receiver is `B.box-impl`, as kotlinc does. The
+  default provider's declaring class decides: a value class's own member keeps its carrier. Tests:
+  `tests/value_class_interface_default_receiver_e2e.rs`.
+- **A `try` has its branches' value-class representation.** Like a `when`, a `try` is the
+  representation of its first value-class branch (the body, then each handler). A body that cannot
+  complete (`try { fail() } catch (e: Throwable) { Outcome(Failure(e)) }`) leaves the handler's
+  carrier as the `try`'s value, so coercing the `try` to `Outcome` casts and unboxes nothing.
+  Tests: `tests/value_class_try_value_e2e.rs`.
+- **A caller passes the box to a `Result` parameter of a generic override.** `kotlin.Result` does
+  not mangle its function's name, so `override fun take(x: Result<Any?>)` of `Sink<T>.take(x: T)`
+  keeps `take(Object)` and receives the box, as kotlinc does. Its callers box the carrier with
+  `box-impl` and pass the box as it is, although the `Object` slot is also `Result`'s carrier: the
+  call records the override's declared parameters with that position marked as the box, and a
+  nullable destination over a null-accepting underlying is the box. The override checks no null,
+  as for any `Result` parameter. Tests: `tests/result_generic_override_argument_e2e.rs`.
+- **A nested value class's property is the shared carrier.** For `Outer(val inner: Inner)` over
+  `Inner(val x: Any)`, `outer.inner` reads nothing: it is `Inner`'s carrier, which `Outer`'s carrier
+  already is, so `Outer(outer.inner)` and `outer.inner.x` neither cast nor unbox, as kotlinc does.
+  A call whose checked declaration returns a non-null type (a member returning `Outer`) is boxed
+  into a generic slot with a plain `box-impl`, without a null test. Tests:
+  `tests/value_class_nested_sole_property_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

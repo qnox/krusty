@@ -399,6 +399,8 @@ mod cli_dropin_e2e;
 mod closure_in_class_e2e;
 #[path = "codegen_host_e2e.rs"]
 mod codegen_host_e2e;
+#[path = "collection_bridge_barrier_e2e.rs"]
+mod collection_bridge_barrier_e2e;
 #[path = "collection_members_e2e.rs"]
 mod collection_members_e2e;
 #[path = "collection_special_member_stub_e2e.rs"]
@@ -1301,6 +1303,8 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "result_generic_override_argument_e2e.rs"]
+mod result_generic_override_argument_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
@@ -1313,24 +1317,38 @@ mod suspend_value_class_results_e2e;
 mod unsigned_operations_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
+#[path = "value_class_constructor_bodies_e2e.rs"]
+mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
 mod value_class_constructor_default_e2e;
+#[path = "value_class_delegated_result_e2e.rs"]
+mod value_class_delegated_result_e2e;
 #[path = "value_class_equality_e2e.rs"]
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
+#[path = "value_class_generic_slot_read_e2e.rs"]
+mod value_class_generic_slot_read_e2e;
 #[path = "value_class_hidden_constructor_e2e.rs"]
 mod value_class_hidden_constructor_e2e;
 #[path = "value_class_inherited_default_names_e2e.rs"]
 mod value_class_inherited_default_names_e2e;
+#[path = "value_class_interface_default_receiver_e2e.rs"]
+mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
 mod value_class_lambda_class_e2e;
+#[path = "value_class_nested_carrier_e2e.rs"]
+mod value_class_nested_carrier_e2e;
+#[path = "value_class_nested_sole_property_e2e.rs"]
+mod value_class_nested_sole_property_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
 mod value_class_nothing_override_bridges_e2e;
+#[path = "value_class_nullable_any_carrier_e2e.rs"]
+mod value_class_nullable_any_carrier_e2e;
 #[path = "value_class_nullable_bridge_e2e.rs"]
 mod value_class_nullable_bridge_e2e;
 #[path = "value_class_nullable_function_result_e2e.rs"]
@@ -1345,6 +1363,8 @@ mod value_class_secondary_constructor_default_e2e;
 mod value_class_secondary_constructor_return_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
+#[path = "value_class_try_value_e2e.rs"]
+mod value_class_try_value_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;

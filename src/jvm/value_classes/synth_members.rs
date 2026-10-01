@@ -24,6 +24,28 @@ pub(super) struct SynthesizedValueMembers {
     pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
 }
 
+/// A declaration written in a value class's constructor (a local class, a lambda's class) is
+/// enclosed by the static `constructor-impl` realizing that constructor, as kotlinc's
+/// `EnclosingMethod` names it: the instance constructor does not exist on the JVM.
+pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &SynthesizedValueMembers) {
+    let names = ir
+        .classes
+        .iter()
+        .map(|class| class.fq_name)
+        .collect::<Vec<_>>();
+    for declaration in &mut ir.classes {
+        if let Some(crate::ir::IrEnclosure::Constructor { class, ordinal }) = declaration.enclosure
+        {
+            if let Some(&function) = realized
+                .constructor_impls
+                .get(&(names[class as usize], ordinal))
+            {
+                declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
+            }
+        }
+    }
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -286,43 +308,52 @@ pub(super) fn synth_value_members(
         ir.jvm_value_class_representation_order.insert(fid, 1);
     }
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
-    // arg. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an already-built value, so
-    // it must NOT re-run the init. MOVE `init_body` out of the class (clearing it, so `<init>` keeps only
-    // the field assignment) and inline it: common lowering built it in an INSTANCE frame (`this`@0, ctor param
-    // @1), so a sole-field read `this.<field>` is the param — rewrite it to the param, then shift every
-    // value slot down by one. The resulting body still runs over the UNBOXED param (slot 0), so step-4
-    // rewrites its nested value-class accesses (see the `constructor-impl` entry added to `s4_bodies`).
+    // constructed value. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an
+    // already-built value. MOVE `init_body` out of the class (so `<init>` keeps only the field
+    // assignment). Like kotlinc, the constructed value is first an unnamed temporary over the carrier
+    // (slot 1), which the init block reads as `this` (instance slot 0), while the parameter moves from
+    // instance slot 1 to 0. The temporary is typed as the value class, so a read of its property is the
+    // carrier and a `this` passed as a reference is boxed (see the `constructor-impl` entry in `s4_bodies`).
     {
         let mut stmts = Vec::new();
-        if has_init {
-            if let Some(init_root) = ir.classes[class_id as usize].init_body {
-                let mut reach = HashSet::new();
-                collect_reachable(&ir.exprs, init_root, &mut reach);
-                let class_fq = ir.classes[class_id as usize].fq_name;
-                for id in reach {
-                    // The sole field read — as an indexed field read, or as the property it is.
-                    let sole_field_read = match &ir.exprs[id as usize] {
-                        IrExpr::GetField { class, .. } => *class == class_id,
-                        IrExpr::PropertyRead { owner, .. } => *owner == class_fq,
-                        _ => false,
-                    };
-                    if sole_field_read {
-                        ir.exprs[id as usize] = IrExpr::GetValue(1); // sole field == the ctor param (slot 1)
+        let mut result = 0;
+        if let Some(init_root) = ir.classes[class_id as usize]
+            .init_body
+            .take()
+            .filter(|_| has_init)
+        {
+            let mut reach = HashSet::new();
+            collect_reachable_scoped(&ir.exprs, init_root, &mut reach);
+            // `this` is the temporary; the parameter, which is the class's sole property, is read
+            // as that property of the temporary. Later locals keep their slots.
+            for id in reach {
+                match ir.exprs[id as usize] {
+                    IrExpr::GetValue(0) => ir.exprs[id as usize] = IrExpr::GetValue(1),
+                    IrExpr::GetValue(1) => {
+                        let receiver = ir.add_expr(IrExpr::GetValue(1));
+                        ir.exprs[id as usize] = IrExpr::GetField {
+                            receiver,
+                            class: class_id,
+                            index: 0,
+                        };
                     }
+                    _ => {}
                 }
-                shift_slots(ir, init_root); // slot 1 (param) → 0; no `this` use remains
-                if let IrExpr::Block { stmts: bs, value } = &ir.exprs[init_root as usize] {
-                    stmts.extend(bs.iter().copied());
-                    if let Some(v) = value {
-                        stmts.push(*v);
-                    }
-                } else {
-                    stmts.push(init_root);
-                }
-                ir.classes[class_id as usize].init_body = None;
             }
+            let parameter = ir.add_expr(IrExpr::GetValue(0));
+            stmts.push(ir.add_expr(IrExpr::Variable {
+                index: 1,
+                ty: x_ir,
+                init: Some(parameter),
+                named: false,
+            }));
+            match ir.exprs[init_root as usize].clone() {
+                IrExpr::Block { stmts: bs, value } => stmts.extend(bs.into_iter().chain(value)),
+                _ => stmts.push(init_root),
+            }
+            result = 1;
         }
-        let arg = ir.add_expr(IrExpr::GetValue(0));
+        let arg = ir.add_expr(IrExpr::GetValue(result));
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
@@ -648,9 +679,10 @@ pub(super) fn synth_value_members(
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
+            // Typed as the value class, like the primary's temporary: `this` is the carrier.
             let delegation = ir.add_expr(IrExpr::Variable {
                 index: delegated_value,
-                ty: u_ir,
+                ty: x_ir,
                 init: Some(call),
                 named: false,
             });
@@ -912,4 +944,21 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     ir.add_expr(IrExpr::When {
         branches: vec![(Some(is_null), zero), (None, non_null)],
     })
+}
+
+/// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —
+/// reframing an instance-lowered body (`this` at slot 0) as a static one (params at slot 0).
+pub(super) fn shift_slots(ir: &mut IrFile, root: ExprId) {
+    let mut reach = HashSet::new();
+    collect_reachable_scoped(&ir.exprs, root, &mut reach);
+    for id in reach {
+        match &mut ir.exprs[id as usize] {
+            IrExpr::GetValue(i)
+            | IrExpr::SetValue { var: i, .. }
+            | IrExpr::Variable { index: i, .. } => {
+                *i = i.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
 }
