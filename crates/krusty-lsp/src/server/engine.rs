@@ -1118,7 +1118,6 @@ fn run<A: Analysis>(
                 }
             }
             Some(EngineCommand::Analyze(mut job)) => {
-                let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                 let batch = job.run(&mut analyze);
                 if events
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
@@ -1133,6 +1132,7 @@ fn run<A: Analysis>(
                 // further interactive work is waiting. Enumerating a large workspace ahead of the
                 // first open document delayed its diagnostics past two minutes on a 64k-file tree.
                 if !commands.interactive_pending() {
+                    let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                     let neighborhood = analyze.neighborhood_index_candidates(&open);
                     if !neighborhood.is_empty() {
                         commands.enqueue(EngineCommand::Index(IndexJob {
