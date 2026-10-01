@@ -317,3 +317,318 @@ impl Checker<'_> {
             .unwrap_or_default()
     }
 }
+
+/// Flow a completing expression proved in one scope frame: narrowing shadows, property paths, and
+/// straight-line assignment types. Branch joins keep only the facts present on every completing
+/// frame; the call that evaluated the expression then installs that delta for the arguments that
+/// run next.
+#[derive(Clone)]
+pub(super) struct CompletedFlow {
+    shadows: Vec<(String, Ty)>,
+    paths: Vec<(NarrowPath, Ty)>,
+    locals: Vec<(String, Ty)>,
+}
+
+impl CompletedFlow {
+    pub(super) fn capture(checker: &Checker<'_>, scope: &CheckerScope<'_>) -> Self {
+        let mut shadows = Vec::new();
+        if let Some(parent) = scope.enclosing() {
+            scope.own_bindings(Ns::Value, |name, binding| {
+                let Some(local) = binding.value() else {
+                    return;
+                };
+                let Some(outer) = checker.lookup(parent, name) else {
+                    return;
+                };
+                if outer.flow_identity == local.flow_identity && outer.ty != local.ty {
+                    shadows.push((name.to_string(), local.ty));
+                }
+            });
+        }
+        let locals = scope
+            .own_local_narrowings()
+            .into_iter()
+            .filter(|(name, _)| !scope.declared_here(name, Ns::Value))
+            .collect();
+        Self {
+            shadows,
+            paths: scope.own_path_narrowings(),
+            locals,
+        }
+    }
+
+    pub(super) fn publish(self, checker: &mut Checker<'_>, scope: &CheckerScope<'_>) {
+        for (name, ty) in self.shadows {
+            if let Some(path) = checker.visible_value_path(scope, &name) {
+                checker.apply_narrowing_unchecked(scope, &path, ty);
+            }
+        }
+        for (path, ty) in self.paths {
+            checker.apply_narrowing_unchecked(scope, &path, ty);
+        }
+        for (name, ty) in self.locals {
+            // This is a fact proved by a completed expression, not a source write. Actual
+            // assignments already record their binding identity while they are checked; using the
+            // write API here would make an enclosing catch discard a still-valid entry narrowing.
+            scope.narrow_local(&name, Some(ty));
+        }
+    }
+
+    /// Install the facts shared by every completing branch. An empty list (every branch leaves)
+    /// installs nothing.
+    pub(super) fn publish_common(
+        checker: &mut Checker<'_>,
+        scope: &CheckerScope<'_>,
+        flows: &[CompletedFlow],
+    ) {
+        let Some(common) = Self::intersect(flows) else {
+            return;
+        };
+        common.publish(checker, scope);
+    }
+
+    fn intersect(flows: &[CompletedFlow]) -> Option<CompletedFlow> {
+        let (first, rest) = flows.split_first()?;
+        let mut common = first.clone();
+        for other in rest {
+            common
+                .shadows
+                .retain(|(name, ty)| other.shadows.iter().any(|(n, t)| n == name && t == ty));
+            common
+                .paths
+                .retain(|(path, ty)| other.paths.iter().any(|(p, t)| p == path && t == ty));
+            common
+                .locals
+                .retain(|(name, ty)| other.locals.iter().any(|(n, t)| n == name && t == ty));
+        }
+        Some(common)
+    }
+}
+
+/// The call being resolved as an arbitrary invoke, apart from the scope its arguments use.
+struct ArbitraryInvoke<'a> {
+    call: ExprId,
+    callee: ExprId,
+    args: &'a [ExprId],
+    span: Span,
+    expected: Option<Ty>,
+}
+
+impl Checker<'_> {
+    /// Whether evaluating `expression` returns to the code that follows it.
+    pub(super) fn completed_normally(&self, expression: ExprId) -> bool {
+        !self.expr_diverges(expression) && !self.expression_terminates_function(expression)
+    }
+
+    /// A hard cast proved its operand for the rest of this scope. Safe casts (`as?`) do not: the
+    /// operand may still have its original type when the cast fails.
+    pub(super) fn record_completed_cast(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        ty: &TypeRef,
+        expression: ExprId,
+    ) {
+        let Some(path) = self.expr_access_path(operand) else {
+            return;
+        };
+        let Some(stable_ty) = self.stable_path_ty(scope, &path, self.span(expression)) else {
+            return;
+        };
+        let Some(narrowed) = self.proven_narrowed_ty(scope, Some(stable_ty), ty) else {
+            return;
+        };
+        // Replace the stable type only when the cast refines it. `x: R as Any` and
+        // `a as MutableList<Any?>` keep the original type; `a: Any as String` narrows.
+        // An unrelated cast written as its own statement still reaches later reads
+        // through the block's cast walk.
+        if self.receiver_is_assignable(narrowed, stable_ty)
+            && !self.receiver_is_assignable(stable_ty, narrowed)
+        {
+            self.apply_narrowing_unchecked(scope, &path, narrowed);
+        }
+    }
+
+    /// Check `receiver` once, in source order, and return the scope arguments of this call are
+    /// typed under. Facts the receiver proved are on that scope, and — when the receiver returns —
+    /// on `scope` as well, so a later argument of an enclosing call sees them.
+    pub(super) fn check_receiver_before_arguments<'p>(
+        &mut self,
+        scope: &'p CheckerScope<'p>,
+        receiver: ExprId,
+    ) -> (Ty, CheckerScope<'p>) {
+        let argument_scope = scope.child(ScopeKind::Block);
+        let ty = self.expr(&argument_scope, receiver);
+        if self.completed_normally(receiver) {
+            CompletedFlow::capture(self, &argument_scope).publish(self, scope);
+        }
+        (ty, argument_scope)
+    }
+
+    /// A lambda literal whose parameter shape is supplied by the call's argument probes. An
+    /// anonymous function declares that shape itself and is an ordinary callee.
+    fn postponed_lambda_callee(&self, callee: ExprId) -> bool {
+        matches!(self.file.expr(callee), Expr::Lambda { .. })
+            && !self.file.anon_fun_lambdas.contains(&callee.0)
+    }
+
+    /// Invoke an arbitrary callee (`make()(x)`, `(a as String)(a)`). A postponed lambda, and a
+    /// callee whose value is a callable reference under `when`/`if`/`try`/`?:`, is typed once
+    /// after its argument probes: those probes are the function shape. Every other callee is
+    /// typed once before its arguments, and those arguments see the flow that check produced.
+    pub(super) fn check_arbitrary_callee(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Ty {
+        let site = ArbitraryInvoke {
+            call,
+            callee,
+            args,
+            span,
+            expected,
+        };
+        if self.postponed_lambda_callee(callee) || self.adapts_to_expected_function(callee) {
+            return self.invoke_probed_callee(scope, site);
+        }
+        let (callee_ty, argument_scope) = self.check_receiver_before_arguments(scope, callee);
+        self.finish_arbitrary_invoke(&argument_scope, site, callee_ty, None)
+    }
+
+    /// The callee's type is a callable reference, or a control-flow join of one. Its shape comes
+    /// from the call's expected function type, so the arguments are probed first and the callee
+    /// is still checked only once.
+    fn adapts_to_expected_function(&self, expression: ExprId) -> bool {
+        match self.file.expr(expression).clone() {
+            Expr::CallableRef { .. } => true,
+            Expr::When { arms, .. } => arms
+                .iter()
+                .any(|arm| self.adapts_to_expected_function(arm.body)),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.adapts_to_expected_function(then_branch)
+                    || else_branch.is_some_and(|branch| self.adapts_to_expected_function(branch))
+            }
+            Expr::Try { body, catches, .. } => {
+                self.adapts_to_expected_function(body)
+                    || catches
+                        .iter()
+                        .any(|clause| self.adapts_to_expected_function(clause.body))
+            }
+            Expr::Elvis { lhs, rhs } => {
+                self.adapts_to_expected_function(lhs) || self.adapts_to_expected_function(rhs)
+            }
+            Expr::Block { trailing, .. } => {
+                trailing.is_some_and(|trailing| self.adapts_to_expected_function(trailing))
+            }
+            _ => false,
+        }
+    }
+
+    fn invoke_probed_callee(&mut self, scope: &CheckerScope<'_>, site: ArbitraryInvoke<'_>) -> Ty {
+        let probes = site
+            .args
+            .iter()
+            .map(|&argument| {
+                self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+                    if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
+                        Ty::Error
+                    } else {
+                        self.expr(scope, argument)
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        // The surrounding call constrains the callee's return only when this expression itself
+        // has an expected result. With no such constraint, let the callee infer its own result:
+        // forcing `Any` here changes `({ "s" })()` from `String` to `Any` before the invocation
+        // is selected.
+        let callee_ty = match site.expected.filter(|ty| *ty != Ty::Error) {
+            Some(result) => self.expr_expected(scope, site.callee, Ty::fun(probes.clone(), result)),
+            None => self.expr(scope, site.callee),
+        };
+        self.finish_arbitrary_invoke(scope, site, callee_ty, Some(probes))
+    }
+
+    fn finish_arbitrary_invoke(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        site: ArbitraryInvoke<'_>,
+        callee_ty: Ty,
+        probes: Option<Vec<Ty>>,
+    ) -> Ty {
+        let params = self
+            .expression_function_type(scope, site.callee, callee_ty)
+            .and_then(|semantic| match semantic {
+                Ty::Fun(signature) if signature.params.len() == site.args.len() => {
+                    Some(signature.params.clone())
+                }
+                _ => None,
+            })
+            .or_else(|| self.object_invoke_operator_parameter_shape(callee_ty, site.args.len()));
+        let arg_tys = site
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, &argument)| {
+                let probed = probes
+                    .as_ref()
+                    .and_then(|probes| probes.get(index))
+                    .copied();
+                let Some(expected_arg) = params
+                    .as_ref()
+                    .and_then(|parameters| parameters.get(index))
+                    .copied()
+                else {
+                    return probed.unwrap_or_else(|| self.probe_or_check_argument(scope, argument));
+                };
+                if matches!(
+                    self.file.expr(argument),
+                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                ) || self.call_result_can_bind_expected(argument, expected_arg)
+                {
+                    self.expr_expected(scope, argument, expected_arg)
+                } else {
+                    probed.unwrap_or_else(|| self.expr(scope, argument))
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(ret) = self.record_invoke_or_report(
+            scope,
+            CallArgs {
+                call: site.call,
+                args: site.args,
+                arg_tys: &arg_tys,
+            },
+            site.callee,
+            callee_ty,
+            site.span,
+            CallResultConstraint::direct(site.expected),
+        ) {
+            return ret;
+        }
+        if callee_ty != Ty::Error {
+            self.diags.error(site.span, "expression is not callable");
+        }
+        Ty::Error
+    }
+
+    /// The type an argument contributes before its callee's parameter type is known. A callable
+    /// reference and a lambda literal stay postponed; every other argument is checked once.
+    fn probe_or_check_argument(&mut self, scope: &CheckerScope<'_>, argument: ExprId) -> Ty {
+        self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+            if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
+                Ty::Error
+            } else {
+                self.expr(scope, argument)
+            }
+        })
+    }
+}

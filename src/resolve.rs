@@ -120,6 +120,7 @@ mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_flow;
+use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 mod receiver_uses;
 mod reflection_locals;
@@ -19486,7 +19487,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let receiver_diag_mark = self.diags.diags.len();
-                let mut rt = self.expr(scope, receiver);
+                let (mut rt, argument_scope) =
+                    self.check_receiver_before_arguments(scope, receiver);
+                let scope = &argument_scope;
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
@@ -20381,9 +20384,18 @@ impl<'a> Checker<'a> {
                         .error(span, "expression is not callable".to_string());
                     return Ty::Error;
                 }
+                // A bare call's implicit receiver is the callee. Read it before any argument:
+                // `invoke(this as String)` must keep the receiver from before that cast.
+                let callee_receivers = self.implicit_receivers(scope);
+                let callee_this = self.effective_this_narrow(scope);
                 let local_value = self
                     .lookup(scope, &fname)
-                    .map(|local| (local.ty, local.origin))
+                    .map(|local| {
+                        (
+                            self.local_narrowing(scope, &fname).unwrap_or(local.ty),
+                            local.origin,
+                        )
+                    })
                     // A dispatch property is contributed by an implicit-receiver rung, not by
                     // the lexical-value rung. Treating its cached scope binding as a local lets a
                     // receiver-function property preempt an applicable member extension on a
@@ -20696,9 +20708,9 @@ impl<'a> Checker<'a> {
                             args,
                             &arg_tys,
                         );
-                        if let Some(dispatch_receiver) = self
-                            .implicit_receivers(scope)
-                            .into_iter()
+                        if let Some(dispatch_receiver) = callee_receivers
+                            .iter()
+                            .copied()
                             .find(|candidate| candidate.ty == receiver)
                         {
                             self.mark_implicit_receiver_selection(call, dispatch_receiver);
@@ -23186,7 +23198,7 @@ impl<'a> Checker<'a> {
                     expected,
                 };
                 let mut receivers_closed = false;
-                for rung in self.implicit_rungs(scope) {
+                for rung in self.implicit_rungs_with(scope, callee_receivers.clone()) {
                     let implicit_receiver = match rung {
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                             if let Some(ret) = self.static_scope_call(
@@ -23338,21 +23350,19 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if !self.module_declares(&fname) {
-                    if let Some(bt) = self.effective_this_narrow(scope) {
+                    if let Some(bt) = callee_this {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some(ret) = self.check_applicable_module_member_call(
                                 scope, call, bt, &fname, args, &arg_tys, expected,
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
-                                if let Some(receiver) =
-                                    self.implicit_receivers(scope).into_iter().next()
-                                {
+                                if let Some(receiver) = callee_receivers.first().copied() {
                                     self.mark_implicit_receiver_selection(call, receiver);
                                 }
                                 self.mark_current_extension_receiver_used(call);
                                 return ret;
                             }
-                            let mut receivers = self.implicit_receivers(scope);
+                            let mut receivers = callee_receivers.clone();
                             if let Some(current) = receivers.iter_mut().find(|receiver| {
                                 receiver.current || receiver.extension_receiver.is_some()
                             }) {
@@ -23467,7 +23477,7 @@ impl<'a> Checker<'a> {
                     Some(CallableCandidateSelection::Selected(_))
                         | Some(CallableCandidateSelection::Ambiguous(_))
                 );
-                for implicit_receiver in self.implicit_receivers(scope) {
+                for implicit_receiver in callee_receivers.iter().copied() {
                     if top_level_owns_the_name
                         && context_receiver_priority::is_context_parameter_receiver(
                             scope,
@@ -23528,7 +23538,7 @@ impl<'a> Checker<'a> {
                 // Member functions on implicit receivers have already had their closer call-tower
                 // opportunity above. A non-callable property contributes no call candidate and does
                 // not shadow a function at a later rung.
-                for implicit_receiver in self.implicit_receivers(scope) {
+                for implicit_receiver in callee_receivers.iter().copied() {
                     if top_level_owns_the_name
                         && context_receiver_priority::is_context_parameter_receiver(
                             scope,
@@ -23990,89 +24000,7 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Error
             }
-            _ => {
-                // An arbitrary callee expression (e.g. `make()(x)`): invoke it if it is a function
-                // value or carries a member `operator fun invoke`. Every expression follows the same
-                // two-phase constraint flow: ordinary arguments are typed once, contextual arguments
-                // stay postponed, and the resulting call shape is supplied while typing the callee.
-                let probes = args
-                    .iter()
-                    .map(|&argument| {
-                        self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
-                            if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
-                                Ty::Error
-                            } else {
-                                self.expr(scope, argument)
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                // The surrounding call constrains the callee's return only when this expression
-                // itself has an expected result. With no such constraint, let the callee infer its
-                // own result: forcing `Any` here changes `({ "s" })()` from `String` to `Any` before
-                // the invocation is selected.
-                // An anonymous-function declaration owns its parameter/context/receiver shape.
-                // The surrounding invocation may constrain a lambda literal, but replacing an
-                // explicitly declared `context(C) fun (x: X)` with `(X) -> R` erases the context
-                // slot before invoke selection can supply it from scope.
-                let callee_owns_shape = self.file.anon_fun_lambdas.contains(&callee.0);
-                let callee_ty = match expected.filter(|ty| *ty != Ty::Error && !callee_owns_shape) {
-                    Some(result) => {
-                        self.expr_expected(scope, callee, Ty::fun(probes.clone(), result))
-                    }
-                    None => self.expr(scope, callee),
-                };
-                let params = self
-                    .expression_function_type(scope, callee, callee_ty)
-                    .and_then(|semantic| match semantic {
-                        Ty::Fun(signature) if signature.params.len() == args.len() => {
-                            Some(signature.params.clone())
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| self.object_invoke_operator_parameter_shape(callee_ty, args.len()));
-                let arg_tys = args
-                    .iter()
-                    .zip(probes)
-                    .enumerate()
-                    .map(|(index, (&argument, probe))| {
-                        let Some(expected) = params
-                            .as_ref()
-                            .and_then(|parameters| parameters.get(index))
-                            .copied()
-                        else {
-                            return probe;
-                        };
-                        if matches!(
-                            self.file.expr(argument),
-                            Expr::Lambda { .. } | Expr::CallableRef { .. }
-                        ) || self.call_result_can_bind_expected(argument, expected)
-                        {
-                            self.expr_expected(scope, argument, expected)
-                        } else {
-                            probe
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(ret) = self.record_invoke_or_report(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
-                    callee,
-                    callee_ty,
-                    span,
-                    CallResultConstraint::direct(expected),
-                ) {
-                    return ret;
-                }
-                if callee_ty != Ty::Error {
-                    self.diags.error(span, "expression is not callable");
-                }
-                Ty::Error
-            }
+            _ => self.check_arbitrary_callee(scope, call, callee, args, span, expected),
         }
     }
 
@@ -63858,6 +63786,7 @@ impl<'a> Checker<'a> {
             if nullable {
                 Ty::nullable(tt)
             } else {
+                self.record_completed_cast(scope, operand, &ty, e);
                 tt
             }
         };
@@ -64230,14 +64159,17 @@ impl<'a> Checker<'a> {
             // `map[key] ?: emptyList()` must infer the element type from `map[key]`, just as the
             // same generic call is retyped from an enclosing callable parameter elsewhere.
             let mut lt = definitely_non_null_ty(lt0);
+            // The right operand runs only when the left is null, so a cast or assignment it proves
+            // must not become a fact of the value that took the left operand.
+            let rhs_scope = scope.child(ScopeKind::Block);
             let rt = match conditional_expected {
-                Some(ty) => self.expr_expected(scope, rhs, ty),
+                Some(ty) => self.expr_expected(&rhs_scope, rhs, ty),
                 // The bottom type contributes no constraint to the other branch. In particular,
                 // `null ?: run { statement }` must infer `run` from its lambda as `Unit`; forcing
                 // the non-null form of `Null` (`Nothing`) into the RHS instead asks the lambda to
                 // return `Nothing` and rejects every normally-completing statement.
-                None if lt == Ty::Nothing => self.expr(scope, rhs),
-                None => self.expr_expected(scope, rhs, lt),
+                None if lt == Ty::Nothing => self.expr(&rhs_scope, rhs),
+                None => self.expr_expected(&rhs_scope, rhs, lt),
             };
             let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
             let lt0 = self.rebind_conditional_branch(lhs, rt, lt0, fixed, |c, exp| {
@@ -64245,7 +64177,7 @@ impl<'a> Checker<'a> {
             });
             lt = definitely_non_null_ty(lt0);
             let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
-                c.expr_expected(scope, rhs, exp)
+                c.expr_expected(&rhs_scope, rhs, exp)
             });
             self.report_unbound_conditional_branch(scope, lhs);
             self.report_unbound_conditional_branch(scope, rhs);
@@ -66451,7 +66383,21 @@ impl<'a> Checker<'a> {
         trailing: Option<ExprId>,
     ) -> Ty {
         let block_scope = scope.child(ScopeKind::Block);
-        self.expr_inner_block_in_scope(&block_scope, e, expected, value_required, stmts, trailing)
+        let ty = self.expr_inner_block_in_scope(
+            &block_scope,
+            e,
+            expected,
+            value_required,
+            stmts,
+            trailing,
+        );
+        // A completing block exports the facts its statements proved. The parent decides whether
+        // those facts survive: an `if` joins its branches, and a lambda frame never publishes
+        // them to the caller.
+        if self.completed_normally(e) {
+            CompletedFlow::capture(self, &block_scope).publish(self, scope);
+        }
+        ty
     }
 
     /// Check a block in a scope whose lifetime is owned by the surrounding construct. A do-while
@@ -66725,6 +66671,7 @@ impl<'a> Checker<'a> {
             let mut arm_exits = Vec::with_capacity(arms.len());
             let mut fallthrough_casts: Vec<(NarrowPath, Ty)> = Vec::new();
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
+            let mut completing_flows = Vec::new();
             for arm in &arms {
                 if arm.conditions.is_empty() {
                     has_else = true;
@@ -66825,6 +66772,9 @@ impl<'a> Checker<'a> {
                         c.expr_result(scope, arm.body, expected, value_required)
                     })
                 };
+                if self.completed_normally(arm.body) {
+                    completing_flows.push(CompletedFlow::capture(self, &arm_scope));
+                }
                 arm_results.push(ArmResult {
                     body: arm.body,
                     span: self.span(arm.body),
@@ -66924,6 +66874,9 @@ impl<'a> Checker<'a> {
                 });
             }
             self.publish_joined_local_flow(scope, &locals, &entry_reads, &arm_exits);
+            if exhaustive {
+                CompletedFlow::publish_common(self, scope, &completing_flows);
+            }
             if exhaustive {
                 self.exhaustive_whens.insert(e);
                 result.unwrap_or(Ty::Unit)
