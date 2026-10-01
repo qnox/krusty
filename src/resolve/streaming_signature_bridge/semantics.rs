@@ -1122,10 +1122,10 @@ impl ProductionSignatureSemantics<'_> {
                     return None;
                 }
                 selected.owner.get_or_insert(internal);
-                Some(crate::symbol_resolver::SelectedConstructorDeclaration {
-                    declaration: selected,
-                    type_parameters: classifier.type_parameters.clone(),
-                })
+                Some(crate::symbol_resolver::selected_constructor::capture(
+                    selected,
+                    &classifier,
+                ))
             })?;
             let declaration = &selected.declaration;
             let slots = crate::libraries::map_call_args(
@@ -2693,23 +2693,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     }
                 }
                 if let crate::symbol_resolver::Symbol::Constructor(constructor) = &symbol {
-                    let declaration = match constructor {
-                        crate::symbol_resolver::SelectedConstructorCall::Direct(declaration) => {
-                            declaration.as_ref().clone()
-                        }
-                        crate::symbol_resolver::SelectedConstructorCall::Platform(realization) => {
-                            realization.declaration.clone()
-                        }
-                    };
-                    let owner = declaration.owner?;
-                    let type_parameters = resolver.classifier(owner)?.type_parameters.clone();
+                    let selected =
+                        crate::symbol_resolver::selected_constructor::from_selected_call(
+                            constructor,
+                        );
                     return Some((
-                        SelectedTopLevelCall::Constructor(Box::new(
-                            crate::symbol_resolver::SelectedConstructorDeclaration {
-                                declaration,
-                                type_parameters,
-                            },
-                        )),
+                        SelectedTopLevelCall::Constructor(Box::new(selected)),
                         argument_types.clone(),
                     ));
                 }

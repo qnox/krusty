@@ -30,6 +30,8 @@ mod qualified_classifiers;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+pub(crate) mod selected_constructor;
+pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
@@ -1594,7 +1596,9 @@ impl Symbol {
         match self {
             Symbol::Member(f) => f.call.map(|resolved| resolved.member),
             Symbol::Instance(member) | Symbol::Companion(member) => Some(member),
-            Symbol::Constructor(SelectedConstructorCall::Direct(member)) => Some(*member),
+            Symbol::Constructor(SelectedConstructorCall::Direct(selected)) => {
+                Some(selected.declaration)
+            }
             Symbol::Constructor(SelectedConstructorCall::Platform(_)) => None,
         }
     }
@@ -1915,10 +1919,7 @@ impl<'a> SymbolResolver<'a> {
                 &constructor.call_sig,
             )),
         );
-        selected.map(|declaration| SelectedConstructorDeclaration {
-            declaration,
-            type_parameters: classifier.type_parameters.clone(),
-        })
+        selected.map(|declaration| selected_constructor::capture(declaration, &classifier))
     }
 
     pub(crate) fn classifier_in_scope(&self, name: &str) -> CandidateSelection<TypeName> {
@@ -3507,8 +3508,10 @@ impl<'a> SymbolResolver<'a> {
                     // physical default invocation required by that application. This is one callable
                     // selection result: consumers never retry a rejected direct constructor as a
                     // separate name-resolution fallback.
-                    select_constructor_call(self.lib, &self.src, internal, args)
-                        .map(Symbol::Constructor)
+                    selected_constructor::select_constructor_call(
+                        self.lib, &self.src, internal, args,
+                    )
+                    .map(Symbol::Constructor)
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
@@ -4569,27 +4572,8 @@ pub struct SyntheticCtorCall {
 /// constructor declaration first; its provider-attached realization never participates in selection.
 #[derive(Clone, Debug)]
 pub enum SelectedConstructorCall {
-    Direct(Box<LibraryMember>),
-    Platform(Box<SyntheticCtorCall>),
-}
-
-/// The semantic declaration and classifier-owned generic facts selected as one resolver decision.
-/// Consumers may complete contextual result inference from these facts without resolving the
-/// classifier again through a provider-specific path.
-#[derive(Clone, Debug)]
-pub(crate) struct SelectedConstructorDeclaration {
-    pub(crate) declaration: LibraryMember,
-    pub(crate) type_parameters: crate::types::TypeParameters<Vec<Vec<Ty>>>,
-}
-
-fn select_constructor_call(
-    lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    internal: TypeName,
-    args: &[CallArgKind],
-) -> Option<SelectedConstructorCall> {
-    let classifier = src.classifier(internal)?;
-    select_constructor_call_from_type(lib, src, internal, &classifier, args)
+    Direct(Box<selected_constructor::SelectedConstructorDeclaration>),
+    Platform(Box<selected_constructor::SelectedConstructorDeclaration>),
 }
 
 /// Select one semantic constructor overload, then couple that declaration to its opaque platform
@@ -4622,20 +4606,14 @@ pub(crate) fn select_constructor_call_from_type(
     declaration.owner.get_or_insert(internal);
     let omitted = args.len() < declaration.params.len();
     if omitted || (declaration.descriptor.is_empty() && declaration.default_realization.is_some()) {
-        let realization = declaration.default_realization.as_deref()?;
-        let descriptor = realization.descriptor.clone();
-        let real_params = realization.real_params.clone();
-        let mask_count = realization.mask_count;
+        declaration.default_realization.as_ref()?;
         return Some(SelectedConstructorCall::Platform(Box::new(
-            SyntheticCtorCall {
-                declaration,
-                descriptor,
-                real_params,
-                mask_count,
-            },
+            selected_constructor::capture(declaration, classifier),
         )));
     }
-    Some(SelectedConstructorCall::Direct(Box::new(declaration)))
+    Some(SelectedConstructorCall::Direct(Box::new(
+        selected_constructor::capture(declaration, classifier),
+    )))
 }
 
 /// Select the source constructor declaration. This operation knows nothing about marker constructors,
