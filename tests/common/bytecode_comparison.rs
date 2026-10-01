@@ -513,3 +513,82 @@ pub fn assert_class_code_matches_kotlinc(
     );
     comparison
 }
+
+/// Compile `src` (file `<stem>.kt`, module `main`) with kotlinc and krusty, and assert each class in
+/// `classes` is byte-identical to kotlinc's.
+pub fn assert_classes_identical_to_kotlinc(stem: &str, src: &str, classes: &[&str]) {
+    let dir = super::common_core::scratch_dir().expect("scratch directory");
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let source = dir.join(format!("{stem}.kt"));
+    std::fs::write(&source, src).expect("write fixture");
+    let (code, stderr) = super::common_core::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
+        src,
+        stem,
+        &[super::common_core::stdlib_jar()],
+        "main",
+        None,
+    )
+    .expect("krusty compiles the fixture");
+    let mut differences = Vec::new();
+    for class in classes {
+        let reference = std::fs::read(reference_dir.join(format!("{class}.class")))
+            .expect("kotlinc emits the class");
+        let ours = krusty
+            .iter()
+            .find(|(internal, _)| internal == class)
+            .map(|(_, bytes)| bytes)
+            .expect("krusty emits the class");
+        if &reference != ours {
+            differences.push(exact_class_difference(class, &reference, ours));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's build:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+/// The semantic surfaces behind an exact class-byte mismatch. Constant-pool ordering remains part
+/// of the enclosing assertion, but this report names the header, member, code/debug, and metadata
+/// difference that must be corrected instead of reducing the failure to a class name.
+fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
+    let header = |bytes: &[u8]| {
+        let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
+        (
+            info.access,
+            info.this_class,
+            info.super_class,
+            info.interfaces(),
+            info.signature.clone(),
+        )
+    };
+    let reference_disassembly = disassemble(class, reference);
+    let ours_disassembly = disassemble(class, ours);
+    format!(
+        "{class} differs (kotlinc {} bytes, krusty {} bytes)\n\
+         headers:\n  kotlinc: {:?}\n  krusty:  {:?}\n\
+         member tables:\n  kotlinc: {:#?}\n  krusty:  {:#?}\n\
+         members/code/debug:\n--- kotlinc ---\n{}\n--- krusty ---\n{}\n\
+         metadata:\n  kotlinc: {:#?}\n  krusty:  {:#?}",
+        reference.len(),
+        ours.len(),
+        header(reference),
+        header(ours),
+        member_table(reference),
+        member_table(ours),
+        member_blocks(&reference_disassembly).join("\n"),
+        member_blocks(&ours_disassembly).join("\n"),
+        super::common_core::raw_kotlin_metadata(reference),
+        super::common_core::raw_kotlin_metadata(ours),
+    )
+}

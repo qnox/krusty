@@ -55,16 +55,13 @@ impl BodyFirChecker<'_> {
             ));
         };
         let (mutable, delegate) = (*mutable, *delegate);
-        for site in self
-            .file
-            .local_delegate_lifting_sites
-            .get(&statement)
-            .into_iter()
-            .flatten()
-        {
-            self.body
-                .add_bodiless_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
-        }
+        let provenance = self.file.local_delegates.get(&statement).ok_or_else(|| {
+            self.failure(
+                span,
+                BodyCheckFailureKind::UnsupportedStatement(StatementForm::LocalDelegate),
+            )
+        })?;
+        let (ordinal, sites) = (provenance.ordinal, provenance.accessors.clone());
         let (name, explicit_type) = (name.as_str(), explicit_type.as_ref());
         let delegate_ty = self.expression_type(delegate)?;
         let property_ty = match explicit_type {
@@ -101,7 +98,12 @@ impl BodyFirChecker<'_> {
         let mut initializer = self.expression(delegate)?;
         let storage_ty = if let Some(provide) = self.info.delegate_provide(delegate) {
             let provide = self.delegate_call_target(delegate, delegate_ty, provide)?;
-            let property = self.local_property_reference(origin, declaration, name, property_ty);
+            let reference = self.local_property_reference(
+                origin,
+                declaration,
+                (name, property_ty),
+                (mutable, ordinal),
+            );
             let owner = self.synthetic_null(origin);
             let result = provide.result;
             let kind = self.delegate_convention_call(
@@ -109,7 +111,7 @@ impl BodyFirChecker<'_> {
                 span,
                 &provide,
                 initializer,
-                vec![owner, property],
+                vec![owner, reference],
             )?;
             initializer = self.body.add_expr(FirExpr {
                 origin,
@@ -125,8 +127,43 @@ impl BodyFirChecker<'_> {
             ty: storage_ty,
             lateinit: false,
         };
+        let storage_name = format!("{name}$delegate");
         self.body
-            .set_debug_value_name(storage.value, format!("{name}$delegate"));
+            .set_debug_value_name(storage.value, storage_name.clone());
+        let reference = self.local_property_reference(
+            origin,
+            declaration,
+            (name, property_ty),
+            (mutable, ordinal),
+        );
+        let expected_sites = 1 + usize::from(mutable);
+        if sites.len() != expected_sites {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget));
+        }
+        let accessor_sites = sites
+            .iter()
+            .map(|site| crate::fir::FirLiftingSite::from_source(site, true))
+            .collect::<Vec<_>>();
+        for site in &accessor_sites {
+            self.body.add_bodiless_lifting_site(site.clone());
+        }
+        self.body
+            .add_local_delegate_plan(crate::fir::FirLocalDelegatePlan {
+                declaration,
+                storage_name: storage_name.clone().into(),
+                storage_type: storage_ty,
+                property_type: property_ty,
+                reference,
+                get_value: get_value.clone(),
+                set_value: set_value.clone(),
+                accessor_sites: accessor_sites.into_boxed_slice(),
+                line: self
+                    .file
+                    .stmt_lines
+                    .get(statement.0 as usize)
+                    .copied()
+                    .unwrap_or(0),
+            });
         self.delegate_scopes
             .last_mut()
             .expect("a local delegate belongs to a lexical scope")
@@ -134,6 +171,7 @@ impl BodyFirChecker<'_> {
                 name.to_string(),
                 LocalDelegateBinding {
                     storage: DelegateStorage::Local(storage),
+                    storage_name: storage_name.into(),
                     property_ty,
                     get_value,
                     set_value,
@@ -163,20 +201,17 @@ impl BodyFirChecker<'_> {
     ) -> Result<FirExprId, BodyCheckFailure> {
         let origin = self.expression_origin(expression)?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
-        let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(
-            origin,
-            delegate.declaration,
-            &delegate.name,
-            delegate.property_ty,
-        );
-        let call = self.delegate_convention_call(
+        let dispatch_receiver = self.delegate_dispatch_receiver(
             origin,
             self.file.expr_span(expression),
             &delegate.get_value,
-            receiver,
-            vec![owner, property],
         )?;
+        let call = FirExprKind::LocalDelegateAccess {
+            plan: delegate.declaration,
+            delegate: receiver,
+            dispatch_receiver,
+            value: None,
+        };
         self.add_expression_with_type(expression, delegate.property_ty, call)
     }
 
@@ -201,27 +236,20 @@ impl BodyFirChecker<'_> {
         delegate: LocalDelegateBinding,
         value: FirExprId,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        let target = delegate.set_value.clone().ok_or_else(|| {
+        let setter = delegate.set_value.as_ref().ok_or_else(|| {
             self.failure(
                 span,
                 BodyCheckFailureKind::UnsupportedStatement(StatementForm::Assign),
             )
         })?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
-        let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(
-            origin,
-            delegate.declaration,
-            &delegate.name,
-            delegate.property_ty,
-        );
-        self.delegate_convention_call(
-            origin,
-            span,
-            &target,
-            receiver,
-            vec![owner, property, value],
-        )
+        let dispatch_receiver = self.delegate_dispatch_receiver(origin, span, setter)?;
+        Ok(FirExprKind::LocalDelegateAccess {
+            plan: delegate.declaration,
+            delegate: receiver,
+            dispatch_receiver,
+            value: Some(value),
+        })
     }
 
     pub(super) fn delegated_inc_dec_expression(
@@ -331,10 +359,13 @@ impl BodyFirChecker<'_> {
         })
     }
 
+    /// `a++` or `++a` as a statement on a local delegated property, as kotlinc lowers it: the
+    /// expression form with its value discarded. A postfix update holds the value it read in a
+    /// temporary; a prefix one reads the property again after writing it.
     pub(super) fn delegated_inc_dec_statement(
         &mut self,
         statement: StmtId,
-        decrement: bool,
+        (decrement, prefix): (bool, bool),
         depth: u32,
         delegate: LocalDelegateBinding,
         origin: OriginId,
@@ -353,14 +384,54 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(StatementForm::IncDec),
                 )
             })?;
-        let read = self.delegate_storage_read(origin, depth, &delegate)?;
+        let property_ty = delegate.property_ty;
+        let read = |checker: &mut Self| -> Result<FirExprId, BodyCheckFailure> {
+            let receiver = checker.delegate_storage_read(origin, depth, &delegate)?;
+            let dispatch_receiver =
+                checker.delegate_dispatch_receiver(origin, span, &delegate.get_value)?;
+            let kind = FirExprKind::LocalDelegateAccess {
+                plan: delegate.declaration,
+                delegate: receiver,
+                dispatch_receiver,
+                value: None,
+            };
+            Ok(checker.body.add_expr(FirExpr {
+                origin,
+                ty: property_ty,
+                kind,
+            }))
+        };
+        let mut statements = Vec::new();
+        let operand = if prefix {
+            read(self)?
+        } else {
+            let temporary = self.allocate_local();
+            let initializer = read(self)?;
+            statements.push(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Local {
+                    target: temporary,
+                    ty: property_ty,
+                    mutable: false,
+                    lateinit: false,
+                    deferred: false,
+                    initializer: Some(initializer),
+                    conversion: None,
+                },
+            }));
+            self.body.add_expr(FirExpr {
+                origin,
+                ty: property_ty,
+                kind: FirExprKind::ValueRead(temporary),
+            })
+        };
         let convention = if decrement { "dec" } else { "inc" };
         let updated_kind = if self
             .info
             .resolved_stmt_operator_call(statement, convention)
             .is_some()
         {
-            self.zero_arg_statement_operator_call_on_value(statement, convention, read)?
+            self.zero_arg_statement_operator_call_on_value(statement, convention, operand)?
         } else {
             FirExprKind::Unary {
                 operation: if decrement {
@@ -368,7 +439,7 @@ impl BodyFirChecker<'_> {
                 } else {
                     FirUnaryOperation::Increment
                 },
-                operand: read,
+                operand,
             }
         };
         let updated = self.body.add_expr(FirExpr {
@@ -376,11 +447,32 @@ impl BodyFirChecker<'_> {
             ty: self.resolved_type(concrete_span, resolution.updated_ty)?,
             kind: updated_kind,
         });
-        let write_kind = self.delegated_write_value(origin, span, depth, delegate, updated)?;
-        Ok(self.body.add_expr(FirExpr {
+        let write_kind =
+            self.delegated_write_value(origin, span, depth, delegate.clone(), updated)?;
+        let write = self.body.add_expr(FirExpr {
             origin,
             ty: ResolvedTy::new(Ty::Unit).expect("Unit is publishable FIR"),
             kind: write_kind,
+        });
+        statements.push(self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(write),
+        }));
+        let (ty, result) = if prefix {
+            (property_ty, Some(read(self)?))
+        } else {
+            (
+                ResolvedTy::new(Ty::Unit).expect("Unit is publishable FIR"),
+                None,
+            )
+        };
+        Ok(self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::Block {
+                statements: statements.into_boxed_slice(),
+                result,
+            },
         }))
     }
 
@@ -443,8 +535,8 @@ impl BodyFirChecker<'_> {
         &mut self,
         cause: OriginId,
         declaration: LocalDelegatedPropertyId,
-        name: &str,
-        property_type: ResolvedTy,
+        (name, property_type): (&str, ResolvedTy),
+        (mutable, ordinal): (bool, u32),
     ) -> FirExprId {
         let origin = self
             .origins
@@ -460,6 +552,8 @@ impl BodyFirChecker<'_> {
                 name: name.into(),
                 property_type,
                 declaration,
+                mutable,
+                ordinal,
             },
         })
     }
@@ -476,18 +570,17 @@ impl BodyFirChecker<'_> {
             value: delegate,
             conversion: None,
         };
-        let dispatch_receiver = if let Some(selected) = &convention.dispatch_receiver {
-            Some(self.member_extension_dispatch_receiver(origin, span, selected)?)
-        } else if !convention.extension {
-            Some(delegate_receiver)
-        } else {
-            None
+        let dispatch_receiver = match &convention.dispatch_receiver {
+            Some(selected) => {
+                Some(self.member_extension_dispatch_receiver(origin, span, selected)?)
+            }
+            None if !convention.extension => Some(delegate_receiver),
+            None => None,
         };
-        let extension_receiver = convention.extension.then_some(delegate_receiver);
         Ok(FirExprKind::Call(FirCall {
             target: convention.target.clone(),
             dispatch_receiver,
-            extension_receiver,
+            extension_receiver: convention.extension.then_some(delegate_receiver),
             parameter_types: convention.parameters.clone(),
             arguments: arguments
                 .into_iter()
@@ -501,6 +594,20 @@ impl BodyFirChecker<'_> {
                 .into_boxed_slice(),
             substitutions: Box::new([]),
         }))
+    }
+
+    fn delegate_dispatch_receiver(
+        &mut self,
+        origin: OriginId,
+        span: Option<Span>,
+        convention: &FirDelegateCall,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        match convention.dispatch_receiver.as_ref() {
+            Some(FirDelegateDispatchReceiver::Singleton { .. }) | None => Ok(None),
+            Some(selected) => self
+                .member_extension_dispatch_receiver(origin, span, selected)
+                .map(Some),
+        }
     }
 
     fn member_extension_dispatch_receiver(

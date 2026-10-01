@@ -1081,6 +1081,7 @@ impl BodyLowering<'_> {
             body.local_callable()
                 .ok_or(FirLoweringFailure::MissingBodyLocalCallable(body.owner()))?,
         );
+        nested.prepare_local_delegate_plans()?;
         nested.prepare_local_functions()?;
         nested.realize_local_functions()?;
         let mut defaults = vec![None; local_function_parameters(body).len()];

@@ -45,7 +45,6 @@ coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 delegatedProperty/getDelegateWithoutReflection.kt
-delegatedProperty/local/localDelegatedPropertyCall.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt

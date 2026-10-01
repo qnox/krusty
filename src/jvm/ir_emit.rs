@@ -19,9 +19,11 @@ use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
     type_descriptor,
 };
+use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use companion_field::{add_companion_field, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 
 mod access_bridges;
@@ -46,6 +48,7 @@ mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+mod companion_field;
 mod copied_code;
 mod coroutine_machine;
 mod debug_lines;
@@ -1177,46 +1180,6 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
 }
 
-fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    cw.add_field(
-        0x0019,
-        companion.nested_segment_ref(),
-        &format!("L{};", companion.render()),
-    );
-}
-
-fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    let companion_name = companion.render();
-    let descriptor = format!("L{companion_name};");
-    // An INTERFACE's companion self-hosts its singleton (`static final $$INSTANCE`, built in the
-    // companion's own `<clinit>`); the interface's `Companion` field merely aliases it.
-    if is_jvm_interface(class) {
-        let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
-        code.getstatic(instance, 1);
-        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-        code.putstatic(field, 1);
-        return;
-    }
-    let classifier = cw.class_ref(&companion_name);
-    code.new_obj(classifier);
-    code.dup();
-    code.aconst_null();
-    let constructor = cw.methodref(
-        &companion_name,
-        "<init>",
-        "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-    );
-    code.invokespecial(constructor, 1, 0);
-    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-    code.putstatic(field, 1);
-}
-
 /// Emit the companion/static surface shared by declarations that are JVM interfaces: Kotlin
 /// interfaces and annotation classes. Common IR keeps those source kinds distinct, but both use
 /// interface field constraints and the companion's self-hosted `$$INSTANCE` realization.
@@ -1228,6 +1191,7 @@ fn emit_jvm_interface_companion_surface(
     cw: &mut ClassWriter,
 ) {
     let fq_name = c.fq_name();
+    delegated_property_array::declare_in_interface(env, c.fq_name, cw);
 
     let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
@@ -1236,7 +1200,8 @@ fn emit_jvm_interface_companion_surface(
         .filter(|(_, s)| s.owner_matches(&fq_name))
         .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
-    if c.companion_class.is_some() || !clinit_statics.is_empty() {
+    let array = delegated_property_array::exists(env, c.fq_name);
+    if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
         let mut emitter = Emitter::new(
@@ -1250,6 +1215,7 @@ fn emit_jvm_interface_companion_surface(
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
         let mut clinit = CodeBuilder::new(0);
+        emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
         for &(static_index, s, init) in &clinit_statics {
@@ -1788,6 +1754,7 @@ fn emit_pass(
                 .filter_map(|(expression, value)| match value {
                     IrExpr::Checked(_)
                     | IrExpr::PluginPlaceholder { .. }
+                    | IrExpr::LocalDelegateAccess(_)
                     | IrExpr::Call {
                         callee: Callee::Module { .. } | Callee::External { .. },
                         ..
@@ -2387,6 +2354,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
         // A plugin placeholder that reached emit means its owning plugin didn't run (or couldn't
         // specialize it) — decline the file rather than miscompile (the node has no JVM lowering).
         IrExpr::PluginPlaceholder { .. } => false,
+        IrExpr::LocalDelegateAccess(_) => false,
         _ => true,
     })
 }
@@ -3094,7 +3062,8 @@ fn emit_class(
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && (c.is_anonymous_object
-            || build_class_metadata(ir, env.override_results, c, opts).is_some());
+            || build_class_metadata(ir, env.override_results, c, opts, env.local_delegated())
+                .is_some());
     let pool_seed = || PlainClassPoolSeed {
         ir,
         class: c,
@@ -3800,7 +3769,7 @@ fn emit_class(
     cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
@@ -4070,7 +4039,7 @@ fn emit_annotation_class(
     cw.set_class_annotations(&user_annotations);
     cw.set_runtime_annotations(&mirrors);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4423,7 +4392,7 @@ fn emit_interface_class(
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
@@ -5170,7 +5139,7 @@ fn emit_enum_class(
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     let class_metadata = opts
         .emit_class_metadata
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if class_metadata.is_some() {
         attach_synth_debug_tables(
@@ -11851,6 +11820,7 @@ mod invariant_tests {
             &crate::jvm::override_results::OverrideResults::default(),
             &ir.classes[outer_id as usize],
             &EmitOptions::default(),
+            &LocalDelegatedProperties::default(),
         )
         .expect("plain source class metadata");
         assert!(metadata.d2.iter().any(|entry| entry == "Node2"));

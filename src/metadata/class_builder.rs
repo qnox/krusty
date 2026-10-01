@@ -11,6 +11,9 @@
 //! String table: a class id uses operation `DESC_TO_CLASS_ID` (Record.f3=2) over `Lpkg/Name;`;
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
+use crate::metadata::local_properties::{
+    local_property_pb, LocalPropertyMeta, LOCAL_VARIABLE_FIELD,
+};
 use crate::metadata::type_encoder::{
     encode_annotation, encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
     semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
@@ -665,6 +668,8 @@ pub struct ClassTail<'a> {
     pub enum_entry_bodies: &'a std::collections::HashSet<TypeName>,
     /// Whether the class is an `enum class`, whose implicit `Enum<E>` supertype metadata omits.
     pub is_enum: bool,
+    /// The class's local delegated properties, in `<v#N>` order.
+    pub local_properties: &'a [LocalPropertyMeta],
 }
 
 static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeName>> =
@@ -704,6 +709,7 @@ impl Default for ClassTail<'_> {
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
             enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
             is_enum: false,
+            local_properties: &[],
         }
     }
 }
@@ -1453,6 +1459,12 @@ pub fn build_class(
     // The module name (f101) interns after the sealed ids — kotlinc places it after every
     // structural string.
     let module_idx = tail.module_name.map(|m| st.local(m));
+    // Local delegated properties (f102) intern next, before the annotations.
+    let local_msgs: Vec<Pb> = tail
+        .local_properties
+        .iter()
+        .map(|property| local_property_pb(&mut st, property, &class_type_parameters))
+        .collect();
     // Class.annotation = f25. kotlinc interns the annotation strings LAST of all — after nested +
     // companion names, sealed subclass ids, and the module name (measured on 2.4.10: an annotated
     // class under `-module-name` puts the module string BEFORE the annotation descriptor) — even
@@ -1529,6 +1541,9 @@ pub fn build_class(
     // Extensions are written in ASCENDING field number, like every other field: 101 before 104.
     if let Some(mi) = module_idx {
         class.field_varint(101, mi as u64); // JvmProtoBuf.classModuleName = 101
+    }
+    for local in &local_msgs {
+        class.repeated_message(LOCAL_VARIABLE_FIELD, local); // JvmProtoBuf.classLocalVariable
     }
     if let Some(v) = tail.jvm_class_flags {
         class.field_varint(104, v); // JvmProtoBuf.classFlags = 104 (interfaces carry 3)

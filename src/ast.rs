@@ -1478,6 +1478,15 @@ pub struct LiftingSite {
     pub path: Vec<LiftingStep>,
 }
 
+/// A local delegated property's place in the callables and references kotlinc generates for it:
+/// the lifting sites of its accessors, and its ordinal among its lexical class's local delegated
+/// properties, which names its reflected property `<v#N>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalDelegateProvenance {
+    pub accessors: Vec<LiftingSite>,
+    pub ordinal: u32,
+}
+
 /// One enclosing local callable of a [`LiftingSite`]: its source name (`None` for a lambda) and its
 /// position in the sequence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1733,8 +1742,8 @@ pub struct File {
     pub lambda_lifting_sites: std::collections::HashMap<u32, LiftingSite>,
     /// Lifting provenance of each local function declaration, by statement id.
     pub local_function_lifting_sites: std::collections::HashMap<StmtId, LiftingSite>,
-    /// Lifting provenance of the accessors of each local delegated property, by statement id.
-    pub local_delegate_lifting_sites: std::collections::HashMap<StmtId, Vec<LiftingSite>>,
+    /// Generation provenance of each local delegated property, by statement id.
+    pub local_delegates: std::collections::HashMap<StmtId, LocalDelegateProvenance>,
     /// Declared receiver type of an anonymous extension function (`fun R.(x: A) { … }`), keyed by
     /// the desugared lambda's `ExprId.0`.
     pub anon_fun_receivers: std::collections::HashMap<u32, TypeRef>,
@@ -1926,7 +1935,7 @@ impl File {
         self.generated_class_sequence_starts = Default::default();
         self.lambda_lifting_sites = Default::default();
         self.local_function_lifting_sites = Default::default();
-        self.local_delegate_lifting_sites = Default::default();
+        self.local_delegates = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();

@@ -894,6 +894,8 @@ impl BodyFirChecker<'_> {
                 capture.capture_dependency.or(Some(field_identity))
             };
             let mut ty = self.resolved_type(span, capture.ty)?;
+            // A captured delegated property is its delegate's variable, named as such.
+            let mut name = capture.name.clone();
             let source = match capture.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
                     let delegate = self
@@ -905,6 +907,7 @@ impl BodyFirChecker<'_> {
                             self.failure(Some(span), BodyCheckFailureKind::UnknownLocal)
                         })?;
                         ty = storage.ty;
+                        name = delegate.storage_name.to_string();
                         let source = if depth == u32::MAX {
                             FirLocalClassCaptureSource::Value(storage.value)
                         } else {
@@ -1178,7 +1181,7 @@ impl BodyFirChecker<'_> {
             };
             checked.push(FirLocalClassCapture {
                 origin,
-                name: capture.name.clone().into_boxed_str(),
+                name: name.into_boxed_str(),
                 ty,
                 shared_cell: capture.shared_cell,
                 capture_identity,

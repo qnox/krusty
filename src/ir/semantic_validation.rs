@@ -291,6 +291,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::LocalPropertyReference(reference) => {
             reject("local property reference", reference.property_type)
         }
+        IrExpr::LocalDelegateAccess(_) => Ok(()),
         IrExpr::Call { callee, .. } => validate_callee(callee),
         IrExpr::PluginPlaceholder { types, .. } => {
             reject_all("plugin operation type", types.iter().copied())

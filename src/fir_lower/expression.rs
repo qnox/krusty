@@ -421,13 +421,37 @@ impl BodyLowering<'_> {
                 name,
                 property_type,
                 declaration,
-            } => self.ir.add_expr(IrExpr::LocalPropertyReference(
-                crate::ir::IrLocalPropertyReference {
-                    name: name.clone(),
-                    property_type: property_type.get(),
-                    declaration: *declaration,
-                },
-            )),
+                mutable,
+                ordinal,
+            } => {
+                let reference = self.local_property_reference(
+                    *declaration,
+                    (name, property_type.get()),
+                    (*mutable, *ordinal),
+                )?;
+                self.ir.add_expr(IrExpr::LocalPropertyReference(reference))
+            }
+            FirExprKind::LocalDelegateAccess {
+                plan,
+                delegate,
+                dispatch_receiver,
+                value,
+            } => {
+                let plan = self.ir.local_delegate_plan_ids.get(plan).copied().ok_or(
+                    FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()),
+                )?;
+                let delegate = self.expression(*delegate)?;
+                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let value = value.map(|value| self.expression(value)).transpose()?;
+                self.ir.add_expr(IrExpr::LocalDelegateAccess(
+                    crate::ir::IrLocalDelegateAccess {
+                        plan,
+                        delegate,
+                        dispatch_receiver,
+                        value,
+                    },
+                ))
+            }
             FirExprKind::PropertyReference {
                 target,
                 function_type,
@@ -591,21 +615,24 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::Increment | FirUnaryOperation::Decrement => {
+                        // kotlinc's `inc`/`dec` intrinsic adds a signed delta: `dec` is `+ -1`.
                         let result = expression.ty.get();
-                        let one = self.ir.add_expr(IrExpr::Const(match result.non_null() {
-                            crate::types::Ty::Long | crate::types::Ty::ULong => IrConst::Long(1),
-                            crate::types::Ty::Float => IrConst::Float(1.0),
-                            crate::types::Ty::Double => IrConst::Double(1.0),
-                            _ => IrConst::Int(1),
+                        let delta: i8 = match operation {
+                            FirUnaryOperation::Increment => 1,
+                            _ => -1,
+                        };
+                        let delta = self.ir.add_expr(IrExpr::Const(match result.non_null() {
+                            crate::types::Ty::Long | crate::types::Ty::ULong => {
+                                IrConst::Long(delta.into())
+                            }
+                            crate::types::Ty::Float => IrConst::Float(delta.into()),
+                            crate::types::Ty::Double => IrConst::Double(delta.into()),
+                            _ => IrConst::Int(delta.into()),
                         }));
                         let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if *operation == FirUnaryOperation::Increment {
-                                IrBinOp::Add
-                            } else {
-                                IrBinOp::Sub
-                            },
+                            op: IrBinOp::Add,
                             lhs: operand,
-                            rhs: one,
+                            rhs: delta,
                         });
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,

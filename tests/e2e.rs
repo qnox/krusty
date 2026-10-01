@@ -1181,6 +1181,10 @@ mod local_class_nullability_e2e;
 mod local_class_scope_e2e;
 #[path = "local_class_scoping_e2e.rs"]
 mod local_class_scoping_e2e;
+#[path = "local_delegated_accessors_e2e.rs"]
+mod local_delegated_accessors_e2e;
+#[path = "local_delegated_property_references_e2e.rs"]
+mod local_delegated_property_references_e2e;
 #[path = "local_fun_default_args_e2e.rs"]
 mod local_fun_default_args_e2e;
 #[path = "local_fun_overload_e2e.rs"]

@@ -8973,6 +8973,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receivers — cannot share that field. The first keeps `name$delegate` and each later one takes
   the next suffix, `name$delegate$1`, `name$delegate$2`, in declaration order, including when the
   delegate types differ. (`tests/extension_delegate_fields_e2e.rs`.)
+- **Local delegated properties (kotlinc's `PropertyReferenceLowering` and local accessors).** A
+  local `val x by d` keeps its `KProperty` in its lexical class's `$$delegatedProperties` (a
+  top-level function's in its file facade, flagged `1`), in source order among the class's members,
+  with signature `<v#N>`: N counts every local delegated property of that class in source order,
+  lambdas included, while a local class or anonymous object numbers its own. The checker builds the
+  selected getter (and a `var`'s setter) as a target-neutral access plan. The JVM realizes it as a
+  lifted local function, `<container>$lambda$N`, private static, taking the delegate (and a setter's
+  value). A member-extension operator takes the enclosing instance first, named `this$0`, and the
+  delegate local is `$x$delegate`:
+  it is emitted even when nothing reads the property, and every read or write calls it. A lambda captures the delegate; a local class or object keeps it in a
+  `$x$delegate` field and reaches the accessor through `access$`. A statement `x++` keeps the value
+  it read in a temporary, and `++x` reads the property again after writing it; `dec` adds `-1`. An
+  inline operator that never reads the property gets `null` and no slot but still takes an N. Kotlin
+  metadata lists the class's or facade's local delegated properties (JvmProtoBuf field 102) in `<v#N>`
+  order. A generic local property carries its own metadata copies of the enclosing type parameters,
+  without suppressing either it or non-generic siblings in the same container.
+  (`tests/local_delegated_property_references_e2e.rs`, `tests/local_delegated_accessors_e2e.rs`.)
 
 - **A reference to an array's own member reflects the JVM array class.** The array classifiers
   (`IntArray`, `Array<T>`, ...) have no JVM class, and their `get`/`set`/`size` declarations have no

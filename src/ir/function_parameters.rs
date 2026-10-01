@@ -88,6 +88,11 @@ pub enum IrGeneratedParameterRole {
     InterfaceDelegationValue {
         ordinal: u32,
     },
+    /// Stored delegate operand of a target-generated local delegated-property accessor.
+    LocalDelegateStorage,
+    /// Enclosing instance a member-extension local delegated accessor receives ahead of the
+    /// delegate. The JVM spells it `this$0`.
+    LocalDelegateDispatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

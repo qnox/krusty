@@ -1092,6 +1092,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         IrExpr::LocalPropertyReference(reference) => {
             specialize_ty(&mut reference.property_type, bindings)
         }
+        IrExpr::LocalDelegateAccess(_) => {}
         IrExpr::Call { callee, .. } => specialize_callee(callee, bindings),
         IrExpr::TypeOp {
             op, type_operand, ..

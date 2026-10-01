@@ -1773,7 +1773,7 @@ impl BodyLowering<'_> {
                         {
                             inline_lambdas[parameter] = Some(value);
                         }
-                        let value = if preserve {
+                        let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
                         } else if direct {
                             self.direct_call_operand(value, parameter_ty)

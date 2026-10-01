@@ -1547,8 +1547,7 @@ fn record_local_class_name_provenance_with_counters(
     file.lambda_lifting_sites.extend(lifted.lambdas);
     file.local_function_lifting_sites
         .extend(lifted.local_functions);
-    file.local_delegate_lifting_sites
-        .extend(lifted.local_delegates);
+    file.local_delegates.extend(lifted.local_delegates);
     let invented = local_class_names::invent(file, &mut counters.classes);
     file.local_class_name_provenance.extend(invented.classes);
     file.anonymous_object_enclosing_functions
