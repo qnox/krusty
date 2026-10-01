@@ -10,6 +10,9 @@ use super::checked_arguments::{
 };
 use super::{lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext};
 
+#[cfg(test)]
+mod enclosing_superclass_capture_tests;
+
 pub(super) fn predeclare_constructors(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,

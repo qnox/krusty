@@ -915,5 +915,3 @@ pub(crate) mod tests;
 mod callable_scope_tests;
 #[cfg(test)]
 mod constructor_capture_tests;
-#[cfg(test)]
-mod enclosing_superclass_capture_tests;
