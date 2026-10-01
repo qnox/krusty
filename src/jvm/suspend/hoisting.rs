@@ -923,11 +923,13 @@ fn hoist_expr(
         IrExpr::KClassLiteral {
             classifier,
             value: Some(value),
+            type_argument,
         } => {
             let value = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::KClassLiteral {
                 classifier,
                 value: Some(value),
+                type_argument,
             };
             e
         }

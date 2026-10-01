@@ -1,9 +1,34 @@
 //! Class literals `T::class` and `expr::class`, checked against JVM runtime behavior.
 
 use super::common;
+use krusty::jvm::classreader::parse_class;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
+}
+
+/// Assert the exact natural JVM declarations of class-literal functions on both compilers. The
+/// instruction helper deliberately selects by name only, so this separately pins the ABI it reads.
+fn assert_kclass_method_declarations(pair: &common::ModuleClassPair, names: &[&str]) {
+    let expected = names
+        .iter()
+        .map(|name| ((*name).to_string(), "()Lkotlin/reflect/KClass;".to_string()))
+        .collect::<Vec<_>>();
+    let declarations = |bytes: &[u8]| {
+        parse_class(bytes)
+            .expect("a parseable class-literal fixture")
+            .methods
+            .into_iter()
+            .filter(|method| names.contains(&method.name.as_str()))
+            .map(|method| (method.name, method.descriptor))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        declarations(&pair.kotlinc),
+        expected,
+        "kotlinc declarations"
+    );
+    assert_eq!(declarations(&pair.krusty), expected, "krusty declarations");
 }
 
 fn assert_array_literal_runs(tag: &str, source: &str) {
@@ -35,8 +60,9 @@ fun box(): String {\n\
 
 #[test]
 fn primitive_class_literals_bound_and_unbound_agree() {
-    // A primitive literal is modeled by its boxed wrapper class: `Int::class` (unbound) and `x::class`
-    // (bound, boxed-then-getClass) compare equal, as do distinct primitives unequal.
+    // An unbound `Int::class` wraps the primitive `int` class and a bound `x::class` the boxed
+    // `Integer` its value boxes to; `KClass` equality compares their object types, so the two agree
+    // and distinct primitives do not.
     const SRC: &str = "fun box(): String {\n\
     val i = 42\n\
     val b = true\n\
@@ -199,4 +225,90 @@ fn unresolved_class_literal_receiver_adds_no_unsupported_cascade() {
             "unresolved reference 'SecondMissing'.".to_string(),
         ],
     );
+}
+
+/// kotlinc loads a primitive class literal's class from its wrapper's `TYPE` field
+/// (`getstatic Integer.TYPE`), the primitive's own class, before wrapping it into a `KClass`. A
+/// reified type parameter an inlined call substitutes by a primitive still loads the boxed class
+/// (`ldc Integer`), as kotlinc's reified inliner does, and so does any other classifier.
+#[test]
+fn a_primitive_class_literal_loads_the_primitive_class() {
+    let source = "class Plain\n\
+        inline fun <reified T : Any> token() = T::class\n\
+        fun number() = Int::class\n\
+        fun wide() = Long::class\n\
+        fun flag() = Boolean::class\n\
+        fun letter() = Char::class\n\
+        fun plain() = Plain::class\n\
+        fun substituted() = token<Int>()\n";
+    let pair = common::ModuleClassPair::compile(&[("Literals.kt", source)], "LiteralsKt");
+    assert_kclass_method_declarations(
+        &pair,
+        &[
+            "token",
+            "number",
+            "wide",
+            "flag",
+            "letter",
+            "plain",
+            "substituted",
+        ],
+    );
+    for method in ["number", "wide", "flag", "letter", "plain"] {
+        let (kotlinc, krusty) = pair.method_code("LiteralsKt", method);
+        assert_eq!(krusty, kotlinc, "{method}");
+    }
+    // kotlinc also stores the inlined function's `$i$f$token` marker (`iconst_0; istore_0`) first
+    // and leaves a `nop` where the inlined body ends; every other instruction must match.
+    let (kotlinc, krusty) = pair.method_code("LiteralsKt", "substituted");
+    let body = |code: &str| {
+        let mut instructions = code
+            .lines()
+            .map(|line| {
+                line.split_once(": ")
+                    .map_or(line, |(_, rest)| rest)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|instruction| instruction != "nop")
+            .collect::<Vec<_>>();
+        if instructions.starts_with(&["iconst_0".to_string(), "istore_0".to_string()]) {
+            instructions.drain(..2);
+        }
+        instructions
+    };
+    assert_eq!(body(&krusty), body(&kotlinc), "substituted");
+    assert_eq!(body(&kotlinc).len(), 3, "substituted");
+}
+
+/// A repository class spelled like a primitive is an ordinary class: its literal loads the class
+/// itself, and so does an unsigned value class, which has no primitive class.
+#[test]
+fn a_classifier_spelled_like_a_primitive_loads_its_own_class() {
+    let shadow = "package shadow\nclass Int\n";
+    let source = "import shadow.Int\n\
+        fun shadowed() = Int::class\n\
+        fun unsigned() = UInt::class\n";
+    let pair = common::ModuleClassPair::compile(
+        &[("Shadow.kt", shadow), ("Shadowed.kt", source)],
+        "ShadowedKt",
+    );
+    assert_kclass_method_declarations(&pair, &["shadowed", "unsigned"]);
+    for method in ["shadowed", "unsigned"] {
+        let (kotlinc, krusty) = pair.method_code("ShadowedKt", method);
+        assert_eq!(krusty, kotlinc, "{method}");
+    }
+}
+
+/// At run time the unbound literal's Java class is the primitive class itself.
+#[test]
+fn a_primitive_class_literal_is_the_primitive_class_at_run_time() {
+    const SRC: &str = "class Plain\n\
+fun box(): String {\n\
+    if (!Int::class.java.isPrimitive) return \"Fail 1\"\n\
+    if (Int::class.java.name != \"int\") return \"Fail 2\"\n\
+    if (Plain::class.java.isPrimitive) return \"Fail 3\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("primitive class literal at run time"), "OK");
 }

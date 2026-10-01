@@ -106,9 +106,11 @@ impl BodyLowering<'_> {
         value: Option<crate::fir::FirExprId>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let value = value.map(|value| self.expression(value)).transpose()?;
+        let classifier = classifier.map(crate::fir::ResolvedTy::get);
         Ok(self.ir.add_expr(IrExpr::KClassLiteral {
-            classifier: classifier.map(crate::fir::ResolvedTy::get),
+            classifier,
             value,
+            type_argument: classifier.is_some_and(|ty| ty.ty_param_name().is_some()),
         }))
     }
 
