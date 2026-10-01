@@ -435,7 +435,15 @@ impl Checker<'_> {
         let Some(narrowed) = self.proven_narrowed_ty(scope, Some(stable_ty), ty) else {
             return;
         };
-        self.apply_narrowing_unchecked(scope, &path, narrowed);
+        // Replace the stable type only when the cast refines it. `x: R as Any` and
+        // `a as MutableList<Any?>` keep the original type; `a: Any as String` narrows.
+        // An unrelated cast written as its own statement still reaches later reads
+        // through the block's cast walk.
+        if self.receiver_is_assignable(narrowed, stable_ty)
+            && !self.receiver_is_assignable(stable_ty, narrowed)
+        {
+            self.apply_narrowing_unchecked(scope, &path, narrowed);
+        }
     }
 
     /// Check `receiver` once, in source order, and return the scope arguments of this call are
@@ -461,9 +469,10 @@ impl Checker<'_> {
             && !self.file.anon_fun_lambdas.contains(&callee.0)
     }
 
-    /// Invoke an arbitrary callee (`make()(x)`, `(a as String)(a)`). A postponed lambda is typed
-    /// once, after its argument probes. Every other callee is typed once before its arguments, and
-    /// those arguments see the flow that check produced.
+    /// Invoke an arbitrary callee (`make()(x)`, `(a as String)(a)`). A postponed lambda, and a
+    /// callee whose value is a callable reference under `when`/`if`/`try`/`?:`, is typed once
+    /// after its argument probes: those probes are the function shape. Every other callee is
+    /// typed once before its arguments, and those arguments see the flow that check produced.
     pub(super) fn check_arbitrary_callee(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -480,18 +489,47 @@ impl Checker<'_> {
             span,
             expected,
         };
-        if self.postponed_lambda_callee(callee) {
-            return self.invoke_postponed_lambda_callee(scope, site);
+        if self.postponed_lambda_callee(callee) || self.adapts_to_expected_function(callee) {
+            return self.invoke_probed_callee(scope, site);
         }
         let (callee_ty, argument_scope) = self.check_receiver_before_arguments(scope, callee);
         self.finish_arbitrary_invoke(&argument_scope, site, callee_ty, None)
     }
 
-    fn invoke_postponed_lambda_callee(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        site: ArbitraryInvoke<'_>,
-    ) -> Ty {
+    /// The callee's type is a callable reference, or a control-flow join of one. Its shape comes
+    /// from the call's expected function type, so the arguments are probed first and the callee
+    /// is still checked only once.
+    fn adapts_to_expected_function(&self, expression: ExprId) -> bool {
+        match self.file.expr(expression).clone() {
+            Expr::CallableRef { .. } => true,
+            Expr::When { arms, .. } => arms
+                .iter()
+                .any(|arm| self.adapts_to_expected_function(arm.body)),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.adapts_to_expected_function(then_branch)
+                    || else_branch.is_some_and(|branch| self.adapts_to_expected_function(branch))
+            }
+            Expr::Try { body, catches, .. } => {
+                self.adapts_to_expected_function(body)
+                    || catches
+                        .iter()
+                        .any(|clause| self.adapts_to_expected_function(clause.body))
+            }
+            Expr::Elvis { lhs, rhs } => {
+                self.adapts_to_expected_function(lhs) || self.adapts_to_expected_function(rhs)
+            }
+            Expr::Block { trailing, .. } => {
+                trailing.is_some_and(|trailing| self.adapts_to_expected_function(trailing))
+            }
+            _ => false,
+        }
+    }
+
+    fn invoke_probed_callee(&mut self, scope: &CheckerScope<'_>, site: ArbitraryInvoke<'_>) -> Ty {
         let probes = site
             .args
             .iter()

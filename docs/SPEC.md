@@ -2747,8 +2747,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or short-circuit receiver publishes a fact only when every completing path proved it:
   `(if (c) a as String else a)(a)` stays `Any.invoke(Any)`, and `(c && (a as String).isNotEmpty())(a)`
   does not see the cast, while `((a as String).isNotEmpty() && c)(a)` does. A cast written in an
-  argument does not flow backward onto the receiver. The callee is checked once; a postponed lambda
-  callee is the explicit exception whose argument probes supply its shape.
+  argument does not flow backward onto the receiver. The callee is checked once. A postponed lambda,
+  and a callee whose value is a callable reference reached through `when`/`if`/`try`/`?:`, are the
+  explicit exceptions whose argument probes supply the function shape; that callee is still not
+  checked again. A hard cast narrows a stable operand only when the target refines that operand's
+  type (`a: Any as String`); `x: R as Any` and an unrelated cast leave the original type in place.
   `tests/invoke_receiver_smartcast_e2e.rs`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced

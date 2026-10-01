@@ -163,6 +163,74 @@ fn an_invoke_receiver_smart_casts_following_arguments() {
 }
 
 #[test]
+fn a_generic_cast_to_any_keeps_the_type_parameter() {
+    const SOURCE: &str = r#"
+inline fun <R, T> foo(x: R, y: R, block: (R) -> T): T {
+    val a = x is Number
+    val b = x is Any
+    val seen = x as Any
+    return if (a && b) block(x) else block(y)
+}
+
+inline fun <R, T> bar(x: R, y: R, block: (R) -> T): T {
+    val seen = x as Object
+    return block(x)
+}
+
+fun box(): String {
+    if (foo(1, 2) { x -> x as Int } != 1) return "fail int"
+    if (foo("abc", "def") { x -> x as String } != "def") return "fail string"
+    if (bar(1, 2) { x -> x as Int } != 1) return "fail object"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SOURCE, "GenericCastKeepsTypeParameter");
+}
+
+#[test]
+fn a_when_of_callable_references_is_invoked() {
+    const SOURCE: &str = r#"
+fun decodeValue(value: String): Any {
+    return when (value[0]) {
+        'F' -> String::toFloat
+        'B' -> String::toBoolean
+        'I' -> String::toInt
+        else -> throw IllegalArgumentException("bad")
+    }(value.substring(2))
+}
+
+fun box(): String {
+    if (decodeValue("I:1") != 1) return "fail int"
+    if (decodeValue("B:true") != true) return "fail bool"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SOURCE, "WhenOfCallableReferences");
+}
+
+#[test]
+fn a_supertype_cast_keeps_the_type_parameter() {
+    const SOURCE: &str = r#"
+fun <T> keepAny(x: T): T {
+    val seen: Any = x as Any
+    return if (seen == seen) x else x
+}
+
+fun <T> keepObject(x: T): T {
+    val seen: Object = x as Object
+    return if (seen == seen) x else x
+}
+
+fun box(): String {
+    if (keepAny(1) != 1) return "fail any"
+    if (keepObject("ok") != "ok") return "fail object"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SOURCE, "SupertypeCastKeepsTypeParameter");
+}
+
+#[test]
 fn an_expected_invoke_callee_is_diagnosed_once() {
     const SOURCE: &str = "fun caller(): String {\n    return (unresolved as String)(\"x\")\n}\n";
     let diagnostics = common::front_end_diagnostics(SOURCE, &[], None);
