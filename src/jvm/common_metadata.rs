@@ -304,6 +304,18 @@ mod tests {
     const VALID_MODULE_HEADER: &[u8] = b"\x0a\x15<unpackedExampleKlib>\x3a\x00";
     const VALID_ROOT_FRAGMENT: &[u8] = b"\x0a\x1d\x0a\x04main\x0a\x06kotlin\x0a\x04Unit\x0a\x07main.kt\x12\x0c\x0a\x02\x10\x01\x0a\x06\x08\x00\x10\x02\x18\x00\x1a\x1c\x1a\x07\x10\x00\x38\x00\xe0\x0a\x03\xf2\x01\x04\x0a\x02\x30\x01\xd8\x0a\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\xe0\x0a\x00\xea\x0a\x00";
 
+    fn write_empty_zip(path: &Path) {
+        // A complete empty archive. The tests select this path as kotlin-stdlib and then diagnose
+        // the sibling KLIB; the jar itself is not a class catalog.
+        std::fs::write(
+            path,
+            [
+                0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .expect("write empty classpath archive");
+    }
+
     fn write(root: &Path, entry: &str, contents: &[u8]) {
         let path = root.join(entry);
         std::fs::create_dir_all(path.parent().expect("fixture entry parent"))
@@ -333,7 +345,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).expect("create dependency directory");
         let stdlib = directory.join("kotlin-stdlib.jar");
-        std::fs::write(&stdlib, b"unused by this initialization test").expect("write stdlib path");
+        write_empty_zip(&stdlib);
         let klib = directory.join("kotlin-stdlib-wasm-js.klib");
         std::fs::write(&klib, b"not a zip").expect("write corrupt common KLIB");
 
@@ -516,7 +528,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).expect("create diagnostic fixture directory");
         let stdlib = directory.join("kotlin-stdlib.jar");
-        std::fs::write(&stdlib, b"selected stdlib path").expect("write stdlib path");
+        write_empty_zip(&stdlib);
         let klib = directory.join("kotlin-stdlib-wasm-js.klib");
         configure(&klib);
         let mut diagnostics = DiagSink::new();

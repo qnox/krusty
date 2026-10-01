@@ -5199,26 +5199,11 @@ fn build_jar_packages_dir_visited(
             // declares `Package` members, a multifile facade lists its parts. Record those classes as
             // the package's facades, exactly as `kotlin_module` would have.
             if rel.ends_with(".class") {
-                if let Some(ci) = std::fs::read(&p).ok().and_then(|b| parse_class(&b).ok()) {
-                    let m = &ci.meta;
-                    if !m.package_functions.is_empty()
-                        || !m.package_properties.is_empty()
-                        || !m.type_aliases.is_empty()
-                        || !m.multifile_parts.is_empty()
-                    {
-                        let internal = ci.this_class;
-                        // The DECLARED package, which `@JvmPackageName` divorces from the class
-                        // file's own directory — the same fact `kotlin_module` records for a jar.
-                        let package = ci.declaring_package();
-                        let facade_id = crate::types::insert_type_name_in(&jp.names, internal);
-                        jp.facades.insert(facade_id);
-                        let entry = jp.entry_mut_name(package);
-                        if !entry.facades.contains(&facade_id) {
-                            entry.facades.push(facade_id);
-                        }
+                match std::fs::read(&p) {
+                    Ok(bytes) => {
+                        complete &= catalog_availability::directory_class_is_inventoried(jp, &bytes)
                     }
-                } else {
-                    complete = false;
+                    Err(_) => complete = false,
                 }
             }
         }
