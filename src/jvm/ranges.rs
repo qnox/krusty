@@ -1,11 +1,38 @@
 //! JVM realization of backend-neutral checked range construction.
+//!
+//! Floating-range membership is published with the same `RangesKt` methods this module's
+//! construction contract already names. Later phases read that realization on the selected
+//! callable. A Kotlin declaration with the same shape is not one of those methods.
 
 use std::rc::Rc;
 
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
 use crate::fir::FirRangeOperation;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
-use crate::types::Ty;
+use crate::libraries::{CompilerIntrinsic, LibraryCallable};
+use crate::types::{InternalName, Ty};
+
+/// `RangesKt.rangeTo` and `RangesKt.rangeUntil` for `Double` and `Float`. Identity is the
+/// published facade method's owner and JVM descriptor.
+pub(super) fn catalog_floating_range_membership(
+    callable: &LibraryCallable,
+) -> Option<CompilerIntrinsic> {
+    if !callable.owner.internal_matches("kotlin/ranges/RangesKt") {
+        return None;
+    }
+    matches!(
+        (callable.name.as_str(), callable.descriptor.as_str()),
+        (
+            "rangeTo",
+            "(DD)Lkotlin/ranges/ClosedFloatingPointRange;"
+                | "(FF)Lkotlin/ranges/ClosedFloatingPointRange;"
+        ) | (
+            "rangeUntil",
+            "(DD)Lkotlin/ranges/OpenEndRange;" | "(FF)Lkotlin/ranges/OpenEndRange;"
+        )
+    )
+    .then_some(CompilerIntrinsic::FloatingRangeMembership)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RangeRealizationFailure {
@@ -379,3 +406,91 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
         style: crate::backend::counted_loops::CounterLoopStyle::JavaLike,
         inlining: crate::backend::counted_loops::HeaderInlining::Kotlinc,
     };
+
+#[cfg(test)]
+mod tests {
+    use super::catalog_floating_range_membership;
+    use crate::libraries::{CompilerIntrinsic, LibraryCallable};
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::types::{type_name, InternalName, Ty};
+
+    #[test]
+    fn the_floating_range_catalog_carries_membership() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ))
+        .expect("stdlib provider");
+        let membership = |name: &str, descriptor: &str| {
+            let symbols =
+                libraries.symbols(SymbolNamespace::Package(type_name("kotlin/ranges")), name);
+            let functions = match &symbols.callables {
+                crate::libraries::Callables::Functions(functions)
+                | crate::libraries::Callables::Both { functions, .. } => functions,
+                _ => panic!("{name} is missing from the stdlib catalog"),
+            };
+            let function = functions
+                .overloads
+                .iter()
+                .find(|function| function.callable.descriptor == descriptor)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no {name} {descriptor}; overloads={:?}",
+                        functions
+                            .overloads
+                            .iter()
+                            .map(|function| (
+                                function.callable.owner.render(),
+                                function.callable.descriptor.as_str(),
+                                function.callable.compiler_intrinsic,
+                            ))
+                            .collect::<Vec<_>>()
+                    )
+                });
+            assert!(function
+                .callable
+                .owner
+                .internal_matches("kotlin/ranges/RangesKt"));
+            assert_eq!(
+                function.callable.compiler_intrinsic,
+                Some(CompilerIntrinsic::FloatingRangeMembership)
+            );
+        };
+        membership("rangeTo", "(DD)Lkotlin/ranges/ClosedFloatingPointRange;");
+        membership("rangeTo", "(FF)Lkotlin/ranges/ClosedFloatingPointRange;");
+        membership("rangeUntil", "(DD)Lkotlin/ranges/OpenEndRange;");
+        membership("rangeUntil", "(FF)Lkotlin/ranges/OpenEndRange;");
+
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/ranges")),
+            "rangeTo",
+        );
+        let functions = match &symbols.callables {
+            crate::libraries::Callables::Functions(functions)
+            | crate::libraries::Callables::Both { functions, .. } => functions,
+            _ => panic!("rangeTo missing"),
+        };
+        let comparable = functions
+            .overloads
+            .iter()
+            .find(|function| {
+                function.callable.descriptor
+                    == "(Ljava/lang/Comparable;Ljava/lang/Comparable;)Lkotlin/ranges/ClosedRange;"
+            })
+            .expect("generic rangeTo");
+        assert_eq!(comparable.callable.compiler_intrinsic, None);
+
+        let result = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
+        let twin = LibraryCallable::library(
+            "example/Ranges",
+            "rangeTo",
+            vec![Ty::Double, Ty::Double],
+            result,
+            result,
+            "(DD)Lkotlin/ranges/ClosedFloatingPointRange;",
+        );
+        assert_eq!(catalog_floating_range_membership(&twin), None);
+    }
+}

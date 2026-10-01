@@ -4659,6 +4659,7 @@ impl JvmLibraries {
                     crate::libraries::builtin_top_level_realization::normalized_function_realization(
                         package, name, overload,
                     )
+                    .or_else(|| super::ranges::catalog_floating_range_membership(&overload.callable))
                 {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
                 }
