@@ -8,20 +8,25 @@ use super::common::{
 };
 
 const SRC: &str = r#"
+class Payload(val text: String)
+class Probe
+
+inline fun Probe.read(block: Probe.() -> String): String = block()
+
 interface Test {
     companion object {
-        val x = "O"
-        val y1 = Test.x
-        val y2 = 42.let { x }
+        val x = Payload("O")
+        val y1 = Test.x.text
+        val y2 = Probe().read { x.text }
         val y3: String
         init {
-            fun localFun() = x
+            fun localFun() = x.text
             y3 = localFun()
         }
-        fun method() = x
+        fun method() = x.text
         val y4 = method()
         val anonObject = object {
-            override fun toString() = x
+            override fun toString() = x.text
         }
         val y5 = anonObject.toString()
     }
@@ -29,18 +34,18 @@ interface Test {
 
 annotation class Anno {
     companion object {
-        val x = "K"
-        val y1 = Anno.x
-        val y2 = 42.let { x }
+        val x = Payload("K")
+        val y1 = Anno.x.text
+        val y2 = Probe().read { x.text }
         val y3: String
         init {
-            fun localFun() = x
+            fun localFun() = x.text
             y3 = localFun()
         }
-        fun method() = x
+        fun method() = x.text
         val y4 = method()
         val anonObject = object {
-            override fun toString() = x
+            override fun toString() = x.text
         }
         val y5 = anonObject.toString()
     }
@@ -48,9 +53,9 @@ annotation class Anno {
 
 class Holder {
     companion object {
-        val x = "C"
+        val x = Payload("C")
         val anonObject = object {
-            override fun toString() = x
+            override fun toString() = x.text
         }
         val y = anonObject.toString()
     }
@@ -60,7 +65,7 @@ fun box(): String {
     if (Test.y1 != "O" || Test.y2 != "O" || Test.y3 != "O" || Test.y4 != "O" || Test.y5 != "O") return "Test"
     if (Anno.y1 != "K" || Anno.y2 != "K" || Anno.y3 != "K" || Anno.y4 != "K" || Anno.y5 != "K") return "Anno"
     if (Holder.y != "C") return "Holder"
-    return Test.x + Anno.x
+    return Test.x.text + Anno.x.text
 }
 "#;
 

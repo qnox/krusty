@@ -6960,6 +6960,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
+    self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
     owner: String,
@@ -7094,6 +7096,7 @@ impl<'a> Emitter<'a> {
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             suspended_result_returns: env.suspended_result_returns,
+            self_companion: singleton_instance_load::self_companion(ir, static_owner),
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
@@ -10466,10 +10469,9 @@ impl<'a> Emitter<'a> {
                     ));
                     return;
                 };
-                let (owner, field) = singleton_instance_load::instance_load(
-                    self.ir,
+                let (owner, field) = singleton_instance_load::loaded_instance(
+                    self.self_companion,
                     *classifier,
-                    &self.owner,
                     published,
                 );
                 let owner = owner.render();
@@ -10478,10 +10480,9 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
-                let (owner, field) = singleton_instance_load::instance_load(
-                    self.ir,
+                let (owner, field) = singleton_instance_load::loaded_instance(
+                    self.self_companion,
                     *ty,
-                    &self.owner,
                     singleton_instance_load::PublishedSingleton {
                         owner: *owner,
                         field: field.clone(),

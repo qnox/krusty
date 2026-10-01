@@ -4,7 +4,8 @@
 //! is assigned only after the companion `<clinit>` returns, so the companion and a class declared
 //! in its initializer load `$$INSTANCE`, which that `<clinit>` stores first.
 
-use crate::ir::IrFile;
+use crate::ir::{IrEnclosure, IrFile};
+use crate::jvm::private_static_access::StaticOwner;
 use crate::types::TypeName;
 
 /// The field a resolved singleton publishes for callers outside its own class.
@@ -54,37 +55,25 @@ pub(super) fn published_singleton(
     dependency.map(|(owner, field)| PublishedSingleton { owner, field })
 }
 
-/// The interface companion whose `$$INSTANCE` this emission should load for a self-read.
+/// The interface companion whose `$$INSTANCE` code of `owner` loads for a self-read.
 ///
-/// That is the class being emitted when it is the companion, and the companion that encloses a
-/// class declared in its initializer. An anonymous object there is its own class, but it still
-/// runs before the interface's `Companion` field is assigned.
-pub(super) fn self_companion(ir: &IrFile, emitted_owner: &str) -> Option<TypeName> {
-    let class = ir
-        .classes
-        .iter()
-        .find(|class| class.fq_name_matches(emitted_owner))?;
+/// That is `owner` when it is the companion, and the companion that encloses a class declared in
+/// its initializer. An anonymous object there is its own class, but it still runs before the
+/// interface's `Companion` field is assigned. The emitter caches this once from [`StaticOwner`].
+pub(super) fn self_companion(ir: &IrFile, owner: Option<StaticOwner>) -> Option<TypeName> {
+    let StaticOwner::Class(name) = owner? else {
+        return None;
+    };
+    let class_id = ir.class_id_by_name(name)?;
+    let class = ir.classes.get(class_id as usize)?;
     if super::companion_of_interface(ir, class) {
         return Some(class.fq_name);
     }
-    let crate::ir::IrEnclosure::ClassInitializer(owner) = class.enclosure? else {
+    let IrEnclosure::ClassInitializer(enclosing) = class.enclosure? else {
         return None;
     };
-    let companion = ir.classes.get(owner as usize)?;
+    let companion = ir.classes.get(enclosing as usize)?;
     super::companion_of_interface(ir, companion).then_some(companion.fq_name)
-}
-
-/// The field actually loaded for `singleton`.
-///
-/// A self-read of the companion being emitted, or of the companion whose initializer encloses the
-/// class being emitted, uses `$$INSTANCE`. Every other read uses the published field.
-pub(super) fn instance_load(
-    ir: &IrFile,
-    singleton: TypeName,
-    emitted_owner: &str,
-    published: PublishedSingleton,
-) -> (TypeName, String) {
-    loaded_instance(self_companion(ir, emitted_owner), singleton, published)
 }
 
 pub(super) fn loaded_instance(
@@ -127,6 +116,50 @@ mod tests {
         let (owner, field) = loaded_instance(None, companion, published_interface_field());
         assert_eq!(owner, interface);
         assert_eq!(field, "Companion");
+    }
+
+    #[test]
+    fn an_initializer_object_uses_the_enclosing_interface_companion() {
+        use crate::ir::IrClass;
+        let mut ir = IrFile::default();
+        let interface_name = type_name("Test");
+        let companion_name = type_name("Test$Companion");
+        let mut interface = IrClass::synthetic(interface_name);
+        interface.is_interface = true;
+        interface.companion_class = Some(companion_name);
+        ir.add_class(interface);
+        let mut companion = IrClass::synthetic(companion_name);
+        companion.is_companion = true;
+        let companion_id = ir.add_class(companion);
+        let anonymous_name = type_name("Test$Companion$anonObject$1");
+        let mut anonymous = IrClass::synthetic(anonymous_name);
+        anonymous.enclosure = Some(IrEnclosure::ClassInitializer(companion_id));
+        ir.add_class(anonymous);
+        let mut holder = IrClass::synthetic(type_name("Holder"));
+        holder.companion_class = Some(type_name("Holder$Companion"));
+        ir.add_class(holder);
+        let class_companion = type_name("Holder$Companion");
+        let mut class_companion_class = IrClass::synthetic(class_companion);
+        class_companion_class.is_companion = true;
+        ir.add_class(class_companion_class);
+
+        assert_eq!(
+            self_companion(&ir, Some(StaticOwner::Class(companion_name))),
+            Some(companion_name)
+        );
+        assert_eq!(
+            self_companion(&ir, Some(StaticOwner::Class(anonymous_name))),
+            Some(companion_name)
+        );
+        assert_eq!(self_companion(&ir, Some(StaticOwner::Facade)), None);
+        assert_eq!(
+            self_companion(&ir, Some(StaticOwner::Class(interface_name))),
+            None
+        );
+        assert_eq!(
+            self_companion(&ir, Some(StaticOwner::Class(class_companion))),
+            None
+        );
     }
 
     #[test]
