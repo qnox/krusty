@@ -175,12 +175,20 @@ fn function_enclosure(
 ) -> Option<(String, Option<(String, String)>)> {
     let declaration = &ir.functions[function as usize];
     // A suspend member whose body moved to its static `$suspendImpl` keeps the member's class.
+    // A value class's static `constructor-impl` has no receiver; its owner is the class that
+    // declares the member.
     let owner = declaration
         .dispatch_receiver
         .or_else(|| {
             ir.jvm_suspend_impl_bodies
                 .get(&function)
                 .map(|&(owner, _)| owner)
+        })
+        .or_else(|| {
+            ir.classes
+                .iter()
+                .find(|class| class.methods.contains(&function))
+                .map(|class| class.fq_name)
         })
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
