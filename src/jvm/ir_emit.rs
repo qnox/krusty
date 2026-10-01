@@ -6960,12 +6960,11 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
+    self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
     owner: String,
-    /// Whether `owner` is an interface companion. Fixed when the emitter is built; singleton
-    /// loads consult it instead of reclassifying every class on each read.
-    interface_companion_self: bool,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
     /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
@@ -7097,12 +7096,10 @@ impl<'a> Emitter<'a> {
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             suspended_result_returns: env.suspended_result_returns,
+            self_companion: singleton_instance_load::self_companion(ir, static_owner),
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
-            interface_companion_self: singleton_instance_load::emitted_class_is_interface_companion(
-                ir, owner,
-            ),
             facade: facade.to_string(),
             slots: HashMap::new(),
             temporaries: backend_temporaries::BackendTemporaries::default(),
@@ -10452,10 +10449,9 @@ impl<'a> Emitter<'a> {
                     ));
                     return;
                 };
-                let (owner, field) = singleton_instance_load::instance_load(
-                    self.interface_companion_self,
+                let (owner, field) = singleton_instance_load::loaded_instance(
+                    self.self_companion,
                     *classifier,
-                    &self.owner,
                     published,
                 );
                 let owner = owner.render();
@@ -10464,10 +10460,9 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
-                let (owner, field) = singleton_instance_load::instance_load(
-                    self.interface_companion_self,
+                let (owner, field) = singleton_instance_load::loaded_instance(
+                    self.self_companion,
                     *ty,
-                    &self.owner,
                     singleton_instance_load::PublishedSingleton {
                         owner: *owner,
                         field: field.clone(),
