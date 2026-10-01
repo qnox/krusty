@@ -500,6 +500,8 @@ pub struct ExternalPropertyRealization {
     pub setter: Option<crate::fir::ExternalCallableId>,
     /// The provider-normalized declaration is its value class's underlying storage property.
     pub declares_value_class_storage: bool,
+    /// Provider-normalized payload of a compile-time constant property.
+    pub compile_time_constant: Option<LibraryConst>,
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {

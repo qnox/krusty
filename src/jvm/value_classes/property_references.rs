@@ -417,6 +417,7 @@ mod tests {
                 setter_function: None,
                 physical_getter_ret: None,
                 physical_setter_value: None,
+                getter_constant: None,
                 getter_field: None,
                 setter_field: None,
                 declares_value_class_storage: false,

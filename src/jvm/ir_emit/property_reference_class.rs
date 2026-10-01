@@ -63,6 +63,7 @@ struct PropertyReferenceTarget {
     getter_descriptor: String,
     getter_params: Vec<Ty>,
     getter_ret: Ty,
+    getter_constant: Option<IrConst>,
     signature: String,
     getter_field: Option<crate::jvm::property_references::PropertyFieldAccess>,
     setter_field: Option<crate::jvm::property_references::PropertyFieldAccess>,
@@ -116,6 +117,7 @@ impl PropertyReferenceTarget {
             getter_descriptor,
             getter_params,
             getter_ret: ir_ty_to_jvm(&getter_ret),
+            getter_constant: realization.getter_constant.clone(),
             getter_field: realization.getter_field.clone(),
             setter_field: realization.setter_field.clone(),
             boxed_value_class: realization.boxed_value_class,
@@ -382,10 +384,14 @@ pub(super) fn emit_prop_ref_class(
 
     seed_method_header(&mut cw, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
     let mut get = CodeBuilder::new(2);
-    get.aload(1);
-    target
-        .getter(pr)
-        .emit_get(&mut cw, &mut get, target.getter_ret);
+    if let Some(constant) = target.getter_constant.as_ref() {
+        constant_emission::emit(constant, &mut get, &mut cw);
+    } else {
+        get.aload(1);
+        target
+            .getter(pr)
+            .emit_get(&mut cw, &mut get, target.getter_ret);
+    }
     box_property_reference_value(
         &mut cw,
         &mut get,
@@ -469,13 +475,17 @@ fn emit_bound_prop_ref_class(
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
     seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
     let mut get = CodeBuilder::new(1);
-    get.aload(0);
-    // kotlinc names the inherited field through the carrier itself.
-    let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
-    get.getfield(recv_f, 1);
-    target
-        .getter(pr)
-        .emit_get(&mut cw, &mut get, target.getter_ret);
+    if let Some(constant) = target.getter_constant.as_ref() {
+        constant_emission::emit(constant, &mut get, &mut cw);
+    } else {
+        get.aload(0);
+        // kotlinc names the inherited field through the carrier itself.
+        let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
+        get.getfield(recv_f, 1);
+        target
+            .getter(pr)
+            .emit_get(&mut cw, &mut get, target.getter_ret);
+    }
     box_property_reference_value(
         &mut cw,
         &mut get,
@@ -509,8 +519,8 @@ fn emit_bound_prop_ref_class(
 }
 
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
-/// `INSTANCE` singleton whose `get()` does `invokestatic <facade>.getFoo()` (no receiver), and — for a
-/// `var` — a `set(Object)` doing `invokestatic <facade>.setFoo(v)`. The super ctor is the 4-arg
+/// `INSTANCE` singleton whose `get()` does `invokestatic <facade>.getFoo()` (no receiver), and — for
+/// a `var` — a `set(Object)` doing `invokestatic <facade>.setFoo(v)`. The super ctor is the 4-arg
 /// `(Class, String, String, int)` form, flagged top-level when a package owns the property.
 /// `owner_internal = None` is the facade sentinel (the declaring file class, unknown until emit).
 fn emit_toplevel_prop_ref_class(
@@ -582,15 +592,20 @@ fn emit_toplevel_prop_ref_class(
     let locals = function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &[]);
     cw.set_method_debug("<init>", "()V", None, &locals);
 
-    // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
+    // `get()Object`: a compile-time constant directly, otherwise
+    // `invokestatic <facade>.getName()`. Boxed if primitive.
     seed_method_header(&mut cw, "get", "()Ljava/lang/Object;");
     let mut get = CodeBuilder::new(1);
-    let gref = if call_owner_is_interface {
-        cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+    if let Some(constant) = realization.getter_constant.as_ref() {
+        constant_emission::emit(constant, &mut get, &mut cw);
     } else {
-        cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
-    };
-    get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+        let gref = if call_owner_is_interface {
+            cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
+        } else {
+            cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
+        };
+        get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+    }
     if carrier {
         box_property_reference_value(
             &mut cw,

@@ -84,6 +84,9 @@ pub(crate) struct PropertyReferenceRealization {
     /// The PHYSICAL value type the selected setter declares, recorded and kept in step exactly as
     /// [`Self::physical_getter_ret`] is.
     pub physical_setter_value: Option<Ty>,
+    /// Exact semantic payload of a selected compile-time constant property. The carrier returns
+    /// this value directly, as kotlinc does, instead of inventing a getter or reading storage.
+    pub getter_constant: Option<crate::ir::IrConst>,
     /// The storage the reference reads and writes directly, when the selected declaration is
     /// realized as a field (`@JvmField`, a dependency's field-backed property) rather than through
     /// accessors. Decided where the declaration was selected, from its own realization; nothing
