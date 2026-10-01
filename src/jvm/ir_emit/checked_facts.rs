@@ -17,6 +17,9 @@ pub(crate) struct EmitMetadata<'a> {
         &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// The overrides whose primitive result is declared as its wrapper.
     pub(crate) override_results: &'a crate::jvm::override_results::OverrideResults,
+    /// JVM entry guards selected from exact collection override edges.
+    pub(crate) collection_method_entry_barriers:
+        &'a crate::jvm::collection_barriers::MethodEntryBarriers,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.

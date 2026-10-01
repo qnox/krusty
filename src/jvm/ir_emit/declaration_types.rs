@@ -1,38 +1,13 @@
 //! Physical JVM types and descriptors for common-IR declarations.
+//!
+//! Declaration descriptors themselves live in `jvm::method_descriptors`, which planning and
+//! emission both call. This module keeps the function- and field-shaped adapters that need the
+//! file's capture map.
 
 use super::*;
 
-pub(in crate::jvm) fn jvm_declared_ty(ty: &Ty) -> Ty {
-    fn is_nothing(ty: &Ty) -> bool {
-        match ty {
-            Ty::Nothing => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_nothing(inner),
-            Ty::Obj(name, _) => name.matches("kotlin/Nothing"),
-            _ => false,
-        }
-    }
-    if is_nothing(ty) {
-        Ty::obj("java/lang/Void")
-    } else {
-        match ir_ty_to_jvm(ty) {
-            Ty::Nothing => Ty::obj("java/lang/Void"),
-            other => other,
-        }
-    }
-}
-
-pub(crate) fn jvm_tys(types: &[Ty]) -> Vec<Ty> {
-    types
-        .iter()
-        .map(|ty| {
-            if *ty == Ty::Unit {
-                Ty::obj("kotlin/Unit")
-            } else {
-                jvm_declared_ty(ty)
-            }
-        })
-        .collect()
-}
+pub(crate) use crate::jvm::method_descriptors::jvm_tys;
+pub(in crate::jvm) use crate::jvm::method_descriptors::{ir_method_desc, jvm_declared_ty};
 
 pub(super) fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Vec<Ty> {
     let mut parameters = jvm_tys(&ir.functions[function as usize].params);
@@ -100,10 +75,6 @@ pub(super) fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
         .iter()
         .map(|field| jvm_declared_ty(&field.ty))
         .collect()
-}
-
-pub(in crate::jvm) fn ir_method_desc(parameters: &[Ty], result: &Ty) -> String {
-    method_descriptor(&jvm_tys(parameters), jvm_declared_ty(result))
 }
 
 pub(in crate::jvm) fn class_ctor_jvm_tys(class: &IrClass) -> Vec<Ty> {

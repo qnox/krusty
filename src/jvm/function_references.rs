@@ -83,11 +83,11 @@ fn external_reflection(
         let parameters = callable
             .physical_params
             .iter()
-            .map(super::ir_emit::ir_ty_to_jvm)
+            .map(super::physical_type::ir_ty_to_jvm)
             .collect::<Vec<_>>();
         crate::jvm::names::method_descriptor(
             &parameters,
-            super::ir_emit::ir_ty_to_jvm(&callable.physical_ret),
+            super::physical_type::ir_ty_to_jvm(&callable.physical_ret),
         )
     } else {
         callable.descriptor.clone()

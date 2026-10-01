@@ -7,7 +7,7 @@
 //! and the `checkcast` follows.
 
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::jvm::ir_emit::ir_ty_to_jvm;
+use crate::jvm::physical_type::ir_ty_to_jvm;
 
 pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
     let placements = (0..ir.exprs.len())

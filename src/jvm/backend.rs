@@ -50,6 +50,8 @@ pub(crate) struct BackendPassFacts {
     function_argument_arrays: crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     /// The overrides whose primitive result is realized as its wrapper.
     override_results: crate::jvm::override_results::OverrideResults,
+    /// Neutral-result guards on collection overrides whose descriptor needs no bridge.
+    collection_method_entry_barriers: crate::jvm::collection_barriers::MethodEntryBarriers,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -84,7 +86,7 @@ pub(crate) struct BackendPassFacts {
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
 ///
-/// 7. `collection_barriers::select` — attach provider-normalized JVM collection bridge semantics.
+/// 7. `collection_barriers::select` — record collection bridge and method-entry plans.
 ///
 /// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
@@ -184,7 +186,11 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.function_argument_arrays,
     )?;
-    crate::jvm::collection_barriers::select(ir);
+    crate::jvm::collection_barriers::select(
+        ir,
+        &facts.override_results,
+        &mut facts.collection_method_entry_barriers,
+    );
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
@@ -725,6 +731,7 @@ impl JvmBackend {
             bridge_adaptations: &pass_facts.bridge_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
+            collection_method_entry_barriers: &pass_facts.collection_method_entry_barriers,
         };
         // The facade's identity, interned from the name the file's stem and package give it, as
         // `module_calls::facade_for` interns it for the declarations it owns.
