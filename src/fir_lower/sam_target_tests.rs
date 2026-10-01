@@ -41,9 +41,10 @@ fn member(ir: &IrFile, owner: &str, name: &str, parameters: &[Ty]) -> FirSamMeth
     target
 }
 
-const PICK: &str = "fun interface Pick {
+const PICK: &str = "class Other(val size: Int)
+fun interface Pick {
     fun choose(value: Int): Int
-    fun choose(value: String): Int = value.length
+    fun choose(value: Other): Int = value.size
 }
 fun pick(p: Pick): Int = p.choose(2)
 ";

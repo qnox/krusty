@@ -994,9 +994,10 @@ fn member_callable(
 #[test]
 fn a_sam_conversion_names_the_selected_abstract_method_among_same_named_members() {
     let (body, index) = checked_function_body(
-        "fun interface Pick {\n\
+        "class Other(val size: Int)\n\
+         fun interface Pick {\n\
              fun choose(value: Int): Int\n\
-             fun choose(value: String): Int = value.length\n\
+             fun choose(value: Other): Int = value.size\n\
          }\n\
          class Chooser { fun choose(value: Int): Int = value }\n\
          fun pick(p: Pick): Int = p.choose(2)\n\
@@ -1006,7 +1007,7 @@ fn a_sam_conversion_names_the_selected_abstract_method_among_same_named_members(
     let abstract_choose = member_callable(&index, "Pick", "choose", crate::types::Ty::Int);
     assert_ne!(
         abstract_choose,
-        member_callable(&index, "Pick", "choose", crate::types::Ty::String)
+        member_callable(&index, "Pick", "choose", crate::types::Ty::obj("Other"))
     );
     assert_ne!(
         abstract_choose,

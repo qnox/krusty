@@ -85,8 +85,5 @@ fun box(): String {\n\
     val seen = feed { it.n + 1 }\n\
     return if (seen == 4) \"OK\" else \"fail: $seen\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("abstract value-class SAM among same-arity siblings"),
-        "OK"
-    );
+    common::expect_box_same_as_kotlinc(SRC, "SameNameSameArityValueClassSam");
 }
