@@ -1395,6 +1395,8 @@ mod for_loop_iterable_slot_e2e;
 mod inline_arguments_in_place_e2e;
 #[path = "inline_operand_copies_e2e.rs"]
 mod inline_operand_copies_e2e;
+#[path = "intrinsic_suspension_probes_e2e.rs"]
+mod intrinsic_suspension_probes_e2e;
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
