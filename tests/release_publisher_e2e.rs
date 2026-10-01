@@ -284,15 +284,15 @@ fn steps(job: &str) -> Vec<&str> {
 }
 
 #[test]
-fn each_ref_keeps_only_its_latest_run_and_the_release_job_publishes_under_the_lock() {
+fn non_master_refs_keep_only_their_latest_run_and_master_runs_finish_under_the_lock() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
 
     assert!(
         workflow.contains(
-            "\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n"
+            "\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
         ),
-        "a newer run must cancel the previous run for the same ref, including master"
+        "a newer run must cancel a superseded non-master ref, while every master run must finish"
     );
 
     let job = release_job(&workflow);
