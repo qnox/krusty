@@ -39,6 +39,7 @@ mod tests {
             source_order: 0,
             decl_line: 0,
             ty: Ty::obj("kotlin/Result"),
+            type_params: Vec::new(),
             visibility: Visibility::Public,
             return_value_status: Default::default(),
             annotations: Box::new([]),
