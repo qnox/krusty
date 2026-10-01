@@ -55932,8 +55932,11 @@ impl<'a> Checker<'a> {
                                 self.file_index,
                                 bp.span.lo,
                             );
-                        property_scope
-                            .declare_tparams(&bp.type_params, &property_tparams, |_| false);
+                        property_scope.declare_tparams(
+                            &bp.type_params,
+                            &property_tparams,
+                            |name| bp.reified_type_params.contains(name),
+                        );
                         self.resolved_declaration_type_parameters.insert(
                             bp.span.lo,
                             bp.type_params
@@ -56992,7 +56995,11 @@ impl<'a> Checker<'a> {
                             })
                             .collect(),
                     );
-                    scope.declare_tparams(&bp.type_params, &property_tparams, |_| false);
+                    // The reified mark is part of the binding, as it is for a top-level property.
+                    // The initializer sees it here. Accessors rebind it on their own rung below.
+                    scope.declare_tparams(&bp.type_params, &property_tparams, |name| {
+                        bp.reified_type_params.contains(name)
+                    });
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
                     self.check_duplicate_param_names(
                         &bp.context_params,
@@ -57270,10 +57277,13 @@ impl<'a> Checker<'a> {
                     {
                         let accessor_tparam_scope =
                             dispatch_scope.child(ScopeKind::Function { receiver: None });
+                        // This rung is not a child of the property scope, so the getter's
+                        // `T::class` reads the reified mark from here. Leaving it unset reports
+                        // `unresolved reference 'T'` for a parameter the property declared.
                         accessor_tparam_scope.declare_tparams(
                             &bp.type_params,
                             &property_tparams,
-                            |_| false,
+                            |name| bp.reified_type_params.contains(name),
                         );
                         let context_receivers = bp
                             .context_params

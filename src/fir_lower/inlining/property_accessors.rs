@@ -27,11 +27,14 @@ pub(super) fn splice_inline_property_accessors(
     ir: &mut crate::ir::IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut next_temporary = fresh_value_base(ir);
-    let sites = ir
+    let mut sites = ir
         .inline_property_splices
         .keys()
         .copied()
         .collect::<Vec<_>>();
+    // Hash iteration must not decide whether an already-expanded accessor is cloned into a later
+    // use. Consumed records are removed; sorting keeps the rest deterministic.
+    sites.sort_unstable();
     let mut stack = HashSet::new();
     for site in sites {
         splice_property_access(ir, site, &mut next_temporary, &mut stack)?;
@@ -93,6 +96,9 @@ fn splice_property_access(
         return Err(failure(splice.accessor, InlineFail::Recursive));
     }
     let nested = expand_inline_accessor(ir, site, &access, &splice, function, next_temporary)?;
+    // The site is now the expanded block. Drop the record so a later clone of this accessor does
+    // not try to splice that block again.
+    ir.inline_property_splices.remove(&site);
     for nested in nested {
         splice_property_access(ir, nested, next_temporary, stack)?;
     }
