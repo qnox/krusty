@@ -821,6 +821,9 @@ impl BodyFirChecker<'_> {
                     Some(crate::libraries::CompilerIntrinsic::StringLength) => {
                         Some(FirIntrinsic::StringLength)
                     }
+                    Some(crate::libraries::CompilerIntrinsic::EnumName) => {
+                        Some(FirIntrinsic::EnumName)
+                    }
                     Some(_) | None => None,
                 };
                 if let Some(operation) = intrinsic {

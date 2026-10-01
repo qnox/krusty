@@ -177,6 +177,9 @@ impl ConstantEvaluation {
                 Some(string(text.finish()))
             }
             FirExprKind::Call(call) => {
+                if let Some(name) = enum_entry_name(body, call) {
+                    return Some(name);
+                }
                 let FirCallTarget::Intrinsic { operation, .. } = &call.target else {
                     return None;
                 };
@@ -212,6 +215,27 @@ impl ConstantEvaluation {
             None => Some(value),
         }
     }
+}
+
+/// `Enum.name` on a direct entry is that entry's declaration name. The entry expression is not
+/// itself a constant: evaluating it would initialize the enum. A name read through any other
+/// receiver stays a call.
+fn enum_entry_name(body: &FirBody, call: &crate::fir::FirCall) -> Option<EvaluatedConstant> {
+    let FirCallTarget::Intrinsic {
+        operation: FirIntrinsic::EnumName,
+        ..
+    } = &call.target
+    else {
+        return None;
+    };
+    let receiver = call.dispatch_receiver?;
+    if receiver.conversion.is_some() {
+        return None;
+    }
+    let FirExprKind::EnumEntry { name, .. } = &body.expr(receiver.value)?.kind else {
+        return None;
+    };
+    Some(string(KtString::from(name.as_ref())))
 }
 
 fn string(value: KtString) -> EvaluatedConstant {

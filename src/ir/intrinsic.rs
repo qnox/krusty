@@ -17,6 +17,9 @@ pub enum IrIntrinsic {
     ArraySize,
     StringGet,
     StringLength,
+    /// `kotlin.Enum.name()` for a receiver that constant evaluation did not fold. A direct enum
+    /// entry never reaches this operation: it is already the entry's name constant.
+    EnumName,
     NullableAnyToString,
     /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
     /// reified type parameter in the emitted inline template; call-site inline specialization turns

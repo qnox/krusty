@@ -8551,7 +8551,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   integer division or remainder by zero, a referential `===`, and a `String.get` index outside the
   string. `String.plus` (operator or explicit call) concatenates the argument's `toString()` text and
   `String.get` answers the UTF-16 unit at the index, so `"abc"[1]` is `bipush 98`; equality with a
-  `null` constant folds too (`"a" == null` is `false`). kotlinc's interpreter also folds the
+  `null` constant folds too (`"a" == null` is `false`). A direct enum entry's `name`
+  (`EnumClass.OK.name`), the builtin property marked `@IntrinsicConstEvaluation`, folds to that
+  entry's declaration name, so the read does not initialize the enum. A name read through a value
+  stays a call of `name()` and does initialize it.
+  (`tests/enum_name_const_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`.)
+  kotlinc's interpreter also folds the
   remaining `@IntrinsicConstEvaluation` library calls, which the checker publishes as ordinary calls
   and krusty does not fold yet: `toString()`, `floorDiv`/`mod`, and unsigned arithmetic and
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.

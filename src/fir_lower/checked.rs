@@ -1303,6 +1303,7 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::ArraySize => crate::ir::IrIntrinsic::ArraySize,
         crate::fir::FirIntrinsic::StringGet => crate::ir::IrIntrinsic::StringGet,
         crate::fir::FirIntrinsic::StringLength => crate::ir::IrIntrinsic::StringLength,
+        crate::fir::FirIntrinsic::EnumName => crate::ir::IrIntrinsic::EnumName,
         crate::fir::FirIntrinsic::StringPlus => {
             unreachable!("a String.plus call is a concatenation, lowered with its flattened parts")
         }

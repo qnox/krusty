@@ -7,6 +7,196 @@
 
 use super::*;
 
+/// Publish the compiler-owned realization attached to each exact core declaration. These names
+/// define declarations in this provider; consumers receive the selected callable identity and its
+/// typed intrinsic and never classify a later source or JVM spelling.
+pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner: TypeName) {
+    fn member_function(
+        classifier: &mut LibraryType,
+        owner: TypeName,
+        receiver: Ty,
+        name: &str,
+        parameter: Option<Ty>,
+        result: Ty,
+        semantics: (CompilerIntrinsic, bool),
+    ) {
+        let (intrinsic, infix) = semantics;
+        let params = parameter.into_iter().collect::<Vec<_>>();
+        let mut callable =
+            LibraryCallable::library(owner, name, params.clone(), result, result, "");
+        callable.compiler_intrinsic = Some(intrinsic);
+        let mut declaration = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
+        declaration.call_sig = CallSig::metadata_plain(params.len());
+        declaration.flags.infix = infix;
+
+        if let Some(callables) = classifier.declared_callables.get_mut(name) {
+            let (mut functions, properties) = std::mem::take(callables).into_parts();
+            if let Some(existing) = functions.overloads.iter_mut().find(|candidate| {
+                candidate.kind == FnKind::Member
+                    && candidate.semantic_params().as_ref() == params.as_slice()
+                    && candidate.callable.ret.canonical_semantic() == result
+            }) {
+                existing.callable.compiler_intrinsic = Some(intrinsic);
+                existing.flags.infix |= infix;
+            } else {
+                functions.overloads.push(declaration);
+            }
+            *callables = Callables::from_parts(functions, properties);
+        } else {
+            classifier.insert_declared_callables(
+                name.to_string(),
+                Callables::Functions(FunctionSet {
+                    overloads: vec![declaration],
+                }),
+            );
+        }
+    }
+
+    fn member_property(
+        classifier: &mut LibraryType,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        intrinsic: CompilerIntrinsic,
+    ) {
+        if let Some(callables) = classifier.declared_callables.get_mut(name) {
+            let (functions, mut properties) = std::mem::take(callables).into_parts();
+            if !properties.overloads.is_empty() {
+                for property in &mut properties.overloads {
+                    property.getter.compiler_intrinsic = Some(intrinsic);
+                }
+                *callables = Callables::from_parts(functions, properties);
+                return;
+            }
+            *callables = Callables::from_parts(functions, properties);
+        }
+        let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
+        getter.compiler_intrinsic = Some(intrinsic);
+        let property = PropertyInfo {
+            return_value_status: None,
+            name: name.to_string(),
+            kind: PropKind::Member,
+            receiver: Some(Ty::obj_name(owner)),
+            associated_classifier: None,
+            associated_access_owner: None,
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            context_param_names: Vec::new(),
+            context_parameter_identities: Vec::new(),
+            getter,
+            setter: None,
+            setter_visibility: Visibility::Private,
+            setter_parameter_name: None,
+            is_const: false,
+            implicit_integer_coercion: false,
+            compile_time_constant: None,
+            visibility: Visibility::Public,
+            owner,
+            receiver_rank: 0,
+            source_key: None,
+            stable_declaration: None,
+            getter_declaration: None,
+            setter_declaration: None,
+            source_member: None,
+            producer: PropertyProducer::KotlinAccessor,
+            read_stability: PropertyReadStability::Unstable,
+        };
+        if let Some(callables) = classifier.declared_callables.get_mut(name) {
+            let (functions, mut properties) = std::mem::take(callables).into_parts();
+            properties.overloads.push(property.clone());
+            *callables = Callables::from_parts(functions, properties);
+        } else {
+            classifier.insert_declared_callables(
+                name.to_string(),
+                Callables::Properties(PropertySet {
+                    overloads: vec![property],
+                }),
+            );
+        }
+    }
+
+    for (expected_owner, name, ty, intrinsic) in [
+        (
+            crate::types::type_name("kotlin/String"),
+            "length",
+            Ty::Int,
+            CompilerIntrinsic::StringLength,
+        ),
+        (
+            crate::types::wk::kotlin_enum(),
+            "name",
+            Ty::String,
+            CompilerIntrinsic::EnumName,
+        ),
+    ] {
+        if owner == expected_owner {
+            member_property(classifier, owner, name, ty, intrinsic);
+        }
+    }
+    if owner.matches("kotlin/Array") || Ty::primitive_array_element(owner.segment_ref()).is_some() {
+        member_property(
+            classifier,
+            owner,
+            "size",
+            Ty::Int,
+            CompilerIntrinsic::ArraySize,
+        );
+    }
+    let bit_receiver = if owner.matches("kotlin/Int") {
+        Some(Ty::Int)
+    } else if owner.matches("kotlin/Long") {
+        Some(Ty::Long)
+    } else if owner.matches("kotlin/Boolean") {
+        Some(Ty::Boolean)
+    } else {
+        None
+    };
+    if let Some(receiver) = bit_receiver {
+        for (name, intrinsic) in [
+            ("and", CompilerIntrinsic::PrimitiveBitAnd),
+            ("or", CompilerIntrinsic::PrimitiveBitOr),
+            ("xor", CompilerIntrinsic::PrimitiveBitXor),
+        ] {
+            member_function(
+                classifier,
+                owner,
+                receiver,
+                name,
+                Some(receiver),
+                receiver,
+                (intrinsic, true),
+            );
+        }
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "inv",
+            None,
+            receiver,
+            (CompilerIntrinsic::PrimitiveBitNot, false),
+        );
+        if matches!(receiver, Ty::Int | Ty::Long) {
+            for (name, intrinsic) in [
+                ("shl", CompilerIntrinsic::PrimitiveShiftLeft),
+                ("shr", CompilerIntrinsic::PrimitiveShiftRight),
+                ("ushr", CompilerIntrinsic::PrimitiveUnsignedShiftRight),
+            ] {
+                member_function(
+                    classifier,
+                    owner,
+                    receiver,
+                    name,
+                    Some(Ty::Int),
+                    receiver,
+                    (intrinsic, true),
+                );
+            }
+        }
+    }
+}
+
 impl EmptySymbolSource {
     fn builtin_classifier(name: &str, internal: TypeName) -> Option<LibraryType> {
         let known = Ty::from_name(name).is_some()
@@ -444,5 +634,27 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             callables,
             importable_declaration: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_name_intrinsic_belongs_to_the_exact_core_declaration() {
+        let mut kotlin_enum = LibraryType::declaration_header();
+        add_core_builtin_declarations(&mut kotlin_enum, crate::types::wk::kotlin_enum());
+        let [name] = kotlin_enum.declared_callables["name"].properties() else {
+            panic!("core kotlin.Enum publishes one name property");
+        };
+        assert_eq!(
+            name.getter.compiler_intrinsic,
+            Some(CompilerIntrinsic::EnumName)
+        );
+
+        let mut same_spelling = LibraryType::declaration_header();
+        add_core_builtin_declarations(&mut same_spelling, crate::types::type_name("sample/Enum"));
+        assert!(!same_spelling.declared_callables.contains_key("name"));
     }
 }
