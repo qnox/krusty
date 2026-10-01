@@ -964,11 +964,12 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();
-    file.lambda_parameter_destructures = std::mem::take(&mut file.lambda_parameter_destructures)
-        .into_iter()
-        .filter_map(|old| statements.get(&old).copied())
-        .collect();
-    file.destructured_loops = std::mem::take(&mut file.destructured_loops)
+    file.destructuring.lambda_parameters =
+        std::mem::take(&mut file.destructuring.lambda_parameters)
+            .into_iter()
+            .filter_map(|old| statements.get(&old).copied())
+            .collect();
+    file.destructuring.loops = std::mem::take(&mut file.destructuring.loops)
         .into_iter()
         .filter_map(|old| statements.get(&old).copied())
         .collect();
@@ -994,10 +995,13 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, label)| statements.get(&old).copied().map(|new| (new, label)))
         .collect();
-    file.destructure_source_props = std::mem::take(&mut file.destructure_source_props)
-        .into_iter()
-        .filter_map(|(old, properties)| statements.get(&StmtId(old)).map(|new| (new.0, properties)))
-        .collect();
+    file.destructuring.source_properties =
+        std::mem::take(&mut file.destructuring.source_properties)
+            .into_iter()
+            .filter_map(|(old, properties)| {
+                statements.get(&StmtId(old)).map(|new| (new.0, properties))
+            })
+            .collect();
     file.local_property_context_params = std::mem::take(&mut file.local_property_context_params)
         .into_iter()
         .filter_map(|(old, mut parameters)| {

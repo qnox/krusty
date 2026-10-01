@@ -190,7 +190,8 @@ impl Parser<'_> {
                     param_types.push(None);
                     roles.push(LambdaParameterRole::Destructured);
                     destructures.push((synth, entries, source_props, entry_types, sp));
-                } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
+                } else if self.at(TokenKind::LBracket) {
+                    self.note_ungated_bracket_destructure();
                     // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
                     // identical to the `(a, b)` form, just with `[ ]`.
                     let sp = self.tok().span;
@@ -275,12 +276,15 @@ impl Parser<'_> {
         for (synth, entries, source_props, entry_types, sp) in destructures.into_iter().rev() {
             let init = self.file.add_expr(Expr::Name(synth), sp);
             let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
-            self.file.lambda_parameter_destructures.insert(d);
+            self.file.destructuring.lambda_parameters.insert(d);
             if source_props.iter().any(|s| s.is_some()) {
-                self.file.destructure_source_props.insert(d.0, source_props);
+                self.file
+                    .destructuring
+                    .source_properties
+                    .insert(d.0, source_props);
             }
             if entry_types.iter().any(Option::is_some) {
-                self.file.destructure_entry_types.insert(d.0, entry_types);
+                self.file.destructuring.entry_types.insert(d.0, entry_types);
             }
             stmts.insert(0, d);
         }
