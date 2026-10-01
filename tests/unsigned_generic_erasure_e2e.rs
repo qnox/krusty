@@ -283,3 +283,106 @@ fn unsigned_inline_splice_element_keeps_its_host_provided_box() {
         "UIntMapElementStillEmits",
     );
 }
+
+/// `map` obtains each element from `Iterator.next()` as a boxed `kotlin/UInt`. An inlined lambda
+/// that passes that element to a carrier parameter (`testUInt(it)`) unboxes through
+/// `UInt.unbox-impl` before the call. Leaving the box on the stack fails verification.
+#[test]
+fn unsigned_inlined_map_argument_unboxes_before_a_carrier_call() {
+    common::expect_box_ok_with_stdlib(
+        "const val M1: UInt = 2147483648u\n\
+         const val M2: ULong = 9223372036854775808UL\n\
+         fun testUInt(x: UInt) = when (x) {\n\
+             0u -> \"none\"\n\
+             1u -> \"one\"\n\
+             M1 -> \"M1\"\n\
+             else -> \"many\"\n\
+         }\n\
+         fun testULong(x: ULong) = when (x) {\n\
+             0UL -> \"none\"\n\
+             1UL -> \"one\"\n\
+             M2 -> \"M2\"\n\
+             else -> \"many\"\n\
+         }\n\
+         fun box(): String {\n\
+             val t1 = listOf(0u, 1u, 4u, M1).map { testUInt(it) }\n\
+             if (t1 != listOf(\"none\", \"one\", \"many\", \"M1\")) return \"UInt\"\n\
+             val t2 = listOf(0UL, 1UL, 4UL, M2).map { testULong(it) }\n\
+             if (t2 != listOf(\"none\", \"one\", \"many\", \"M2\")) return \"ULong\"\n\
+             return \"OK\"\n\
+         }\n",
+        "UnsignedWhenByMap",
+    );
+}
+
+/// An inline host whose lambda parameter is `UInt?` must not take the non-null carrier.
+/// `invoke` passes the boxed `kotlin/UInt` (or null). Unboxing at that boundary would drop the
+/// null. `render` takes an unknown `UInt?`, so the inlined parameter stays that box.
+///
+/// Kotlinc also plants `$i$a$` marker stores and a trailing `nop` around the inline frame. Those
+/// shift local slots and are not the coercion. The remaining opcodes, in order, and the member
+/// each call names, match.
+#[test]
+fn nullable_unsigned_inline_parameter_stays_boxed() {
+    const SRC: &str = "inline fun host(value: UInt?, block: (UInt?) -> String): String = block(value)\n\
+        fun render(value: UInt?): String = host(value) { element ->\n\
+            if (element == null) \"none\" else element.toString()\n\
+        }\n\
+        fun box(): String = if (render(7u) == \"7\" && render(null) == \"none\") \"OK\" else \"bad\"\n";
+    let comparison = common::compare_with_kotlinc_plugin(
+        "NullableUnsignedInlineHost",
+        SRC,
+        "NullableUnsignedInlineHostKt",
+        &[common::stdlib_jar(), common::jdk_modules()],
+        "21",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let reference = common::method_instructions(&comparison.reference, "(kotlin.UInt);");
+    let krusty = common::method_instructions(&comparison.krusty, "(kotlin.UInt);");
+    let value_ops = |lines: &[String]| -> Vec<String> {
+        lines
+            .iter()
+            .filter_map(|line| {
+                let code = line.split_once(": ")?.1;
+                let op = code.split_whitespace().next()?;
+                if op == "iconst_0" || op == "nop" || op.starts_with("istore") {
+                    return None;
+                }
+                let op = op.trim_end_matches(|ch: char| ch.is_ascii_digit() || ch == '_');
+                let comment = code
+                    .split_once("//")
+                    .map(|(_, comment)| comment.trim())
+                    .unwrap_or("");
+                Some(if comment.is_empty() {
+                    op.to_string()
+                } else {
+                    format!("{op} {comment}")
+                })
+            })
+            .collect()
+    };
+    let reference_ops = value_ops(&reference);
+    let krusty_ops = value_ops(&krusty);
+    assert_eq!(
+        krusty_ops, reference_ops,
+        "render(): value instructions differ from kotlinc\nkrusty: {krusty:?}\nkotlinc: {reference:?}"
+    );
+    let null_test = reference_ops
+        .iter()
+        .position(|op| op == "ifnonnull")
+        .expect("kotlinc null-tests the boxed parameter");
+    let unbox = reference_ops
+        .iter()
+        .position(|op| op.contains("unbox-impl"))
+        .expect("kotlinc unboxes only to print");
+    assert!(
+        null_test < unbox,
+        "unbox-impl precedes the null test: {reference_ops:?}"
+    );
+    assert!(
+        krusty_ops.iter().any(|op| op.contains("kotlin/UInt")),
+        "the parameter stays a kotlin/UInt box: {krusty_ops:?}"
+    );
+    common::expect_box_same_as_kotlinc(SRC, "NullableUnsignedInlineHost");
+}
