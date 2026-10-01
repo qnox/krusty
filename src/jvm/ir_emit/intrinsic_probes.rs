@@ -34,7 +34,11 @@ impl Emitter<'_> {
                 .set_emit_error("a probed continuation has no declared value slot".to_string());
             return;
         };
-        // The block ran as an inlined body, after which kotlinc writes the call's line afresh.
+        // The block ran as an inlined body. Its frame close may have left a debugger-only `nop` at
+        // this exact boundary; the probe's first real instruction carries that boundary instead.
+        code.take_line_placeholder();
+        // kotlinc writes the call's line afresh after the inlined body. When the placeholder was
+        // removed this lands on the existing boundary offset and is deduplicated there.
         if let Some(&line) = self.ir.expr_source_lines.get(&point) {
             if line != 0 {
                 // Closing the spliced lambda may already have put the call line on a trailing

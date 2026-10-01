@@ -286,6 +286,46 @@ impl CodeBuilder {
         self.line_forgotten = true;
     }
 
+    /// Emit a `nop` that carries a debug boundary only until an immediate real instruction can
+    /// carry it instead. The byte remains an ordinary `nop` unless [`Self::take_line_placeholder`]
+    /// consumes it before anything else is emitted.
+    pub(crate) fn line_placeholder(&mut self) {
+        self.line_placeholder_nop = None;
+        let offset = self.bytes.len();
+        self.nop();
+        if !self.dead && self.bytes.len() == offset + 1 {
+            self.line_placeholder_nop = Some(super::LinePlaceholder {
+                offset,
+                next_bind: self.next_bind,
+                line_marks: self.line_marks.len(),
+                local_entries: self.local_entries.len(),
+                exceptions: self.exceptions.len(),
+            });
+        }
+    }
+
+    /// Remove the immediately preceding debugger placeholder so the caller's next instruction
+    /// occupies its offset. Replacement is refused if an intervening operation emitted a byte or
+    /// changed an offset-bearing side table; truncating underneath such metadata would stale it.
+    /// Labels, line marks and local ranges already anchored at the placeholder's START continue to
+    /// name the replacement instruction.
+    pub(crate) fn take_line_placeholder(&mut self) -> bool {
+        let Some(placeholder) = self.line_placeholder_nop.take() else {
+            return false;
+        };
+        let unchanged = placeholder.offset + 1 == self.bytes.len()
+            && self.bytes.get(placeholder.offset) == Some(&0x00)
+            && self.next_bind == placeholder.next_bind
+            && self.line_marks.len() == placeholder.line_marks
+            && self.local_entries.len() == placeholder.local_entries
+            && self.exceptions.len() == placeholder.exceptions;
+        if !unchanged {
+            return false;
+        }
+        self.bytes.truncate(placeholder.offset);
+        true
+    }
+
     /// Record an inlined body's line number at the current offset, as ASM copies a
     /// `LineNumberNode`: the entry is written even when the line is already in effect, and a
     /// second entry at one offset follows the first rather than replacing it.
@@ -509,6 +549,65 @@ mod tests {
         code.inlined_line(6);
         code.inlined_line(6);
         assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
+    }
+
+    #[test]
+    fn a_real_instruction_replaces_an_immediate_line_placeholder() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(4);
+        code.line_placeholder();
+        code.forget_line();
+
+        assert!(code.take_line_placeholder());
+        code.mark_line(4);
+        code.dup();
+
+        assert_eq!(code.bytes, [0x59]);
+        assert_eq!(code.line_marks(), [(0, 4)]);
+    }
+
+    #[test]
+    fn a_line_placeholder_expires_after_another_instruction() {
+        let mut code = CodeBuilder::new(0);
+        code.line_placeholder();
+        code.aconst_null();
+
+        assert!(!code.take_line_placeholder());
+        assert_eq!(code.bytes, [0x00, 0x01]);
+    }
+
+    #[test]
+    fn a_line_placeholder_cannot_move_a_later_label() {
+        let mut code = CodeBuilder::new(0);
+        code.line_placeholder();
+        let after = code.new_label();
+        code.bind(after);
+
+        assert!(!code.take_line_placeholder());
+        assert_eq!(code.bytes, [0x00]);
+    }
+
+    #[test]
+    fn a_line_placeholder_cannot_move_later_debug_metadata() {
+        let mut line = CodeBuilder::new(0);
+        line.line_placeholder();
+        line.mark_line(7);
+        assert!(!line.take_line_placeholder());
+
+        let mut local = CodeBuilder::new(1);
+        local.line_placeholder();
+        local.add_local_entry(1, None, 0, "x", "I");
+        assert!(!local.take_line_placeholder());
+    }
+
+    #[test]
+    fn a_dead_line_placeholder_records_no_replacement_permission() {
+        let mut code = CodeBuilder::new(0);
+        code.ret_void();
+        code.line_placeholder();
+
+        assert!(!code.take_line_placeholder());
+        assert_eq!(code.bytes, [0xb1]);
     }
 
     /// A retained entry is spent by the mark that appends after it: a third at the same offset
