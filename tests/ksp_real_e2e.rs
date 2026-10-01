@@ -90,6 +90,9 @@ fn real_ksp_processor_from_jar_generates_code() {
         return;
     }
     let Some(resolver) = deps::detect() else {
+        if std::env::var_os("KRUSTY_REQUIRE_KSP_E2E").is_some() {
+            panic!("required KSP conformance has no gradle/mvn/cs dependency resolver");
+        }
         eprintln!("skipping: no gradle/mvn/cs resolver to provision the KSP toolchain");
         return;
     };
@@ -118,6 +121,9 @@ fn real_ksp_processor_from_jar_generates_code() {
         match resolver.fetch(&coords, &libs_dir) {
             Ok(j) => j,
             Err(e) => {
+                if std::env::var_os("KRUSTY_REQUIRE_KSP_E2E").is_some() {
+                    panic!("required KSP toolchain provisioning failed: {e}");
+                }
                 eprintln!("skipping: provisioning failed: {e}");
                 return;
             }
@@ -126,6 +132,9 @@ fn real_ksp_processor_from_jar_generates_code() {
     assert!(!libs.is_empty(), "KSP toolchain jars provisioned");
 
     let Some(jdk) = jdk_home(&tool) else {
+        if std::env::var_os("KRUSTY_REQUIRE_KSP_E2E").is_some() {
+            panic!("required KSP conformance has no usable JDK 21");
+        }
         eprintln!("skipping: no JDK 21 available (set KSP_E2E_JDK)");
         return;
     };

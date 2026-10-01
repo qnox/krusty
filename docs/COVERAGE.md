@@ -63,9 +63,8 @@ Enforced in two places:
   there is no separate plain own-suite run), then `conformance-plain` (the kotlin box corpus WITHOUT
   coverage). Blocks a push that lowers coverage or breaks a test.
 - **CI** (`just ci` is lint + `coverage-gate`) — the unbypassable backstop. The box suite
-  runs from the prebuilt conformance binary for every supported Kotlin version, and every
-  other test in that binary runs on the latest version. Neither set rebuilds krusty inside
-  this job. A local `git push --no-verify`
+  and every other active conformance test run from the same prebuilt binary for every supported
+  Kotlin version. Neither set rebuilds krusty inside a matrix leg. A local `git push --no-verify`
   skips the hook, but CI re-measures and fails the PR, so coverage cannot be lowered by bypassing
   the client-side hook.
 

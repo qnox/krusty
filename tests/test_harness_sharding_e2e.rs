@@ -754,22 +754,70 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_runs_prebuilt_box_and_regression_conformance() {
+fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
-    let release = workflow
-        .find("needs: [ci, klib-semantics, conformance, conformance-regressions, versions, build-release]")
-        .expect("release waits on both conformance sets");
-    let box_run = workflow
-        .find("just conformance-run ")
-        .expect("version matrix runs the box suite");
-    let regressions = workflow
-        .find("just conformance-regressions ")
-        .expect("latest version runs the other conformance tests");
+    let matrix = workflow
+        .find("  conformance:\n")
+        .expect("workflow has one supported-version conformance matrix");
     assert!(
-        box_run < regressions && regressions < release,
-        "box suite, then the other tests, then release"
+        workflow.contains("version: ${{ fromJson(needs.versions.outputs.matrix) }}"),
+        "conformance job must expand every supported Kotlin version"
+    );
+    let box_run = workflow[matrix..]
+        .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
+        .map(|offset| matrix + offset)
+        .expect("each version lane runs the box suite");
+    let regressions = workflow[matrix..]
+        .find("just conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
+        .map(|offset| matrix + offset)
+        .expect("each version lane runs every non-box conformance test");
+    let release = workflow
+        .find("needs: [ci, klib-semantics, conformance, versions, build-release]")
+        .expect("release waits on the combined conformance matrix");
+    assert!(
+        matrix < box_run && box_run < regressions && regressions < release,
+        "one matrix lane runs box then non-box tests before release"
+    );
+    assert!(
+        workflow.contains("target/cache/ser-corpus/${{ matrix.version }}"),
+        "each version lane caches its matching serialization corpus"
+    );
+    assert!(
+        workflow.contains("kotlin-conformance-all-${{ matrix.version }}-"),
+        "the expanded corpus cache must not reuse the immutable box-only key"
+    );
+    assert!(
+        workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
+        "recorded kotlinc bytes must be isolated by matrix version"
+    );
+    assert!(
+        !workflow.contains("\n  conformance-regressions:\n"),
+        "non-box conformance must not remain a max-version-only job"
+    );
+    assert_eq!(
+        workflow.matches("bin=$(just conformance-bin)").count(),
+        1,
+        "the matrix reuses one conformance build"
+    );
+    assert_eq!(
+        workflow
+            .matches("cargo build --profile gate -p krusty-cli")
+            .count(),
+        1,
+        "the matrix reuses one CLI build"
+    );
+    assert!(
+        workflow.contains(
+            "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
+        ),
+        "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
+    );
+    assert!(
+        workflow.contains("KRUSTY_REQUIRE_KSP_E2E: \"1\"")
+            && workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
+        "matrix conformance must fail instead of self-skipping required integrations"
     );
 }
 

@@ -100,12 +100,15 @@ invocation separately because each is a separate process with its own wall time.
 the explicit labels `shard-1-of-22`, and so on; every shard's reported selected-test count must equal
 the planner's count, so filtering cannot silently reduce coverage.
 
-CI builds the conformance test binary once and runs that artifact against every version in
-`kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
-runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
-uses the same configurable process-group conformance deadline as the local harness, including its
-spawned compiler and runner JVMs. A release publishes only after every leg matches both exact outcome
-manifests.
+CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` runs both the
+box corpus and every active non-box conformance test from those artifacts. `KRUSTY_LANGUAGE_VERSION`,
+`KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix
+does not rebuild Rust code per Kotlin version. Toolchain, box/serialization corpora, and recorded
+kotlinc-byte caches are isolated by version. Matrix runs opt into the KSP integration and require
+both KSP and pinned serialization-runtime provisioning, so missing prerequisites fail rather than
+turning those tests into passing skips. Each leg uses the same configurable process-group conformance
+deadline as the local harness, including its spawned compiler and runner JVMs. A release publishes
+only after every combined leg passes and matches both exact box outcome manifests.
 
 ## Box Outcome Manifests
 
