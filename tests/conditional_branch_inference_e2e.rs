@@ -35,7 +35,7 @@ fn elvis_right_side_binds_from_non_null_left() {
         SRC,
         &[(
             4,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'Result<Int>'.",
         )],
     );
@@ -52,7 +52,7 @@ fn if_branches_bind_generic_calls_from_sibling() {
         THEN_CALL,
         &[(
             4,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
         )],
     );
@@ -65,7 +65,7 @@ fn if_branches_bind_generic_calls_from_sibling() {
         ELSE_CALL,
         &[(
             4,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
         )],
     );
@@ -82,7 +82,7 @@ fn when_arms_bind_generic_calls_from_sibling() {
         ELSE_CALL,
         &[(
             4,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
         )],
     );
@@ -95,7 +95,7 @@ fn when_arms_bind_generic_calls_from_sibling() {
         FIRST_ARM_CALL,
         &[(
             4,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'Result<Int>?'.",
         )],
     );
@@ -143,7 +143,7 @@ fn empty_list_binds_from_sibling_branch() {
         SRC,
         &[(
             3,
-            17,
+            15,
             "initializer type mismatch: expected 'String', actual 'List<String>'.",
         )],
     );
