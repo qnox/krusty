@@ -5,7 +5,7 @@
 //! the runtime `FunctionReferenceImpl` carrier; it does not resolve a source name or select an
 //! overload.
 
-use super::classpath::{Classpath, ExternalCallableKind};
+use super::classpath::ExternalCallableKind;
 use crate::fir::ExternalCallableId;
 use crate::ir::{FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
 use crate::types::{type_name, Ty};
@@ -70,17 +70,17 @@ pub(super) fn reference_class_name(
 /// builtin the compiler implements has no facade: kotlinc reflects it on `Intrinsics.Kotlin`, not
 /// top-level, with the JVM signature its declaration maps to.
 fn external_reflection(
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     declaration: ExternalCallableId,
     receiver: Option<Ty>,
 ) -> Result<
     (Option<crate::types::TypeName>, String, bool, Option<String>),
     FunctionReferenceRealizationTarget,
 > {
-    let realization = classpath
-        .external_callable(declaration)
+    let callable = callables
+        .callable(declaration)
+        .cloned()
         .ok_or(FunctionReferenceRealizationTarget::External(declaration))?;
-    let callable = realization.callable;
     let name = callable
         .reflection_name
         .clone()
@@ -103,7 +103,7 @@ fn external_reflection(
     } else {
         callable.descriptor.clone()
     };
-    let (owner_class, physical_name, top_level) = match realization.kind {
+    let (owner_class, physical_name, top_level) = match callable.kind {
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
             if callable.descriptor.is_empty() =>
         {
@@ -114,12 +114,12 @@ fn external_reflection(
             )
         }
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension => {
-            (Some(callable.owner), callable.name.as_str(), true)
+            (Some(callable.physical_owner), callable.name.as_str(), true)
         }
         ExternalCallableKind::Member => (
             receiver.and_then(Ty::kotlin_class_internal),
             crate::jvm::names::mapped_builtin_virtual_name(
-                callable.owner,
+                callable.physical_owner,
                 &callable.name,
                 &descriptor,
             ),
@@ -145,7 +145,7 @@ pub(super) fn reference_enclosure(
 
 fn realize_adapter_reference(
     ir: &mut IrFile,
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
@@ -247,7 +247,7 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::External {
             declaration,
             receiver,
-        } => external_reflection(classpath, declaration, receiver)?,
+        } => external_reflection(callables, declaration, receiver)?,
         // kotlinc reflects every function-value conversion, suspend or `Unit`, as a synthesized
         // `suspendConversion<N>` compiler builtin on `Intrinsics.Kotlin`.
         crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => (
@@ -646,7 +646,7 @@ fn realize_own_invoke(
 
 pub(super) fn realize(
     ir: &mut IrFile,
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
@@ -678,7 +678,7 @@ pub(super) fn realize(
         let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
             ir,
-            classpath,
+            callables,
             current_facade,
             raw,
             adapter_owner,
