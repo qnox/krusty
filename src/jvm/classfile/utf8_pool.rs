@@ -72,8 +72,8 @@ impl super::ConstPool {
 #[test]
 fn repeated_utf8_reuses_one_pool_slot() {
     let mut pool = super::ConstPool::default();
-    let first = pool.utf8("java/lang/String");
-    assert_eq!(pool.utf8("java/lang/String"), first);
-    assert_eq!(pool.lookup_utf8("java/lang/String"), Some(first));
+    let first = pool.utf8("sample/Utf8Owner");
+    assert_eq!(pool.utf8("sample/Utf8Owner"), first);
+    assert_eq!(pool.lookup_utf8("sample/Utf8Owner"), Some(first));
     assert_eq!(pool.entries.len(), 1);
 }
