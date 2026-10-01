@@ -11492,11 +11492,7 @@ pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
         Some(b'F') => Ty::Float,
         Some(b'D') => Ty::Double,
         Some(b'V') => Ty::Unit,
-        Some(b'L') => Ty::obj(
-            d.strip_prefix('L')
-                .and_then(|s| s.strip_suffix(';'))
-                .unwrap_or(d),
-        ),
+        Some(b'L') => super::physical_type::class_descriptor_ty(d),
         Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
         _ => Ty::Error,
     }

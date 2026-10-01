@@ -40,6 +40,23 @@ fn jvm_reference_array_element(semantic: Ty) -> Ty {
     }
 }
 
+/// A JVM class descriptor is a reference slot.
+///
+/// Unsigned scalars are stored as `Ty::Obj(kotlin/UInt)` and so on, the same classifier their
+/// box uses. `Lkotlin/UInt;` is that box. Returning the bare scalar would make `is_jvm_scalar`
+/// true and emit `box-impl` on a value the getter already returned boxed.
+pub(super) fn class_descriptor_ty(descriptor: &str) -> Ty {
+    let internal = descriptor
+        .strip_prefix('L')
+        .and_then(|name| name.strip_suffix(';'))
+        .unwrap_or(descriptor);
+    let name = crate::types::type_name(internal);
+    match crate::types::builtin_semantic(name) {
+        Some(scalar) if scalar.is_unsigned() => Ty::nullable(scalar),
+        _ => Ty::obj_name(name),
+    }
+}
+
 pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // A nullable PRIMITIVE is a JVM reference — its boxed wrapper (`Int?` → `java/lang/Integer`, a
     // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
@@ -159,6 +176,28 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 mod tests {
     use super::jvm_builtin_scalar;
     use crate::types::{type_name, Ty};
+
+    #[test]
+    fn an_unsigned_box_descriptor_is_the_nullable_reference() {
+        for (descriptor, scalar) in [
+            ("Lkotlin/UByte;", Ty::UByte),
+            ("Lkotlin/UShort;", Ty::UShort),
+            ("Lkotlin/UInt;", Ty::UInt),
+            ("Lkotlin/ULong;", Ty::ULong),
+        ] {
+            let parsed = super::super::ir_emit::ty_from_field_descriptor(descriptor);
+            assert!(
+                !parsed.is_jvm_scalar(),
+                "{descriptor} is the box, not the carrier"
+            );
+            assert_eq!(parsed, Ty::nullable(scalar));
+            assert_eq!(
+                crate::jvm::names::type_descriptor(parsed),
+                descriptor,
+                "{descriptor} must round-trip"
+            );
+        }
+    }
 
     #[test]
     fn signed_scalars_and_string_are_the_physical_subset() {
