@@ -151,7 +151,7 @@ pub(super) fn realize(
             | IrExpr::BottomValue { .. }
             | IrExpr::ClassConst { .. }
             | IrExpr::KClassLiteral { .. }
-            | IrExpr::LocalPropertyReference { .. }
+            | IrExpr::LocalPropertyReference(_)
             | IrExpr::SingletonValue { .. }
             | IrExpr::GetValue(_)
             | IrExpr::SetValue { .. }

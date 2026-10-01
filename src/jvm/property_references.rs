@@ -108,12 +108,8 @@ pub(super) fn realize(
     let mut delegated_operands = Vec::new();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
-        if let IrExpr::LocalPropertyReference {
-            name,
-            property_type,
-        } = ir.exprs[raw].clone()
-        {
-            ir.exprs[raw] = local_property_reference(ir, name, property_type);
+        if let IrExpr::LocalPropertyReference(reference) = ir.exprs[raw].clone() {
+            ir.exprs[raw] = local_property_reference(ir, reference.name, reference.property_type);
             continue;
         }
         let IrExpr::Checked(IrCheckedOperation::PropertyReference {

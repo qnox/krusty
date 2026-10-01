@@ -290,10 +290,10 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
             classifier: Some(classifier),
             ..
         }
-        | IrExpr::LocalPropertyReference {
+        | IrExpr::LocalPropertyReference(crate::ir::IrLocalPropertyReference {
             property_type: classifier,
             ..
-        }
+        })
         | IrExpr::TypeOp {
             type_operand: classifier,
             ..

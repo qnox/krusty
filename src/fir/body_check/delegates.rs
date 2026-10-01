@@ -1,9 +1,38 @@
 //! Checked FIR for local delegated properties.
 
 use super::*;
+use crate::fir::LocalDelegatedPropertyId;
 use crate::resolve::DelegateGetValueTarget;
 
+impl BodyCheckSession {
+    fn allocate_local_delegated_property(
+        &mut self,
+        owner: BodyOwnerId,
+    ) -> LocalDelegatedPropertyId {
+        self.local_delegated_properties.allocate(owner)
+    }
+}
+
 impl BodyFirChecker<'_> {
+    pub(super) fn local_delegate(&self, name: &str) -> Option<LocalDelegateBinding> {
+        self.delegate_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    pub(super) fn delegated_binding(&self, name: &str) -> Option<(u32, LocalDelegateBinding)> {
+        self.local_delegate(name)
+            .map(|binding| (u32::MAX, binding))
+            .or_else(|| self.outer_delegates.get(name).cloned())
+            .or_else(|| {
+                self.class_delegates
+                    .get(name)
+                    .cloned()
+                    .map(|binding| (u32::MAX, binding))
+            })
+    }
+
     pub(super) fn local_delegate_statement(
         &mut self,
         statement: StmtId,
@@ -68,10 +97,11 @@ impl BodyFirChecker<'_> {
             None
         };
 
+        let declaration = self.allocate_local_delegated_property();
         let mut initializer = self.expression(delegate)?;
         let storage_ty = if let Some(provide) = self.info.delegate_provide(delegate) {
             let provide = self.delegate_call_target(delegate, delegate_ty, provide)?;
-            let property = self.local_property_reference(origin, name, property_ty);
+            let property = self.local_property_reference(origin, declaration, name, property_ty);
             let owner = self.synthetic_null(origin);
             let result = provide.result;
             let kind = self.delegate_convention_call(
@@ -108,6 +138,7 @@ impl BodyFirChecker<'_> {
                     get_value,
                     set_value,
                     name: name.into(),
+                    declaration,
                 },
             );
         Ok(self.body.add_statement(FirStatement {
@@ -133,7 +164,12 @@ impl BodyFirChecker<'_> {
         let origin = self.expression_origin(expression)?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
+        let property = self.local_property_reference(
+            origin,
+            delegate.declaration,
+            &delegate.name,
+            delegate.property_ty,
+        );
         let call = self.delegate_convention_call(
             origin,
             self.file.expr_span(expression),
@@ -173,7 +209,12 @@ impl BodyFirChecker<'_> {
         })?;
         let receiver = self.delegate_storage_read(origin, depth, &delegate)?;
         let owner = self.synthetic_null(origin);
-        let property = self.local_property_reference(origin, &delegate.name, delegate.property_ty);
+        let property = self.local_property_reference(
+            origin,
+            delegate.declaration,
+            &delegate.name,
+            delegate.property_ty,
+        );
         self.delegate_convention_call(
             origin,
             span,
@@ -393,9 +434,15 @@ impl BodyFirChecker<'_> {
     /// Its type is the classifier resolution answered with when it selected those conventions — the
     /// same recorded fact a member or top-level delegated property publishes on its plan, so the
     /// local path does not spell the name a second time.
+    fn allocate_local_delegated_property(&mut self) -> LocalDelegatedPropertyId {
+        self.session
+            .allocate_local_delegated_property(self.body.owner())
+    }
+
     fn local_property_reference(
         &mut self,
         cause: OriginId,
+        declaration: LocalDelegatedPropertyId,
         name: &str,
         property_type: ResolvedTy,
     ) -> FirExprId {
@@ -412,6 +459,7 @@ impl BodyFirChecker<'_> {
             kind: FirExprKind::LocalPropertyReference {
                 name: name.into(),
                 property_type,
+                declaration,
             },
         })
     }
