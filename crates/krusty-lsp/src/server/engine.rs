@@ -18,6 +18,13 @@ use crate::compiler_analysis::LibraryRef;
 use crate::{ScanProgress, ScanReporter};
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
+/// Edits, dumps, materializations, and project changes run ahead of dependency location: the
+/// query that asked for those classes has already returned. A continuous stream of that
+/// interactive work would otherwise leave location queued for the rest of the session. Once this
+/// many interactive commands have been served while location is waiting, the next dequeue serves
+/// one location command, then interactive work resumes. Replacing the workspace model cancels the
+/// location queue instead of draining it: those candidates belong to the previous classpath.
+const INTERACTIVE_COMMANDS_BEFORE_LOCATION: usize = 32;
 /// The longest an interactive command can be made to wait: one chunk of index work. Sized to sit
 /// inside a single worker source-set round trip.
 const MAX_INDEX_CHUNK_FILES: usize = 32;
@@ -319,7 +326,13 @@ struct CommandQueue {
 
 #[derive(Default)]
 struct CommandState {
+    /// Edits, dumps, materializations, and project changes, in arrival order.
     pending: VecDeque<EngineCommand>,
+    /// Dependency location, in arrival order. Separate from `pending` so an edit dequeues in
+    /// constant time no matter how many location commands are waiting.
+    locations: VecDeque<EngineCommand>,
+    /// Interactive commands served since the last location command, while `locations` was nonempty.
+    interactive_since_location: usize,
     neighborhood: VecDeque<IndexJob>,
     sweep: VecDeque<IndexJob>,
     /// Symbol chunks, drained after interactive work and ahead of both diagnostic levels.
@@ -469,9 +482,10 @@ impl CommandState {
                 generation,
                 candidates,
             } => {
-                // The query already returned. `take` runs an edit, dump, or project change ahead of
-                // this, and queued location does not keep the workspace sweep from being admitted.
-                self.pending.push_back(EngineCommand::LocateDependencies {
+                // The query already returned. Foreground dequeue runs interactive work ahead of
+                // this queue, up to `INTERACTIVE_COMMANDS_BEFORE_LOCATION`, and queued location
+                // does not keep the workspace sweep from being admitted.
+                self.locations.push_back(EngineCommand::LocateDependencies {
                     generation,
                     candidates,
                 });
@@ -554,13 +568,40 @@ impl CommandState {
         }
     }
 
-    /// Interactive work first, then the neighbourhood, then the sweep. The levels are the
-    /// priority, so there is no comparator and no heap. Dependency location shares the pending
-    /// deque but yields: a queue of class materializations must not sit in front of an edit.
+    /// Interactive work first, then one deferred location command once the yield bound is
+    /// reached, then the neighbourhood, then the sweep. The levels are the priority, so there
+    /// is no comparator and no heap.
     fn take(&mut self) -> Option<EngineCommand> {
-        if let Some(command) = self.take_pending() {
+        if let Some(command) = self.take_foreground() {
             return Some(command);
         }
+        self.take_background()
+    }
+
+    /// The next edit, dump, materialization, or project change. Location stays on its own queue
+    /// until none of those are waiting, or until interactive work has already run
+    /// [`INTERACTIVE_COMMANDS_BEFORE_LOCATION`] times ahead of it. Two location commands keep the
+    /// order they were queued in. Both pops are from the front of a deque.
+    fn take_foreground(&mut self) -> Option<EngineCommand> {
+        let location_due = !self.locations.is_empty()
+            && self.interactive_since_location >= INTERACTIVE_COMMANDS_BEFORE_LOCATION;
+        if location_due {
+            self.interactive_since_location = 0;
+            return self.locations.pop_front();
+        }
+        if let Some(command) = self.pending.pop_front() {
+            if self.locations.is_empty() {
+                self.interactive_since_location = 0;
+            } else {
+                self.interactive_since_location += 1;
+            }
+            return Some(command);
+        }
+        self.interactive_since_location = 0;
+        self.locations.pop_front()
+    }
+
+    fn take_background(&mut self) -> Option<EngineCommand> {
         loop {
             let job = match self.neighborhood.pop_front() {
                 Some(job) => job,
@@ -583,26 +624,11 @@ impl CommandState {
         }
     }
 
-    /// The earliest edit, dump, materialization, or project change. Location stays in place until
-    /// none of those are waiting, and two location commands keep the order they were queued in.
-    fn take_pending(&mut self) -> Option<EngineCommand> {
-        let interactive = self
-            .pending
-            .iter()
-            .position(|command| !matches!(command, EngineCommand::LocateDependencies { .. }));
-        match interactive {
-            Some(index) => self.pending.remove(index),
-            None => self.pending.pop_front(),
-        }
-    }
-
     /// True when an edit, dump, materialization, or project change is waiting. Queued dependency
     /// location is absent from this check, so serving an edit still admits the workspace sweep
     /// while those classes are written afterwards.
     fn interactive_work_queued(&self) -> bool {
-        self.pending
-            .iter()
-            .any(|command| !matches!(command, EngineCommand::LocateDependencies { .. }))
+        !self.pending.is_empty()
     }
 
     fn take_symbol_chunk(&mut self) -> Option<EngineCommand> {
@@ -675,10 +701,9 @@ impl CommandState {
     fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
         // Location candidates are classpath identities. Drop them with the model-owned index
-        // queues instead of making the new generation drain up to the session's pending-work cap
-        // one stale no-op command at a time.
-        self.pending
-            .retain(|command| !matches!(command, EngineCommand::LocateDependencies { .. }));
+        // queues instead of making the new generation drain a stale no-op command at a time.
+        self.locations.clear();
+        self.interactive_since_location = 0;
         self.indexed_done = 0;
         self.indexed_total = 0;
         self.neighborhood.clear();
@@ -713,6 +738,7 @@ impl CommandState {
 
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
+            && self.locations.is_empty()
             && self.symbols.is_empty()
             && self.neighborhood.is_empty()
             && self.sweep.is_empty()
@@ -862,7 +888,7 @@ impl CommandReceiver {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            if let Some(command) = state.pending.pop_front() {
+            if let Some(command) = state.take_foreground() {
                 return CommandReceive::Command(command);
             }
             if state.disconnected {
@@ -1383,6 +1409,9 @@ fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<()
         .send(Incoming::Engine(EngineEvent::Status(status)))
         .map_err(|_| ())
 }
+
+#[cfg(test)]
+mod location_queue;
 
 #[cfg(test)]
 mod tests {
