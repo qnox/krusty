@@ -19,6 +19,11 @@ pub enum BodyCheckFailureKind {
     UnsupportedCallShape,
     /// The resolver selected a function-value conversion the naming walk did not name.
     UnnamedFunctionValueConversion,
+    /// A resolver-recorded fun-interface conversion could not be published on its producer.
+    ///
+    /// The surrounding target is still a function type, or the recorded conversion did not
+    /// materialize. Leaving the original function value would check-cast it to the interface.
+    UnpublishedRecordedSamConversion,
     UnsupportedExpression(ExpressionForm),
     UnsupportedStatement(StatementForm),
 }

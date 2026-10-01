@@ -16,6 +16,33 @@ fn property_platform_check_name(
     producer.platform_check_name(property, getter_name)
 }
 
+#[cfg(test)]
+thread_local! {
+    static OMIT_RECORDED_SAM_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While this guard is alive, a recorded fun-interface conversion does not materialize.
+///
+/// Production cannot build that mismatch today — the same map was just checked — so the
+/// regression arms it explicitly.
+#[cfg(test)]
+pub(super) struct OmitRecordedSamPublication;
+
+#[cfg(test)]
+impl OmitRecordedSamPublication {
+    pub(super) fn arm() -> Self {
+        OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OmitRecordedSamPublication {
+    fn drop(&mut self) {
+        OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.set(false));
+    }
+}
+
 /// The expression a block chain actually yields. A recorded SAM conversion names that lambda, not
 /// the block written around it.
 fn sam_conversion_producer(file: &crate::ast::File, mut expression: ExprId) -> ExprId {
@@ -881,16 +908,15 @@ impl BodyFirChecker<'_> {
     ///
     /// `if` and `when` arms, and the block that is such an arm, type the lambda as the interface
     /// while the published child is still the function. The conversion stays on the lambda, so the
-    /// arm has to carry it or the interface-typed join check-casts the function object.
+    /// arm has to carry it or the interface-typed join check-casts the function object. A recorded
+    /// conversion that cannot be published is a frontend error: a function-typed target, or a
+    /// record that does not materialize a conversion, must not degrade to the original value.
     pub(super) fn with_recorded_sam_conversion(
         &mut self,
         producer: ExprId,
         value: crate::fir::FirExprId,
         target: ResolvedTy,
     ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
-        if matches!(target.get().non_null(), Ty::Fun(_)) {
-            return Ok(value);
-        }
         let producer = sam_conversion_producer(self.file, producer);
         if !self.info.resolved_sam_conversions.contains_key(&producer) {
             return Ok(value);
@@ -898,9 +924,21 @@ impl BodyFirChecker<'_> {
         if self.value_has_sam_conversion(value) {
             return Ok(value);
         }
+        let span = self.file.expr_span(producer);
+        if matches!(target.get().non_null(), Ty::Fun(_)) {
+            return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
+        }
         let origin = self.expression_origin(producer)?;
-        let Some(conversion) = self.selected_argument_conversion(producer, origin)? else {
-            return Ok(value);
+        #[cfg(test)]
+        let conversion = if OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.get()) {
+            None
+        } else {
+            self.selected_argument_conversion(producer, origin)?
+        };
+        #[cfg(not(test))]
+        let conversion = self.selected_argument_conversion(producer, origin)?;
+        let Some(conversion) = conversion else {
+            return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
         };
         Ok(self.body.add_expr(crate::fir::FirExpr {
             origin,
