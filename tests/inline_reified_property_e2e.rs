@@ -162,7 +162,11 @@ fun noInlineRun(f: Int.() -> String): String = f(1)
     const MAIN: &str = r#"
 fun box() = { a: Int -> if (a == 1) "O" else "FA" }.foo() + { a: Int -> if (a == 1) "K" else "IL" }.bar
 "#;
-    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    assert_eq!(
+        run_box_files(&sources),
+        common::kotlinc_box_files_result(&sources, "MainKt")
+    );
 }
 
 /// Local classes inside an anonymous object in a cross-file inline property are part of the splice.
@@ -190,7 +194,11 @@ inline val bar: String get() {
 }
 "#;
     const MAIN: &str = "fun box(): String = foo() + bar\n";
-    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    assert_eq!(
+        run_box_files(&sources),
+        common::kotlinc_box_files_result(&sources, "MainKt")
+    );
 }
 
 /// An imported member extension on an object keeps its dispatch receiver when spliced in another file.
@@ -219,7 +227,11 @@ fun box(): String {
     return "OK"
 }
 "#;
-    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    assert_eq!(
+        run_box_files(&sources),
+        common::kotlinc_box_files_result(&sources, "test.MainKt")
+    );
 }
 
 fn run_box_files(sources: &[(&str, &str)]) -> String {

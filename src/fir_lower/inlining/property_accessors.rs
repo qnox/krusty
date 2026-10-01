@@ -28,7 +28,8 @@ pub(super) fn splice_inline_property_accessors(
 ) -> Result<(), FirFileLoweringFailure> {
     let mut next_temporary = fresh_value_base(ir);
     let mut sites = ir
-        .inline_property_splices
+        .inline_property_access
+        .splices
         .keys()
         .copied()
         .collect::<Vec<_>>();
@@ -85,7 +86,7 @@ fn splice_property_access(
     next_temporary: &mut u32,
     stack: &mut HashSet<DeclarationId>,
 ) -> Result<(), FirFileLoweringFailure> {
-    let Some(splice) = ir.inline_property_splices.get(&site).cloned() else {
+    let Some(splice) = ir.inline_property_access.splices.get(&site).cloned() else {
         return Ok(());
     };
     let Some(access) = property_access(ir, site) else {
@@ -98,7 +99,7 @@ fn splice_property_access(
     let nested = expand_inline_accessor(ir, site, &access, &splice, function, next_temporary)?;
     // The site is now the expanded block. Drop the record so a later clone of this accessor does
     // not try to splice that block again.
-    ir.inline_property_splices.remove(&site);
+    ir.inline_property_access.splices.remove(&site);
     for nested in nested {
         splice_property_access(ir, nested, next_temporary, stack)?;
     }
@@ -110,7 +111,8 @@ fn recorded_accessor(
     ir: &crate::ir::IrFile,
     splice: &IrInlinePropertySplice,
 ) -> Result<crate::ir::FunId, FirFileLoweringFailure> {
-    ir.accessor_functions
+    ir.inline_property_access
+        .accessor_functions
         .get(&splice.accessor)
         .copied()
         .ok_or_else(|| failure(splice.accessor, InlineFail::MissingFunction))
@@ -270,7 +272,7 @@ fn expand_inline_accessor(
     let nested = cloned
         .values()
         .copied()
-        .filter(|copy| ir.inline_property_splices.contains_key(copy))
+        .filter(|copy| ir.inline_property_access.splices.contains_key(copy))
         .collect();
     Ok(nested)
 }
@@ -296,13 +298,13 @@ fn carry_nested_splice(
     copy: ExprId,
     bindings: &HashMap<String, Ty>,
 ) {
-    let Some(mut splice) = ir.inline_property_splices.get(&source).cloned() else {
+    let Some(mut splice) = ir.inline_property_access.splices.get(&source).cloned() else {
         return;
     };
     for substitution in &mut splice.substitutions {
         substitution.value = ty_subst_keep_unbound(substitution.value, bindings);
     }
-    ir.inline_property_splices.insert(copy, splice);
+    ir.inline_property_access.splices.insert(copy, splice);
 }
 
 enum ExpandedAccessor {
@@ -570,7 +572,7 @@ mod tests {
     }
 
     fn record_splice(ir: &mut IrFile, site: ExprId, accessor: DeclarationId) {
-        ir.inline_property_splices.insert(
+        ir.inline_property_access.splices.insert(
             site,
             IrInlinePropertySplice {
                 accessor,
@@ -627,7 +629,9 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        ir.accessor_functions.insert(accessor, function);
+        ir.inline_property_access
+            .accessor_functions
+            .insert(accessor, function);
 
         let error = splice_inline_property_accessors(&mut ir).unwrap_err();
 

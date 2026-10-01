@@ -220,7 +220,7 @@ fn publish_foreign_accessor_layouts(
 ) -> Result<(), FirFileLoweringFailure> {
     let mut accessors: HashMap<crate::fir::PropertyId, (Option<FunId>, Option<FunId>)> =
         HashMap::new();
-    for (&declaration, &function) in &ir.accessor_functions {
+    for (&declaration, &function) in &ir.inline_property_access.accessor_functions {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
@@ -1624,7 +1624,9 @@ fn publish_accessor_function(
     let (Some(declaration), Some(function)) = (declaration, function) else {
         return;
     };
-    ir.accessor_functions.insert(declaration, function);
+    ir.inline_property_access
+        .accessor_functions
+        .insert(declaration, function);
     if !inline {
         return;
     }
@@ -2104,6 +2106,7 @@ pub(super) fn accept_inline_accessor_template(
     ir.callable_scopes.insert(body);
     ir.functions[function as usize].body = Some(body);
     if ir
+        .inline_property_access
         .accessor_functions
         .insert(declaration, function)
         .is_some()

@@ -1048,7 +1048,7 @@ impl BodyLowering<'_> {
         let Some(splice) = splice else {
             return;
         };
-        self.ir.inline_property_splices.insert(
+        self.ir.inline_property_access.splices.insert(
             expression,
             crate::ir::IrInlinePropertySplice {
                 accessor: splice.accessor,
