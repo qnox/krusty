@@ -521,10 +521,6 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.boxed_primitive(ty)
     }
 
-    fn extension_receiver_rank(&self, recv: Ty, declared: Ty) -> Option<u32> {
-        self.platform.extension_receiver_rank(recv, declared)
-    }
-
     fn function_like_arity(&self, ty: Ty) -> Option<usize> {
         self.platform.function_like_arity(ty)
     }
