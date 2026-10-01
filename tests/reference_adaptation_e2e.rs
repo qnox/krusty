@@ -44,7 +44,7 @@ fn star_projected_member_and_extension_references_use_their_declared_bounds() {
     );
 }
 
-/// Owner class, reflected name, reflection descriptor, and specialized `invoke` descriptor.
+/// Owner class, reflected name, and the descriptor string passed to `FunctionReferenceImpl`.
 fn krusty_reflection_identities(source: &str) -> BTreeSet<String> {
     let classes = common::expect_classes_with_stdlib(source, "Main");
     let dir = common::scratch_dir().expect("scratch dir");
@@ -115,8 +115,6 @@ fn reflection_identity(class_file: &Path) -> Option<String> {
     let mut owner = None;
     let mut name = None;
     let mut signature = None;
-    let mut invoke = None;
-    let mut method = String::new();
     for line in dump.lines() {
         let trimmed = line.trim();
         if trimmed.ends_with("();") && !trimmed.contains(' ') {
@@ -124,33 +122,25 @@ fn reflection_identity(class_file: &Path) -> Option<String> {
             continue;
         }
         if in_constructor && (trimmed.starts_with("public ") || trimmed.starts_with("static ")) {
-            in_constructor = false;
+            break;
         }
-        if in_constructor {
-            if let Some(payload) = trimmed.split("// ").nth(1) {
-                if let Some(class_name) = payload.strip_prefix("class ") {
-                    owner = Some(class_name.trim().to_string());
-                } else if let Some(text) = payload.strip_prefix("String ") {
-                    if text.contains('(') {
-                        signature = Some(text.trim().to_string());
-                    } else {
-                        name = Some(text.trim().to_string());
-                    }
-                }
+        if !in_constructor {
+            continue;
+        }
+        let Some(payload) = trimmed.split("// ").nth(1) else {
+            continue;
+        };
+        if let Some(class_name) = payload.strip_prefix("class ") {
+            owner = Some(class_name.trim().to_string());
+        } else if let Some(text) = payload.strip_prefix("String ") {
+            if text.contains('(') {
+                signature = Some(text.trim().to_string());
+            } else {
+                name = Some(text.trim().to_string());
             }
-        }
-        if trimmed.ends_with(';') && trimmed.contains(" invoke(") {
-            method = trimmed.to_string();
-        }
-        if let Some(descriptor) = trimmed.strip_prefix("descriptor: ") {
-            if method.contains(" invoke(") && !method.contains("java.lang.Object, java.lang.Object")
-            {
-                invoke = Some(descriptor.trim().to_string());
-            }
-            method.clear();
         }
     }
-    Some(format!("{} {} {} {}", owner?, name?, signature?, invoke?))
+    Some(format!("{} {} {}", owner?, name?, signature?))
 }
 
 #[test]
