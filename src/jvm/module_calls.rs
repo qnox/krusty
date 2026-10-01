@@ -1026,8 +1026,5 @@ pub(super) fn facade_for(
     stems: &[String],
 ) -> Option<crate::types::TypeName> {
     let stem = stems.get(source.source.raw() as usize)?;
-    let package = (source.package != crate::types::TypeName::ROOT).then(|| source.package.render());
-    Some(crate::types::type_name(
-        &crate::jvm::names::file_class_name(stem, package.as_deref()),
-    ))
+    Some(crate::jvm::names::file_facade_name(source.package, stem))
 }
