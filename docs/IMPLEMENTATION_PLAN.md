@@ -4905,12 +4905,16 @@ passes; a dependency classifier is still answered through its provider during em
   the JVM consumes. The table answers only for identities the IR holds. External calls,
   constructors, callable references, and override bridges consume it without querying the classpath
   callable table again.
-- ☐ Dependency property facts, one per `ExternalPropertyId` the IR references.
-  Property-reference realization still asks the provider for the selected property's accessor ids;
-  that property-owned lookup is not a second authority for a callable already carried by this table.
+- ✅ Dependency property facts, one per `ExternalPropertyId` the IR references (dependency property
+  reads and writes, and property references): the provider-decoded Kotlin name, the getter and
+  setter identities (each with its own callable fact), the owner the provider published for the
+  getter, the getter declaration's exact result type, so a backend types a dependency property
+  read from the selected declaration rather than from its owner's or its own spelling, and whether
+  the provider normalized it as its value class's underlying storage property.
 - ☐ Freeze the referenced dependency classifier facts too. `CheckedBackendClassifiers` still holds
   the provider (`&dyn SymbolSource`) and answers a dependency classifier by asking it during
-  emission (`backend/module_facts.rs`), so a backend is not yet provider-free; only callables are.
+  emission (`backend/module_facts.rs`), so a backend is not yet provider-free; only callables and
+  properties are.
 - ☐ Publish a separate semantic Kotlin owner for dependency declarations. The frozen
   `physical_owner` is deliberately the provider's target container (a mapped builtin's JVM class or
   a top-level facade) and is consumed only as a realization fact.

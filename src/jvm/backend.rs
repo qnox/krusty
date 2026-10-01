@@ -880,7 +880,7 @@ impl Backend for JvmBackend {
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.callables,
             &facade,
         ) {
             Ok(realizations) => realizations,
@@ -1343,6 +1343,22 @@ mod tests {
             assert!(
                 !text.contains(".external_callable("),
                 "{relative} must consume CheckedBackendCallables by ExternalCallableId"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_dependency_properties_are_not_requeried_during_realization() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/jvm/external_calls.rs",
+            "src/jvm/property_references.rs",
+        ] {
+            let text = std::fs::read_to_string(root.join(relative))
+                .expect("read dependency-property realization pass");
+            assert!(
+                !text.contains(".external_property("),
+                "{relative} must consume CheckedBackendCallables by ExternalPropertyId"
             );
         }
     }

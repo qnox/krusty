@@ -328,8 +328,8 @@ pub(super) fn realize(
         )) = property
         {
             property_dispatch = dispatch;
-            let realization = classpath
-                .external_property(property)
+            let realization = callables
+                .property(property)
                 .ok_or(ExternalDependencyTarget::Property(property))?;
             let target = if write {
                 realization

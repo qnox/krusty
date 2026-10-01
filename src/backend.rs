@@ -9,7 +9,9 @@ mod module_facts;
 
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
-pub use dependency_facts::{BackendCallableFact, CheckedBackendCallables, DependencyFactError};
+pub use dependency_facts::{
+    BackendCallableFact, BackendPropertyFact, CheckedBackendCallables, DependencyFactError,
+};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendMemberFact,
@@ -28,8 +30,9 @@ pub struct CheckedIrFile<'a> {
     /// exposing the frontend symbol table here would permit lookup and provisional local
     /// signatures to leak across the backend boundary.
     pub classifiers: CheckedBackendClassifiers<'a>,
-    /// Frozen facts for exactly the dependency callables this file's IR selected, copied from their
-    /// provider at this boundary so emission need not ask the provider about one again.
+    /// Frozen facts for exactly the dependency callables and properties this file's IR selected,
+    /// copied from their provider at this boundary so emission need not ask the provider about one
+    /// again.
     pub callables: CheckedBackendCallables,
     /// The native compiler plugins the frontend ran for this compilation. A backend runs exactly
     /// these, so a declaration the frontend published is realized and no unrequested one appears.

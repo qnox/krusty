@@ -5,27 +5,41 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::{
-    referenced_dependencies, Artifact, Backend, BackendCallableFact, CheckedBackendCallables,
-    CheckedIrFile, DependencyFactError,
+    referenced_dependencies, Artifact, Backend, BackendCallableFact, BackendPropertyFact,
+    CheckedBackendCallables, CheckedIrFile, DependencyFactError,
 };
 use crate::compiler::emit_analyzed;
 use crate::diag::DiagSink;
 use crate::features::LangFeatures;
-use crate::fir::ExternalCallableId;
+use crate::fir::{ExternalCallableId, ExternalPropertyId};
 use crate::jvm::classpath::Classpath;
 use crate::libraries::ExternalCallableKind;
 use crate::source::SourceInput;
-use crate::types::type_name;
+use crate::types::{type_name, Ty};
 
 /// Two repository-owned dependencies publish the same top-level and member spellings. Distinct
 /// identities, rather than a stdlib special case, must keep their frozen realizations apart.
+/// `lib` also declares properties and a `listOf` that shares the stdlib's name.
 const LIBRARY: &str = r#"package lib
+
+val version: Int = 1
 
 fun collide(value: String): String = value
 
+fun listOf(vararg elements: String): List<String> = elements.asList()
+
+class Text {
+    val length: Long = 3L
+}
+
 class Buffer {
+    var count: Int = 0
+    val label: String get() = "buffer"
     fun append(value: String): String = value
 }
+
+@JvmInline
+value class Meters(val value: Int)
 
 open class Base(val seed: Int) {
     var mutableSeed: Int = seed
@@ -55,10 +69,34 @@ fun box(): String {
 }
 "#;
 
+/// References `lib`'s properties and the stdlib names those declarations share.
+const PROPERTY_PROGRAM: &str = r#"import lib.Buffer
+import lib.Text
+import lib.listOf as libListOf
+import lib.version
+
+fun box(): String {
+    val names = listOf("b", "a")
+    val mine = libListOf("c")
+    val builder = StringBuilder()
+    builder.append(names.size)
+    val buffer = Buffer()
+    buffer.append("x")
+    buffer.count = version
+    val label = Buffer::label
+    val read = names.first() == "b" && mine.size == 1 && label(buffer) == "buffer"
+    val text: CharSequence = builder
+    val lengths = Text().length == 3L && text.length == 1
+    return if (read && lengths && buffer.count == 1) "OK" else "fail"
+}
+"#;
+
 /// Exercises every side-table source of a dependency identity: a primary and a secondary super
 /// constructor, override edges of a function and a property, a module call that takes its omitted
 /// arguments' defaults from a dependency declaration, and a delegate convention.
 const SOURCES: &str = r#"import lib.Base
+import lib.Buffer
+import lib.Meters
 
 class Direct : Base(2)
 
@@ -71,6 +109,15 @@ class Child : Base {
 fun greetings(): String = Child().greet()
 
 val lazyValue: Int by lazy { 3 }
+
+fun properties(): Int {
+    val tag = Direct().tag
+    val reference = Base::tag
+    val storage = Meters::value
+    val buffer = Buffer()
+    buffer.count = 2
+    return tag.length + reference(Child()).length + storage(Meters(4)) + buffer.count
+}
 "#;
 
 /// Every callable fact of the file, with its identity, in identity order.
@@ -135,11 +182,46 @@ fn side_table_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalCal
     carriers
 }
 
+/// Each carrier of a dependency property identity, read straight off the checked IR the backend
+/// receives: reads, writes and property references.
+fn property_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalPropertyId)> {
+    use crate::fir::{FirPropertyReferenceTarget, FirPropertyTarget};
+    use crate::ir::{IrCheckedOperation, IrExpr};
+    let mut carriers = Vec::new();
+    for expression in &ir.exprs {
+        let IrExpr::Checked(operation) = expression else {
+            continue;
+        };
+        match operation {
+            IrCheckedOperation::ExternalPropertyRead { target, .. } => {
+                carriers.push(("property read", *target))
+            }
+            IrCheckedOperation::ExternalPropertyWrite { target, .. } => {
+                carriers.push(("property write", *target))
+            }
+            IrCheckedOperation::PropertyReference {
+                target: FirPropertyReferenceTarget::External { getter, setter, .. },
+                ..
+            } => {
+                for accessor in std::iter::once(getter).chain(setter) {
+                    if let FirPropertyTarget::External { property, .. } = accessor.as_ref() {
+                        carriers.push(("property reference", *property));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    carriers
+}
+
 /// Records the frozen facts of every file after checking them against the provider's own records.
 struct FactRecorder {
     classpath: Rc<Classpath>,
     callables: RefCell<Recorded>,
     carriers: RefCell<Vec<(&'static str, ExternalCallableId)>>,
+    properties: RefCell<Vec<(ExternalPropertyId, BackendPropertyFact)>>,
+    property_carriers: RefCell<Vec<(&'static str, ExternalPropertyId)>>,
 }
 
 impl Backend for FactRecorder {
@@ -154,16 +236,45 @@ impl Backend for FactRecorder {
         let referenced = referenced_dependencies(&file.ir);
         let mut held = referenced.callables.clone();
         for property in referenced.properties {
+            let fact = file
+                .callables
+                .property(property)
+                .expect("every referenced property has a frozen fact");
             let realization = self
                 .classpath
                 .external_property(property)
                 .expect("the provider answers for its own property identity");
-            held.insert(realization.getter);
-            held.extend(realization.setter);
+            let getter = self
+                .classpath
+                .external_callable(realization.getter)
+                .expect("the provider answers for its own getter identity");
+            assert_eq!(
+                *fact,
+                BackendPropertyFact {
+                    name: realization.name.into_boxed_str(),
+                    getter: realization.getter,
+                    setter: realization.setter,
+                    owner: getter.callable.owner,
+                    result: getter.callable.ret,
+                    declares_value_class_storage: realization.declares_value_class_storage,
+                    compile_time_constant: realization
+                        .compile_time_constant
+                        .as_ref()
+                        .and_then(crate::ir::IrConst::from_library_constant),
+                }
+            );
+            for accessor in std::iter::once(fact.getter).chain(fact.setter) {
+                assert!(file.callables.callable(accessor).is_some());
+                held.insert(accessor);
+            }
+            self.properties.borrow_mut().push((property, fact.clone()));
         }
         self.carriers
             .borrow_mut()
             .extend(side_table_carriers(&file.ir));
+        self.property_carriers
+            .borrow_mut()
+            .extend(property_carriers(&file.ir));
         for callable in &held {
             let fact = file
                 .callables
@@ -310,12 +421,22 @@ fn compile_library() -> std::path::PathBuf {
 }
 
 /// Freeze the program's dependency facts over the stdlib, the JDK and the compiled library.
-fn frozen_program_facts() -> Recorded {
-    frozen_facts(PROGRAM).0
+fn frozen_program_facts() -> (Recorded, Vec<(ExternalPropertyId, BackendPropertyFact)>) {
+    let (callables, properties, _, _) = frozen_facts(PROGRAM);
+    (callables, properties)
 }
 
-/// Freeze `program`'s dependency facts, and report every side-table carrier the backend saw.
-fn frozen_facts(program: &str) -> (Recorded, Vec<(&'static str, ExternalCallableId)>) {
+/// The facts frozen for one program: its callables, its properties, and every side-table carrier
+/// the backend saw.
+type Frozen = (
+    Recorded,
+    Vec<(ExternalPropertyId, BackendPropertyFact)>,
+    Vec<(&'static str, ExternalCallableId)>,
+    Vec<(&'static str, ExternalPropertyId)>,
+);
+
+/// Freeze `program`'s dependency facts over the stdlib, the JDK and the compiled library.
+fn frozen_facts(program: &str) -> Frozen {
     let library = compile_library();
     let mut paths = platform_paths();
     paths.push(library.clone());
@@ -326,6 +447,8 @@ fn frozen_facts(program: &str) -> (Recorded, Vec<(&'static str, ExternalCallable
         classpath,
         callables: RefCell::default(),
         carriers: RefCell::default(),
+        properties: RefCell::default(),
+        property_carriers: RefCell::default(),
     };
     let outputs = emit_analyzed(
         analysis,
@@ -339,7 +462,9 @@ fn frozen_facts(program: &str) -> (Recorded, Vec<(&'static str, ExternalCallable
     assert!(outputs.is_empty());
     (
         recorder.callables.into_inner(),
+        recorder.properties.into_inner(),
         recorder.carriers.into_inner(),
+        recorder.property_carriers.into_inner(),
     )
 }
 
@@ -385,7 +510,7 @@ fn assert_named(
 
 #[test]
 fn frozen_facts_answer_every_dependency_identity_the_ir_references() {
-    let callables = frozen_program_facts();
+    let (callables, properties) = frozen_program_facts();
     let mut summary = callables
         .iter()
         .map(|(_, fact)| (Some(fact_name(fact)), fact.kind))
@@ -405,11 +530,68 @@ fn frozen_facts_answer_every_dependency_identity_the_ir_references() {
             (Some("collide"), ExternalCallableKind::TopLevel),
         ]
     );
+    let mut properties = properties
+        .iter()
+        .map(|(_, fact)| {
+            (
+                fact.name.as_ref(),
+                fact.setter.is_some(),
+                fact.owner,
+                fact.result,
+            )
+        })
+        .collect::<Vec<_>>();
+    properties.sort_by_key(|(name, ..)| *name);
+    assert!(
+        properties.is_empty(),
+        "the same-name program references no dependency property: {properties:?}"
+    );
+}
+
+#[test]
+fn frozen_property_facts_answer_every_referenced_dependency_property() {
+    let (_, properties, _, _) = frozen_facts(PROPERTY_PROGRAM);
+    let properties = properties
+        .iter()
+        .map(|(_, fact)| {
+            (
+                fact.name.as_ref(),
+                fact.setter.is_some(),
+                fact.owner,
+                fact.result,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = [
+        ("count", true, type_name("lib/Buffer"), Ty::Int),
+        // Read through `Buffer::label`.
+        ("label", false, type_name("lib/Buffer"), Ty::String),
+        // `CharSequence.length`, and a repository-owned property with the same name: each fact
+        // carries its own getter's declared result.
+        (
+            "length",
+            false,
+            type_name("java/lang/CharSequence"),
+            Ty::Int,
+        ),
+        ("length", false, type_name("lib/Text"), Ty::Long),
+        // `List.size`, whose getter the JVM provider publishes on the mapped JVM interface.
+        ("size", false, type_name("java/util/List"), Ty::Int),
+        ("version", false, type_name("lib/LibKt"), Ty::Int),
+    ];
+    // Identity order is the provider's interning order, so compare as a set of exact facts.
+    assert_eq!(properties.len(), expected.len(), "{properties:?}");
+    for fact in &expected {
+        assert!(
+            properties.contains(fact),
+            "{fact:?} is not among {properties:?}"
+        );
+    }
 }
 
 #[test]
 fn same_named_repository_top_level_functions_have_distinct_facts() {
-    let callables = frozen_program_facts();
+    let (callables, _) = frozen_program_facts();
     assert_named(
         &callables,
         "collide",
@@ -422,7 +604,7 @@ fn same_named_repository_top_level_functions_have_distinct_facts() {
 
 #[test]
 fn same_named_repository_members_have_distinct_facts() {
-    let callables = frozen_program_facts();
+    let (callables, _) = frozen_program_facts();
     assert_named(
         &callables,
         "append",
@@ -435,7 +617,7 @@ fn same_named_repository_members_have_distinct_facts() {
 
 #[test]
 fn every_side_table_source_of_a_dependency_callable_is_frozen() {
-    let (callables, carriers) = frozen_facts(SOURCES);
+    let (callables, _, carriers, _) = frozen_facts(SOURCES);
     let frozen = callables
         .iter()
         .map(|(identity, _)| *identity)
@@ -469,7 +651,7 @@ fn every_side_table_source_of_a_dependency_callable_is_frozen() {
 
 #[test]
 fn dependency_property_accessors_are_frozen_before_backend_realization() {
-    let (callables, _) = frozen_facts(
+    let (callables, _, _, _) = frozen_facts(
         r#"import lib.Base
 
 fun update(base: Base): Int {
@@ -515,5 +697,75 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
     assert_eq!(
         CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource).map(|_| ()),
         Err(DependencyFactError::UnknownCallable(target))
+    );
+}
+
+#[test]
+fn a_property_its_provider_cannot_answer_is_an_internal_error() {
+    let mut ir = crate::ir::IrFile::default();
+    let property = ExternalPropertyId::from_raw(5);
+    ir.exprs.push(crate::ir::IrExpr::Checked(
+        crate::ir::IrCheckedOperation::ExternalPropertyRead {
+            target: property,
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: None,
+            arguments: Vec::new(),
+            parameters: Vec::new(),
+            result: crate::types::Ty::Int,
+            source_receiver: None,
+        },
+    ));
+    assert_eq!(
+        CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource).map(|_| ()),
+        Err(DependencyFactError::UnknownProperty(property))
+    );
+}
+
+#[test]
+fn every_carrier_of_a_dependency_property_is_frozen_with_its_accessors() {
+    // The recorder asserts that every referenced property's fact equals the provider's record and
+    // that each of its accessors has a frozen callable fact; this test pins that every carrier of a
+    // property identity reaches it.
+    let (_, properties, _, carriers) = frozen_facts(SOURCES);
+    let mut sources = carriers
+        .iter()
+        .map(|(source, _)| *source)
+        .collect::<Vec<_>>();
+    sources.sort_unstable();
+    sources.dedup();
+    assert_eq!(
+        sources,
+        ["property read", "property reference", "property write"]
+    );
+    for (source, identity) in &carriers {
+        assert!(
+            properties.iter().any(|(property, _)| property == identity),
+            "the {source} {identity:?} has no frozen fact"
+        );
+    }
+}
+
+#[test]
+fn a_value_class_storage_property_keeps_its_provider_flag() {
+    let (_, properties, _, _) = frozen_facts(SOURCES);
+    let mut storage = properties
+        .iter()
+        .map(|(_, fact)| {
+            (
+                fact.name.as_ref(),
+                fact.owner,
+                fact.result,
+                fact.declares_value_class_storage,
+            )
+        })
+        .filter(|(name, ..)| matches!(*name, "value" | "tag"))
+        .collect::<Vec<_>>();
+    storage.sort_by_key(|(name, ..)| *name);
+    assert_eq!(
+        storage,
+        [
+            ("tag", type_name("lib/Base"), Ty::String, false),
+            ("value", type_name("lib/Meters"), Ty::Int, true),
+        ]
     );
 }

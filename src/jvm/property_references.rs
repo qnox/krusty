@@ -10,7 +10,7 @@ pub(crate) use realization::{
     PropertyReferenceRealizations, ProtectedReferenceBridgeMethod,
 };
 
-use super::classpath::{Classpath, ExternalCallableKind, ExternalCallableRealization};
+use super::classpath::ExternalCallableKind;
 use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget, PropertyId,
 };
@@ -95,13 +95,14 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
 pub(super) enum PropertyReferenceRealizationTarget {
     Module(PropertyId),
     External(crate::fir::ExternalCallableId),
+    ExternalProperty(crate::fir::ExternalPropertyId),
     Invalid,
 }
 
 pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
@@ -194,7 +195,7 @@ pub(super) fn realize(
                 extension_receiver,
                 property_type,
             } => external_property(
-                classpath,
+                callables,
                 reflection_owner.map(crate::fir::ResolvedTy::get),
                 getter.as_ref(),
                 setter.as_deref(),
@@ -431,25 +432,28 @@ fn classifier_property(
 }
 
 fn external_property(
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     reflection_owner: Option<Ty>,
     getter: &FirPropertyTarget,
     setter: Option<&FirPropertyTarget>,
     extension_receiver: bool,
     property_type: Ty,
 ) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
-    // The name a `KProperty` answers with is the PROPERTY's, and only the provider has it: it
-    // decoded it from the declaration's metadata, where an accessor's own name is a physical call
-    // target that may be renamed or value-class-mangled.
-    let property_declaration = declared_property(classpath, getter)?;
+    // The frontend/backend handoff froze the PROPERTY declaration and each selected accessor by
+    // opaque identity. An accessor's physical name may be renamed or value-class-mangled, so no
+    // classpath/name lookup is permitted while realizing the reference.
+    let (property_identity, property_declaration) = external_property_fact(callables, getter)?;
     let name = property_declaration.name.clone();
-    let getter_constant = property_declaration
-        .compile_time_constant
-        .as_ref()
-        .and_then(crate::ir::IrConst::from_library_constant);
-    let getter = external_accessor(classpath, getter, false)?;
+    let getter_constant = property_declaration.compile_time_constant.clone();
+    let getter = external_accessor(callables, getter, false)?;
     let setter = setter
-        .map(|setter| external_accessor(classpath, setter, true))
+        .map(|setter| {
+            let (setter_property, _) = external_property_fact(callables, setter)?;
+            if setter_property != property_identity {
+                return Err(PropertyReferenceRealizationTarget::Invalid);
+            }
+            external_accessor(callables, setter, true)
+        })
         .transpose()?;
     let failure = PropertyReferenceRealizationTarget::External(getter.0);
     let field_realization = matches!(
@@ -468,7 +472,7 @@ fn external_property(
     if !setter_matches {
         return Err(failure);
     }
-    let callable = &getter.1.callable;
+    let callable = getter.1;
     let descriptor = if field_realization {
         crate::jvm::names::method_descriptor(&[], callable.physical_ret)
     } else {
@@ -481,15 +485,16 @@ fn external_property(
                 getter.1.kind,
                 ExternalCallableKind::TopLevel | ExternalCallableKind::StaticFieldRead
             )
-            .then_some(callable.owner)
+            .then_some(property_declaration.owner)
         })
         .ok_or(failure)?;
     let (static_dispatch, ext_facade) = match getter.1.kind {
         ExternalCallableKind::TopLevel => (true, None),
-        ExternalCallableKind::Extension => (false, Some(Some(callable.owner))),
-        ExternalCallableKind::Member | ExternalCallableKind::InstanceFieldRead => {
-            (false, extension_receiver.then_some(Some(callable.owner)))
-        }
+        ExternalCallableKind::Extension => (false, Some(Some(property_declaration.owner))),
+        ExternalCallableKind::Member | ExternalCallableKind::InstanceFieldRead => (
+            false,
+            extension_receiver.then_some(Some(property_declaration.owner)),
+        ),
         ExternalCallableKind::StaticFieldRead => (true, None),
         ExternalCallableKind::Constructor
         | ExternalCallableKind::InstanceFieldWrite
@@ -504,12 +509,12 @@ fn external_property(
     let call_owner = if ext_facade.is_none() && !static_dispatch && !callable.owner_is_interface {
         owner
     } else {
-        callable.owner
+        property_declaration.owner
     };
     // A field-backed declaration is read and written as the field its accessors ARE, from the
     // same selected realization: the field an owner and spelling would find may belong to another
     // declaration.
-    let field_access = |realization: &ExternalCallableRealization, ty: Ty| {
+    let field_access = |realization: &crate::backend::BackendCallableFact, ty: Ty| {
         let is_static = match realization.kind {
             ExternalCallableKind::InstanceFieldRead | ExternalCallableKind::InstanceFieldWrite => {
                 false
@@ -522,25 +527,18 @@ fn external_property(
         };
         Some(PropertyFieldAccess {
             owner: if is_static {
-                realization.callable.owner
+                realization.physical_owner
             } else {
                 call_owner
             },
-            name: realization.callable.name.clone(),
+            name: realization.name.clone(),
             ty,
             is_static,
         })
     };
     let physical_setter_value = setter
         .as_ref()
-        .map(|(_, setter)| {
-            setter
-                .callable
-                .physical_params
-                .last()
-                .copied()
-                .ok_or(failure)
-        })
+        .map(|(_, setter)| setter.physical_params.last().copied().ok_or(failure))
         .transpose()?;
     let getter_field = getter_constant
         .is_none()
@@ -568,14 +566,12 @@ fn external_property(
             prop_name: name.to_string(),
             getter_name: getter_name.clone(),
             getter_descriptor: Some(descriptor),
-            setter_name: setter
-                .as_ref()
-                .map(|(_, setter)| setter.callable.name.clone()),
+            setter_name: setter.as_ref().map(|(_, setter)| setter.name.clone()),
             setter_descriptor: setter.as_ref().map(|(_, setter)| {
                 if field_realization {
-                    crate::jvm::names::method_descriptor(&setter.callable.physical_params, Ty::Unit)
+                    crate::jvm::names::method_descriptor(&setter.physical_params, Ty::Unit)
                 } else {
-                    callable_descriptor(&setter.callable)
+                    callable_descriptor(setter)
                 }
             }),
             owner_is_interface: callable.owner_is_interface,
@@ -587,9 +583,7 @@ fn external_property(
         },
         PropertyReferenceRealization {
             declared_getter_name: getter_name,
-            declared_setter_name: setter
-                .as_ref()
-                .map(|(_, setter)| setter.callable.name.clone()),
+            declared_setter_name: setter.as_ref().map(|(_, setter)| setter.name.clone()),
             // A dependency's storage was realized by whoever compiled it, and its accessors are
             // read from that artifact's metadata rather than realized again here.
             facade_storage: false,
@@ -627,32 +621,39 @@ fn external_property(
 }
 
 /// The Kotlin name of the property an accessor target belongs to, as its declaration published it.
-fn declared_property(
-    classpath: &Classpath,
+fn external_property_fact<'a>(
+    callables: &'a crate::backend::CheckedBackendCallables,
     target: &FirPropertyTarget,
-) -> Result<super::classpath::ExternalPropertyRealization, PropertyReferenceRealizationTarget> {
-    let FirPropertyTarget::External { property, .. } = target else {
-        return Err(PropertyReferenceRealizationTarget::Invalid);
-    };
-    classpath
-        .external_property(*property)
-        .ok_or(PropertyReferenceRealizationTarget::Invalid)
-}
-
-fn external_accessor(
-    classpath: &Classpath,
-    target: &FirPropertyTarget,
-    write: bool,
 ) -> Result<
-    (crate::fir::ExternalCallableId, ExternalCallableRealization),
+    (
+        crate::fir::ExternalPropertyId,
+        &'a crate::backend::BackendPropertyFact,
+    ),
     PropertyReferenceRealizationTarget,
 > {
     let FirPropertyTarget::External { property, .. } = target else {
         return Err(PropertyReferenceRealizationTarget::Invalid);
     };
-    let realization = classpath
-        .external_property(*property)
-        .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
+    callables
+        .property(*property)
+        .map(|fact| (*property, fact))
+        .ok_or(PropertyReferenceRealizationTarget::ExternalProperty(
+            *property,
+        ))
+}
+
+fn external_accessor<'a>(
+    callables: &'a crate::backend::CheckedBackendCallables,
+    target: &FirPropertyTarget,
+    write: bool,
+) -> Result<
+    (
+        crate::fir::ExternalCallableId,
+        &'a crate::backend::BackendCallableFact,
+    ),
+    PropertyReferenceRealizationTarget,
+> {
+    let (_, realization) = external_property_fact(callables, target)?;
     let accessor = if write {
         realization
             .setter
@@ -660,13 +661,13 @@ fn external_accessor(
     } else {
         realization.getter
     };
-    classpath
-        .external_callable(accessor)
-        .map(|realization| (accessor, realization))
+    callables
+        .callable(accessor)
+        .map(|fact| (accessor, fact))
         .ok_or(PropertyReferenceRealizationTarget::External(accessor))
 }
 
-fn callable_descriptor(callable: &crate::libraries::LibraryCallable) -> String {
+fn callable_descriptor(callable: &crate::backend::BackendCallableFact) -> String {
     if callable.descriptor.is_empty() {
         crate::jvm::names::method_descriptor(&callable.physical_params, callable.physical_ret)
     } else {
