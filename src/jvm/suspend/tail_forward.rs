@@ -64,7 +64,6 @@ pub(super) fn tail_forward(
     suspend_functions: &HashSet<u32>,
     declared_return: Ty,
     original_returns: &[Ty],
-    delegation_forwarder: bool,
 ) -> Option<TailForward> {
     let forward = match tail_forward_call(
         ir,
@@ -86,7 +85,7 @@ pub(super) fn tail_forward(
     // resumed result and cannot hand its own continuation over. An interface-delegation forwarder
     // is not that caller: it returns the callee's CPS result, adapted to the carrier. An intrinsic
     // point's value is the box on either path, which a function returning the carrier unboxes too.
-    if delegation_forwarder {
+    if ir.interface_delegation_forwarders.contains(&function) {
         return Some(forward);
     }
     let returns_carrier =
@@ -99,7 +98,7 @@ pub(super) fn tail_forward(
 }
 
 /// The carrier check an interface-delegation forwarder applies to its one reference-carrier call.
-pub(super) fn delegation_carrier(
+fn delegation_carrier(
     ir: &IrFile,
     forward: &TailForward,
     suspend_functions: &HashSet<u32>,
@@ -109,6 +108,36 @@ pub(super) fn delegation_carrier(
     };
     let (_classifier, carrier) = boxed_on_resume(ir, *call, suspend_functions)?;
     Some(super::SuspendedResultReturn::ValueClassCarrier { carrier })
+}
+
+/// Record how a forwarded CPS `Object` is adapted at this function's return boundary.
+pub(super) fn record_return_adaptations(
+    ir: &IrFile,
+    function: u32,
+    forward: &TailForward,
+    suspend_functions: &HashSet<u32>,
+    returned: Option<ExprId>,
+    declared_return: Ty,
+    returns: &mut super::SuspendedResultReturns,
+) {
+    if declared_return == Ty::Unit
+        && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
+    {
+        returns.extend(
+            returned
+                .into_iter()
+                .map(|expression| (expression, super::SuspendedResultReturn::Unit)),
+        );
+    }
+    if !ir.interface_delegation_forwarders.contains(&function) {
+        return;
+    }
+    let Some((expression, adaptation)) =
+        returned.zip(delegation_carrier(ir, forward, suspend_functions))
+    else {
+        return;
+    };
+    returns.insert(expression, adaptation);
 }
 
 /// Rewrite the body so each forwarded call's CPS `Object` is what the function returns.

@@ -108,11 +108,7 @@ pub(super) fn route(
 
     // A member's continuation nests under its class, a top-level function's under the facade.
     let semantic_owner = ir.functions[fid as usize].dispatch_receiver;
-    let is_static = ir.functions[fid as usize].is_static;
-    let receiver = semantic_owner.filter(|_| !is_static);
-    let static_owner = is_static
-        .then(|| semantic_owner.or_else(|| ir.class_static_local_functions.get(&fid).copied()))
-        .flatten();
+    let (receiver, static_owner) = super::continuation_class::reentry_owners(ir, fid);
     let class_owner = semantic_owner.or(static_owner);
     let owner = class_owner.map_or_else(|| route.facade.to_string(), |owner| owner.render());
     let continuation_class = name_continuation(ir, fid, &owner, class_owner, route.facade);

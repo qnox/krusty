@@ -1787,7 +1787,7 @@ pub struct IrFile {
     /// identity. Their `$default` ABI uses the ordinary function marker rather than
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
-    pub class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
+    pub(crate) class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
@@ -2144,7 +2144,7 @@ pub struct IrFile {
     /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
     /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
     /// after returning `COROUTINE_SUSPENDED` unchanged.
-    pub interface_delegation_forwarders: std::collections::HashSet<u32>,
+    pub(crate) interface_delegation_forwarders: std::collections::HashSet<u32>,
     /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
     /// The declaration promises constant stack and the body still recurses, so a backend that
     /// cannot supply the guarantee itself must decline the function rather than emit a program that

@@ -12,6 +12,18 @@ use crate::ir::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
+/// The instance receiver captured by a continuation and the exact class owner used to re-enter a
+/// class-owned static function. A function has exactly one of these physical receiver routes.
+pub(super) fn reentry_owners(ir: &IrFile, function: u32) -> (Option<TypeName>, Option<TypeName>) {
+    let semantic_owner = ir.functions[function as usize].dispatch_receiver;
+    if !ir.functions[function as usize].is_static {
+        return (semantic_owner, None);
+    }
+    let static_owner =
+        semantic_owner.or_else(|| ir.class_static_local_functions.get(&function).copied());
+    (None, static_owner)
+}
+
 pub(super) fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,

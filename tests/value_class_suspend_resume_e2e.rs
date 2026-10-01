@@ -102,5 +102,5 @@ fun box(): String {\n\
   return result!!\n\
 }\n";
 
-    common::expect_box_ok_with_stdlib(src, "StarProjectedSuspendValueClass");
+    common::expect_box_same_as_kotlinc(src, "StarProjectedSuspendValueClass");
 }
