@@ -2339,7 +2339,7 @@ mod tests {
             result_count: 1,
             inferred_count: 1,
             language_features: &[],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: true,
         })
@@ -2349,15 +2349,21 @@ mod tests {
         let mut output = Vec::new();
         run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
 
+        let diagnostics_only_bytes = output.len();
         let analysis = decode_worker_output(output)
             .into_iter()
             .last()
             .unwrap()
             .into_document_analysis();
-        assert!(analysis
-            .diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.msg.contains("unresolved reference 'Missing'") }));
+        assert_eq!(analysis.diagnostics.len(), 1);
+        let diagnostic = &analysis.diagnostics[0];
+        assert_eq!(diagnostic.file, 0);
+        assert_eq!(diagnostic.span, Span::new(41, 48));
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
+        assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+        assert!(analysis.library_definitions.is_empty());
+        assert!(analysis.implementation_relations.is_empty());
         assert_eq!(analysis.hover.entry_count(), 0);
         assert_eq!(analysis.completion.entry_count(), 0);
         assert_eq!(analysis.signature_help.entry_count(), 0);
@@ -2368,6 +2374,28 @@ mod tests {
         assert_eq!(analysis.document_symbols.entry_count(), 0);
         assert_eq!(analysis.folding_ranges.entry_count(), 0);
         assert_eq!(analysis.workspace_symbols.entry_count(), 0);
+
+        let full = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[] as &[&str],
+            classpath: None,
+            diagnostics_only: false,
+        })
+        .unwrap();
+        let mut full_input = Vec::new();
+        write_framed(&mut full_input, &full).unwrap();
+        let mut full_output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(full_input), &mut full_output, Vec::new()).unwrap();
+        assert!(
+            diagnostics_only_bytes < full_output.len(),
+            "diagnostics-only indexing must not serialize the navigation indexes, {} vs {}",
+            diagnostics_only_bytes,
+            full_output.len()
+        );
     }
 
     #[test]
@@ -2511,6 +2539,7 @@ mod tests {
             language_features: &[],
             java_sources,
             classpath,
+            diagnostics_only: false,
         })
         .unwrap();
         write_framed(input, &request).unwrap();

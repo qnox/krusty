@@ -1382,7 +1382,7 @@ impl WorkerHost {
 
 impl krusty_lsp::Analysis for WorkerHost {
     fn index_workspace_files(&mut self, uris: &[&str]) -> krusty_lsp::IndexOutcome {
-        let readable = krusty_lsp::uri::read_index_chunk(uris);
+        let readable = krusty_lsp::workspace_index_input::read_index_chunk(uris);
         if readable.is_empty() {
             // No worker call was needed, but every URI was conclusively absent, unreadable, or
             // outside the read budget. Treating this as infrastructure failure would make a
@@ -1397,13 +1397,9 @@ impl krusty_lsp::Analysis for WorkerHost {
             .map(|(uri, text)| (uri.as_str(), text.as_str()))
             .collect();
         let indexed_uris: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
-        // Use the same module grouping, source visibility, language flags, and classpath selection
-        // as interactive analysis. A raw `analyze(&texts)` call loses every one of those origins
-        // and publishes false unresolved-reference diagnostics for otherwise valid workspace files.
-        //
-        // Indexing still must not evict or populate the interactive cache. Temporarily replacing
-        // that cache lets the shared project-analysis path stay the single semantic implementation
-        // while keeping background chunks invisible to the next keystroke's hot state.
+        // Same module grouping, visibility, language flags, and classpath as interactive analysis.
+        // The interactive cache is swapped out so a background chunk cannot evict the open
+        // document's hot state or publish false unresolved references from a raw text-only call.
         let interactive_cache = std::mem::take(&mut self.analysis_cache);
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
         self.index_diagnostics_only = true;
@@ -2051,6 +2047,9 @@ fn dependencies_excluding_friends(dependencies: &[usize], friends: &[usize]) -> 
         .filter(|index| !friends.contains(index))
         .collect()
 }
+
+#[cfg(test)]
+mod index_diagnostics;
 
 #[cfg(test)]
 mod tests {
