@@ -108,7 +108,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/kt66970.kt
 nonLocalReturns/suspendConversion.kt
-nothingValue/nothingValueException.kt
 nullCheckOptimization/kt22410.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt

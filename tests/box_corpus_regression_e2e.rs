@@ -78,16 +78,17 @@ const NULLABLE_TPARAM_SUPPORTED_CASES: &[&str] = &[
     "functions/defaultargs1.kt",
 ];
 
-const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[
-    (
-        "coroutines/kt46813.kt",
-        "gate:suspend-generic-value-class-specialization",
-    ),
-    (
-        "nothingValue/nothingValueException.kt",
-        "gate:projected-generic-return-inference",
-    ),
-];
+const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[(
+    "coroutines/kt46813.kt",
+    "gate:suspend-generic-value-class-specialization",
+)];
+
+const NOTHING_VALUE_CASES: &[&str] = &["nothingValue/nothingValueException.kt"];
+
+#[test]
+fn nothing_value_exception_corpus_case_box_ok() {
+    assert_corpus_cases_box_ok(NOTHING_VALUE_CASES);
+}
 
 #[test]
 fn nullable_type_parameter_admitted_cases_do_not_miscompile() {

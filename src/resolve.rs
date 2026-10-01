@@ -43748,18 +43748,18 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::TypePosition::Out,
                 crate::symbol_resolver::UnboundSpecialization::Preserve,
             );
-            // Input constraints may legitimately choose bottom for an `in`-projected parameter while
-            // the expected-result constraint approximates the expression to its consumer type. Keep
-            // the bottom binding in `params` for applicability, but expose the contextual result just
-            // as Kotlin's constraint system does (`Context<out T>` -> `Context<in Nothing>`, result T).
-            let specialized_ret = result_constraint
-                .selected_result_approximation(signature.ret)
-                .filter(|expected| {
-                    inferred_ret == Ty::Nothing
-                        && matches!(signature.ret.non_null(), Ty::TyParam(..))
-                        && *expected != Ty::Error
-                })
-                .unwrap_or(inferred_ret);
+            let specialized_ret = self.contextual_result(call_result_constraint::BottomInputs {
+                signature: &signature,
+                bindings: &specialized_bindings,
+                inferred: inferred_ret,
+                constraint: result_constraint,
+                receiver: inference_receiver.or(candidate_receiver),
+                shape: &shape,
+                parameters: &argument_parameters,
+                arg_tys,
+                whole_arrays: &named_whole_arrays,
+                args,
+            });
             let ret = candidate.ret.apply(
                 candidate
                     .generic_sig

@@ -11887,6 +11887,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `anonymous_object_forwards_a_unit_super_argument`,
   `interface_delegation_across_modules_forwards_the_member`, and
   `fir::body_check::local_class_tests::anonymous_super_forward_records_the_parameter_and_a_local_class_keeps_its_argument`.
+- **A generic call solved only at `Nothing` stays `Nothing` when that value is observed.**
+  Passing `Context<out T>` to `fun <U> decode(context: Context<in U>): U` fixes `U` at `Nothing`:
+  no other argument satisfies both projections. An expected result that is itself a legal argument
+  (`select(Context<Any>()): String`) replaces that bottom; an expected outer type parameter does
+  not, because `Context<out T>` is not a `Context<in T>`. The call's type is therefore `Nothing`,
+  a safe call over it is `Nothing?`, and using the non-null result — including returning it as the
+  outer `T` — discards the erased value and throws `KotlinNothingValueException`. A concrete
+  expected type that the arguments accept is returned as that type, with no exception. An input
+  whose type failed to resolve does not authorize that approximation.
+  Tests: `src/fir/body_check/nothing_instantiation_tests.rs`,
+  `src/resolve/call_result_constraint.rs` (`an_error_input_cannot_contextualize_a_bottom_result`),
+  `tests/use_site_variance_e2e.rs` (`nested_projected_nothing_result_throws_when_observed`).
+  Corpus: `nothingValue/nothingValueException.kt`.
 - **A checked `Nothing` value carries its completion contract into common IR.** Non-null `Nothing`
   is semantically divergent, but a target can still have to realize a physical fallthrough path.
   On the JVM, a declared `Nothing` call has a `java.lang.Void` result slot, while `null!!` retains
