@@ -7,7 +7,6 @@ use super::{
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
-use crate::names::property_getter_name;
 use crate::plugins::PluginContext;
 use crate::types::Ty;
 
@@ -140,36 +139,27 @@ impl SerializeBody<'_> {
         // property's private backing FIELD directly — which is what kotlinc emits.
         // (The old inlined shape lived on the `$serializer`, which cannot, and had to
         // go through the public getter.)
-        let read_property = |ir: &mut IrFile,
-                             field_index: usize,
-                             name: &str,
-                             ty: &Ty|
-         -> Option<ExprId> {
-            let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
-            if delegate {
-                return Some(ir.add_expr(IrExpr::GetField {
+        let read_property =
+            |ir: &mut IrFile, field_index: usize, name: &str, ty: &Ty| -> Option<ExprId> {
+                let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
+                if delegate {
+                    return Some(ir.add_expr(IrExpr::GetField {
+                        receiver,
+                        class: foo_id,
+                        index: field_index as u32,
+                    }));
+                }
+                // The generic inlined shape lives on `$serializer`, so it uses the public getter.
+                let descriptor = ty_descriptor(ctx, ty)?;
+                Some(super::synthesized_accessor::getter(
+                    ir,
                     receiver,
-                    class: foo_id,
-                    index: field_index as u32,
-                }));
-            }
-            // The generic inlined shape lives on `$serializer`, so it uses the public getter.
-            let descriptor = ty_descriptor(ctx, ty)?;
-            let call = ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: serialized_name,
-                    name: property_getter_name(name),
-                    descriptor: format!("(){descriptor}"),
-                    params: None,
-                    interface: false,
-                    module_target: None,
-                },
-                dispatch_receiver: Some(receiver),
-                args: vec![],
-            });
-            super::synthesized_accessor::bind_field_getter(ir, call, foo_id, field_index as u32);
-            Some(call)
-        };
+                    serialized_name,
+                    name,
+                    descriptor,
+                    (foo_id, field_index as u32),
+                ))
+            };
         // Element `i` is written from backing field `field`; they differ after a transient property.
         for (i, &field) in elements.iter().enumerate() {
             let (pname, ty) = &fields[field];

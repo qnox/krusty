@@ -2044,19 +2044,14 @@ impl IrPlugin for SerializationPlugin {
                         let Some(getter_desc) = ty_descriptor(ctx, &uty) else {
                             continue;
                         };
-                        let v = ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner: class_classifier,
-                                name: property_getter_name(&pname),
-                                descriptor: format!("(){getter_desc}"),
-                                params: None,
-                                interface: false,
-                                module_target: None,
-                            },
-                            dispatch_receiver: Some(vrecv),
-                            args: vec![],
-                        });
-                        synthesized_accessor::bind_field_getter(ir, v, foo_id, 0);
+                        let v = synthesized_accessor::getter(
+                            ir,
+                            vrecv,
+                            class_classifier,
+                            &pname,
+                            getter_desc,
+                            (foo_id, 0),
+                        );
                         let call = ir.add_expr(IrExpr::Call {
                             callee: virtual_iface(
                                 "kotlinx/serialization/encoding/Encoder",

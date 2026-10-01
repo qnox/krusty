@@ -4,7 +4,34 @@
 //! Only a field that is a property has a synthesized accessor. The value-class pass renames
 //! that call only through this binding, and retires the binding when it replaces the call.
 
-use crate::ir::{ClassId, ExprId, IrFile, SynthesizedAccessorCall};
+use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile, SynthesizedAccessorCall};
+use crate::names::property_getter_name;
+use crate::types::TypeName;
+
+/// Emit a virtual property getter and bind it to the property that owns `field` when one exists.
+pub(super) fn getter(
+    ir: &mut IrFile,
+    receiver: ExprId,
+    owner: TypeName,
+    property_name: &str,
+    descriptor: String,
+    property: (ClassId, u32),
+) -> ExprId {
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Callee::Virtual {
+            owner,
+            name: property_getter_name(property_name),
+            descriptor: format!("(){descriptor}"),
+            params: None,
+            interface: false,
+            module_target: None,
+        },
+        dispatch_receiver: Some(receiver),
+        args: vec![],
+    });
+    bind_field_getter(ir, call, property.0, property.1);
+    call
+}
 
 /// Record that `call` is the synthesized getter of the property whose backing field is `field`.
 pub(super) fn bind_synthesized_getter(ir: &mut IrFile, call: ExprId, class: ClassId, field: u32) {
