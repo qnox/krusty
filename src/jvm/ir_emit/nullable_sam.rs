@@ -9,8 +9,8 @@ use crate::types::Ty;
 use super::{slot_words, type_descriptor, Emitter, TempRole};
 
 impl<'a> Emitter<'a> {
-    /// `new` / captures / `<init>`. A nullable single capture stays null instead of being passed
-    /// to the constructor.
+    /// `new` / captures / `<init>`. A validated nullable adapter's single reference capture stays
+    /// null instead of being passed to the constructor.
     pub(super) fn emit_capturing_lambda_class(
         &mut self,
         code: &mut CodeBuilder,
@@ -19,8 +19,13 @@ impl<'a> Emitter<'a> {
         cap_tys: &[Ty],
         nullable: bool,
     ) {
-        if nullable && captures.len() == 1 {
-            self.emit_null_preserving_lambda_class(code, internal, captures[0], cap_tys);
+        if nullable {
+            let [function] = captures else {
+                unreachable!("validated nullable SAM adapter must have one capture")
+            };
+            debug_assert_eq!(cap_tys.len(), 1);
+            debug_assert_eq!(slot_words(cap_tys[0]), 1);
+            self.emit_null_preserving_lambda_class(code, internal, *function, cap_tys);
             return;
         }
         self.emit_initialized_lambda_class(code, internal, cap_tys, |emitter, code| {
@@ -30,7 +35,8 @@ impl<'a> Emitter<'a> {
         });
     }
 
-    /// `invokedynamic` over the captures. A nullable single capture skips the call site when null.
+    /// `invokedynamic` over the captures. A validated nullable adapter's single reference capture
+    /// skips the call site when null.
     pub(super) fn emit_indy_lambda(
         &mut self,
         code: &mut CodeBuilder,
@@ -39,8 +45,12 @@ impl<'a> Emitter<'a> {
         captures: &[u32],
         nullable: bool,
     ) {
-        if nullable && captures.len() == 1 {
-            self.emit_value(captures[0], code);
+        if nullable {
+            let [function] = captures else {
+                unreachable!("validated nullable SAM adapter must have one capture")
+            };
+            debug_assert_eq!(cap_words, 1);
+            self.emit_value(*function, code);
             let null_case = code.new_label();
             let done = code.new_label();
             code.dup();

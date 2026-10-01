@@ -10438,10 +10438,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   would produce a non-null SAM whose method throws. The checker records that on the conversion from
   the argument's semantic type (`FirSamConversion.nullable`). Lowering copies it onto the
   function-value adapter (`IrSamTarget.nullable`); a lambda literal is a fresh object, so its target
-  stays non-null. Emission branches around the adapter. `invokedynamic` duplicates the function and
-  skips the call site when it is null. The class strategy parks the function in a local first: `new`
-  cannot both test that value and pass it to `<init>` without a temporary. A non-null function and a
-  lambda literal still become the interface. Test: `tests/nullable_sam_e2e.rs`. Corpus
+  stays non-null. Common-IR validation requires the adapter to carry exactly one nullable reference
+  capture before a backend sees it; emission never falls back from a malformed nullable shape.
+  `invokedynamic` duplicates the function and skips the call site when it is null. The class strategy
+  parks the function in a local first: `new` cannot both test that value and pass it to `<init>`
+  without a temporary. A non-null function and a lambda literal still become the interface. Both
+  JVM strategies are compared with kotlinc in `tests/nullable_sam_e2e.rs`. Corpus
   `funInterface/nullableSam.kt`.
 
 - **A `Nothing`-bodied lambda materializes as an ordinary closure.** A lambda whose body diverges is

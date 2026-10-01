@@ -19,6 +19,22 @@ pub struct UndeterminedIrType {
     pub ty: Ty,
 }
 
+/// A cross-field common-IR invariant that must hold before any backend sees the file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidIrContract {
+    NullableSam {
+        expression: u32,
+        violation: NullableSamContractViolation,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NullableSamContractViolation {
+    MissingFunctionAdapter,
+    CaptureCount { actual: usize },
+    CaptureType { ty: Option<Ty> },
+}
+
 fn reject(location: &'static str, ty: Ty) -> Result<(), UndeterminedIrType> {
     if ty.mentions_pending() || ty.mentions_error() {
         Err(UndeterminedIrType { location, ty })
@@ -724,12 +740,72 @@ impl IrFile {
         }
         Ok(())
     }
+
+    /// Prove cross-field semantic contracts whose validity cannot be expressed by one IR node's
+    /// Rust type. Backends consume these facts directly and must not recover from a malformed shape.
+    pub fn validate_semantic_contracts(&self) -> Result<(), InvalidIrContract> {
+        for (expression, node) in self.exprs.iter().enumerate() {
+            let IrExpr::Lambda {
+                captures,
+                sam: Some(sam),
+                ..
+            } = node
+            else {
+                continue;
+            };
+            if !sam.nullable {
+                continue;
+            }
+            let expression = expression as u32;
+            if !sam.wraps_function_value {
+                return Err(InvalidIrContract::NullableSam {
+                    expression,
+                    violation: NullableSamContractViolation::MissingFunctionAdapter,
+                });
+            }
+            let [capture] = captures.as_slice() else {
+                return Err(InvalidIrContract::NullableSam {
+                    expression,
+                    violation: NullableSamContractViolation::CaptureCount {
+                        actual: captures.len(),
+                    },
+                });
+            };
+            let ty = self.logical_types.get(capture).copied();
+            if !ty.is_some_and(|ty| ty.is_nullable() && ty.is_reference()) {
+                return Err(InvalidIrContract::NullableSam {
+                    expression,
+                    violation: NullableSamContractViolation::CaptureType { ty },
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrExpr, IrFunction};
+    use crate::ir::{IrConst, IrExpr, IrFunction};
+
+    fn nullable_sam_target() -> IrSamTarget {
+        IrSamTarget {
+            classifier: crate::types::type_name("Action"),
+            method: "invoke".to_string(),
+            method_target: crate::fir::FirSamMethod::FunctionTypeInvoke,
+            parameters: Vec::new(),
+            result: Ty::Unit,
+            declared_parameters: Vec::new(),
+            declared_result: Ty::Unit,
+            context_count: 0,
+            has_receiver: false,
+            suspend: false,
+            overrides_non_primitive_result: false,
+            function_adapter: false,
+            wraps_function_value: true,
+            nullable: true,
+        }
+    }
 
     #[test]
     fn rejects_an_undetermined_declaration_signature() {
@@ -774,6 +850,73 @@ mod tests {
             Err(UndeterminedIrType {
                 location: "callee result",
                 ty: Ty::Error,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_nullable_sam_without_its_single_capture() {
+        let mut ir = IrFile::default();
+        ir.exprs.push(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: Vec::new(),
+            sam: Some(nullable_sam_target()),
+            inline_body: None,
+        });
+
+        assert_eq!(
+            ir.validate_semantic_contracts(),
+            Err(InvalidIrContract::NullableSam {
+                expression: 0,
+                violation: NullableSamContractViolation::CaptureCount { actual: 0 },
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_nullable_sam_that_is_not_a_function_value_adapter() {
+        let mut ir = IrFile::default();
+        let capture = ir.add_expr(IrExpr::Const(IrConst::Null));
+        ir.logical_types
+            .insert(capture, Ty::nullable(Ty::fun(Vec::new(), Ty::Unit)));
+        let mut sam = nullable_sam_target();
+        sam.wraps_function_value = false;
+        ir.exprs.push(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: vec![capture],
+            sam: Some(sam),
+            inline_body: None,
+        });
+
+        assert_eq!(
+            ir.validate_semantic_contracts(),
+            Err(InvalidIrContract::NullableSam {
+                expression: 1,
+                violation: NullableSamContractViolation::MissingFunctionAdapter,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_nullable_sam_with_a_non_reference_capture() {
+        let mut ir = IrFile::default();
+        let capture = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        ir.logical_types.insert(capture, Ty::Int);
+        ir.exprs.push(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: vec![capture],
+            sam: Some(nullable_sam_target()),
+            inline_body: None,
+        });
+
+        assert_eq!(
+            ir.validate_semantic_contracts(),
+            Err(InvalidIrContract::NullableSam {
+                expression: 1,
+                violation: NullableSamContractViolation::CaptureType { ty: Some(Ty::Int) },
             })
         );
     }

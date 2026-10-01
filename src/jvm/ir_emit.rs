@@ -10796,7 +10796,12 @@ impl<'a> Emitter<'a> {
                         identity,
                         owner_is_interface: impl_owner_is_interface,
                     });
-                    if captures.is_empty() {
+                    let nullable = sam.as_ref().is_some_and(|target| target.nullable);
+                    if nullable {
+                        self.emit_capturing_lambda_class(
+                            code, &internal, captures, cap_tys, nullable,
+                        );
+                    } else if captures.is_empty() {
                         // Nothing captured, so every evaluation yields the same instance — kotlinc
                         // holds it in a static and the call site just reads it.
                         let field =
@@ -10807,11 +10812,7 @@ impl<'a> Emitter<'a> {
                         code.checkcast(target);
                     } else {
                         self.emit_capturing_lambda_class(
-                            code,
-                            &internal,
-                            captures,
-                            cap_tys,
-                            sam.as_ref().is_some_and(|target| target.nullable),
+                            code, &internal, captures, cap_tys, nullable,
                         );
                     }
                     return;
