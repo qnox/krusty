@@ -6505,6 +6505,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and the initializer records a numeric conversion. Tests:
   `resolve::integer_constants::tests::overflowing_int_constant_initializers_widen_to_long`,
   `tests/integer_literal_branch_join_e2e.rs::overflowing_int_constant_expression_wraps_before_adapting_to_long`.
+- **An `Int` division or remainder by zero stays an integer constant.** `1 / 0` and `1 % 0` have no
+  compile-time magnitude — executing them throws — but they are still `Int` constant expressions, so
+  they adapt to `Long` the way every `Int` constant does. They do not narrow to `Byte` or `Short`.
+  A non-constant operand (`value / 0`) does not adapt. A `const val` cannot publish the missing
+  magnitude and is rejected with `const 'val' initializer must be a constant value.` Tests:
+  `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
+  `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
+  `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,

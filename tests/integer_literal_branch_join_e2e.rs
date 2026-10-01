@@ -279,6 +279,26 @@ fn unadapted_integer_constants_prefer_the_int_overload() {
 }
 
 #[test]
+fn division_by_zero_int_constant_throws_after_adapting_to_long() {
+    both_compilers_box(
+        "fun box(): String {\n\
+         try {\n\
+         val quotient: Long = 1 / 0\n\
+         return \"quotient:$quotient\"\n\
+         } catch (_: ArithmeticException) {\n\
+         }\n\
+         try {\n\
+         val remainder: Long = 1 % 0\n\
+         return \"remainder:$remainder\"\n\
+         } catch (_: ArithmeticException) {\n\
+         }\n\
+         return \"OK\"\n\
+         }\n",
+        "division_by_zero_int_constant_throws_after_adapting_to_long",
+    );
+}
+
+#[test]
 fn overflowing_int_constant_expression_wraps_before_adapting_to_long() {
     both_compilers_box(
         "fun box(): String {\n\

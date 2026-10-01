@@ -4,6 +4,9 @@
 [block_branch_adapts_an_integer_constant]
 2.4.20:
 
+[division_by_zero_int_constant_throws_after_adapting_to_long]
+2.4.20:
+
 [elvis_adapts_an_integer_constant]
 2.4.20:
 

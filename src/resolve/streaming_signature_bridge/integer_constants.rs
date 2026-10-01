@@ -16,7 +16,10 @@ pub(super) fn fold_selected_binary(
     // `if (flag) value else 1u + 1u` is `Comparable<*>` on the reference compiler; inferring
     // that shape as `ULong` lowers the sum as `Long` and throws.
     let natural = match (lhs, rhs) {
-        (IntegerConstant::Signed(_), IntegerConstant::Signed(_)) => Ty::Int,
+        (
+            IntegerConstant::Signed(_) | IntegerConstant::DivisionByZero,
+            IntegerConstant::Signed(_) | IntegerConstant::DivisionByZero,
+        ) => Ty::Int,
         (IntegerConstant::Unsigned(_), IntegerConstant::Unsigned(_)) => return None,
         _ => return None,
     };

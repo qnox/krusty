@@ -53209,19 +53209,25 @@ impl<'a> Checker<'a> {
             // convention for a builtin operation. The payload is also attached to this root
             // expression so checked FIR emits a literal rather than a runtime `<clinit>` program.
             if p.is_const && !resolved_property_ty.mentions_error() {
-                let folded = checked_constant_expression(
-                    constant_evaluation::CheckedConstantExpression {
-                        file: self.file,
-                        expression_types: &self.expr_types,
-                        resolved_constants: &self.resolved_constants,
-                        resolved_calls: &self.resolved_calls,
-                        resolved_operator_calls: &self.resolved_operator_calls,
-                    },
-                    init,
-                    resolved_property_ty,
-                );
+                let context = constant_evaluation::CheckedConstantExpression {
+                    file: self.file,
+                    expression_types: &self.expr_types,
+                    resolved_constants: &self.resolved_constants,
+                    resolved_calls: &self.resolved_calls,
+                    resolved_operator_calls: &self.resolved_operator_calls,
+                };
+                let folded = checked_constant_expression(context, init, resolved_property_ty);
                 if let Some(folded) = folded {
                     self.resolved_constants.insert(init, folded);
+                } else if checked_integer_constant(context, init)
+                    == Some(IntegerConstant::DivisionByZero)
+                {
+                    // The expression adapts as an `Int` constant, but it has no magnitude to
+                    // publish. kotlinc reports this instead of a type mismatch.
+                    self.diags.error(
+                        self.span(init),
+                        "const 'val' initializer must be a constant value.".to_string(),
+                    );
                 }
             }
         }
@@ -60169,6 +60175,10 @@ impl<'a> Checker<'a> {
                     };
                     self.contextual_unsigned_integer_literal_type(value, Some(expected))
                 }
+                IntegerConstant::DivisionByZero => self.contextual_integer_literal_type(
+                    Some(expected),
+                    IntegerConstant::division_by_zero_type,
+                ),
             }
         } else if matches!(expected.non_null(), Ty::Fun(_)) {
             self.expression_function_types(scope, expression, nominal)

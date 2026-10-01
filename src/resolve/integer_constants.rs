@@ -2,10 +2,12 @@
 
 use crate::ast::{BinOp, Expr, ExprId, File, UnOp};
 use crate::integer_constant::{IntegerConstant, IntegerConstantOp};
+use crate::libraries::{CompilerIntrinsic, LibConst, PrimitiveBinaryIntrinsic};
 use crate::types::Ty;
 
 use super::{
     checked_constant_expression, BuiltinUnaryOperation, CallArgKind, CheckedConstantExpression,
+    ResolvedCall, SyntheticOperatorCall,
 };
 
 /// Branch values of a conditional integer constant: an `if` that has an `else`, a `when` that has
@@ -60,16 +62,111 @@ pub(super) fn checked_integer_constant(
     }
 
     let ty = *context.expression_types.get(expression.0 as usize)?;
-    let constant = checked_constant_expression(context, expression, ty)?;
-    match (ty.non_null(), constant.value) {
-        (Ty::Int, crate::libraries::LibConst::Int(value)) => Some(IntegerConstant::Signed(value)),
-        (Ty::UInt, crate::libraries::LibConst::Int(value))
-            if matches!(context.file.expr(expression), Expr::UIntLit(_))
-                || context.resolved_constants.contains_key(&expression) =>
+    if let Some(constant) = checked_constant_expression(context, expression, ty) {
+        return match (ty.non_null(), constant.value) {
+            (Ty::Int, LibConst::Int(value)) => Some(IntegerConstant::Signed(value)),
+            (Ty::UInt, LibConst::Int(value))
+                if matches!(context.file.expr(expression), Expr::UIntLit(_))
+                    || context.resolved_constants.contains_key(&expression) =>
+            {
+                Some(IntegerConstant::Unsigned(u64::from(value as u32)))
+            }
+            _ => None,
+        };
+    }
+    // A primitive division or remainder by zero has no magnitude, but it is still an `Int`
+    // constant: it adapts to `Long` and throws when executed. An overloaded operator is not one.
+    (ty.non_null() == Ty::Int)
+        .then(|| signed_division_by_zero(context, expression))
+        .flatten()
+}
+
+/// Signed `Int` arithmetic whose selected operator is primitive and whose value is unavailable
+/// because a division or remainder by zero was reached.
+fn signed_division_by_zero(
+    context: CheckedConstantExpression<'_>,
+    expression: ExprId,
+) -> Option<IntegerConstant> {
+    match context.file.expr(expression) {
+        Expr::Unary {
+            op: UnOp::Plus | UnOp::Neg,
+            operand,
+        } => signed_division_by_zero(context, *operand),
+        Expr::Binary { op, lhs, rhs, .. }
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            ) && primitive_int_arithmetic(context, expression, *op) =>
         {
-            Some(IntegerConstant::Unsigned(u64::from(value as u32)))
+            let left = signed_piece(context, *lhs)?;
+            let right = signed_piece(context, *rhs)?;
+            let lost = matches!(
+                (left, right, op),
+                (_, SignedPiece::Value(0), BinOp::Div | BinOp::Rem)
+                    | (SignedPiece::DivisionByZero, _, _)
+                    | (_, SignedPiece::DivisionByZero, _)
+            );
+            lost.then_some(IntegerConstant::DivisionByZero)
         }
         _ => None,
+    }
+}
+
+enum SignedPiece {
+    Value(i32),
+    DivisionByZero,
+}
+
+fn signed_piece(context: CheckedConstantExpression<'_>, expression: ExprId) -> Option<SignedPiece> {
+    let ty = *context.expression_types.get(expression.0 as usize)?;
+    if ty.non_null() != Ty::Int {
+        return None;
+    }
+    if let Some(constant) = checked_constant_expression(context, expression, ty) {
+        return match constant.value {
+            LibConst::Int(value) if constant.ty.non_null() == Ty::Int => {
+                Some(SignedPiece::Value(value))
+            }
+            _ => None,
+        };
+    }
+    signed_division_by_zero(context, expression).map(|_| SignedPiece::DivisionByZero)
+}
+
+/// Whether checking selected the builtin `Int` operator, matching constant evaluation.
+///
+/// A missing operator record is the builtin arithmetic table. A recorded non-primitive callable
+/// is a source operator and is not an integer constant.
+fn primitive_int_arithmetic(
+    context: CheckedConstantExpression<'_>,
+    expression: ExprId,
+    operation: BinOp,
+) -> bool {
+    let (operator, expected) = match operation {
+        BinOp::Add => (SyntheticOperatorCall::Plus, PrimitiveBinaryIntrinsic::Add),
+        BinOp::Sub => (
+            SyntheticOperatorCall::Minus,
+            PrimitiveBinaryIntrinsic::Subtract,
+        ),
+        BinOp::Mul => (
+            SyntheticOperatorCall::Times,
+            PrimitiveBinaryIntrinsic::Multiply,
+        ),
+        BinOp::Div => (SyntheticOperatorCall::Div, PrimitiveBinaryIntrinsic::Divide),
+        BinOp::Rem => (
+            SyntheticOperatorCall::Rem,
+            PrimitiveBinaryIntrinsic::Remainder,
+        ),
+        _ => return false,
+    };
+    match context
+        .resolved_operator_calls
+        .get(&(expression, operator))
+        .map(ResolvedCall::compiler_intrinsic)
+    {
+        None => true,
+        Some(Some(CompilerIntrinsic::PrimitiveBinary(intrinsic))) => intrinsic == expected,
+        Some(Some(_)) | Some(None) => false,
     }
 }
 
@@ -89,6 +186,7 @@ fn integer_constant(file: &File, expression: ExprId) -> Option<IntegerConstant> 
             operand,
         } => match integer_constant(file, *operand)? {
             IntegerConstant::Signed(value) => value.checked_neg().map(IntegerConstant::Signed),
+            IntegerConstant::DivisionByZero => Some(IntegerConstant::DivisionByZero),
             IntegerConstant::Unsigned(_) => None,
         },
         Expr::Binary { op, lhs, rhs, .. }
@@ -147,6 +245,9 @@ pub(super) fn selected_builtin_unary_integer_constant(
         (BuiltinUnaryOperation::Identity, value) => Some(value),
         (BuiltinUnaryOperation::Negate, IntegerConstant::Signed(value)) => {
             value.checked_neg().map(IntegerConstant::Signed)
+        }
+        (BuiltinUnaryOperation::Negate, IntegerConstant::DivisionByZero) => {
+            Some(IntegerConstant::DivisionByZero)
         }
         (BuiltinUnaryOperation::Negate, IntegerConstant::Unsigned(_)) => None,
     }
@@ -273,8 +374,13 @@ mod tests {
         assert!(kinds[1].adapts_integer_literal_to(Ty::Short));
         assert!(!kinds[2].adapts_integer_literal_to(Ty::Byte));
         assert!(kinds[3].adapts_integer_literal_to(Ty::Byte));
+        assert_eq!(
+            folded_integer_literal(&file, arguments[4]),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert!(!kinds[4].adapts_integer_literal_to(Ty::Byte));
         assert!(!kinds[4].adapts_integer_literal_to(Ty::Short));
-        assert!(!kinds[4].adapts_integer_literal_to(Ty::Long));
+        assert!(kinds[4].adapts_integer_literal_to(Ty::Long));
         assert!(kinds[5].adapts_integer_literal_to(Ty::Long));
         assert!(kinds[6].adapts_integer_literal_to(Ty::UByte));
         assert!(!kinds[7].adapts_integer_literal_to(Ty::UByte));
@@ -399,6 +505,92 @@ mod tests {
             info.selected_numeric_conversions.get(&sums[0]),
             Some(&Ty::Long)
         );
+    }
+
+    #[test]
+    fn division_by_zero_adapts_to_long_without_a_folded_value() {
+        let source = "const val lost: Long = 1 / 0\n\
+                      const val kept: Long = 1 / 1\n\
+                      fun box(): String {\n\
+                          val quotient: Long = 1 / 0\n\
+                          val remainder: Long = 1 % 0\n\
+                          val typed: Int = 1\n\
+                          val widened: Long = typed\n\
+                          val narrow: Byte = 1 / 0\n\
+                          return \"OK\"\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let messages = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                "const 'val' initializer must be a constant value.".to_string(),
+                "initializer type mismatch: expected 'Long', actual 'Int'.".to_string(),
+                "initializer type mismatch: expected 'Byte', actual 'Int'.".to_string(),
+            ]
+        );
+        let context = CheckedConstantExpression {
+            file: &files[0],
+            expression_types: &info.expr_types,
+            resolved_constants: &info.resolved_constants,
+            resolved_calls: &info.resolved_calls,
+            resolved_operator_calls: &info.resolved_operator_calls,
+        };
+        let division = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Binary { op: BinOp::Div, .. } => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .expect("division");
+        let remainder = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Binary { op: BinOp::Rem, .. } => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .expect("remainder");
+        assert_eq!(
+            checked_integer_constant(context, division),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert_eq!(
+            checked_integer_constant(context, remainder),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert_eq!(info.expr_types[division.0 as usize], Ty::Int);
+        assert_eq!(info.expr_types[remainder.0 as usize], Ty::Int);
+        assert_eq!(
+            info.selected_numeric_conversions.get(&division),
+            Some(&Ty::Long)
+        );
+        assert_eq!(
+            info.selected_numeric_conversions.get(&remainder),
+            Some(&Ty::Long)
+        );
+        assert!(info.resolved_constants.values().any(|constant| {
+            matches!(
+                constant.value,
+                crate::libraries::LibConst::Long(1) | crate::libraries::LibConst::Int(1)
+            )
+        }));
+        assert!(!info
+            .resolved_constants
+            .values()
+            .any(|constant| matches!(constant.value, crate::libraries::LibConst::Int(0))));
     }
 
     #[test]

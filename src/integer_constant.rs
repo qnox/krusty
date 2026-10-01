@@ -12,6 +12,11 @@ use crate::types::Ty;
 pub enum IntegerConstant {
     Signed(i32),
     Unsigned(u64),
+    /// Signed `Int` arithmetic that reached a division or remainder by zero.
+    ///
+    /// There is no magnitude. Every `Int` still adapts to `Long`, and this does not narrow.
+    /// Executing the expression throws; a `const val` cannot publish it.
+    DivisionByZero,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +33,20 @@ impl IntegerConstant {
         matches!(self, Self::Unsigned(_))
     }
 
+    /// Expected primitive of a division-by-zero `Int` constant.
+    ///
+    /// Every `Int` adapts to `Long`. Without a magnitude, `Byte` and `Short` stay `Int`.
+    pub(crate) fn division_by_zero_type(expected: Option<Ty>) -> Ty {
+        expected
+            .map(Ty::non_null)
+            .map(|expected| match expected {
+                Ty::TyParam(_, bound) => bound.non_null(),
+                expected => expected,
+            })
+            .filter(|ty| *ty == Ty::Long)
+            .unwrap_or(Ty::Int)
+    }
+
     /// Whether this magnitude is a valid constant of `target`.
     ///
     /// This is the only range test. Representative selection and both adaptation paths call it, so
@@ -41,6 +60,8 @@ impl IntegerConstant {
                 Ty::Long => true,
                 _ => false,
             },
+            // No magnitude is available, so a narrower integer cannot be proven to fit.
+            Self::DivisionByZero => matches!(target, Ty::Int | Ty::Long),
             Self::Unsigned(value) => match target {
                 Ty::UByte => u8::try_from(value).is_ok(),
                 Ty::UShort => u16::try_from(value).is_ok(),
@@ -52,12 +73,22 @@ impl IntegerConstant {
     }
 
     /// Fold an operation in the constant's ordinary source width. Kotlin integral arithmetic wraps
-    /// before a contextual conversion, including in a compile-time constant expression. Division
-    /// by zero is the only arithmetic failure; signed minimum divided by `-1` keeps the wrapped
-    /// minimum value and its remainder is zero, as on the JVM.
+    /// before a contextual conversion, including in a compile-time constant expression. Signed
+    /// division or remainder by zero has no magnitude ([`IntegerConstant::DivisionByZero`]): the
+    /// expression is still an `Int` constant and throws when executed. Signed minimum divided by
+    /// `-1` keeps the wrapped minimum value and its remainder is zero, as on the JVM.
     pub(crate) fn fold(self, operation: IntegerConstantOp, right: Self) -> Option<Self> {
         match (self, right) {
+            (Self::DivisionByZero, Self::Signed(_) | Self::DivisionByZero)
+            | (Self::Signed(_), Self::DivisionByZero) => Some(Self::DivisionByZero),
             (Self::Signed(left), Self::Signed(right)) => {
+                if matches!(
+                    operation,
+                    IntegerConstantOp::Divide | IntegerConstantOp::Remainder
+                ) && right == 0
+                {
+                    return Some(Self::DivisionByZero);
+                }
                 let value = match operation {
                     IntegerConstantOp::Add => left.wrapping_add(right),
                     IntegerConstantOp::Subtract => left.wrapping_sub(right),
@@ -143,6 +174,36 @@ mod tests {
             IntegerConstant::Signed(1).fold(IntegerConstantOp::Add, IntegerConstant::Unsigned(1),),
             None
         );
+        assert_eq!(
+            IntegerConstant::Signed(1).fold(IntegerConstantOp::Divide, IntegerConstant::Signed(0),),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert_eq!(
+            IntegerConstant::Signed(1)
+                .fold(IntegerConstantOp::Remainder, IntegerConstant::Signed(0),),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert_eq!(
+            IntegerConstant::DivisionByZero
+                .fold(IntegerConstantOp::Add, IntegerConstant::Signed(1),),
+            Some(IntegerConstant::DivisionByZero)
+        );
+        assert_eq!(
+            IntegerConstant::Unsigned(1)
+                .fold(IntegerConstantOp::Divide, IntegerConstant::Unsigned(0),),
+            None
+        );
+        assert!(!IntegerConstant::DivisionByZero.fits(Ty::Byte));
+        assert!(!IntegerConstant::DivisionByZero.fits(Ty::Short));
+        assert!(IntegerConstant::DivisionByZero.fits(Ty::Int));
+        assert!(IntegerConstant::DivisionByZero.fits(Ty::Long));
+        let joined = IntegerConstant::representative(&[
+            IntegerConstant::DivisionByZero,
+            IntegerConstant::Signed(1),
+        ])
+        .expect("division by zero shares the signed family");
+        assert!(!joined.fits(Ty::Byte));
+        assert!(joined.fits(Ty::Long));
     }
 
     #[test]

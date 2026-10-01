@@ -64,7 +64,7 @@ fn integer_constant_sibling_primitive(
             return true;
         };
         let natural = match constant {
-            IntegerConstant::Signed(_) => Ty::Int,
+            IntegerConstant::Signed(_) | IntegerConstant::DivisionByZero => Ty::Int,
             IntegerConstant::Unsigned(_) => Ty::UInt,
         };
         CallArgKind::integer_constant(natural, *constant).adapts_integer_literal_to(target)
