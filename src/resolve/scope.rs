@@ -778,12 +778,12 @@ impl<'p, B> Scope<'p, B> {
     }
 
     /// The scope this frame was opened under.
-    pub(crate) fn enclosing(&self) -> Option<&Scope<'p, B>> {
+    pub(super) fn enclosing(&self) -> Option<&Scope<'p, B>> {
         self.parent
     }
 
     /// Path facts proved in this frame, not facts inherited from an enclosing one.
-    pub(crate) fn own_path_narrowings(&self) -> Vec<(NarrowPath, Ty)> {
+    pub(super) fn own_path_narrowings(&self) -> Vec<(NarrowPath, Ty)> {
         self.flow
             .borrow()
             .paths
@@ -793,7 +793,7 @@ impl<'p, B> Scope<'p, B> {
     }
 
     /// Straight-line read types proved in this frame.
-    pub(crate) fn own_local_narrowings(&self) -> Vec<(String, Ty)> {
+    pub(super) fn own_local_narrowings(&self) -> Vec<(String, Ty)> {
         self.flow
             .borrow()
             .locals

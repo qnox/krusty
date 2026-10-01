@@ -3,8 +3,8 @@
 use crate::ast::{BinOp, Expr, ExprId};
 use crate::types::Ty;
 
-use super::scope::ScopeKind;
 use super::receiver_flow::CompletedFlow;
+use super::scope::ScopeKind;
 use super::{conditional_branch, control_flow_join, Checker, CheckerScope, Wanted};
 
 impl Checker<'_> {
