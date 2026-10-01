@@ -46,6 +46,8 @@ mod inline_returns;
 mod inlining;
 mod interface_delegation;
 mod local_callables;
+#[cfg(test)]
+mod local_property_reference_tests;
 mod loops;
 mod module_declarations;
 mod package_declarations;

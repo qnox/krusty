@@ -4942,3 +4942,19 @@ context-parameter accessor. A backend finds the dispatch slot by that identity, 
 unset (`Callee::realized_virtual`). The JVM backend does not read it. Tests:
 `fir_lower/call_target_tests.rs`, `local_property_accessor_tests.rs`. Gap: the serialization
 plugin's synthesized calls name no selection.
+
+## A local delegated property's identity  ✅
+
+The checker allocates each local delegated property a `LocalDelegatedPropertyId` from the body
+that declares it, and every reflection value its conventions receive (`provideDelegate`,
+`getValue`, `setValue`) names it, wherever the read or write is
+(`FirExprKind::LocalPropertyReference::declaration`, carried to
+`IrLocalPropertyReference::declaration`). The identity is not an `OriginId`: an origin says where
+a FIR node came from, and one property has several. Two locals with the same name in sibling
+scopes, nested scopes, or different files are different properties; a read inside a lambda names
+the enclosing declaration. A backend that realizes one reflection object per property keys it by
+this identity, not by the name.
+The JVM backend keeps building a `PropertyReference0Impl` at each use. An inline function's local
+delegate inlined twice into one body keeps one identity for both copies, as for any other checked
+node an inlined body copies. Tests: `fir/body_check/delegate_tests.rs`,
+`fir_lower/local_property_reference_tests.rs`.

@@ -50,6 +50,7 @@ pub use suspension_points::{
 mod intrinsic;
 mod jvm_static_realization;
 mod local_class_names;
+mod local_property_references;
 mod module_records;
 mod operators;
 mod overrides;
@@ -92,6 +93,7 @@ pub use field_flags::IrfFlags;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrClassifierKind, IrHeaderAnnotation, IrModuleCallable, IrModuleClassifier,
     IrModuleMemberAccess, IrModuleSource,
@@ -376,10 +378,7 @@ pub enum IrExpr {
         value: Option<ExprId>,
     },
     /// Backend-neutral reflection value passed to local delegated-property conventions.
-    LocalPropertyReference {
-        name: Box<str>,
-        property_type: Ty,
-    },
+    LocalPropertyReference(IrLocalPropertyReference),
     /// Checked Kotlin singleton value. Its classifier is the semantic identity selected by the
     /// frontend; a backend decides how that singleton is stored on its target platform.
     SingletonValue {
