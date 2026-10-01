@@ -53,6 +53,22 @@ impl Checker<'_> {
         }
     }
 
+    /// A `try` statement never continues when its result is `Nothing`, or when its `finally` is.
+    ///
+    /// The body's value stays the `try`'s type even if `finally` aborts, so the result alone misses
+    /// `try { x = "OK" } finally { throw … }`. Either way the next statement does not run, and
+    /// recording its write would replace the value a later `finally` actually reads. The statement
+    /// stays in the lowering: a `try` the backend emits as a jump (`null as Nothing` before a
+    /// `catch`) lands on that following code, and deleting it aims the jump past the last
+    /// instruction.
+    pub(super) fn try_never_completes(&self, e: ExprId) -> bool {
+        let Expr::Try { finally, .. } = self.file.expr(e) else {
+            return false;
+        };
+        self.expr_types[e.0 as usize] == Ty::Nothing
+            || finally.is_some_and(|finally| self.expr_types[finally.0 as usize] == Ty::Nothing)
+    }
+
     /// Whether the block-body expression `e` transfers control out of the function on every path — a
     /// `return`/`throw`, a `Nothing`-typed call (`error(…)`/`TODO()`/any `Nothing`-returning fn), an
     /// `if` whose both branches do, a `when` whose every arm does, a `try` whose paths all do, or an

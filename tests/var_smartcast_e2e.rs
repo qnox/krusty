@@ -16,6 +16,18 @@ fn assert_diagnostics(actual: Vec<String>, expected: &[&str]) {
     assert_eq!(actual.as_slice(), expected);
 }
 
+/// Run the same `box()` source under kotlinc and require both compilers to return `OK`.
+fn same_box(stem: &str, src: &str) {
+    common::expect_box_same_as_kotlinc(src, stem);
+}
+
+/// Reject the same source under both compilers and compare file, line, column, message, count,
+/// and order.
+fn same_rejection(tag: &str, src: &str) {
+    let result = common::compiler_diagnostics(&[("Main.kt", src)], &[]);
+    common::expect_identical_rejection(&result, tag);
+}
+
 #[test]
 fn var_null_check_smart_casts_in_branch() {
     const SRC: &str = "fun f(x: String?): Int {\n\
@@ -308,6 +320,221 @@ fn same_rung_null_write_reports_nothing_nullable_receiver_for_calls() {
             "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Nothing?'.",
         ],
     );
+}
+
+#[test]
+fn null_branch_assignment_is_non_null_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(x: Box?): Int {\n\
+    var b = x\n\
+    if (b == null) {\n\
+        b = Box(1)\n\
+    }\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(null) == 1 && f(Box(4)) == 4) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("null-branch assignment smart-casts after if"),
+        "OK"
+    );
+    same_box("null_branch_assignment", SRC);
+}
+
+#[test]
+fn both_branch_assignments_are_non_null_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean): Int {\n\
+    var b: Box? = null\n\
+    if (c) b = Box(1) else b = Box(2)\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(true) == 1 && f(false) == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("both-branch assignment smart-casts after if"),
+        "OK"
+    );
+    same_box("both_branch_assignments", SRC);
+}
+
+#[test]
+fn one_sided_assignment_stays_nullable_after_if() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean, x: Box?): Int {\n\
+    var b = x\n\
+    if (c) b = Box(1)\n\
+    return b.n\n\
+}\n";
+    assert_diagnostics(
+        diags(SRC),
+        &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
+    );
+    same_rejection("one_sided_assignment", SRC);
+}
+
+#[test]
+fn null_write_on_one_edge_drops_the_flow_type() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(c: Boolean): Int {\n\
+    var b: Box? = Box(1)\n\
+    if (c) b = null\n\
+    return b.n\n\
+}\n";
+    assert_diagnostics(
+        diags(SRC),
+        &["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box?'."],
+    );
+    same_rejection("null_write_on_one_edge", SRC);
+}
+
+#[test]
+fn when_edges_that_agree_are_non_null_after() {
+    const SRC: &str = "class Box(val n: Int)\n\
+fun f(x: Box?): Int {\n\
+    var b = x\n\
+    when {\n\
+        b == null -> b = Box(2)\n\
+        else -> {}\n\
+    }\n\
+    return b.n\n\
+}\n\
+fun box(): String = if (f(null) == 2 && f(Box(5)) == 5) \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("when edges agree after the when"), "OK");
+    same_box("when_edges_agree", SRC);
+}
+
+#[test]
+fn else_edge_keeps_an_earlier_assignment() {
+    const SRC: &str = "fun f(c: Boolean, x: String?): Int {\n\
+    var t = x\n\
+    t = \"hello\"\n\
+    if (c) {\n\
+        t = null\n\
+    } else {\n\
+        return t.length\n\
+    }\n\
+    return -1\n\
+}\n\
+fun box(): String = if (f(false, null) == 5 && f(true, null) == -1) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("else edge keeps the assignment the then edge skipped"),
+        "OK"
+    );
+    same_box("else_edge_keeps_assignment", SRC);
+}
+
+#[test]
+fn null_branch_assignment_unboxes_a_nullable_primitive() {
+    const SRC: &str = "fun f(x: Int?): Int {\n\
+    var n = x\n\
+    if (n == null) n = 7\n\
+    return n + 1\n\
+}\n\
+fun box(): String = if (f(null) == 8 && f(2) == 3) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("nullable primitive assignment smart-casts after if"),
+        "OK"
+    );
+}
+
+#[test]
+fn operator_after_null_branch_assignment() {
+    const SRC: &str = "fun box(): String {\n\
+    val result = mutableMapOf<String, MutableList<Int>>()\n\
+    val key = \"k\"\n\
+    var list = result[key]\n\
+    if (list == null) {\n\
+        list = mutableListOf()\n\
+        result[key] = list\n\
+    }\n\
+    list += 1\n\
+    return if (result[key]?.single() == 1) \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("operator applies to the joined non-null type"),
+        "OK"
+    );
+}
+
+#[test]
+fn nothing_branch_leaves_the_other_edge() {
+    const SRC: &str = "fun f(x: String?): Int {\n\
+    var t = x\n\
+    if (t == null) {\n\
+        throw IllegalStateException()\n\
+    }\n\
+    return t.length\n\
+}\n\
+fun box(): String = if (f(\"ab\") == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("Nothing branch is not part of the join"),
+        "OK"
+    );
+    same_box("nothing_branch", SRC);
+}
+
+#[test]
+fn finally_keeps_the_value_a_skipped_assignment_does_not_replace() {
+    const SRC: &str = "fun box(): String {\n\
+    var result = \"fail\"\n\
+    try {\n\
+        var x: Any = 42\n\
+        try {\n\
+            try {\n\
+                throw Error()\n\
+            } finally {\n\
+                x = \"OK\"\n\
+            }\n\
+            x = 117\n\
+        } finally {\n\
+            result = x.toString()\n\
+        }\n\
+    } catch (_: Throwable) { }\n\
+    return result\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("finally reads the assignment that ran"),
+        "OK"
+    );
+}
+
+#[test]
+fn finally_keeps_the_value_when_a_throwing_finally_skips_the_next_assignment() {
+    const SRC: &str = "fun box(): String {\n\
+    var result = \"fail\"\n\
+    try {\n\
+        var x: Any = 42\n\
+        try {\n\
+            try {\n\
+                x = \"OK\"\n\
+            } finally {\n\
+                throw Error()\n\
+            }\n\
+            x = 117\n\
+        } finally {\n\
+            result = x.toString()\n\
+        }\n\
+    } catch (_: Throwable) { }\n\
+    return result\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("throwing finally skips the dead assignment"),
+        "OK"
+    );
+}
+
+#[test]
+fn cast_to_nothing_in_try_still_returns_from_the_catch() {
+    const SRC: &str = "fun box(): String {\n\
+    try {\n\
+        null as Nothing\n\
+    } catch (_: ClassCastException) {\n\
+        return \"OK\"\n\
+    } catch (_: NullPointerException) {\n\
+        return \"OK\"\n\
+    }\n\
+    return \"Fail\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("catch returns after null as Nothing"), "OK");
 }
 
 #[test]
