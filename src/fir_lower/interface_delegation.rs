@@ -719,6 +719,7 @@ fn add_forwarder(
     ir.open_methods.insert(function);
     // kotlinc's forwarder has no source line, yet it names its receiver and parameters.
     ir.fn_debug_locals.insert(function);
+    ir.interface_delegation_forwarders.insert(function);
     function
 }
 

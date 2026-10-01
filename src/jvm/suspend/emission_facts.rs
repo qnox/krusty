@@ -31,6 +31,10 @@ pub(crate) enum SuspendedResultReturn {
         classifier: crate::types::TypeName,
         carrier: crate::types::Ty,
     },
+    /// An interface-delegation forwarder whose callee returns a value class as its reference
+    /// carrier. `COROUTINE_SUSPENDED` is returned as it is; any other result is that carrier,
+    /// which `checkcast`s and is returned without boxing.
+    ValueClassCarrier { carrier: crate::types::Ty },
 }
 
 /// The return nodes that reshape a suspend result, and how.

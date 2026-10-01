@@ -245,9 +245,18 @@ fun box(): String {
     check(src, "SequencePipeline");
 }
 
-// Dropped: `sequence { yield(...) }` builder — krusty emits a Sequence lambda whose iterator() is
-// abstract at runtime (AbstractMethodError). generateSequence / asSequence pipelines work and are
-// covered by `sequence_pipeline` above.
+#[test]
+fn sequence_builder() {
+    let src = r#"
+fun box(): String {
+    val s = sequence { yield(1); yield(2) }
+    var t = 0
+    for (x in s) t += x
+    return if (t == 3) "OK" else "sequence $t"
+}
+"#;
+    check(src, "SequenceBuilder");
+}
 
 #[test]
 fn string_split_join_case() {

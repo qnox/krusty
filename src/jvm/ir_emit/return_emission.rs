@@ -109,6 +109,12 @@ impl Emitter<'_> {
                     code.invokestatic(box_impl, 1, 1);
                 }
             }
+            SuspendedResultReturn::ValueClassCarrier { carrier } => {
+                let cast = self
+                    .cw
+                    .class_ref(&crate::jvm::names::instanceof_internal_name(carrier));
+                code.checkcast(cast);
+            }
         }
     }
 

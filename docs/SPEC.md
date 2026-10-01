@@ -8339,6 +8339,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A call whose checked declaration returns a non-null type (a member returning `Outer`) is boxed
   into a generic slot with a plain `box-impl`, without a null test. Tests:
   `tests/value_class_nested_sole_property_e2e.rs`.
+- **A suspend call to a value-class member keeps its suspend name.** A virtual call whose callee
+  is a suspend function is named by the suspend mangling rule, so a class delegating
+  `suspend fun tag(s: String): Tag` forwards to `tag-vneLvdU`, the name the interface declares,
+  as kotlinc does. That forwarder is the small adapter, not a state machine: it passes its own
+  continuation through, returns `COROUTINE_SUSPENDED` unchanged, and `checkcast`s any other result
+  to the reference carrier (`String` for `Tag`). A boxed carrier (`Count(val n: Int)`, `Maybe?`
+  over `String?`) is returned as the callee left it. Tests:
+  `tests/suspend_value_class_delegation_e2e.rs`.
+- **A value class's suspend member is re-entered on its class.** The member is realized as a
+  static `-impl` method of the value class, so the continuation of its state machine calls
+  `Tag.twice-<hash>(String, Continuation)` on that class, as kotlinc does, not on the file facade.
+  Tests: `tests/value_class_suspend_member_reentry_e2e.rs`.
+- **A suspend function's reference carrier resumes its caller as the box.** A suspend function
+  returning a value class as its reference carrier (`Tag(val s: String)`, and `Tag?` over it)
+  returns the carrier when it completes without suspending, but its continuation's `invokeSuspend`
+  boxes the carrier it re-enters with (null-safely for `Tag?`). So the caller unboxes the value it
+  is resumed with, and a user call to such a function is never a tail forward: kotlinc keeps a
+  state machine around it (`suspend fun wrap(): Tag = source.tag(s)`). An interface-delegation
+  forwarder is the exception recorded above. A carrier that is itself the box (`Tag?` over `Int`)
+  needs neither step. A
+  result declared as a type parameter bounded by a value class (`T : Tag?`) crosses exactly as
+  the bound does. krusty's machine also hands a synchronous result through `result`, so it stores
+  the box there too and every read of `result` sees one representation. Tests:
+  `tests/value_class_suspend_resume_e2e.rs`, `tests/value_class_suspend_member_reentry_e2e.rs`.
+  Corpus: `coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt`,
+  `coroutines/inlineClasses/resume/defaultStub.kt`,
+  `coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt`.
+- **An override of a dependency's value class gets its bridge.** Bridge derivation reads which
+  classes are value classes, including ones declared in a dependency such as `Result`, so those are
+  recorded before bridges are derived. A `suspend fun execute(): Result<String>` overriding a
+  generic `execute(): T` gets kotlinc's erased `execute(Continuation)` bridge.
+  Tests: `tests/value_class_dependency_bridge_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`
