@@ -46,7 +46,7 @@ mod synth_members;
 mod type_operation_roles;
 mod unboxing_rewrites;
 mod value_boundaries;
-use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
+use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
