@@ -4339,7 +4339,7 @@ fn reference_needs_checkcast(t: &Ty) -> bool {
         Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
         Ty::String => true,
         Ty::Obj(i, _) => {
-            !i.matches("kotlin/Any") && !super::jvm_class_map::is_boxed_primitive_classifier(i)
+            i != crate::types::wk::any() && !super::jvm_class_map::is_boxed_primitive_classifier(i)
         }
         _ => false,
     }
