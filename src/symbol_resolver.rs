@@ -4971,6 +4971,7 @@ impl ResolvedMember {
         member.external_identity = callable.external_identity;
         member.external_property_identity = callable.external_property_identity;
         member.physical_params = callable.physical_params.clone();
+        member.physical_parameter_plan = callable.physical_parameter_plan.clone();
         member.owner = Some(callable.owner);
         member.physical_ret = callable.physical_ret;
         member.signature = callable.signature;
@@ -8198,6 +8199,7 @@ mod tests {
             plugin_expression: None,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
+            physical_parameter_plan: None,
             ret: Ty::Int,
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),

@@ -10,6 +10,7 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
+mod parameter_plans;
 #[cfg(test)]
 mod provider_normalization_tests;
 mod static_properties;
@@ -716,7 +717,7 @@ impl JvmLibraries {
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
             // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
             let descriptor = if suspend {
-                strip_continuation_param(&c.descriptor)
+                parameter_plans::logical_suspend_descriptor(&c.descriptor)
             } else {
                 c.descriptor.clone()
             };
@@ -833,6 +834,7 @@ impl JvmLibraries {
                 )
             };
             callable.physical_params = physical_params;
+            parameter_plans::source_only(&mut callable);
             if !is_default && call_sig.param_defaults.iter().any(|default| *default) {
                 callable.default_realization =
                     self.top_level_default_realization(&callable).map(Box::new);
@@ -1881,11 +1883,18 @@ impl JvmLibraries {
                     has_kotlin_metadata,
                     &member.annotations,
                 ));
+                let dispatch_parameter = m.is_static()
+                    && ci.meta.class_kind != Some(crate::libraries::TypeKind::Object)
+                    && declaration
+                        .is_some_and(|declaration| !declaration.is_companion_block_member());
+                let continuation_parameter =
+                    declaration.is_some_and(|declaration| declaration.is_suspend());
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
-                        pass_receiver: physical_params.len() == member.params.len() + 1,
+                        pass_receiver: dispatch_parameter,
                     };
                 }
+                parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
                 if let Some(declaration) = declaration {
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
@@ -1966,9 +1975,11 @@ impl JvmLibraries {
                     // The EMIT descriptor is the LOGICAL (continuation-stripped) form — the coroutine pass
                     // re-threads the CPS `Continuation` at the call. `physical_params` retains the classfile
                     // shape while `params` is the normalized source-semantic shape used by resolution.
-                    member.descriptor = strip_continuation_param(&member.descriptor);
+                    member.descriptor =
+                        parameter_plans::logical_suspend_descriptor(&member.descriptor);
                     if let Some(holder) = member.nonvirtual_realization.as_deref_mut() {
-                        holder.descriptor = strip_continuation_param(&holder.descriptor);
+                        holder.descriptor =
+                            parameter_plans::logical_suspend_descriptor(&holder.descriptor);
                     }
                 }
                 if is_map && member.name == "put" {
@@ -3355,23 +3366,6 @@ fn function_interface_signature(
     Some(Ty::fun(params.to_vec(), ret))
 }
 
-const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
-
-/// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
-/// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
-/// `kotlin/coroutines/Continuation` parameter kotlinc appends (`(ILkotlin/coroutines/Continuation;)…`
-/// → `(I)…`). The return stays erased (`Object`); the *logical* Kotlin return lives in `@Metadata`. A
-/// suspend callee is resolved by this logical signature; the coroutine pass re-derives the CPS form for
-/// the emitted call. A no-op if the descriptor has no trailing continuation (not a CPS method).
-fn strip_continuation_param(desc: &str) -> String {
-    if let Some(close) = desc.rfind(')') {
-        if let Some(stripped) = desc[1..close].strip_suffix(CONTINUATION_PARAM_DESCRIPTOR) {
-            return format!("({}){}", stripped, &desc[close + 1..]);
-        }
-    }
-    desc.to_string()
-}
-
 /// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
 /// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
 /// matching receiver-first static method at the provider boundary.
@@ -3740,6 +3734,7 @@ impl JvmLibraries {
                             pass_receiver: true,
                         };
                     }
+                    parameter_plans::callable(&mut getter, value_dispatch, false);
                     let setter = mp.setter.clone().and_then(|setter| {
                         let (physical_params, physical_ret) = parse_method_desc(&setter.desc)?;
                         if physical_params.len() != extension_index + 2 || physical_ret != Ty::Unit
@@ -3769,6 +3764,7 @@ impl JvmLibraries {
                                     pass_receiver: true,
                                 };
                         }
+                        parameter_plans::callable(&mut callable, value_dispatch, false);
                         Some(callable)
                     });
                     overloads.push(PropertyInfo {
@@ -4515,7 +4511,7 @@ impl JvmLibraries {
                 // normal call resolves — the same rule the top-level and member paths apply. The
                 // coroutine pass re-threads the CPS `Continuation` at the emitted call.
                 let descriptor = if mf.is_suspend() {
-                    strip_continuation_param(&descriptor)
+                    parameter_plans::logical_suspend_descriptor(&descriptor)
                 } else {
                     descriptor
                 };
@@ -5023,11 +5019,10 @@ impl JvmLibraries {
                         // form for emission.
                         let suspend = m.suspend();
                         let params = m.params.clone();
-                        let descriptor = if suspend {
-                            strip_continuation_param(&m.descriptor)
-                        } else {
-                            m.descriptor.clone()
-                        };
+                        // `build_library_type` normalized this selected member's physical CPS
+                        // descriptor exactly once. Reapplying that operation here would remove the
+                        // final real source parameter from the already-logical descriptor.
+                        let descriptor = m.descriptor.clone();
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
                         let metadata_ret = m.declared_ret.or_else(|| {
                             self.cp
@@ -5203,6 +5198,7 @@ impl JvmLibraries {
                         // rebuilt as a physically boxed `Result<T>` merely because both facts were
                         // normalized through this member-overload view.
                         callable.physical_params = m.physical_params.clone();
+                        callable.physical_parameter_plan = m.physical_parameter_plan.clone();
                         callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
                         let inline_body_plan = callable.inline_body_plan.clone();
                         overloads.push(FunctionInfo {

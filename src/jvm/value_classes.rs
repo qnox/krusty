@@ -1303,7 +1303,8 @@ pub(crate) fn lower_value_classes(
                 *ret = erase(ret, &under);
             }
         }
-        for e in &mut ir.exprs {
+        let mut module_physical_parameters = Vec::new();
+        for (index, e) in ir.exprs.iter_mut().enumerate() {
             let IrExpr::Call { callee, .. } = e else {
                 continue;
             };
@@ -1341,57 +1342,46 @@ pub(crate) fn lower_value_classes(
                     }
                     _ => continue,
                 };
-            if let Some(callable) =
+            let record_physical = if let Some(callable) =
                 module_target.and_then(|target| ir.referenced_module_callables.get(&target))
             {
-                // `$default` is a JVM companion of the KOTLIN declaration, not a declaration whose
-                // mask/marker parameters participate in value-class mangling. Mangle the finalized
-                // semantic signature retained with the stable module target, then append the
-                // synthetic suffix. This also preserves member-return and suspend mangling rules;
-                // neither can be reconstructed from the realized static descriptor.
-                let base = if module_default_call {
-                    name.as_str()
-                        .strip_suffix("$default")
-                        .unwrap_or(name.as_str())
-                } else {
-                    name.as_str()
-                };
-                let is_suspend = callable.flags.has(crate::fir::DeclarationFlags::SUSPEND);
-                // A member of a module value class is realized as a static implementation over
-                // its carrier, so its `$default` companion extends that implementation's name.
-                let mangled = if callable
-                    .owner
-                    .is_some_and(|owner| module_value_classes.contains_key(&owner))
-                {
-                    vc_member_impl_name(
-                        base,
-                        &callable.parameters,
-                        &callable.result,
-                        &callable_under,
-                        is_suspend,
-                    )
-                } else {
-                    vc_mangle_once(
-                        base,
-                        &callable.parameters,
-                        &callable.result,
-                        &callable_under,
-                        callable.owner.is_none(),
-                        is_suspend,
-                    )
-                };
-                *name = if module_default_call && !semantic_default {
-                    format!("{mangled}$default")
-                } else {
-                    mangled
-                };
+                let (mangled, value_class_bounds) = member_names::module_call_jvm_name(
+                    name,
+                    &callable.parameters,
+                    &callable.type_parameters,
+                    &callable.result,
+                    callable
+                        .owner
+                        .is_some_and(|owner| module_value_classes.contains_key(&owner)),
+                    callable.owner.is_none(),
+                    module_default_call,
+                    semantic_default,
+                    &callable_under,
+                    callable.flags.has(crate::fir::DeclarationFlags::SUSPEND),
+                );
+                *name = mangled;
+                for (parameter, bound) in value_class_bounds {
+                    if let Some(slot) = params.get_mut(parameter) {
+                        *slot = bound;
+                    }
+                }
+                ir.declaration_argument_boundaries
+                    .contains_key(&(index as ExprId))
             } else {
                 *name = vc_mangle(name, params, ret, &callable_under, true, false);
-            }
+                false
+            };
             for parameter in params.iter_mut() {
                 *parameter = erase(parameter, &under);
             }
             *ret = erase(ret, &under);
+            if record_physical {
+                module_physical_parameters.push((index as ExprId, params.clone()));
+            }
+        }
+        for (call, parameters) in module_physical_parameters {
+            ir.physical_call_parameters
+                .insert(call, parameters.into_boxed_slice());
         }
     }
     function_references::realize(ir, &callable_under, &renamed_functions);

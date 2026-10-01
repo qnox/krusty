@@ -77,6 +77,7 @@ impl FunctionInfo {
         );
         callable.signature = member.signature.clone();
         callable.physical_params = member.physical_params.clone();
+        callable.physical_parameter_plan = member.physical_parameter_plan.clone();
         callable.generic_sig = member.generic_sig.clone().map(Box::new);
         callable.declared_params = member
             .generic_sig

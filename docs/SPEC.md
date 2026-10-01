@@ -2642,6 +2642,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consistently across all three; a key rebuilt from the raw AST in codegen (`ty_of`, which erases a bare
   type parameter to `Object`) would diverge and make codegen miss the override
   (`tests/generic_inferred_return_e2e.rs`).
+- **An intersection's JVM carrier is its class bound, then that bound's value-class carrier.**
+  `fun <T : X, X : Comparable<UInt>> f(arg: T) where X : UInt` erases `arg` to `int`. The
+  `Comparable` constituent stays in the generic signature. Common IR records each supplied
+  argument whose declaration parameter mentions a type parameter: the parameter ordinal, the
+  semantic parameter type, and whether that operand is the implicit coercion placed at the
+  boundary. It does not ask whether the bound's JVM form is an unsigned carrier. After generic
+  erasure, the JVM walks those bounds by semantic type-parameter identity, with a visited set,
+  and rejects a cyclic bound. Only an unsigned class bound is adapted to the physical slot, so
+  `f(3U)` passes `int` and does not call `UInt.box-impl`. A reference erasure is not adapted: a
+  suspend lambda stays the continuation the frontend produced. A signed primitive bound is not
+  adapted either: its `$default` stub boxes the value (`T : Char` to `Character`). The dependency
+  provider names every source parameter, dispatch receiver, and suspend continuation in the
+  classfile vector when it aligns that vector with the declaration. A vector that matches none of
+  those shapes is rejected; a missing plan is not a source-parameter vector. Default-argument
+  masks and the marker are not slots of this vector — the default-call realization records their
+  count, and its `real_params` prefix is published as source slots when the bridge is realized.
+  A continuation stored in the vector is not a source argument, and a `$DefaultImpls`
+  holder prepends its receiver in the descriptor only, so
+  `ClosedFloatingPointRange.contains` still receives the value (`tests/float_range_nan_e2e.rs`,
+  `tests/unsigned_intersection_carrier_e2e.rs`).
 - **An inferred generic return bound to a primitive types as the plain primitive** (`fun <T> fizz(x: T): T;
   fizz(1)` is `Int` — usable at an `Int` parameter, in arithmetic, as an `Int` initializer), matching
   kotlinc's static type. The runtime value behind the erased `Object` return is still the boxed wrapper;
