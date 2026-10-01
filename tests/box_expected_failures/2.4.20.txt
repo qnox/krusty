@@ -10,7 +10,6 @@ annotations/instances/multimoduleTypeParams.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 basics/k42000_1.kt
 basics/k42000_crossmodule.kt
-boxingOptimization/unsignedArrayForEach.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 callableReference/bound/arrayGetIntrinsic.kt
@@ -114,7 +113,6 @@ inference/pcla/issues/kt49160b.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionFunctions.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/ExtensionProperties.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
 inline/localDeclarationsClash.kt
 inlineClasses/boundCallableReferencePassedToInlineFunction.kt

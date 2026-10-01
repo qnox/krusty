@@ -17,7 +17,9 @@ pub(super) fn operand_nonnull(
 ) -> bool {
     let non_null_ty = |t: &Ty| matches!(t, Ty::Obj(..));
     match &exprs[id as usize] {
-        IrExpr::New { .. } => true,
+        // An array allocation is a fresh non-null reference. Treating `newarray` as nullable
+        // dropped the `box-impl` a null-safe coercion to a supertype has to emit.
+        IrExpr::New { .. } | IrExpr::NewArray { .. } | IrExpr::Vararg { .. } => true,
         // A read of a non-nullable field yields a non-null value (a `val a: X` data-class property is
         // never null — box it with the plain `box-impl`, no null guard).
         IrExpr::GetField { class, index, .. } => fields

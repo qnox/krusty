@@ -46,6 +46,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(module_member_accesses);
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
+    move_fact!(value_class_unbox_type_operation_edges);
 
     target
 }
@@ -77,6 +78,7 @@ mod tests {
     fn selected_call_facts_move_exclusively_to_the_cloned_operation() {
         let mut ir = IrFile::default();
         let source = ir.add_expr(IrExpr::UnitInstance);
+        let unbox_receiver = ir.add_expr(IrExpr::UnitInstance);
         ir.ext_call_source_receiver.insert(source, Ty::String);
         ir.semantic_call_roles.insert(
             source,
@@ -90,6 +92,8 @@ mod tests {
             source,
             vec![Modifier::None, Modifier::Crossinline].into_boxed_slice(),
         );
+        ir.value_class_unbox_type_operation_edges
+            .insert(source, unbox_receiver);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -114,5 +118,12 @@ mod tests {
             Some([Modifier::None, Modifier::Crossinline].as_slice())
         );
         assert!(!ir.call_inline_modifiers.contains_key(&source));
+        assert_eq!(
+            ir.value_class_unbox_type_operation_edges.remove(&target),
+            Some(unbox_receiver)
+        );
+        assert!(!ir
+            .value_class_unbox_type_operation_edges
+            .contains_key(&source));
     }
 }

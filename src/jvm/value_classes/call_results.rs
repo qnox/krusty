@@ -126,10 +126,58 @@ pub(super) fn representation(
         | Callee::Special { descriptor, .. } => descriptor.rsplit(')').next().map(str::to_string),
         _ => None,
     };
+    // A producer with no JVM descriptor can still record that its result is this value class's
+    // carrier (a primitive-array allocation is `newarray`, not a method). Absent that record, a
+    // missing descriptor does not select the carrier: the result stays the box.
+    if physical_descriptor.is_none()
+        && physical
+            .get(&id)
+            .is_some_and(|recorded| recorded.non_null() == under[&value_class].non_null())
+    {
+        return repr_of_ty(logical, under);
+    }
     let carrier_descriptor = desc(&erase(&under[&value_class], under));
     if physical_descriptor.as_deref() == Some(carrier_descriptor.as_str()) {
         repr_of_ty(logical, under)
     } else {
         Repr::Boxed(value_class)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{Callee, IrIntrinsic};
+
+    #[test]
+    fn a_missing_descriptor_selects_the_carrier_only_when_that_result_was_recorded() {
+        let value_class = crate::types::type_name("kotlin/UIntArray");
+        let carrier = Ty::obj("kotlin/IntArray");
+        let mut under = Under::new();
+        under.insert(value_class, carrier);
+        let mut logical = HashMap::new();
+        logical.insert(0, Ty::obj_name(value_class));
+        let declared = HashMap::new();
+        let callee = Callee::Intrinsic {
+            operation: IrIntrinsic::PrimitiveArrayNew { element: Ty::UInt },
+            ret: Ty::obj_name(value_class),
+        };
+        let types = CallTypes {
+            logical: &logical,
+            declared: &declared,
+            property_declarations: &declared,
+            statics: &[],
+        };
+        let absent = HashMap::new();
+        assert!(matches!(
+            representation(0, &callee, &under, types, &absent),
+            Repr::Boxed(classifier) if classifier == value_class
+        ));
+        let mut recorded = HashMap::new();
+        recorded.insert(0, carrier);
+        assert!(matches!(
+            representation(0, &callee, &under, types, &recorded),
+            Repr::Unboxed(classifier) if classifier == value_class
+        ));
     }
 }

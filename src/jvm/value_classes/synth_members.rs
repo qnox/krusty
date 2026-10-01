@@ -488,18 +488,7 @@ pub(super) fn synth_value_members(
                 arg: other_v,
                 type_operand: x_ir,
             });
-            let ounbox = ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: internal_name,
-                    name: "unbox-impl".to_string(),
-                    descriptor: format!("(){udesc}"),
-                    params: None,
-                    interface: false,
-                    module_target: None,
-                },
-                dispatch_receiver: Some(ocast),
-                args: vec![],
-            });
+            let ounbox = super::unboxing_rewrites::unbox_call(ir, ocast, internal_name, &u_ir);
             // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`): the
             // other value is unboxed into a temporary and compared as `arg0 == tmp`, then guarded
             // `if (!eq) return false; return true`. Temporary elimination later keeps a reference

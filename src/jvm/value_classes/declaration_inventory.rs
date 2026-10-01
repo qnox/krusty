@@ -28,9 +28,6 @@ pub(super) fn merge_referenced(
             collect_classifier_names(underlying, &mut pending);
             continue;
         }
-        if crate::types::prim_array_element(classifier).is_some() {
-            continue;
-        }
 
         if let Some(property) = classifiers.classifier_value_property(classifier) {
             crate::trace_compiler!(
@@ -58,9 +55,14 @@ pub(super) fn merge_referenced(
                 declared = Some(candidate);
             }
         }
-        let Some(underlying) = declared else {
+        let Some(mut underlying) = declared else {
             continue;
         };
+        // Metadata may stamp an array carrier nullable. The array reference already holds null, so
+        // `UIntArray?` stays that non-null array and boxes only when a consumer asks for the box.
+        if underlying.non_null().is_array() {
+            underlying = underlying.non_null();
+        }
         ir.insert_external_value_class_name(classifier, underlying);
         collect_classifier_names(underlying, &mut pending);
         // A value class the type model carries as a native scalar (the unsigned integers) is still
@@ -114,6 +116,71 @@ mod tests {
         assert!(ir.is_value_class_name(uint));
         assert!(!super::super::is_boxed_value_class(&ir, uint));
         assert!(!declarations.contains_key(&uint));
+    }
+
+    struct UnsignedArrayFacts;
+
+    impl crate::types::ClassifierFactSource for UnsignedArrayFacts {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+            classifier
+                .matches("kotlin/UByteArray")
+                .then_some(Ty::nullable(Ty::obj("kotlin/ByteArray")))
+        }
+    }
+
+    #[test]
+    fn an_unsigned_array_enters_the_rewrite_map_as_its_primitive_carrier() {
+        let array = crate::types::type_name("kotlin/UByteArray");
+        let mut ir = IrFile::default();
+        let mut holder = crate::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(array),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::new();
+
+        assert!(merge_referenced(&mut ir, &UnsignedArrayFacts, &mut declarations).is_some());
+        assert_eq!(
+            ir.value_class_underlying_name(array),
+            Some(Ty::obj("kotlin/ByteArray"))
+        );
+        assert!(ir.is_value_class_name(array));
+        assert!(super::super::is_boxed_value_class(&ir, array));
+        assert_eq!(
+            declarations.get(&array).copied(),
+            Some(Ty::obj("kotlin/ByteArray"))
+        );
+        assert!(!declarations.contains_key(&crate::types::type_name("kotlin/ByteArray")));
+    }
+
+    #[test]
+    fn a_signed_primitive_array_without_a_value_underlying_stays_out() {
+        let array = crate::types::type_name("kotlin/ByteArray");
+        let mut ir = IrFile::default();
+        let mut holder = crate::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(crate::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(array),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::new();
+
+        assert!(merge_referenced(
+            &mut ir,
+            &crate::libraries::EmptySymbolSource,
+            &mut declarations
+        )
+        .is_some());
+        assert!(!declarations.contains_key(&array));
+        assert!(!ir.is_value_class_name(array));
     }
 
     #[test]
