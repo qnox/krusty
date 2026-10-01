@@ -134,20 +134,41 @@ pub(super) fn finalize_interface_delegations(
         let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() else {
             continue;
         };
+        // kotlinc stores the delegates in declaration order, ahead of the class's own
+        // initializers.
+        let mut parameter_stores = Vec::new();
         for (ordinal, delegation) in header.interface_delegations.iter().enumerate() {
-            materialize_delegation(declaration, class, ordinal, delegation, ir)?;
+            let delegate = DelegationSite {
+                declaration,
+                class,
+                ordinal,
+            };
+            materialize_delegation(delegate, delegation, &mut parameter_stores, ir)?;
         }
+        prepend_initializers(ir, class, parameter_stores);
     }
     Ok(())
 }
 
-fn materialize_delegation(
+/// One delegation of a classifier: the classifier, its class, and the delegation's ordinal.
+#[derive(Clone, Copy)]
+struct DelegationSite {
     declaration: DeclarationId,
     class: crate::ir::ClassId,
-    delegation_ordinal: usize,
+    ordinal: usize,
+}
+
+fn materialize_delegation(
+    site: DelegationSite,
     delegation: &ResolvedInterfaceDelegation,
+    parameter_stores: &mut Vec<u32>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
+    let DelegationSite {
+        declaration,
+        class,
+        ordinal: delegation_ordinal,
+    } = site;
     delegation
         .interface
         .get()
@@ -184,7 +205,7 @@ fn materialize_delegation(
             let parameter_index = declared_parameter_index(declaration, ir, class, parameter)?;
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
-            prepend_parameter_initializer(ir, class, field, parameter_index)?;
+            parameter_stores.push(parameter_initializer(ir, class, field, parameter_index)?);
         }
         ResolvedInterfaceDelegateSource::SyntheticConstructorParameter(parameter) => {
             let parameter_index = parameter as usize;
@@ -195,7 +216,7 @@ fn materialize_delegation(
             }
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
-            prepend_parameter_initializer(ir, class, field, parameter_index)?;
+            parameter_stores.push(parameter_initializer(ir, class, field, parameter_index)?);
         }
         ResolvedInterfaceDelegateSource::ConstructorBodyInitializer => {
             if !ir
@@ -489,12 +510,12 @@ fn materialize_delegation(
     Ok(())
 }
 
-fn prepend_parameter_initializer(
+fn parameter_initializer(
     ir: &mut IrFile,
     class: crate::ir::ClassId,
     field: u32,
     parameter_index: usize,
-) -> Result<(), FirFileLoweringFailure> {
+) -> Result<u32, FirFileLoweringFailure> {
     let receiver = ir.add_expr(IrExpr::GetValue(0));
     let value = ir.add_expr(IrExpr::GetValue(
         u32::try_from(parameter_index + 1)
@@ -506,8 +527,7 @@ fn prepend_parameter_initializer(
         index: field,
         value,
     });
-    prepend_initializer(ir, class, store);
-    Ok(())
+    Ok(store)
 }
 
 fn delegated_call(
@@ -631,10 +651,13 @@ fn delegated_call(
     })
 }
 
-fn prepend_initializer(ir: &mut IrFile, class: crate::ir::ClassId, store: u32) {
+fn prepend_initializers(ir: &mut IrFile, class: crate::ir::ClassId, stores: Vec<u32>) {
+    if stores.is_empty() {
+        return;
+    }
     let previous = ir.classes[class as usize].init_body.take();
     let body = ir.add_expr(IrExpr::Block {
-        stmts: std::iter::once(store).chain(previous).collect(),
+        stmts: stores.into_iter().chain(previous).collect(),
         value: None,
     });
     ir.classes[class as usize].init_body = Some(body);

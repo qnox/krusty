@@ -39,8 +39,11 @@ pub(super) fn emit_func_ref_class(
     let capture_signatures = capture_signatures(ir, env, fr);
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
+    // An array classifier has no class of its own: its members are reflected on the JVM array
+    // class, whose constant is its descriptor (`[I`, or the erased `[Ljava/lang/Object;`).
     let owner_class = fr.owner_class_or_facade(facade);
-    let owner_class = crate::jvm::jvm_class_map::to_jvm_internal(&owner_class).to_string();
+    let owner_class = crate::jvm::names::array_class_descriptor(&owner_class)
+        .unwrap_or_else(|| crate::jvm::jvm_class_map::to_jvm_internal(&owner_class).to_string());
     let call_owner_identity = fr.call_owner;
     let call_owner = fr.call_owner_or_facade(facade);
     let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();

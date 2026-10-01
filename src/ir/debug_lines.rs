@@ -24,6 +24,9 @@ pub(super) struct GeneratedLineMarks {
     /// Expressions kotlinc builds without source offsets (an implicit context argument): no line
     /// begins at them, so a line marked where one starts has not begun yet.
     positionless: HashSet<ExprId>,
+    /// Checked operations whose source line begins at their first generated operand. A property
+    /// access owns its implicit context argument even though that argument has no source position.
+    generated_operand_starts: HashSet<ExprId>,
 }
 
 impl IrFile {
@@ -69,6 +72,28 @@ impl IrFile {
         self.generated_lines.positionless.contains(&expression)
     }
 
+    pub(crate) fn mark_generated_operand_start(&mut self, expression: ExprId) {
+        self.generated_lines
+            .generated_operand_starts
+            .insert(expression);
+    }
+
+    pub(crate) fn starts_at_generated_operand(&self, expression: ExprId) -> bool {
+        self.generated_lines
+            .generated_operand_starts
+            .contains(&expression)
+    }
+
+    pub(crate) fn move_generated_operand_start(&mut self, source: ExprId, target: ExprId) {
+        if self
+            .generated_lines
+            .generated_operand_starts
+            .remove(&source)
+        {
+            self.generated_lines.generated_operand_starts.insert(target);
+        }
+    }
+
     /// Carry `source`'s generated line marks over to its copy `target`.
     pub(super) fn copy_generated_line_marks(&mut self, source: ExprId, target: ExprId) {
         let marks = &mut self.generated_lines;
@@ -83,6 +108,9 @@ impl IrFile {
         }
         if marks.positionless.contains(&source) {
             marks.positionless.insert(target);
+        }
+        if marks.generated_operand_starts.contains(&source) {
+            marks.generated_operand_starts.insert(target);
         }
     }
 }

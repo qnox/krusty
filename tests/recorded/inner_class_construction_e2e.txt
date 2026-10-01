@@ -1,0 +1,20 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[inner_constructors_and_member_functions_are_one_overload_family]
+2.4.20:
+  Main.kt:4:27: overload resolution ambiguity between candidates:
+  | Outer.constructor(x: Any, y: Int): Outer.Inner
+  | fun Inner(x: Int, y: Any): String
+  Main.kt:11:27: overload resolution ambiguity between candidates:
+  | Base.constructor(x: Any, y: Int): Base.Nested
+  | fun Nested(x: Int, y: Any): String
+  Main.kt:13:33: overload resolution ambiguity between candidates:
+  | Outer.constructor(x: Any, y: Int): Outer.Inner
+  | fun Inner(x: Int, y: Any): String
+  Main.kt:14:32: overload resolution ambiguity between candidates:
+  | Outer.constructor(x: Any, y: Int): Outer.Inner
+  | fun Inner(x: Int, y: Any): String
+  Main.kt:15:36: overload resolution ambiguity between candidates:
+  | Base.constructor(x: Any, y: Int): Base.Nested
+  | fun Nested(x: Int, y: Any): String

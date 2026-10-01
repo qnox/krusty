@@ -60,6 +60,7 @@ mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
 mod callable_reference_selection;
+mod candidate_display;
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
@@ -94,6 +95,8 @@ mod function_value_conversions;
 mod generic_call_bindings;
 mod if_expression;
 mod implicit_rungs;
+mod inner_constructor_calls;
+use inner_constructor_calls::BoundInnerConstruction;
 mod inspection_analysis;
 mod integer_constants;
 mod interface_delegation;
@@ -10569,6 +10572,9 @@ struct LibraryConstructorOptions<'a> {
     applied_classifier: Option<Ty>,
     expected: Option<Ty>,
     priority: ConstructorPriorityTier,
+    /// A constructor already chosen by a selection that ran over a wider candidate family (the
+    /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
+    selected: Option<&'a crate::libraries::FunctionInfo>,
 }
 
 enum LibraryConstructorFailure {
@@ -14923,8 +14929,48 @@ impl<'a> Checker<'a> {
                 })
             }));
         }
-        let overloads = member_overloads
+        // Kotlin's member level holds the receiver's member functions together with the
+        // constructors of the inner classifier it exposes under the same name. With member
+        // functions present both families are one candidate list, selected once below. Without
+        // them an explicit receiver selects over the constructors alone, still ahead of every
+        // extension level; a bare call's constructor-only family belongs to its classifier tower.
+        let file = self.file;
+        let construction = BoundInnerConstruction {
+            call_args: CallArgs {
+                call,
+                args,
+                arg_tys: &arg_tys,
+            },
+            explicit_outer: tower_rung.explicit_receiver,
+            receiver: rt,
+            arg_names: file.call_arg_names.get(&call.0).map(Vec::as_slice),
+            expected,
+        };
+        let mut inner_classifier = None;
+        let mut inner_constructors = Vec::new();
+        if !member_overloads.is_empty() {
+            match self.member_level_inner_classifier(rt, name) {
+                InheritedNestedClassifier::NotFound => {}
+                InheritedNestedClassifier::Ambiguous => {
+                    self.report_ambiguous_inner_classifier(call, name);
+                    return MemberSlotCall::Rejected;
+                }
+                InheritedNestedClassifier::Found(internal) => {
+                    inner_classifier = Some((internal, None));
+                    inner_constructors = self.bound_inner_constructor_candidates(rt, internal);
+                }
+            }
+        } else if tower_rung.explicit_receiver.is_some() {
+            match self.bound_inner_constructor_call(scope, construction, name) {
+                Some(Ty::Error) => return MemberSlotCall::Rejected,
+                Some(ret) => return MemberSlotCall::Resolved(ret),
+                None => {}
+            }
+        }
+        // kotlinc lists a member level's constructors ahead of its functions.
+        let overloads = inner_constructors
             .iter()
+            .chain(&member_overloads)
             .chain(&extension_overloads)
             .cloned()
             .collect::<Vec<_>>();
@@ -14951,6 +14997,16 @@ impl<'a> Checker<'a> {
                         },
                         member_mapping_failure: None,
                     };
+                }
+                if let Some((internal, alias_target)) =
+                    inner_classifier.filter(|_| selected.info.bound_inner_constructor.is_some())
+                {
+                    return self.commit_selected_inner_constructor(
+                        scope,
+                        construction,
+                        (internal, alias_target),
+                        &selected.info,
+                    );
                 }
                 selected.info.clone()
             }
@@ -15161,178 +15217,6 @@ impl<'a> Checker<'a> {
             root_name,
             &segments[1..],
         )
-    }
-
-    /// Classifier constructor denoted by `receiver.name(...)` when the classifier captures that
-    /// receiver as its enclosing instance. Direct nested classifiers are searched by hierarchy
-    /// level; an in-scope typealias to an inner classifier participates only when no member
-    /// classifier wins. Every edge comes from the federated symbol record—no internal name is
-    /// manufactured from the source spelling.
-    /// A classifier whose declaration captures a VALUE receiver contributes its constructors to
-    /// member-call position (`outer.Inner(args)`, including an in-scope typealias to an inner
-    /// classifier). Shared by the ordinary and SAFE-call member paths: `x?.Inner()` is the same
-    /// selection as `x.Inner()`, and having it on only one path left the safe form reading as
-    /// `unresolved reference 'Inner'`.
-    ///
-    /// `None` when no inner classifier matches, so the caller continues its own tower.
-    fn bound_inner_constructor_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        explicit_outer: Option<ExprId>,
-        rt: Ty,
-        name: &str,
-        arg_names: Option<&[Option<String>]>,
-        expected: Option<Ty>,
-    ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys: _,
-        } = call_args;
-        let direct = self.bound_inner_constructor_classifier(rt, name);
-        let (selection, alias_target) = if direct == InheritedNestedClassifier::NotFound {
-            let target = self.scoped_source_alias_call_ty(scope, call, name, expected);
-            let selected = target
-                .and_then(Ty::kotlin_class_internal)
-                .filter(|classifier| {
-                    self.fed_source()
-                        .classifier(*classifier)
-                        .and_then(|shape| shape.outer_instance)
-                        .is_some_and(|outer| self.receiver_is_assignable(rt, Ty::obj_name(outer)))
-                })
-                .map(InheritedNestedClassifier::Found)
-                .unwrap_or(InheritedNestedClassifier::NotFound);
-            (selected, target)
-        } else {
-            (direct, None)
-        };
-        match selection {
-            InheritedNestedClassifier::Found(internal) => {
-                crate::trace_compiler!(
-                    "resolve",
-                    "bound inner constructor call={call:?} outer={rt:?} name={name} classifier={} legacy={} provider={:?}",
-                    internal.render(),
-                    self.resolver().classifier(internal).is_some(),
-                    self.resolved_type_name(internal).as_ref().map(|shape| (
-                        shape.outer_instance,
-                        shape.constructors.len(),
-                        shape.type_params().clone(),
-                    )),
-                );
-                match self.record_resolved_library_constructor(
-                    scope,
-                    call,
-                    internal,
-                    args,
-                    arg_names,
-                    alias_target,
-                    expected,
-                ) {
-                    Ok(LibraryConstructorSelection::Selected) => {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "bound inner constructor selected call={call:?} classifier={}",
-                            internal.render(),
-                        );
-                        if let Some(receiver) = explicit_outer {
-                            self.resolved_constructors
-                                .get_mut(&call)
-                                .expect("selected dependency constructor")
-                                .bind_outer(receiver);
-                        }
-                        let instance = self.ctor_result_name_without_captures(
-                            scope,
-                            call,
-                            internal,
-                            expected,
-                            alias_target,
-                        );
-                        Some(self.attach_captured_classifier_arguments(
-                            scope,
-                            call,
-                            internal,
-                            instance,
-                            Some(rt),
-                        ))
-                    }
-                    Ok(LibraryConstructorSelection::Rejected) => Some(Ty::Error),
-                    Ok(LibraryConstructorSelection::NoMatch) => {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "bound provider inner constructor no match call={call:?} classifier={}",
-                            internal.render(),
-                        );
-                        None
-                    }
-                    Err(error) => {
-                        self.report_library_constructor_failure(scope, call, args, error);
-                        Some(Ty::Error)
-                    }
-                }
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    format!("overload resolution ambiguity for inner classifier '{name}'"),
-                );
-                Some(Ty::Error)
-            }
-            InheritedNestedClassifier::NotFound => None,
-        }
-    }
-
-    fn bound_inner_constructor_classifier(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> InheritedNestedClassifier {
-        let Some(root) = receiver.kotlin_class_internal() else {
-            return InheritedNestedClassifier::NotFound;
-        };
-        let source = self.fed_source();
-        let mut level = vec![root];
-        let mut seen = std::collections::HashSet::new();
-        while !level.is_empty() {
-            let mut matches = std::collections::HashSet::new();
-            let mut next = Vec::new();
-            for owner in level {
-                if !seen.insert(owner) {
-                    continue;
-                }
-                let symbols = source.symbols(
-                    crate::symbol_source::SymbolNamespace::Classifier(owner),
-                    name,
-                );
-                if let Some(classifier) = symbols.classifier_name.filter(|_| {
-                    symbols
-                        .classifier
-                        .as_ref()
-                        .and_then(|shape| shape.outer_instance)
-                        .is_some_and(|outer| {
-                            self.receiver_is_assignable(receiver, Ty::obj_name(outer))
-                        })
-                }) {
-                    matches.insert(classifier);
-                }
-                next.extend(
-                    crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal),
-                );
-            }
-            match matches.len() {
-                0 => level = next,
-                1 => {
-                    return InheritedNestedClassifier::Found(
-                        matches.into_iter().next().expect("one inner classifier"),
-                    )
-                }
-                _ => return InheritedNestedClassifier::Ambiguous,
-            }
-        }
-
-        InheritedNestedClassifier::NotFound
     }
 
     /// Whether a resolved classifier identity is an `object`, from either origin.
@@ -17098,6 +16982,14 @@ impl<'a> Checker<'a> {
                     break;
                 }
             }
+        }
+        if !members.is_empty() {
+            members = self
+                .member_level_constructor_candidates(member_receiver, name)
+                .into_iter()
+                .map(|constructor| constructor.member_with_return(constructor.callable.ret))
+                .chain(members)
+                .collect();
         }
         let members = self.eager_lambda_members(
             scope,
@@ -19019,9 +18911,13 @@ impl<'a> Checker<'a> {
                             call,
                             internal,
                             args,
-                            arg_names.as_deref(),
-                            qualified_alias_target,
-                            expected,
+                            LibraryConstructorOptions {
+                                arg_names: arg_names.as_deref(),
+                                applied_classifier: qualified_alias_target,
+                                expected,
+                                priority: ConstructorPriorityTier::All,
+                                selected: None,
+                            },
                         ) {
                             Ok(LibraryConstructorSelection::Selected) => {
                                 crate::trace_compiler!(
@@ -19263,16 +19159,18 @@ impl<'a> Checker<'a> {
                         }) {
                             if let Some(ret) = self.bound_inner_constructor_call(
                                 scope,
-                                CallArgs {
-                                    call,
-                                    args,
-                                    arg_tys: &arg_tys,
+                                BoundInnerConstruction {
+                                    call_args: CallArgs {
+                                        call,
+                                        args,
+                                        arg_tys: &arg_tys,
+                                    },
+                                    explicit_outer: None,
+                                    receiver: super_receiver,
+                                    arg_names: arg_names.as_deref(),
+                                    expected,
                                 },
-                                None,
-                                super_receiver,
                                 &name,
-                                arg_names.as_deref(),
-                                expected,
                             ) {
                                 self.implicit_receiver_selections
                                     .insert(call, dispatch_receiver.clone());
@@ -19939,7 +19837,7 @@ impl<'a> Checker<'a> {
                         rt,
                         &name,
                         args,
-                        MemberCallTowerRung::explicit(),
+                        MemberCallTowerRung::explicit(receiver),
                         expected,
                     ) {
                         MemberSlotCall::Resolved(ret) => return ret,
@@ -20005,24 +19903,6 @@ impl<'a> Checker<'a> {
                 if let Some(ret) = self
                     .check_member_extension_function_call(scope, call, rt, &name, args, &arg_tys)
                 {
-                    return ret;
-                }
-                // A classifier whose declaration captures this value receiver contributes its
-                // constructors to the same member-call position. This includes an in-scope
-                // typealias to an inner classifier (`outer.Alias(args)`).
-                if let Some(ret) = self.bound_inner_constructor_call(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
-                    Some(receiver),
-                    rt,
-                    &name,
-                    arg_names.as_deref(),
-                    expected,
-                ) {
                     return ret;
                 }
                 if let Some(ret) = self.record_local_extension_call(
@@ -21728,11 +21608,21 @@ impl<'a> Checker<'a> {
                     implicit_library_ext_lambda_shape.is_some_and(|shape| shape.inline);
                 let this_member_lambda_boxes_captures = implicit_library_ext_lambda_shape
                     .and_then(|shape| shape.boxes_captures.clone());
+                // An inner classifier's constructors belong to the member level of the receiver
+                // supplying its outer instance. When that receiver also declares same-named
+                // member functions, its implicit-receiver rung below selects over both families
+                // at once, and that rung's member shaping types their lambdas; selecting or
+                // shaping from the constructors alone here would hide an ambiguity.
+                let bare_constructor_classifier = bare_classifier.filter(|&internal| {
+                    implicit_constructor_outer.as_ref().is_none_or(|receiver| {
+                        !self.receiver_member_level_owns_constructors(receiver.ty, &fname, internal)
+                    })
+                });
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
                 {
-                    bare_classifier.and_then(|internal| {
+                    bare_constructor_classifier.and_then(|internal| {
                         self.construction_argument_expectations(
                             internal,
                             args.len(),
@@ -21751,14 +21641,14 @@ impl<'a> Checker<'a> {
                 let defer_unshaped_constructor_lambdas = has_lambda_argument
                     && !self.lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
-                    && bare_classifier
+                    && bare_constructor_classifier
                         .and_then(|internal| self.resolved_type_name(internal))
                         .is_some_and(|classifier| !classifier.constructors.is_empty());
                 let known_sam_signatures = std::cell::RefCell::new(vec![None; args.len()]);
                 let postpone_raw_sam_lambda = expected.is_none()
                     && self.postponed_argument_depth != 0
                     && matches!(args, [argument] if matches!(self.file.expr(*argument), Expr::Lambda { .. }))
-                    && bare_classifier.is_some_and(|internal| {
+                    && bare_constructor_classifier.is_some_and(|internal| {
                         self.semantic_sam_signature(Ty::obj_name(internal))
                             .is_some()
                     });
@@ -22956,7 +22846,7 @@ impl<'a> Checker<'a> {
                 let mut low_priority_source_constructor = None;
                 let mut low_priority_provider_constructor = None;
                 let mut had_inapplicable_constructor = false;
-                if let Some(scoped_internal) = bare_classifier {
+                if let Some(scoped_internal) = bare_constructor_classifier {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
                     let inherited_shape = (inherited.found() == Some(scoped_internal))
@@ -23004,6 +22894,7 @@ impl<'a> Checker<'a> {
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
+                                    selected: None,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -23147,6 +23038,7 @@ impl<'a> Checker<'a> {
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
+                                    selected: None,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -23771,6 +23663,7 @@ impl<'a> Checker<'a> {
                             applied_classifier: bare_alias_target,
                             expected,
                             priority: ConstructorPriorityTier::Low,
+                            selected: None,
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -39648,13 +39541,17 @@ enum MemberSlotCall {
 #[derive(Clone, Copy)]
 struct MemberCallTowerRung {
     receiver: Option<ImplicitReceiver>,
+    /// The written receiver of `receiver.name(args)`; it supplies the outer instance when the
+    /// member level selects an inner classifier's constructor.
+    explicit_receiver: Option<ExprId>,
     allow_imported_extensions: bool,
 }
 
 impl MemberCallTowerRung {
-    fn explicit() -> Self {
+    fn explicit(receiver: ExprId) -> Self {
         Self {
             receiver: None,
+            explicit_receiver: Some(receiver),
             allow_imported_extensions: true,
         }
     }
@@ -39662,6 +39559,7 @@ impl MemberCallTowerRung {
     fn implicit(receiver: ImplicitReceiver, allow_imported_extensions: bool) -> Self {
         Self {
             receiver: Some(receiver),
+            explicit_receiver: None,
             allow_imported_extensions,
         }
     }
@@ -41324,135 +41222,6 @@ impl<'a> Checker<'a> {
             failure,
         );
         true
-    }
-
-    /// Render a callable directly from its semantic record. The receiver is an attribute of an
-    /// extension, never positional parameter zero; declaration origin affects neither shape nor text.
-    fn callable_candidate_display(name: &str, function: &crate::libraries::FunctionInfo) -> String {
-        Self::generic_callable_display(name, function)
-    }
-
-    fn generic_callable_display(name: &str, function: &crate::libraries::FunctionInfo) -> String {
-        let signature = function.semantic_signature();
-        Self::semantic_callable_display(
-            name,
-            &signature,
-            &function.call_sig,
-            function.context_count,
-            function.callable.suspend,
-            function.flags.reified,
-            function
-                .is_extension()
-                .then(|| function.semantic_receiver())
-                .flatten(),
-        )
-    }
-
-    fn library_member_candidate_display(
-        name: &str,
-        member: &crate::libraries::LibraryMember,
-    ) -> String {
-        let signature = member.generic_sig.as_ref().map_or_else(
-            || {
-                std::borrow::Cow::Owned(crate::libraries::GenericSig {
-                    formals: Vec::new(),
-                    formal_bounds: Vec::new(),
-                    receiver: None,
-                    params: member.params.clone(),
-                    ret: member.ret,
-                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
-                })
-            },
-            std::borrow::Cow::Borrowed,
-        );
-        Self::semantic_callable_display(
-            name,
-            &signature,
-            &member.call_sig,
-            member.context_count,
-            member.suspend(),
-            member.reified,
-            None,
-        )
-    }
-
-    fn semantic_callable_display(
-        name: &str,
-        signature: &crate::libraries::GenericSig,
-        call_sig: &CallSig,
-        context_count: usize,
-        suspend: bool,
-        reified: bool,
-        extension_receiver: Option<Ty>,
-    ) -> String {
-        let type_parameters = signature
-            .formals
-            .iter()
-            .enumerate()
-            .map(|(index, formal)| {
-                let source = crate::types::type_parameter_source_name(formal);
-                let reified = if reified && index == 0 {
-                    "reified "
-                } else {
-                    ""
-                };
-                let bound = signature
-                    .formal_bounds
-                    .get(index)
-                    .and_then(|bounds| bounds.first())
-                    .copied()
-                    .map(|bound| format!(" : {}", bound.source_name()))
-                    .unwrap_or_default();
-                format!("{reified}{source}{bound}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let type_parameters = if type_parameters.is_empty() {
-            String::new()
-        } else {
-            format!("<{type_parameters}> ")
-        };
-        let parameters = signature
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| {
-                let parameter_name = call_sig
-                    .param_names
-                    .get(index)
-                    .map(String::as_str)
-                    .unwrap_or("_");
-                let default = if call_sig.param_defaults.get(index).copied().unwrap_or(false) {
-                    " = ..."
-                } else {
-                    ""
-                };
-                let vararg = if call_sig.vararg_index == Some(index) {
-                    "vararg "
-                } else {
-                    ""
-                };
-                format!(
-                    "{vararg}{parameter_name}: {}{default}",
-                    parameter.source_name()
-                )
-            })
-            .collect::<Vec<_>>();
-        let context_count = context_count.min(parameters.len());
-        let context = if context_count == 0 {
-            String::new()
-        } else {
-            format!("context({}) ", parameters[..context_count].join(", "))
-        };
-        let parameters = parameters[context_count..].join(", ");
-        let suspend = if suspend { "suspend " } else { "" };
-        let receiver = extension_receiver
-            .map(|receiver| format!("{}.", receiver.source_name()))
-            .unwrap_or_default();
-        format!(
-            "{context}{suspend}fun {type_parameters}{receiver}{name}({parameters}): {}",
-            signature.ret.source_name()
-        )
     }
 
     fn report_callable_type_argument_arity(
@@ -61116,13 +60885,24 @@ impl<'a> Checker<'a> {
         // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
         // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
         // a callable reference is checked expectation-free before its provider member is selected.
-        let mut mapped = self
+        let mut members = self
             .resolver()
             .resolve_symbol(receiver, name, &[], type_args)
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
             .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+            .collect::<Vec<_>>();
+        if let (crate::symbol_resolver::SymRecv::Value(receiver), false) =
+            (receiver, members.is_empty())
+        {
+            members.splice(
+                0..0,
+                self.member_level_constructor_candidates(receiver, name),
+            );
+        }
+        let mut mapped = members
+            .into_iter()
             .filter_map(|candidate| {
                 let parameter_count = candidate.semantic_params().len();
                 let argument_parameters = call_argument_parameter_indices(
@@ -61229,10 +61009,27 @@ impl<'a> Checker<'a> {
         // The probe is MEMBER-only by construction: `selected_member` reads the instance-call,
         // object-instance, or companion facet, never the extension facet — so the specialized
         // params are value-param based and align with the argument positions below.
-        let candidate = self
-            .resolver()
-            .select_symbol(receiver, name, &arg_kinds, type_args)
-            .and_then(crate::symbol_resolver::Symbol::selected_member)?;
+        // A member level that joined an inner classifier's constructors to these functions is a
+        // family the symbol query cannot rebuild; select over exactly that family.
+        let joined_constructors = mapped
+            .iter()
+            .any(|(candidate, _)| candidate.bound_inner_constructor.is_some());
+        let candidate = match receiver {
+            crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
+                let family =
+                    crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+                        overloads: mapped.into_iter().map(|(candidate, _)| candidate).collect(),
+                    });
+                let (selected, _) = self.resolver().select_receiver_function_with_params(
+                    receiver, name, &arg_kinds, type_args, &family,
+                )?;
+                selected.member_with_return(selected.callable.ret)
+            }
+            _ => self
+                .resolver()
+                .select_symbol(receiver, name, &arg_kinds, type_args)
+                .and_then(crate::symbol_resolver::Symbol::selected_member)?,
+        };
 
         // Expectations are consumed in SOURCE-ARGUMENT order, but the selected callable's types
         // and receiver marks live in SEMANTIC-PARAMETER order. Named/default/trailing-lambda calls
@@ -64238,7 +64035,7 @@ impl<'a> Checker<'a> {
                             recv,
                             &name,
                             a,
-                            MemberCallTowerRung::explicit(),
+                            MemberCallTowerRung::explicit(receiver),
                             expected,
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
@@ -64295,30 +64092,14 @@ impl<'a> Checker<'a> {
                         }
                     } else if matches!(recv, Ty::Obj(..) | Ty::TyParam(..) | Ty::Nothing) {
                         // `x?.Inner()` selects an inner classifier's constructor exactly as
-                        // `x.Inner()` does. Attempt it before the member tower, matching the
-                        // ordinary path's order.
-                        if let Some(ret) = self.bound_inner_constructor_call(
-                            scope,
-                            CallArgs {
-                                call: e,
-                                args: a,
-                                arg_tys,
-                            },
-                            Some(receiver),
-                            recv,
-                            &name,
-                            self.file.call_arg_names.get(&e.0).cloned().as_deref(),
-                            expected,
-                        ) {
-                            return ret;
-                        }
+                        // `x.Inner()` does: the member tower rung owns both families.
                         match self.record_member_call_with_slots(
                             scope,
                             e,
                             recv,
                             &name,
                             a,
-                            MemberCallTowerRung::explicit(),
+                            MemberCallTowerRung::explicit(receiver),
                             expected,
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
@@ -71535,6 +71316,7 @@ impl<'a> Checker<'a> {
             applied_classifier,
             expected,
             priority,
+            selected,
         } = options;
         for &argument in args {
             if self.expr_types[argument.0 as usize] == Ty::Error
@@ -71570,22 +71352,13 @@ impl<'a> Checker<'a> {
         let mut mapping_failures = Vec::new();
         let mut bound_failures = Vec::new();
 
-        let checked_local = self.checked_local_constructors.get(&internal);
-        let mut declarations = classifier
-            .constructors
-            .iter()
-            .filter(|declaration| {
-                !checked_local.is_some_and(|checked| {
-                    declaration.stable_declaration.is_some_and(|stable| {
-                        checked
-                            .iter()
-                            .any(|candidate| candidate.stable_declaration == Some(stable))
-                    })
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        declarations.extend(checked_local.into_iter().flatten().cloned());
+        let mut declarations = self.constructor_declarations(internal, classifier);
+        if let Some(selected) = selected {
+            declarations.retain(|declaration| {
+                declaration.stable_declaration == selected.stable_declaration
+                    && declaration.descriptor == selected.callable.descriptor
+            });
+        }
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         declarations.retain(|constructor| {
@@ -71627,30 +71400,8 @@ impl<'a> Checker<'a> {
 
         for declaration in declarations {
             let mut member = declaration;
-            if member.generic_sig.is_none() && !classifier.type_params().is_empty() {
-                let type_arguments = classifier
-                    .type_params()
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, formal)| {
-                        let bound = classifier
-                            .type_param_bounds()
-                            .get(ordinal)
-                            .and_then(|bounds| bounds.first())
-                            .copied()
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                        Ty::ty_param(formal, bound)
-                    })
-                    .collect::<Vec<_>>();
-                member.generic_sig = Some(GenericSig {
-                    formals: classifier.type_params().to_vec(),
-                    formal_bounds: classifier.type_param_bounds().to_vec(),
-                    receiver: None,
-                    params: member.params.clone(),
-                    ret: Ty::obj_args_name(internal, &type_arguments),
-                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
-                });
-            }
+            member.generic_sig =
+                crate::libraries::constructor_generic_signature(internal, classifier, &member);
             let declaration_parameter_shapes = member
                 .generic_sig
                 .as_ref()
@@ -72237,26 +71988,12 @@ impl<'a> Checker<'a> {
         call: ExprId,
         internal: TypeName,
         args: &[ExprId],
-        arg_names: Option<&[Option<String>]>,
-        applied_classifier: Option<Ty>,
-        expected: Option<Ty>,
+        options: LibraryConstructorOptions<'_>,
     ) -> Result<LibraryConstructorSelection, LibraryConstructorFailure> {
         let Some(classifier) = self.resolved_type_name(internal) else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
-        self.record_library_constructor(
-            scope,
-            call,
-            internal,
-            &classifier,
-            args,
-            LibraryConstructorOptions {
-                arg_names,
-                applied_classifier,
-                expected,
-                priority: ConstructorPriorityTier::All,
-            },
-        )
+        self.record_library_constructor(scope, call, internal, &classifier, args, options)
     }
 
     fn record_default_member_call(

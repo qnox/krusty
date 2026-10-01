@@ -2,6 +2,7 @@
 //! members: the `.kotlin_builtins` declaration joined with its JVM realization.
 
 use super::*;
+use super::{builtin_declared_return, builtin_descriptor, builtin_erased};
 
 impl Classpath {
     /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
@@ -154,7 +155,7 @@ impl Classpath {
                         default_values: Vec::new(),
                         default_realization: None,
                         nonvirtual_realization: None,
-                        declared_ret: None,
+                        declared_ret: builtin_declared_return(m.ret_nullable, m.generic_sig.ret),
                         overridden_results: Box::new([]),
                         implicit_classifier_callable: None,
                         associated_classifier: None,

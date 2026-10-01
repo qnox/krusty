@@ -637,3 +637,75 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "kt2224");
 }
+
+const TWO_DELEGATES_SRC: &str = "interface Log { fun log(message: String) }\n\
+interface Store<T> { fun save(content: T) }\n\
+class Both(log: Log, store: Store<String>) : Log by log, Store<String> by store\n\
+fun box(): String = \"OK\"\n";
+
+/// kotlinc stores each delegate in its field in declaration order, first thing in the constructor.
+#[test]
+fn delegates_are_stored_in_declaration_order() {
+    let comparison = common::compare_with_kotlinc_plugin(
+        "TwoDelegates",
+        TWO_DELEGATES_SRC,
+        "Both",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let header = "public Both(Log, Store<java.lang.String>);";
+    let constructor = common::method_block(&comparison.reference, header);
+    assert!(!constructor.is_empty(), "kotlinc declares {header}");
+    assert_eq!(
+        common::method_block(&comparison.krusty, header),
+        constructor
+    );
+}
+
+const CONTEXT_MEMBER_SRC: &str = "// LANGUAGE: +ContextParameters\n\
+interface Log { fun log(message: String): String }\n\
+interface Store<T> {\n\
+\x20   context(log: Log)\n\
+\x20   fun save(content: T): String\n\
+}\n\
+context(log: Log, store: Store<String>)\n\
+fun operation(): String = store.save(\"K\")\n\
+class Both(log: Log, store: Store<String>) : Log by log, Store<String> by store {\n\
+\x20   fun run(): String = operation()\n\
+}\n\
+class Prefix : Log { override fun log(message: String): String = \"O\" + message }\n\
+class Saver : Store<String> {\n\
+\x20   context(log: Log)\n\
+\x20   override fun save(content: String): String = log.log(content)\n\
+}\n\
+fun box(): String = Both(Prefix(), Saver()).run()\n";
+
+/// A delegated member with a context parameter forwards it as the leading argument, as the context
+/// value it is.
+#[test]
+fn a_context_parameter_member_is_delegated() {
+    let comparison = common::compare_with_kotlinc_plugin(
+        "ContextDelegation",
+        CONTEXT_MEMBER_SRC,
+        "Both",
+        &[common::stdlib_jar()],
+        "17",
+        &common::language_directives::kotlinc_args(CONTEXT_MEMBER_SRC),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let marker = "save(Log, java.lang.String)";
+    // The instructions only: a forwarder krusty writes has no local-variable table yet, so the
+    // scan would run on into its parameter annotations, whose rows carry no opcode.
+    let instructions = |disassembly: &str| {
+        common::method_instructions(disassembly, marker)
+            .into_iter()
+            .take_while(|row| !row.ends_with(": #"))
+            .collect::<Vec<_>>()
+    };
+    let forwarder = instructions(&comparison.reference);
+    assert!(!forwarder.is_empty(), "kotlinc declares {marker}");
+    assert_eq!(instructions(&comparison.krusty), forwarder);
+    common::expect_box_same_as_kotlinc(CONTEXT_MEMBER_SRC, "ContextDelegationRun");
+}

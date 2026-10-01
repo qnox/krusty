@@ -87,8 +87,14 @@ fn external_reflection(
         .unwrap_or_else(|| callable.name.clone());
     let descriptor = if callable.descriptor.is_empty() {
         // A compiler-implemented declaration has no JVM method; its signature is the one its
-        // declaration maps to.
-        if callable.compiler_intrinsic.is_none() {
+        // declaration maps to. That includes a member the provider realizes as a compiler
+        // operation (an array's `get`), which kotlinc reflects by that same mapped signature.
+        let compiler_implemented = callable.compiler_intrinsic.is_some()
+            || matches!(
+                callable.member_realization,
+                crate::libraries::MemberRealization::Intrinsic(_)
+            );
+        if !compiler_implemented {
             return Err(FunctionReferenceRealizationTarget::External(declaration));
         }
         let parameters = callable

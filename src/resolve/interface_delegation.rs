@@ -399,48 +399,55 @@ fn delegated_function_declaration(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedDelegatedFunctionDeclaration> {
-    let (target, parameters, result) = if let Some(declaration) = function.stable_declaration {
-        let callable = index.callable_for_declaration(declaration)?;
-        let signature = index.signature(declaration)?;
-        let mut parameters = signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect::<Vec<_>>();
-        if let Some(receiver) = callable.shape.extension_receiver {
-            parameters.insert(
-                callable
-                    .shape
-                    .context_parameter_count
-                    .min(parameters.len() as u32) as usize,
-                receiver.get(),
-            );
-        }
-        (
-            ResolvedFunctionOverrideTarget::Module(callable.id),
-            parameters.into_boxed_slice(),
-            signature.result.get(),
-        )
-    } else {
-        let identity = function.callable.external_identity?;
-        // The member was found through the applied interface; the declaration it overrides is
-        // spelled as its provider normalized it.
-        let (parameters, result) =
-            super::override_plans::dependency_declaration_signature(source, identity);
-        (
-            ResolvedFunctionOverrideTarget::External(identity),
-            parameters,
-            result,
-        )
-    };
-    let extension_position = (function.kind == FnKind::Extension
-        && parameters.len() == function.call_sig.parameter_identities.len() + 1)
-        .then_some(function.context_count);
-    let parameter_identities = function.call_sig.physical_parameter_identities(
-        parameters.len(),
-        function.context_count,
-        extension_position,
-    )?;
+    let (target, parameters, result, parameter_identities) =
+        if let Some(declaration) = function.stable_declaration {
+            let callable = index.callable_for_declaration(declaration)?;
+            let signature = index.signature(declaration)?;
+            let mut parameters = signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect::<Vec<_>>();
+            if let Some(receiver) = callable.shape.extension_receiver {
+                parameters.insert(
+                    callable
+                        .shape
+                        .context_parameter_count
+                        .min(parameters.len() as u32) as usize,
+                    receiver.get(),
+                );
+            }
+            // The module declaration's own typed identities: a context parameter is a context
+            // value, never an ordinary parameter a provider's call shape spells by its name.
+            let parameter_identities =
+                index.callable_parameter_identities(callable.id, parameters.len())?;
+            (
+                ResolvedFunctionOverrideTarget::Module(callable.id),
+                parameters.into_boxed_slice(),
+                signature.result.get(),
+                parameter_identities,
+            )
+        } else {
+            let identity = function.callable.external_identity?;
+            // The member was found through the applied interface; the declaration it overrides is
+            // spelled as its provider normalized it.
+            let (parameters, result) =
+                super::override_plans::dependency_declaration_signature(source, identity);
+            let extension_position = (function.kind == FnKind::Extension
+                && parameters.len() == function.call_sig.parameter_identities.len() + 1)
+                .then_some(function.context_count);
+            let parameter_identities = function.call_sig.physical_parameter_identities(
+                parameters.len(),
+                function.context_count,
+                extension_position,
+            )?;
+            (
+                ResolvedFunctionOverrideTarget::External(identity),
+                parameters,
+                result,
+                parameter_identities,
+            )
+        };
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,

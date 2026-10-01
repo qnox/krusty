@@ -44,39 +44,6 @@ impl crate::jvm::inline::MethodBodies for Classpath {
                 .any(|m| m.name == name && m.descriptor == descriptor && m.is_static())
         })
     }
-    fn static_array_member_realization(
-        &self,
-        name: &str,
-        descriptor: &str,
-    ) -> Option<crate::jvm::inline::StaticMemberRealization> {
-        let candidates = self.ext_by_name(name);
-        let mut matches = candidates
-            .all
-            .iter()
-            .filter(|candidate| candidate.public && candidate.descriptor == descriptor)
-            .map(|candidate| candidate.render(&candidates.owner_names))
-            .filter(|candidate| {
-                self.meta_functions_name(candidate.owner)
-                    .iter()
-                    .any(|function| {
-                        !function.is_extension()
-                            && function.kotlin_name == name
-                            && function.jvm_name == candidate.name
-                            && function
-                                .jvm_desc
-                                .is_none_or(|metadata| metadata == candidate.descriptor)
-                    })
-            })
-            .map(|candidate| crate::jvm::inline::StaticMemberRealization {
-                owner: candidate.owner.render(),
-                name: candidate.name,
-                descriptor: candidate.descriptor,
-            });
-        let realization = matches.next()?;
-        matches
-            .all(|other| other == realization)
-            .then_some(realization)
-    }
     fn member_is_private(&self, owner: &str, name: &str, descriptor: &str) -> bool {
         self.find(owner).is_some_and(|ci| {
             ci.methods
@@ -153,6 +120,44 @@ impl crate::jvm::inline::MethodBodies for Classpath {
             descriptor: callable.descriptor,
             is_static,
         })
+    }
+}
+
+impl Classpath {
+    /// The unique metadata-declared static function implementing a dispatched member of an array
+    /// classifier on the JVM array class (`ArrayIteratorsKt.iterator([I)`).
+    pub(crate) fn static_array_member_realization(
+        &self,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<crate::jvm::inline::StaticMemberRealization> {
+        let candidates = self.ext_by_name(name);
+        let mut matches = candidates
+            .all
+            .iter()
+            .filter(|candidate| candidate.public && candidate.descriptor == descriptor)
+            .map(|candidate| candidate.render(&candidates.owner_names))
+            .filter(|candidate| {
+                self.meta_functions_name(candidate.owner)
+                    .iter()
+                    .any(|function| {
+                        !function.is_extension()
+                            && function.kotlin_name == name
+                            && function.jvm_name == candidate.name
+                            && function
+                                .jvm_desc
+                                .is_none_or(|metadata| metadata == candidate.descriptor)
+                    })
+            })
+            .map(|candidate| crate::jvm::inline::StaticMemberRealization {
+                owner: candidate.owner.render(),
+                name: candidate.name,
+                descriptor: candidate.descriptor,
+            });
+        let realization = matches.next()?;
+        matches
+            .all(|other| other == realization)
+            .then_some(realization)
     }
 }
 
