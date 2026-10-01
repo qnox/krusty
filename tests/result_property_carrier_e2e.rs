@@ -90,16 +90,75 @@ fn accessor_members(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+const GENERIC_SLOT: &str = "\
+class Box<T>(val value: T)\n\
+fun box(): String {\n\
+    val result = Box(Result.success(true)).value\n\
+    return if (result.getOrNull() == true) \"OK\" else \"FAIL\"\n\
+}\n";
+
 #[test]
 fn a_generic_result_slot_stays_boxed() {
-    common::expect_box_ok_with_stdlib(
-        "class Box<T>(val value: T)\n\
-         fun box(): String {\n\
-             val result = Box(Result.success(true)).value\n\
-             return if (result.getOrNull() == true) \"OK\" else \"FAIL\"\n\
-         }\n",
+    common::expect_box_ok_with_stdlib(GENERIC_SLOT, "GenericResultSlot");
+    let Some(read) = compare_with_kotlinc_plugin(
         "GenericResultSlot",
+        GENERIC_SLOT,
+        "GenericResultSlotKt",
+        &[common::stdlib_jar()],
+        "21",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let krusty = method_instructions(&read.krusty, "String box();");
+    let reference = method_instructions(&read.reference, "String box();");
+    assert_eq!(
+        until_is_failure(&krusty),
+        until_is_failure(&reference),
+        "generic Result slot read"
     );
+    assert!(
+        krusty
+            .iter()
+            .any(|line| line.contains("checkcast") && line.contains("kotlin/Result")),
+        "the generic slot is read as a kotlin.Result box: {krusty:?}"
+    );
+    assert!(
+        krusty.windows(2).any(|pair| {
+            pair[0].contains("checkcast")
+                && pair[0].contains("kotlin/Result")
+                && pair[1].contains("unbox-impl")
+        }),
+        "the box is unboxed only after it is checked: {krusty:?}"
+    );
+    let Some(owner) = compare_with_kotlinc_plugin(
+        "GenericResultSlot",
+        GENERIC_SLOT,
+        "Box",
+        &[common::stdlib_jar()],
+        "21",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let krusty_members = value_members(&owner.krusty_bytes);
+    let reference_members = value_members(&owner.reference_bytes);
+    assert_eq!(krusty_members, reference_members, "generic value accessor");
+    assert!(
+        krusty_members
+            .iter()
+            .any(|row| row.contains("getValue()") && !row.contains("getValue-")),
+        "the generic getter stays getValue: {krusty_members:?}"
+    );
+}
+
+fn value_members(bytes: &[u8]) -> Vec<String> {
+    member_table(bytes)
+        .into_iter()
+        .filter(|row| row.contains("value") || row.contains("Value"))
+        .collect()
 }
 
 fn until_is_failure(instructions: &[String]) -> Vec<&String> {

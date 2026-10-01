@@ -11,7 +11,9 @@
 //! runs before the value-class pass so an existing bridge's target is retargeted/renamed with the
 //! mangled name once mangling is known.
 
-use crate::ir::{Bridge, BridgeKind, BridgeParameter, IrFile};
+use crate::ir::{
+    Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation, IrFile,
+};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::names::{property_getter_name, property_setter_name};
@@ -363,6 +365,7 @@ fn superclass_method_bridges(
             barrier_plan: None,
             special,
             target_name,
+            property_implementation: None,
         });
         if packed_arguments {
             let class = &ir.classes[cid];
@@ -508,6 +511,7 @@ fn push_member_extension_accessor_bridges(
         barrier_plan: None,
         special: false,
         target_name: None,
+        property_implementation: None,
     };
     let mut accessors = vec![accessor(
         property_getter_name(&edge.name),
@@ -573,6 +577,7 @@ fn push_property_bridge(
             barrier_plan: None,
             special,
             target_name,
+            property_implementation: property_implementation(edge, BridgeAccessorRole::Getter),
         });
     }
     if !(edge.overridden_mutable && edge.implementation_mutable) {
@@ -602,7 +607,20 @@ fn push_property_bridge(
             barrier_plan: None,
             special: false,
             target_name: None,
+            property_implementation: property_implementation(edge, BridgeAccessorRole::Setter),
         });
+    }
+}
+
+fn property_implementation(
+    edge: &crate::ir::IrPropertyOverride,
+    accessor: BridgeAccessorRole,
+) -> Option<BridgePropertyImplementation> {
+    match edge.implementation {
+        crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+            Some(BridgePropertyImplementation { property, accessor })
+        }
+        crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
     }
 }
 

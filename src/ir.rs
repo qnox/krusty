@@ -71,7 +71,10 @@ pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
-pub use bridges::{Bridge, BridgeKind, BridgeParameter, CollectionBarrierPlan};
+pub use bridges::{
+    Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
+    CollectionBarrierPlan,
+};
 pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;

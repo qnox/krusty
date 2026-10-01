@@ -28,6 +28,7 @@ mod property_default;
 mod runtime_abi;
 mod serial_elements;
 mod serialize_body;
+mod synthesized_accessor;
 mod transient_initializer;
 mod type_parameter_serializers;
 mod value_class_types;
@@ -44,24 +45,6 @@ use crate::plugins::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
-/// The serialization plugin emits a public getter call for a backing field. Record that the
-/// call is that property's synthesized accessor so a later value-class rename touches only it.
-pub(super) fn bind_synthesized_getter(ir: &mut IrFile, call: ExprId, class: ClassId, field: u32) {
-    let Some(property) = ir.classes[class as usize]
-        .properties
-        .iter()
-        .position(|property| property.backing_field == Some(field))
-    else {
-        return;
-    };
-    ir.synthesized_accessor_calls.insert(
-        call,
-        crate::ir::SynthesizedAccessorCall {
-            class,
-            property: property as u32,
-        },
-    );
-}
 use constructed_standard_serializers::constructed_standard_serializer;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
@@ -1597,6 +1580,7 @@ impl IrPlugin for SerializationPlugin {
                     barrier_plan: None,
                     special: false,
                     target_name: None,
+                    property_implementation: None,
                 },
                 crate::ir::Bridge {
                     kind: crate::ir::BridgeKind::Function,
@@ -1616,6 +1600,7 @@ impl IrPlugin for SerializationPlugin {
                     barrier_plan: None,
                     special: false,
                     target_name: None,
+                    property_implementation: None,
                 },
             ];
             let serializer_identity = ser.fq_name_id();
@@ -2071,7 +2056,7 @@ impl IrPlugin for SerializationPlugin {
                             dispatch_receiver: Some(vrecv),
                             args: vec![],
                         });
-                        bind_synthesized_getter(ir, v, foo_id, 0);
+                        synthesized_accessor::bind_synthesized_getter(ir, v, foo_id, 0);
                         let call = ir.add_expr(IrExpr::Call {
                             callee: virtual_iface(
                                 "kotlinx/serialization/encoding/Encoder",

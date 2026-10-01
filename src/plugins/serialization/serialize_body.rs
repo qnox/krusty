@@ -164,7 +164,12 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(receiver),
                     args: vec![],
                 });
-                super::bind_synthesized_getter(ir, call, foo_id, field_index as u32);
+                super::synthesized_accessor::bind_synthesized_getter(
+                    ir,
+                    call,
+                    foo_id,
+                    field_index as u32,
+                );
                 Some(call)
             };
         // Element `i` is written from backing field `field`; they differ after a transient property.
