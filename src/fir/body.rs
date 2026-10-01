@@ -488,6 +488,9 @@ pub enum FirPropertyDispatch {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirInlineAccessorSplice {
     pub accessor: DeclarationId,
+    /// Stable callable identity used to retain/materialize the selected accessor body across
+    /// source-file lowering units.
+    pub callable: CallableId,
     pub substitutions: Box<[FirInlineTypeSubstitution]>,
 }
 
@@ -2778,6 +2781,12 @@ impl FirBody {
                 FirExprKind::CallableReference { target, .. } => {
                     if let Some(callable) = target.module() {
                         callables.insert(callable);
+                    }
+                }
+                FirExprKind::PropertyRead { target, .. }
+                | FirExprKind::PropertyWrite { target, .. } => {
+                    if let Some(splice) = target.inline_splice() {
+                        callables.insert(splice.callable);
                     }
                 }
                 FirExprKind::Lambda { body, .. } => {

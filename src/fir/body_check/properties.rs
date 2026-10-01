@@ -1284,21 +1284,11 @@ impl BodyFirChecker<'_> {
         ) else {
             return Ok(None);
         };
-        let inline = self
+        let callable = self
             .index
-            .declaration_header(accessor)
-            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::INLINE));
-        if !inline {
-            return Ok(None);
-        }
-        // Another source file emits the accessor and does not put its function in this file.
-        // The use stays an ordinary call. A same-file accessor that cannot expand still fails
-        // closed while lowering.
-        if self
-            .index
-            .declaration_anchor(accessor)
-            .is_none_or(|anchor| anchor.source != self.source)
-        {
+            .callable_for_declaration(accessor)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        if !callable.is_inline() {
             return Ok(None);
         }
         let mut recorded = Vec::with_capacity(substitutions.len());
@@ -1324,6 +1314,7 @@ impl BodyFirChecker<'_> {
         }
         Ok(Some(Box::new(crate::fir::FirInlineAccessorSplice {
             accessor,
+            callable: callable.id,
             substitutions: recorded.into_boxed_slice(),
         })))
     }

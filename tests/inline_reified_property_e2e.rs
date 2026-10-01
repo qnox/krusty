@@ -6,34 +6,30 @@ use super::common;
 #[test]
 fn inline_reified_extension_property_uses_the_call_site_class() {
     const SRC: &str = "\
-val <reified T> T.foo: String\n\
-    inline get() { return if (T::class.simpleName == \"String\") \"O\" else \"fail\" }\n\
-inline var <reified T> T.bar: String\n\
-    get() { return if (T::class.simpleName == \"String\") \"K\" else \"fail\" }\n\
+class Token\n\
+val <reified T> T.foo: Int\n\
+    inline get() { return if (T::class.simpleName == \"Token\") 1 else -100 }\n\
+inline var <reified T> T.bar: Int\n\
+    get() { return if (T::class.simpleName == \"Token\") 2 else -100 }\n\
     set(v) { }\n\
-fun box(): String = \"\".foo + \"\".bar\n";
-    assert_eq!(
-        common::compile_and_run_with_stdlib(SRC, "Ep"),
-        Some("OK".to_string())
-    );
+fun box(): String = if (Token().foo + Token().bar == 3) \"OK\" else \"fail\"\n";
+    common::expect_box_same_as_kotlinc(SRC, "inlineReifiedProperty");
 }
 
 #[test]
 fn inline_reified_property_setter_uses_the_call_site_class() {
     const SRC: &str = "\
-var seen = \"\"\n\
-inline var <reified T> T.note: String\n\
-    get() { return if (T::class.simpleName == \"String\") \"S\" else \"fail\" }\n\
-    set(v) { seen = v + T::class.simpleName }\n\
+class Token\n\
+var seen = 0\n\
+inline var <reified T> T.note: Int\n\
+    get() { return if (T::class.simpleName == \"Token\") 2 else -100 }\n\
+    set(v) { seen = v + if (T::class.simpleName == \"Token\") 3 else -100 }\n\
 fun box(): String {\n\
-    val text = \"\"\n\
-    text.note = \"Z\"\n\
-    return text.note + seen\n\
+    val token = Token()\n\
+    token.note = 4\n\
+    return if (token.note == 2 && seen == 7) \"OK\" else \"fail\"\n\
 }\n";
-    assert_eq!(
-        common::compile_and_run_with_stdlib(SRC, "EpSetter"),
-        Some("SZString".to_string())
-    );
+    common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertySetter");
 }
 
 /// The extension receiver and the stored value each run once. The setter sees that value.
@@ -106,10 +102,10 @@ fn an_inline_getter_return_is_the_property_value() {
     );
 }
 
-/// An inline accessor declared in another file is an ordinary call. This file does not contain
-/// the accessor function, so the use is not recorded as a splice.
+/// A selected inline accessor declared in another file retains and materializes the same checked
+/// body as a same-file use. Its reified operation therefore sees the caller's concrete type.
 #[test]
-fn an_inline_property_in_another_file_stays_a_call() {
+fn an_inline_reified_property_in_another_file_is_spliced() {
     const LIB: &str = r#"
 inline fun (Int.() -> String).foo(): String = this(1)
 
@@ -128,8 +124,11 @@ inline fun localFoo(): String {
 }
 
 object Host {
-    inline val <T> T.tag: Int get() = 7
+    inline val <reified T> T.tag: Int
+        get() = if (T::class.simpleName == "Token") 7 else -1
 }
+
+class Token
 "#;
     const MAIN: &str = r#"
 import Host.tag
@@ -138,12 +137,15 @@ fun box(): String {
     val text = { a: Int -> if (a == 1) "O" else "fail" }.foo() +
         { a: Int -> if (a == 1) "K" else "fail" }.bar
     if (localFoo() != "L") return "fail local"
-    if (1.tag != 7) return "fail tag"
+    if (Token().tag != 7) return "fail tag"
     return text
 }
 "#;
-    common::expect_box_ok_files_with_stdlib(
-        &[("lib.kt", LIB), ("main.kt", MAIN)],
-        "crossFileInlineProperty",
-    );
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    let reference = common::kotlinc_box_files_result(&sources, "MainKt");
+    assert_eq!(reference, "OK", "kotlinc cross-file reference");
+    let jdk = common::jdk_modules();
+    let result =
+        common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(jdk.as_path()));
+    assert_eq!(result.as_deref(), Some(reference.as_str()));
 }

@@ -18,7 +18,7 @@ use super::{
     specialize_expression_facts, specialize_types, value_indices,
 };
 
-/// Splice same-file `inline` property accessors at the uses the checker recorded.
+/// Splice `inline` property accessors at the uses the checker recorded.
 ///
 /// Accessor functions exist by the time this runs. Each use names the accessor declaration and
 /// carries that use's type arguments, so a reified `T::class` is the call site's class. The
@@ -91,7 +91,7 @@ fn splice_property_access(
         return Ok(());
     };
     let Some(access) = property_access(ir, site) else {
-        return Ok(());
+        return Err(failure(splice.accessor, InlineFail::InvalidSite));
     };
     let function = recorded_accessor(ir, &splice)?;
     if !stack.insert(splice.accessor) {
@@ -617,6 +617,21 @@ mod tests {
                 accessor,
                 InlineAccessorFailure::MissingFunction
             )
+        );
+    }
+
+    #[test]
+    fn a_recorded_splice_on_a_non_property_expression_is_a_lowering_failure() {
+        let mut ir = IrFile::default();
+        let site = ir.add_expr(IrExpr::UnitInstance);
+        let accessor = DeclarationId::from_raw(1);
+        record_splice(&mut ir, site, accessor);
+
+        let error = splice_inline_property_accessors(&mut ir).unwrap_err();
+
+        assert_eq!(
+            error,
+            FirFileLoweringFailure::InlineAccessor(accessor, InlineAccessorFailure::InvalidSite)
         );
     }
 

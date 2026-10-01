@@ -20,7 +20,10 @@ use super::{
         finalize_interface_delegations, predeclare_interface_delegation_fields,
     },
     lower_body_with_context,
-    properties::{accept_property_body, finalize_properties, predeclare_properties},
+    properties::{
+        accept_inline_accessor_template, accept_property_body, finalize_properties,
+        predeclare_properties,
+    },
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
     FirLoweringFailure, LocalCallableLoweringContext,
 };
@@ -76,6 +79,7 @@ pub enum FirFileLoweringFailure {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InlineAccessorFailure {
+    InvalidSite,
     MissingFunction,
     MissingBody,
     OperandMismatch,
@@ -1382,7 +1386,35 @@ impl<'a> CommonIrBodySink<'a> {
                 &mut self.local_callables,
             );
         }
-        if anchor.kind == DeclarationKind::Property || anchor.kind == DeclarationKind::Accessor {
+        if anchor.kind == DeclarationKind::Accessor {
+            let callable = index
+                .callable_for_declaration(declaration)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+            if let Some(function) = self
+                .ir
+                .checked_callable_functions
+                .get(&callable.id)
+                .copied()
+                .filter(|function| self.ir.foreign_inline_templates.contains(function))
+            {
+                return accept_inline_accessor_template(
+                    declaration,
+                    body,
+                    index,
+                    self.ir,
+                    &mut self.local_callables,
+                    function,
+                );
+            }
+            return accept_property_body(
+                declaration,
+                body,
+                index,
+                self.ir,
+                &mut self.local_callables,
+            );
+        }
+        if anchor.kind == DeclarationKind::Property {
             return accept_property_body(
                 declaration,
                 body,

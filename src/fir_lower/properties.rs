@@ -1957,6 +1957,87 @@ pub(super) fn accept_property_body(
     Ok(())
 }
 
+/// Attach a retained accessor body to the inline-only function predeclared in a caller's file.
+/// The foreign property itself is not imported into that file: it is only the lexical owner of
+/// this checked template, while the selected accessor identity is the splice boundary.
+pub(super) fn accept_inline_accessor_template(
+    declaration: DeclarationId,
+    body: FirBody,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    local_callables: &mut LocalCallableLoweringContext,
+    function: FunId,
+) -> Result<(), FirFileLoweringFailure> {
+    let anchor = index
+        .declaration_anchor(declaration)
+        .filter(|anchor| anchor.kind == DeclarationKind::Accessor)
+        .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+    let returns_value = match anchor.sibling {
+        0 => true,
+        1 => false,
+        _ => return Err(FirFileLoweringFailure::MissingProperty(declaration)),
+    };
+    if ir.functions[function as usize].body.is_some() {
+        let callable = index
+            .callable_for_declaration(declaration)
+            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+        return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+    }
+    let origin = body
+        .roots()
+        .first()
+        .and_then(|root| body.statement(*root))
+        .map_or(crate::fir::OriginId::from_raw(0), |statement| {
+            statement.origin
+        });
+    let lowered = lower_body_with_context(body, index, ir, local_callables)
+        .map_err(FirFileLoweringFailure::Body)?;
+    if !lowered.defaults.is_empty() {
+        return Err(FirFileLoweringFailure::MissingProperty(declaration));
+    }
+    let result = lowered
+        .result_type
+        .ok_or(FirFileLoweringFailure::MissingResultType(declaration))?;
+    if result != ir.functions[function as usize].ret {
+        return Err(FirFileLoweringFailure::ResultTypeMismatch(declaration));
+    }
+    ir.callable_scopes.extend(lowered.root_block);
+    let value = body_value(lowered.roots.into_vec(), Some(origin), ir)?;
+    let line = returns_value
+        .then(|| ir.expr_source_lines.get(&value).copied())
+        .flatten();
+    let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
+    if let Some(line) = line {
+        ir.expr_source_lines.insert(returned, line);
+    }
+    let body = if returns_value {
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        })
+    } else {
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![value, returned],
+            value: None,
+        })
+    };
+    ir.callable_scopes.insert(body);
+    ir.functions[function as usize].body = Some(body);
+    if ir
+        .accessor_functions
+        .insert(declaration, function)
+        .is_some()
+    {
+        return Err(FirFileLoweringFailure::DuplicateBody(
+            index
+                .callable_for_declaration(declaration)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                .id,
+        ));
+    }
+    Ok(())
+}
+
 fn body_value(
     mut roots: Vec<crate::ir::ExprId>,
     origin: Option<crate::fir::OriginId>,
