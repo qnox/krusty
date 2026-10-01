@@ -137,6 +137,7 @@ use selected_argument_commitment::{
     SelectedArgumentCommitment,
 };
 mod signature_collection;
+mod signature_parameter_identity;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
 use signature_collection::{
@@ -148,6 +149,10 @@ use signature_collection::{
 pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
 pub(crate) use signature_collection::{
     collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
+};
+use signature_parameter_identity::{
+    aligned_parameter_identities, copy_parameter_identities, declared_parameter_identities,
+    signature_from_resolved_function,
 };
 mod singleton_receivers;
 mod source_constructors;
@@ -1121,6 +1126,9 @@ pub struct Signature {
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
+    /// Provider-normalized semantic identities parallel to `params`. Source context roles are
+    /// captured from compact headers instead of being reconstructed from their spelling later.
+    pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// File-independent default values, parallel to `params`. `Some` only for literal/object defaults the
     /// lowerer can emit without dereferencing the declaring file's AST arena.
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
@@ -1321,52 +1329,8 @@ impl Signature {
         call_sig.no_infer_params = self.no_infer_params.clone();
         call_sig.implicit_integer_coercion = self.implicit_integer_coercion.clone();
         call_sig.inline_modifiers = self.inline_modifiers.clone();
+        copy_parameter_identities(&mut call_sig, &self.parameter_identities, self.params.len());
         call_sig
-    }
-}
-
-fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -> Signature {
-    let params = function.semantic_params().to_vec();
-    let (source_file, source_decl) = function
-        .source_key
-        .map(|(file, declaration)| (Some(file), Some(DeclId(declaration))))
-        .unwrap_or((None, None));
-    Signature {
-        params: params.clone(),
-        ret: function.ret.apply(function.callable.ret),
-        generic_sig: function.generic_sig.clone(),
-        projected_return_hazard: function.projected_return_hazard,
-        flags: SigFlags::default()
-            .with_vararg(function.call_sig.vararg_index.is_some())
-            .with_is_inline(function.flags.inline.can_inline())
-            .with_is_operator(function.flags.operator)
-            .with_is_infix(function.flags.infix)
-            .with_is_suspend(function.flags.suspend)
-            .with_has_reified_type_params(function.flags.reified)
-            .with_requires_splice(function.flags.inline.must_inline()),
-        annotations: function.annotations.clone(),
-        equality_bound: function.callable.equality_bound,
-        vararg_index: function.call_sig.vararg_index,
-        required: function.call_sig.required,
-        param_defaults: function.call_sig.param_defaults.clone(),
-        exact_params: function.call_sig.exact_params.clone(),
-        no_infer_params: function.call_sig.no_infer_params.clone(),
-        implicit_integer_coercion: function.call_sig.implicit_integer_coercion.clone(),
-        param_default_values: Vec::new(),
-        param_names: function.call_sig.param_names.clone(),
-        lambda_param_types: function.call_sig.lambda_param_types.clone(),
-        lambda_recv: function.call_sig.lambda_receiver_params.clone(),
-        inline_modifiers: function.call_sig.inline_modifiers.clone(),
-        visibility: function.visibility,
-        context_count: function.context_count,
-        source_decl,
-        stable_declaration: function.stable_declaration,
-        source_file,
-        source_member: None,
-        source_receiver: function.receiver,
-        package: TypeName::ROOT,
-        contract: None,
-        plugin_expression: function.callable.plugin_expression,
     }
 }
 
@@ -26290,6 +26254,7 @@ impl<'a> Checker<'a> {
                 .collect(),
             param_default_values: Vec::new(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            parameter_identities: declared_parameter_identities(&f.params),
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
             inline_modifiers: f.params.iter().map(written_inline_modifier).collect(),
@@ -73799,6 +73764,7 @@ impl<'a> Checker<'a> {
             no_infer_params: call_sig.no_infer_params.clone(),
             implicit_integer_coercion: call_sig.implicit_integer_coercion.clone(),
             param_names,
+            parameter_identities: aligned_parameter_identities(&call_sig, aligned),
             param_default_values: vec![None; semantic_params.len()],
             lambda_param_types: semantic_params
                 .iter()

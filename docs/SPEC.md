@@ -3658,6 +3658,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/interface_delegation_e2e.rs::forwarders_follow_interface_declaration_order`,
   `…::forwarder_emission_is_byte_deterministic`.
 
+- **Interface delegation keeps a context parameter's published role.** A delegated member's
+  parameter identities are the ones published with its callable: a named context parameter, an
+  anonymous context parameter, or a legacy context receiver. The legacy call shape's source names
+  are not a second reading of that role. Dropping the member because those names are untyped drops
+  the whole interface, so `class CompositeContext(...): LoggingContext by c1, SaveRepository<Language> by c2`
+  forwards neither `log` nor `save`. Test:
+  `tests/context_parameters_e2e.rs::context_interface_delegation_forwards_both_interfaces`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,

@@ -194,6 +194,7 @@ pub(in crate::resolve) fn member_signature_from_header(
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect(),
+        parameter_identities: streamed_parameter_identities(&header.parameters),
         lambda_param_types,
         lambda_recv: header
             .parameters
