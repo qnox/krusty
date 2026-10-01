@@ -304,6 +304,21 @@ impl CodeBuilder {
         self.line_marks.last().map(|&(_, line)| line)
     }
 
+    /// Whether the current line starts on the one-byte `nop` immediately behind the write cursor.
+    ///
+    /// Inline-frame closure uses that `nop` as a provisional debug anchor. When the caller emits
+    /// a real instruction on the same line immediately afterwards, the optimizer may remove the
+    /// anchor as redundant; inserting another line boundary ahead of the real instruction would
+    /// instead make the `nop` the sole instruction of its debug range and force it to survive.
+    pub(crate) fn line_is_anchored_by_trailing_nop(&self, line: u32) -> bool {
+        let line = line.min(u16::MAX as u32) as u16;
+        self.line_marks.last().is_some_and(|&(pc, marked)| {
+            marked == line
+                && usize::from(pc).checked_add(1) == Some(self.bytes.len())
+                && self.bytes.get(usize::from(pc)) == Some(&0x00)
+        })
+    }
+
     /// Record `line` at the current offset as an entry the NEXT mark at that offset must append
     /// after rather than replace.
     ///
@@ -334,6 +349,17 @@ mod tests {
     /// One instruction, so the next mark lands at a different pc.
     fn advance(code: &mut CodeBuilder) {
         code.aconst_null();
+    }
+
+    #[test]
+    fn a_line_mark_can_identify_its_trailing_nop_anchor() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(4);
+        code.nop();
+        assert!(code.line_is_anchored_by_trailing_nop(4));
+        assert!(!code.line_is_anchored_by_trailing_nop(5));
+        code.dup();
+        assert!(!code.line_is_anchored_by_trailing_nop(4));
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod builtins_validation;
 mod candidate_union;
 mod catalog_availability;
 mod class_locations;
+pub mod content_snapshot;
 mod ct_sym_index;
 mod jimage_catalog;
 mod jimage_locations;
