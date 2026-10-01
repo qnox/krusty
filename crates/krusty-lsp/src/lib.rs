@@ -7,6 +7,7 @@ pub mod deps_cache;
 pub mod dump_cache;
 pub mod formatting;
 mod jvm_analysis;
+pub mod open_document_digest;
 mod options;
 pub mod parity;
 pub mod project;

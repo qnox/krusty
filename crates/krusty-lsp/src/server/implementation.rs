@@ -569,23 +569,7 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
 
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
         debug_assert!(self.0.analysis_ready());
-        let docs: Vec<(&str, &str)> = job
-            .documents
-            .iter()
-            .map(|(u, t, _)| (u.as_str(), t.as_str()))
-            .collect();
-        let open: Vec<&str> = job.open_uris.iter().map(String::as_str).collect();
-        let (analyses, support_documents) = self.0.analyze_open_documents(&docs, &open);
-        Some(AnalysisBatch {
-            analyzed: job
-                .documents
-                .iter()
-                .map(|(u, _, v)| (u.clone(), *v))
-                .collect(),
-            analyses,
-            support_documents,
-            pending: self.0.analysis_pending(),
-        })
+        Some(job.run(&mut self.0))
     }
 
     fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
@@ -873,6 +857,8 @@ struct OpenDocument {
     /// Filled on the first position query for `text` and dropped when `text` changes.
     lines: RefCell<Option<LineIndex>>,
     version: i64,
+    /// One open, from `didOpen` until `didClose`. A reopen is a new lifetime.
+    lifetime: u64,
     diagnostics: DiagnosticIndex,
     hover: HoverIndex,
     completion: CompletionIndex,
@@ -898,6 +884,7 @@ impl OpenDocument {
             text,
             lines: RefCell::new(None),
             version,
+            lifetime: crate::open_document_digest::next_document_lifetime(),
             diagnostics,
             hover: HoverIndex::default(),
             completion: CompletionIndex::default(),
@@ -1231,7 +1218,12 @@ where
             .into_iter()
             .map(|uri| {
                 let open = &self.documents[uri];
-                (uri.to_owned(), open.text.clone(), open.version)
+                (
+                    uri.to_owned(),
+                    open.text.clone(),
+                    open.version,
+                    open.lifetime,
+                )
             })
             .collect();
         let open_uris = self.documents.keys().cloned().collect();
@@ -4607,6 +4599,8 @@ mod tests {
     use super::*;
     use crate::server::engine::{EngineCommand, EngineEvent, ServerStatus};
 
+    mod open_document_lifetime_tests;
+
     #[test]
     fn disk_symbol_index_reports_a_file_rejected_before_reading() {
         struct RemoveOnDrop(std::path::PathBuf);
@@ -5379,7 +5373,7 @@ mod tests {
 
         engine.submit(EngineCommand::SetWorkspaceRoot(None));
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
         engine.submit(EngineCommand::ProjectChange {
@@ -5437,7 +5431,7 @@ mod tests {
         let (events, incoming) = sync_channel(INPUT_QUEUE_CAPACITY);
         let engine = AnalysisEngine::spawn(analysis, events);
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1)],
+            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1, 0)],
             open_uris: vec!["file:///blocked.kt".into()],
         }));
         entered_rx
@@ -7365,90 +7359,6 @@ mod tests {
     }
 
     #[test]
-    fn close_reopen_with_reused_version_discards_in_flight_batch() {
-        let mut service = LspService::new(|s: &[&str]| {
-            s.iter()
-                .map(|_| DocumentAnalysis::empty())
-                .collect::<Vec<_>>()
-        });
-        service.force_initialized_for_test();
-
-        let with_diagnostic = || DocumentAnalysis {
-            diagnostics: vec![Diagnostic {
-                span: krusty::diag::Span::new(0, 0),
-                editor_span: None,
-                identity: None,
-                severity: Severity::Error,
-                kind: DiagnosticKind::Compiler,
-                msg: "from stale batch".to_string(),
-                file: 0,
-            }],
-            ..DocumentAnalysis::empty()
-        };
-        let did_open = |uri: &str, text: &str, version: i64| {
-            serde_json::json!({
-                "textDocument": { "uri": uri, "languageId": "kotlin", "version": version, "text": text }
-            })
-        };
-
-        service.did_open(None, did_open("file:///a.kt", "old", 1), true);
-        let in_flight_job = service
-            .dispatch_pending_analysis()
-            .expect("job for the freshly opened document");
-        assert_eq!(in_flight_job.documents[0].2, 1);
-        assert!(service.analysis_in_flight_for_test());
-
-        service.did_close(
-            None,
-            serde_json::json!({ "textDocument": { "uri": "file:///a.kt" } }),
-            true,
-        );
-        service.did_open(None, did_open("file:///a.kt", "new", 1), true);
-
-        let stale_batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![with_diagnostic()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
-        let messages = service.apply_analysis_batch(stale_batch);
-        assert!(
-            messages.is_empty(),
-            "stale close+reopen batch must not publish diagnostics"
-        );
-        assert_eq!(
-            service.document_diagnostic_count_for_test("file:///a.kt"),
-            0,
-            "stale analysis must not populate the reopened document's indices"
-        );
-        assert!(!service.analysis_in_flight_for_test());
-        assert!(service.analysis_dirty_for_test());
-        assert!(
-            !service.resubmit_pending_for_test(),
-            "discard clears the resubmit slot; a fresh job re-dispatches via analysis_dirty"
-        );
-
-        let fresh_job = service
-            .dispatch_pending_analysis()
-            .expect("fresh job re-dispatches after discard");
-        assert_eq!(fresh_job.documents[0].1, "new");
-        let fresh_batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![with_diagnostic()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
-        let messages = service.apply_analysis_batch(fresh_batch);
-        assert_eq!(messages.len(), 1, "fresh batch is applied");
-        assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
-        assert_eq!(
-            service.document_diagnostic_count_for_test("file:///a.kt"),
-            1,
-            "fresh analysis populates the reopened document"
-        );
-    }
-
-    #[test]
     fn analysis_coalesces_to_one_in_flight() {
         let mut service = LspService::new(|s: &[&str]| {
             s.iter()
@@ -7842,7 +7752,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         let batch = backend.submit(crate::server::engine::AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         });
         let batch = batch.expect("inline backend is synchronous");
