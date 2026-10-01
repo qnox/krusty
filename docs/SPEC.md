@@ -2801,6 +2801,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `selected_value_smartcasts` — a cast of the receiver's OWN value — belongs at a call's receiver.
   `tests/narrowed_this_member_call_e2e.rs`; the corpus case is
   `codegen/box/smartCasts/kt44814.kt`.
+- **A `for` over a projected array binds the element, not the projection.** `Array<out T>` and
+  `Array<*>` yield `T` (`array_read_elem`). The loop variable is that read, so `if (elem is
+  IntProgression)` smart-casts a reference and a later `for (i in elem)` or `elem.first` checkcasts
+  to `IntProgression`. Binding `out Any` itself dropped the cast: a projection is not a reference
+  classifier, and the JVM then rejected the narrowed call (`VerifyError: Object is not assignable
+  to IntProgression`). `tests/projected_smart_cast_e2e.rs`; the corpus case is
+  `controlflow/for_loops_array_nested.kt`.
 - **`is`/`as`/`as?` to `IntArray`/`CharArray`/…** resolves to the primitive array type before the
   classpath-class fallback (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`). `is UInt`/
   `is ULong` and smart-casting a reference to an unsigned value type are rejected (value-type boxing).
