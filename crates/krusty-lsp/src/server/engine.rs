@@ -1504,7 +1504,7 @@ mod tests {
         }));
         state.enqueue(located("First"));
         state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2, 0)],
             open_uris: Vec::new(),
         }));
         state.enqueue(located("Second"));
@@ -1540,7 +1540,7 @@ mod tests {
             "location is not interactive work, so an edit that just finished can admit the sweep"
         );
         state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), String::new(), 1)],
+            documents: vec![("file:///a.kt".into(), String::new(), 1, 0)],
             open_uris: Vec::new(),
         }));
         assert!(state.interactive_work_queued());
