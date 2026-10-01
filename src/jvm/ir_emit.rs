@@ -17,7 +17,7 @@ use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
-    reference_array_element, type_descriptor,
+    type_descriptor,
 };
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
@@ -26,7 +26,7 @@ use field_visibility::{declared_field_access, default_accessor_access, is_jvm_fi
 
 mod access_bridges;
 mod annotation_impl;
-mod array_access;
+mod array_elements;
 mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
@@ -117,6 +117,7 @@ use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
+use array_elements::reference_array_scalar_adapter;
 mod value_class_descriptors;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
@@ -4085,55 +4086,6 @@ fn arrays_param_desc(array: Ty) -> String {
         "[Ljava/lang/Object;".to_string()
     } else {
         type_descriptor(array)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JvmArrayActualRealization {
-    Get,
-    Set,
-    Size,
-}
-
-fn array_actual_element_matches(receiver: Ty, declared: Ty) -> bool {
-    let Some(stored) = receiver.array_elem() else {
-        return false;
-    };
-    if receiver.is_reference_array() {
-        let declared_stored = reference_array_element(ir_ty_to_jvm(&declared));
-        crate::jvm::names::same_type_descriptor(declared_stored, ir_ty_to_jvm(&stored))
-    } else {
-        declared == stored
-    }
-}
-
-/// The JVM realization of an already-selected Kotlin array `actual` declaration. This recognizes the
-/// declaration's complete semantic identity; a same-named function with another owner or signature is
-/// an ordinary call. Metadata supplies these declarations, while only the JVM emitter knows that their
-/// bodies are array bytecodes rather than methods on a loadable `kotlin/*Array` class.
-fn jvm_array_actual_realization(
-    owner: TypeName,
-    name: &str,
-    receiver: Ty,
-    params: &[Ty],
-    ret: Ty,
-) -> Option<JvmArrayActualRealization> {
-    if !receiver.is_array() || receiver.non_null().obj_internal() != Some(owner) {
-        return None;
-    }
-    match (name, params, ret) {
-        ("get", [Ty::Int], declared_ret)
-            if array_actual_element_matches(receiver, declared_ret) =>
-        {
-            Some(JvmArrayActualRealization::Get)
-        }
-        ("set", [Ty::Int, declared_element], Ty::Unit)
-            if array_actual_element_matches(receiver, *declared_element) =>
-        {
-            Some(JvmArrayActualRealization::Set)
-        }
-        ("size", [], Ty::Int) => Some(JvmArrayActualRealization::Size),
-        _ => None,
     }
 }
 
@@ -8237,32 +8189,13 @@ impl<'a> Emitter<'a> {
                 );
             }
         }
-        let array_realization = receiver_ty.and_then(|receiver_ty| {
-            jvm_array_actual_realization(
-                operation.owner,
-                operation.name,
-                receiver_ty,
-                &[],
-                declaration_ty,
-            )
-        });
         crate::trace_compiler!(
             "emit",
-            "property read owner={} name={} receiver={receiver_ty:?} declaration={:?} array_realization={array_realization:?}",
+            "property read owner={} name={} receiver={receiver_ty:?} declaration={:?}",
             operation.owner,
             operation.name,
             declaration_ty,
         );
-        if array_realization == Some(JvmArrayActualRealization::Size) {
-            self.emit_value(
-                operation
-                    .receiver
-                    .expect("array property reads have a dispatch receiver"),
-                code,
-            );
-            code.arraylength();
-            return;
-        }
         if let Some(access) = self
             .ir
             .property_external_accessors
@@ -9957,104 +9890,7 @@ impl<'a> Emitter<'a> {
                     target: _,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
-                    let semantic_receiver = self.value_ty(recv);
                     let interface = *interface || declared_jvm_interface(self.ir, *owner);
-                    if semantic_receiver.is_array() {
-                        if let Some((declared_params, declared_ret)) = params {
-                            let realization = jvm_array_actual_realization(
-                                *owner,
-                                name,
-                                semantic_receiver,
-                                declared_params,
-                                *declared_ret,
-                            );
-                            crate::trace_compiler!(
-                                "emit",
-                                "array actual candidate owner={} name={} receiver={:?} params={:?} ret={:?} realization={:?}",
-                                owner,
-                                name,
-                                semantic_receiver,
-                                declared_params,
-                                declared_ret,
-                                realization,
-                            );
-                            if let Some(realization) = realization {
-                                match realization {
-                                    JvmArrayActualRealization::Get => {
-                                        self.emit_array_get(recv, args[0], code)
-                                    }
-                                    JvmArrayActualRealization::Set => {
-                                        self.emit_array_set(recv, args[0], args[1], code)
-                                    }
-                                    JvmArrayActualRealization::Size => {
-                                        self.emit_value(recv, code);
-                                        code.arraylength();
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                        let erased_descriptor = |ty: Ty| {
-                            if ty.is_array() {
-                                arrays_param_desc(ty)
-                            } else {
-                                type_descriptor(ty)
-                            }
-                        };
-                        let mut expected = String::from("(");
-                        expected.push_str(&erased_descriptor(semantic_receiver));
-                        for &argument in args {
-                            expected.push_str(&erased_descriptor(self.value_ty(argument)));
-                        }
-                        expected.push(')');
-                        let semantic_ret = self.value_ty(e);
-                        expected.push_str(&erased_descriptor(semantic_ret));
-                        if let Some(realization) =
-                            self.bodies.static_array_member_realization(name, &expected)
-                        {
-                            let physical_params = parse_descriptor_params(&realization.descriptor)
-                                .expect("selected array-member realization descriptor");
-                            let mut operands = Vec::with_capacity(args.len() + 1);
-                            operands.push(recv);
-                            operands.extend(args.iter().copied());
-                            let physical_ret = ty_from_descriptor_ret(&realization.descriptor);
-                            if let Err(mismatch) = self.emit_call_descriptor_operands(
-                                e,
-                                1,
-                                &operands,
-                                &physical_params,
-                                code,
-                            ) {
-                                self.bail_descriptor_arity(&mismatch, physical_ret, code);
-                                return;
-                            }
-                            let argument_words: i32 = physical_params
-                                .iter()
-                                .map(|ty| slot_words(*ty) as i32)
-                                .sum();
-                            let method = self.cw.methodref(
-                                &realization.owner,
-                                &realization.name,
-                                &realization.descriptor,
-                            );
-                            crate::trace_compiler!(
-                                "emit",
-                                "array member {}.{} -> {}.{}{}",
-                                owner,
-                                name,
-                                realization.owner,
-                                realization.name,
-                                realization.descriptor,
-                            );
-                            self.mark_call_start(e, code);
-                            code.invokestatic(
-                                method,
-                                argument_words,
-                                slot_words(physical_ret) as i32,
-                            );
-                            return;
-                        }
-                    }
                     // A sibling-file user method carries its signature as `Ty`s (`params`): build the
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
@@ -11728,16 +11564,6 @@ fn boxed_prim_of(t: Ty) -> Option<Ty> {
     t.unboxed_primitive()
 }
 
-/// Semantic scalar adapter for a JVM reference-array element. Unsigned values share a primitive
-/// carrier with signed values but their array stores must call the Kotlin value-class box adapter.
-fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
-    element
-        .non_null()
-        .is_unsigned()
-        .then_some(element.non_null())
-        .or_else(|| boxed_prim_of(element))
-}
-
 /// `(opcode, value-words)` for an array element store (`Xastore`).
 /// Push the zero value of `t` (the placeholder for an omitted `$default` argument; the stub overwrites
 /// it when the mask bit is set).
@@ -12189,58 +12015,6 @@ mod invariant_tests {
         assert_eq!(
             call_ret_ty(&Ty::nullable(Ty::Nothing)),
             Ty::obj("kotlin/Any")
-        );
-    }
-
-    #[test]
-    fn array_actual_realization_requires_the_selected_full_declaration() {
-        let array = Ty::array(Ty::Byte);
-        let owner = crate::types::type_name("kotlin/ByteArray");
-        assert_eq!(
-            jvm_array_actual_realization(owner, "get", array, &[Ty::Int], Ty::Byte),
-            Some(JvmArrayActualRealization::Get)
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "set", array, &[Ty::Int, Ty::Byte], Ty::Unit,),
-            Some(JvmArrayActualRealization::Set)
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "size", array, &[], Ty::Int),
-            Some(JvmArrayActualRealization::Size)
-        );
-        let boxed_int_array = Ty::obj_args("kotlin/Array", &[Ty::obj("java/lang/Integer")]);
-        assert_eq!(
-            jvm_array_actual_realization(
-                crate::types::type_name("kotlin/Array"),
-                "get",
-                boxed_int_array,
-                &[Ty::Int],
-                Ty::Int,
-            ),
-            Some(JvmArrayActualRealization::Get)
-        );
-
-        assert_eq!(
-            jvm_array_actual_realization(owner, "get", array, &[Ty::Long], Ty::Byte),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "set", array, &[Ty::Int, Ty::Int], Ty::Unit),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "size", array, &[], Ty::Long),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(
-                crate::types::type_name("sample/FakeArray"),
-                "get",
-                array,
-                &[Ty::Int],
-                Ty::Byte,
-            ),
-            None
         );
     }
 

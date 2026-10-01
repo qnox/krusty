@@ -11,6 +11,12 @@ pub enum CompilerIntrinsic {
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.
     ArrayFactory(crate::types::ArrayFactoryKind),
+    /// An array classifier's own `operator fun get(index: Int)` (`IntArray.get`, `Array<T>.get`).
+    /// The array classifiers have no platform class, so a target reads the element directly.
+    ArrayGet,
+    /// An array classifier's own `operator fun set(index: Int, value)`, realized as a direct
+    /// element store for the same reason as [`Self::ArrayGet`].
+    ArraySet,
     ArraySize,
     CharCode,
     StringLength,

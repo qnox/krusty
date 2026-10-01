@@ -81,6 +81,8 @@ fn intrinsic_binary_operation(
             FirBinaryOperation::UnsignedShiftRight
         }
         crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+        | crate::libraries::CompilerIntrinsic::ArrayGet
+        | crate::libraries::CompilerIntrinsic::ArraySet
         | crate::libraries::CompilerIntrinsic::ArraySize
         | crate::libraries::CompilerIntrinsic::CharCode
         | crate::libraries::CompilerIntrinsic::StringLength

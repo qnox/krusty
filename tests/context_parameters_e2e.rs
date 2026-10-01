@@ -1131,3 +1131,24 @@ fn ordinary_delegate_operator_beats_a_nearer_context_receiver() {
     "#;
     common::expect_box_same_as_kotlinc(SRC, "OrdinaryDelegateBeforeContext");
 }
+
+const INFERRED_CONTEXT_PROPERTIES: &str = "// LANGUAGE: +ContextParameters\n\
+    class Prefix { val o = \"O\" }\n\
+    context(prefix: Prefix)\n\
+    val suffixed get() = prefix.o + \"K\"\n\
+    context(prefix: Prefix)\n\
+    val String.tagged get() = prefix.o + this\n\
+    fun Prefix.run(): String = if (suffixed == \"OK\") \"K\".tagged else \"Fail\"\n\
+    fun box(): String = Prefix().run()\n";
+
+/// A property whose type its getter infers reads its named context parameters there, as a function
+/// body reads its own; the getter's type is the one it infers from them.
+#[test]
+fn an_inferred_property_getter_reads_its_context_parameters() {
+    common::assert_class_code_matches_kotlinc(
+        "InferredContextProperties",
+        INFERRED_CONTEXT_PROPERTIES,
+        "InferredContextPropertiesKt",
+    );
+    common::expect_box_same_as_kotlinc(INFERRED_CONTEXT_PROPERTIES, "InferredContextPropertiesRun");
+}
