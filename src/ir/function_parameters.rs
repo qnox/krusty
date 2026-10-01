@@ -201,6 +201,9 @@ pub struct FnParamInfo {
     pub defaults_inherited: bool,
     /// Parallel to `identities` for a source declaration; empty for one the source did not write.
     pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
+    /// Parallel to `identities`. Empty when the declaration did not publish an expansion mode;
+    /// expansion then declines instead of guessing splice or copy.
+    pub expansion_modes: Vec<crate::types::InlineExpansionMode>,
 }
 
 impl FnParamInfo {
@@ -211,6 +214,7 @@ impl FnParamInfo {
             stub_only: false,
             defaults_inherited: false,
             inline_modifiers: Vec::new(),
+            expansion_modes: Vec::new(),
         }
     }
 
@@ -221,6 +225,7 @@ impl FnParamInfo {
             stub_only: false,
             defaults_inherited: false,
             inline_modifiers: Vec::new(),
+            expansion_modes: Vec::new(),
         }
     }
 
@@ -247,6 +252,10 @@ impl FnParamInfo {
         if !self.inline_modifiers.is_empty() {
             self.inline_modifiers
                 .insert(0, crate::types::InlineParameterModifier::None);
+        }
+        if !self.expansion_modes.is_empty() {
+            self.expansion_modes
+                .insert(0, crate::types::InlineExpansionMode::Materialize);
         }
     }
 }
@@ -318,6 +327,17 @@ impl IrFile {
             "published source parameter identities are never empty"
         );
         Some(identities)
+    }
+
+    /// Expansion modes parallel to [`Self::function_parameter_identities`]. `None` when the
+    /// declaration published no mode or the two records disagree: the caller declines.
+    pub(crate) fn inline_expansion_modes(
+        &self,
+        function: FunId,
+    ) -> Option<&[crate::types::InlineExpansionMode]> {
+        let info = self.fn_params.get(&function)?;
+        let identities = self.function_parameter_identities(function)?;
+        (info.expansion_modes.len() == identities.len()).then_some(info.expansion_modes.as_slice())
     }
 }
 

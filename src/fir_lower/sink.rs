@@ -552,6 +552,8 @@ impl<'a> CommonIrBodySink<'a> {
             .callable_name(callable.id)
             .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
             .to_owned();
+        let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
+        let expansion_modes = inline_expansion_modes(&identities, &params, &inline_modifiers);
         let function = self.ir.add_fun(IrFunction {
             name: source_name.clone(),
             param_checks: vec![None; params.len()],
@@ -592,9 +594,12 @@ impl<'a> CommonIrBodySink<'a> {
         if flags.has(crate::fir::DeclarationFlags::SUSPEND) {
             self.ir.suspend_funs.push(function);
         }
-        self.ir
-            .fn_params
-            .insert(function, FnParamInfo::identities(identities));
+        self.ir.fn_params.insert(function, {
+            let mut info = FnParamInfo::identities(identities);
+            info.inline_modifiers = inline_modifiers;
+            info.expansion_modes = expansion_modes;
+            info
+        });
         attach_callable_generic_facts(index, declaration, function, self.ir);
         self.ir
             .checked_callable_functions
@@ -1215,6 +1220,8 @@ impl<'a> CommonIrBodySink<'a> {
                 .callable_name(callable.id)
                 .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
                 .to_owned();
+            let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
+            let expansion_modes = inline_expansion_modes(&identities, &params, &inline_modifiers);
             let function = self.ir.add_fun(IrFunction {
                 name: source_name.clone(),
                 param_checks: vec![None; params.len()],
@@ -1305,10 +1312,10 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 }
             }
-            let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
             self.ir.fn_params.insert(function, {
                 let mut info = FnParamInfo::identities(identities);
                 info.inline_modifiers = inline_modifiers;
+                info.expansion_modes = expansion_modes;
                 info
             });
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
@@ -1630,6 +1637,29 @@ fn inline_parameter_modifiers(
                 .flags();
             ordinal += 1;
             flags.inline_modifier()
+        })
+        .collect()
+}
+
+/// One expansion mode per identity, from the role, the resolved parameter type, and the modifier
+/// already copied above. A typealias to a non-null function type is `Ty::Fun` here; `T?` is not.
+fn inline_expansion_modes(
+    identities: &[crate::ir::IrParameterIdentity],
+    parameters: &[crate::types::Ty],
+    modifiers: &[crate::types::InlineParameterModifier],
+) -> Vec<crate::types::InlineExpansionMode> {
+    assert_eq!(identities.len(), parameters.len());
+    assert_eq!(identities.len(), modifiers.len());
+    identities
+        .iter()
+        .zip(parameters)
+        .zip(modifiers)
+        .map(|((identity, ty), modifier)| {
+            crate::types::InlineExpansionMode::declared(
+                matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver),
+                matches!(ty, crate::types::Ty::Fun(_)),
+                *modifier,
+            )
         })
         .collect()
 }

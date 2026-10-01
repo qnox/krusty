@@ -5,7 +5,7 @@ mod interning;
 mod spelling;
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
-pub use crate::inline_parameter_modifier::InlineParameterModifier;
+pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};

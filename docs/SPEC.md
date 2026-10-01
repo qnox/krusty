@@ -9421,10 +9421,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     each build one function object. Splicing the lambda at each use compares two instances, so the
     identity check takes the failure branch. An extension receiver of function type is the same
     shape: only a value parameter whose declaration type is a non-null function type, and which
-    the declaration did not mark `noinline`, is spliced. The call site's substitution does not
-    change that — a type parameter specialized to a function type is still a value.
+    the declaration did not mark `noinline`, is spliced. A nullable function parameter is not that
+    type — kotlinc rejects it unless the parameter writes `noinline`, and the argument is then one
+    object. A typealias of a non-null function type is that type, so a lambda passed to it is
+    spliced and may return from the caller. The expansion does not rediscover this from the index
+    or from `Ty::Fun` at the call: publication records receiver, splice, or materialize on the
+    parameter identity, and a missing or unaligned mode declines before the call is copied.
+    The call site's substitution does not change that — a type parameter specialized to a function
+    type is still a value.
     (`inline_non_function_parameter_materializes_a_lambda_once`, the `inline/lambdaAsAny.kt` box,
-    and `inline_type_parameter_materializes_a_lambda_once`.)
+    `inline_type_parameter_materializes_a_lambda_once`,
+    `inline_nullable_function_parameter_materializes_its_lambda`, and
+    `inline_typealias_of_a_function_splices_its_lambda`.)
 
   Nothing is recovered from a name here: the role and the coordinate are recorded where the
   expansion is built, and the `$this$`/`$iv` spellings exist only at the JVM boundary. Tests:

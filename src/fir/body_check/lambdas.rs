@@ -317,6 +317,7 @@ impl BodyFirChecker<'_> {
                         FirValueParameterName::Destructured
                     }
                 },
+                inline_modifier: crate::types::InlineParameterModifier::None,
             });
         }
         // The lambda's callable result is a real value boundary. Keep the source expression's
