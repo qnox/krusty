@@ -404,7 +404,15 @@ fn declare_class(
             is_vararg: false,
             type_param: None,
             check: None,
+            anonymous_super_forward: None,
             capture: None,
+            // These are the lambda's captured values, added by the JVM realization after source
+            // constructor lowering. Their exact field order and receiver position live on
+            // `IrLambdaClass`; they are not declared value parameters.
+            provenance: crate::ir::IrCtorParameterProvenance::Capture,
+            // A `ClassCaptureIdentity` coordinates source local/anonymous-class forwarding. This
+            // backend-generated lambda class consumes its already-bound capture list directly.
+            capture_identity: None,
         });
     }
     class.lambda = Some(crate::ir::IrLambdaClass {
