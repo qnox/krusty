@@ -313,9 +313,10 @@ impl ProductionSignatureSemantics<'_> {
                 .zip(expansion.type_args().iter().copied())
                 .collect::<crate::symbol_resolver::GSigBinds>();
             let declared = selected
+                .declaration
                 .generic_sig
                 .as_ref()
-                .map_or(selected.params.as_slice(), |signature| {
+                .map_or(selected.declaration.params.as_slice(), |signature| {
                     signature.params.as_slice()
                 })
                 .iter()
@@ -323,7 +324,7 @@ impl ProductionSignatureSemantics<'_> {
                     crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &class_bindings)
                 })
                 .collect::<Vec<_>>();
-            (declared, selected.call_sig.clone())
+            (declared, selected.declaration.call_sig.clone())
         };
 
         // The expected callable inputs are inference evidence before adaptation is judged. This is
