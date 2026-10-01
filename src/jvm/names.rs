@@ -1042,7 +1042,9 @@ mod tests {
         ];
 
         for (label, ty) in invalid {
-            assert_undetermined_descriptor_rejected(label, || drop(type_descriptor(ty)));
+            assert_undetermined_descriptor_rejected(label, || {
+                let _ = type_descriptor(ty);
+            });
             assert_undetermined_descriptor_rejected(label, || {
                 let _ = same_type_descriptor(ty, ty);
             });
