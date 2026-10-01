@@ -1463,6 +1463,66 @@ fn floating_point_membership_carries_its_checked_comparison_type() {
 }
 
 #[test]
+fn a_nearer_double_range_to_is_a_contains_call() {
+    let analysis = checked_analysis(
+        "class Span { operator fun contains(value: Double): Boolean = true }\n\
+         operator fun Double.rangeTo(other: Double): Span = Span()\n\
+         fun test(value: Double, start: Double, end: Double) = value in start..end\n",
+    );
+    let file = &analysis.files[0];
+    let function = file
+        .decls
+        .iter()
+        .find_map(|declaration| match file.decl(*declaration) {
+            Decl::Fun(function) if function.name == "test" => Some(function),
+            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .expect("test declaration");
+    let crate::ast::FunBody::Expr(root) = function.body else {
+        panic!("test must have an expression body")
+    };
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let parameters = function
+        .params
+        .iter()
+        .map(|parameter| CheckedBodyParameter {
+            name: &parameter.name,
+            ty: ResolvedTy::new(info.resolved_type(&parameter.ty).unwrap()).unwrap(),
+            span: parameter.ty.span,
+            context_kind: crate::types::ContextParameterKind::None,
+            inline_modifier: crate::types::InlineParameterModifier::None,
+        })
+        .collect::<Vec<_>>();
+    let mut origins = OriginStore::default();
+    let body = check_expression_body_with_parameters(
+        file,
+        info,
+        SourceFileId::from_raw(0),
+        BodyOwnerId::from_raw(73),
+        root,
+        &parameters,
+        analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        &mut origins,
+    )
+    .expect("a shadowed floating range must build checked FIR");
+
+    let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
+        panic!("root must contain membership FIR")
+    };
+    let FirExprKind::ContainmentCall { call, .. } = &body.expr(root).unwrap().kind else {
+        panic!("shadowed floating membership must call contains")
+    };
+    let range = call
+        .dispatch_receiver
+        .expect("contains must dispatch on the selected range")
+        .value;
+    assert!(matches!(
+        body.expr(range).map(|expression| &expression.kind),
+        Some(FirExprKind::Call(_))
+    ));
+}
+
+#[test]
 fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
     let analysis = checked_analysis(
         "suspend fun test(c: suspend () -> String): Boolean = c is suspend () -> String\n\

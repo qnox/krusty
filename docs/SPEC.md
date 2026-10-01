@@ -10662,6 +10662,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
 
+- **A nearer `Double`/`Float` `rangeTo` replaces primitive `in`.** `x in a..b` for those
+  primitives is a direct IEEE comparison only when overload resolution selects the stdlib
+  `kotlin.ranges` operator that returns `ClosedFloatingPointRange` (`-0.0 in 0.0..0.0` is true,
+  `NaN in NaN..NaN` is false). A declaration in a nearer scope is an ordinary `rangeTo` call
+  followed by `contains`. The generic `Comparable.rangeTo` is not that operator: its `contains`
+  uses `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral
+  ranges stay comparisons. Tests:
+  `a_nearer_double_range_to_is_a_contains_call`,
+  `tests/custom_floating_range_membership_e2e.rs`, box
+  `ranges/contains/inComparableRange.kt`.
+
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
   resolution uses that signature to specialize higher-order parameters, so a declaration such as

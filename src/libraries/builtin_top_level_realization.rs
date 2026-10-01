@@ -311,6 +311,34 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
 
 /// The `kotlin.ranges` progression builders: `downTo` and `until` over integral values, and `step`
 /// and `reversed` over a progression.
+/// The stdlib floating `rangeTo` whose `contains` is IEEE comparison. The generic
+/// `Comparable.rangeTo` returns `ClosedRange` and orders with `compareTo`, so it stays an
+/// ordinary call: `-0.0 in 0.0..0.0` is false there and true for the floating range.
+fn floating_range_membership(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if facts.kind != FnKind::Extension
+        || !facts.is_operator
+        || facts.is_suspend
+        || facts.is_infix
+        || facts.context_count != 0
+        || facts.type_parameter_count != 0
+        || facts.vararg.is_some()
+        || facts.name != "rangeTo"
+    {
+        return None;
+    }
+    let Some(receiver) = facts.receiver else {
+        return None;
+    };
+    let [argument] = facts.params else {
+        return None;
+    };
+    if receiver != *argument || !matches!(receiver, Ty::Double | Ty::Float) {
+        return None;
+    }
+    let range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[receiver]);
+    (facts.ret == range).then_some(CompilerIntrinsic::FloatingRangeMembership)
+}
+
 fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.kind != FnKind::Extension
         || facts.context_count != 0
@@ -475,7 +503,7 @@ pub(crate) fn function_realization(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts)
+        progression_builder(&facts).or_else(|| floating_range_membership(&facts))
     } else {
         None
     }
@@ -667,5 +695,40 @@ mod tests {
             function_realization(declaration(type_name("kotlin/reflect"), Ty::String)),
             None
         );
+    }
+
+    #[test]
+    fn floating_range_to_is_primitive_membership_only_for_the_stdlib_declaration() {
+        let realize = |receiver: Ty, result: Ty, type_parameters: usize| {
+            let params = [receiver];
+            function_realization(BuiltinFunctionDeclaration {
+                package: type_name("kotlin/ranges"),
+                name: "rangeTo",
+                kind: FnKind::Extension,
+                receiver: Some(receiver),
+                params: &params,
+                ret: result,
+                context_count: 0,
+                type_parameter_count: type_parameters,
+                vararg: None,
+                is_suspend: false,
+                is_operator: true,
+                is_infix: false,
+            })
+        };
+        let floating = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
+        assert_eq!(
+            realize(Ty::Double, floating, 0),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+        let float_range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Float]);
+        assert_eq!(
+            realize(Ty::Float, float_range, 0),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
+        let comparable = Ty::obj_args("kotlin/ranges/ClosedRange", &[Ty::Double]);
+        assert_eq!(realize(Ty::Double, comparable, 0), None);
+        assert_eq!(realize(Ty::Double, floating, 1), None);
+        assert_eq!(realize(Ty::Int, Ty::obj("kotlin/ranges/IntRange"), 0), None);
     }
 }

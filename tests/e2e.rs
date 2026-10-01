@@ -519,6 +519,8 @@ mod crossinline_lambda_inlining_e2e;
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
 mod ctor_numeric_widening_e2e;
+#[path = "custom_floating_range_membership_e2e.rs"]
+mod custom_floating_range_membership_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_nullable_value_class_e2e.rs"]

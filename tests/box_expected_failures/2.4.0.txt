@@ -96,7 +96,6 @@ properties/backingField/nullableSupertypeWithValueClassExplicitBackingField.kt
 properties/backingField/supertypePropertyWithValueClassExplicitBackingField.kt
 properties/backingField/typeCheckSupertypeWithValueClassExplicitBackingField.kt
 ranges/contains/generated/doubleRangeUntil.kt
-ranges/contains/inComparableRange.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
