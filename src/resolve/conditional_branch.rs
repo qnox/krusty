@@ -45,6 +45,25 @@ pub(super) fn join_types(
     semantic_join.unwrap_or_else(|| checker.join(left, right, span))
 }
 
+/// Fold conditional results in source order behind the conditional-typing boundary. A declared
+/// expectation stands in for an intersection [`Ty`] does not synthesize, as it does for `if`.
+///
+/// `resolve.rs` owns expression dispatch; the common-supertype policy and its declared-expectation
+/// handling belong here with the other conditional result rules.
+pub(super) fn join_results(
+    checker: &mut Checker<'_>,
+    scope: &CheckerScope<'_>,
+    expected: Option<Ty>,
+    results: impl IntoIterator<Item = (Ty, ExprId)>,
+) -> Option<Ty> {
+    results.into_iter().fold(None, |result, (ty, expression)| {
+        Some(match result {
+            Some(current) => join_types(checker, scope, expected, current, ty, expression),
+            None => ty,
+        })
+    })
+}
+
 /// Join a `try`'s body and catch types where [`join_types`] does not apply: the `try` is a
 /// statement, or a value-position one has a primitive branch.
 ///
@@ -169,32 +188,21 @@ impl Checker<'_> {
         let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
             return current;
         };
-        let infer = |expected| {
-            crate::symbol_resolver::infer_generic_return_bindings(
-                &signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-        };
-        // The sibling may be MORE specific than the generic result classifier: a
-        // `MutableList<String>` branch constrains `listOf<T>()` through its applied `List<String>`
-        // supertype. Project the sibling to the selected call's result classifier before giving up;
-        // this is ordinary subtype information, not collection-specific approximation.
-        let expectation = if infer(sibling).is_some() {
-            sibling
-        } else {
+        // Equal constructors, a subtype result (`linkedSetOf()` beside `hashSetOf<T>()`), a more
+        // specific sibling (`emptyList()` beside `mutableListOf("a")`), or a shared generic
+        // supertype (`linkedSetOf()` beside `arrayListOf<T>()`). The expectation is a face of the
+        // sibling, not a collection-specific approximation.
+        let expectation = {
             let source = self.fed_source();
-            let Some(applied) = crate::assignable::applied_supertype(
-                &crate::symbol_resolver::SourceOracle(&source),
+            let Some(expectation) = crate::symbol_resolver::generic_return_expectation_from_sibling(
+                &source,
+                &signature,
                 sibling,
-                signature.ret,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
             ) else {
                 return current;
             };
-            if infer(applied).is_none() {
-                return current;
-            }
-            applied
+            expectation
         };
         crate::trace_compiler!(
             "expected_call",

@@ -66419,7 +66419,6 @@ impl<'a> Checker<'a> {
             let subj_ty = subject.map(|s| self.expr(scope, s));
             struct ArmResult {
                 body: ExprId,
-                span: Span,
                 ty: Ty,
                 fallthrough_casts: Vec<(NarrowPath, Ty)>,
                 fallthrough_declined: Vec<(String, Ty)>,
@@ -66556,7 +66555,6 @@ impl<'a> Checker<'a> {
                 }
                 arm_results.push(ArmResult {
                     body: arm.body,
-                    span: self.span(arm.body),
                     ty: bt,
                     fallthrough_casts: incoming_fallthrough_casts,
                     fallthrough_declined: incoming_fallthrough_declined,
@@ -66629,13 +66627,12 @@ impl<'a> Checker<'a> {
             for record in &arm_results {
                 self.report_unbound_conditional_branch(scope, record.body);
             }
-            // Preserve source order when joining arm types.
-            let result = arm_results.iter().fold(None, |result: Option<Ty>, record| {
-                Some(match result {
-                    Some(r) => self.join(r, record.ty, record.span),
-                    None => record.ty,
-                })
-            });
+            let result = conditional_branch::join_results(
+                self,
+                scope,
+                expected,
+                arm_results.iter().map(|record| (record.ty, record.body)),
+            );
             let missing = if has_else {
                 None
             } else {
