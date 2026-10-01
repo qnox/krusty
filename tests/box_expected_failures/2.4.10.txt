@@ -194,7 +194,6 @@ smartCasts/invokeRecieverSmartcastK2.kt
 specialBuiltins/enumAsOrdinaled.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
-unsignedTypes/kt25784.kt
 unsignedTypes/kt43286.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
