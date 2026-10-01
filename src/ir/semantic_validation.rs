@@ -7,6 +7,9 @@
 
 use crate::types::Ty;
 
+mod completeness;
+pub use completeness::IncompleteIrFact;
+
 use super::{
     Callee, CtorDelegateTarget, FuncRef, IrCheckedArgument, IrCheckedConstructorTarget,
     IrCheckedOperation, IrCheckedSubstitution, IrClass, IrExpr, IrFile, IrGenericSig, IrIntrinsic,
