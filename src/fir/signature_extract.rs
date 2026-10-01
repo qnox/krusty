@@ -3,7 +3,7 @@
 //! This is a structural pass only. It records compact operations and deferred lookups; ordinary
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
-mod definitely_evaluated;
+mod evaluated_casts;
 mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
@@ -1252,7 +1252,7 @@ impl SignatureConstraintExtractor {
 
     /// Compact smart-cast facts established when `condition` is true. Semantic compatibility is
     /// still decided by the ordinary resolver/checker adapter when these expression types evaluate.
-    fn positive_smartcasts(
+    fn positive_smartcast_facts(
         &mut self,
         file: &File,
         condition: ExprId,
@@ -1402,16 +1402,34 @@ impl SignatureConstraintExtractor {
         }
     }
 
-    /// After a statement that definitely evaluated `x!!`, `x` is non-null for the rest of the
-    /// block, as the body check narrows it. Conditional children must not publish facts here: the
-    /// statement can complete without evaluating them.
-    fn narrow_not_null_asserted(&mut self, file: &File, statement: crate::ast::StmtId) {
-        for name in definitely_evaluated::not_null_assertions_after(file, statement) {
+    /// Publish phase-owned facts established on every normally completing path through a statement.
+    fn narrow_after_normal_completion(
+        &mut self,
+        file: &File,
+        statement: crate::ast::StmtId,
+        scope: SignatureScopeId,
+        origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
+    ) -> Result<(), ExpressionForm> {
+        let mut evaluated = Vec::new();
+        crate::ast::definitely_evaluated::for_each_in_statement(
+            file,
+            statement,
+            &mut |expression| {
+                evaluated.push(expression);
+            },
+        );
+        for &expression in &evaluated {
+            let Expr::NotNull { operand } = file.expr(expression) else {
+                continue;
+            };
+            let Expr::Name(name) = file.expr(*operand) else {
+                continue;
+            };
             let Some(value) = self
                 .lexical_values
                 .iter()
                 .rev()
-                .find_map(|values| values.get(name).copied())
+                .find_map(|values| values.get(name.as_str()).copied())
             else {
                 continue;
             };
@@ -1419,8 +1437,14 @@ impl SignatureConstraintExtractor {
             self.lexical_values
                 .last_mut()
                 .expect("block scope must exist")
-                .insert(name.into(), non_null);
+                .insert(name.clone().into_boxed_str(), non_null);
         }
+        let casts = self.evaluated_as_cast_bindings_from(file, &evaluated, scope, origin)?;
+        self.lexical_values
+            .last_mut()
+            .expect("block scope must exist")
+            .extend(casts);
+        Ok(())
     }
 
     fn smartcast_type(
@@ -1709,12 +1733,14 @@ impl SignatureConstraintExtractor {
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs_expression = *lhs;
                 let lhs = self.expression(file, lhs_expression, scope, origin)?;
-                let rhs = if *op == BinOp::And {
-                    let bindings = self.positive_smartcasts(file, lhs_expression, scope, origin)?;
-                    self.smartcast_bindings_branch(file, *rhs, scope, origin, bindings)?
+                let bindings = if *op == BinOp::And {
+                    self.positive_smartcasts(file, lhs_expression, scope, origin)?
                 } else {
-                    self.expression(file, *rhs, scope, origin)?
+                    // `||` and every eager operator evaluate the left operand before the right,
+                    // so a cast there has run. `&&` uses the stronger positive-condition facts.
+                    self.evaluated_as_cast_bindings(file, lhs_expression, scope, origin)?
                 };
+                let rhs = self.smartcast_bindings_branch(file, *rhs, scope, origin, bindings)?;
                 let operator = match op {
                     BinOp::Add => super::SigBinaryOperator::Add,
                     BinOp::Sub => super::SigBinaryOperator::Subtract,
@@ -2139,9 +2165,6 @@ impl SignatureConstraintExtractor {
                 let mut effects = Vec::new();
                 let mut terminal_lambda_return = false;
                 for (statement_index, statement) in stmts.iter().enumerate() {
-                    if let Some(previous) = statement_index.checked_sub(1) {
-                        self.narrow_not_null_asserted(file, stmts[previous]);
-                    }
                     match file.stmt(*statement) {
                         Stmt::Local {
                             name,
@@ -2433,9 +2456,7 @@ impl SignatureConstraintExtractor {
                             }
                         }
                     }
-                }
-                if let Some(last) = stmts.last() {
-                    self.narrow_not_null_asserted(file, *last);
+                    self.narrow_after_normal_completion(file, *statement, scope, origin)?;
                 }
                 let result = if terminal_lambda_return {
                     self.known(Ty::Nothing)

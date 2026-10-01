@@ -181,6 +181,8 @@ mod callable_ref_unresolved_e2e;
 mod caller_type_param_receiver_e2e;
 #[path = "cannot_infer_cascade_e2e.rs"]
 mod cannot_infer_cascade_e2e;
+#[path = "cast_evaluation_order_e2e.rs"]
+mod cast_evaluation_order_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
 #[path = "catch_entry_flow_e2e.rs"]
