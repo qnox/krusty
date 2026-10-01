@@ -5,7 +5,7 @@
 use super::common;
 
 const SOURCE: &str = "fun touch() {}\n\
-    fun parameter(value: Any) {\n\
+    fun parameter(value: Receiver) {\n\
     \x20   value\n\
     \x20   touch()\n\
     }\n\
@@ -21,7 +21,7 @@ const SOURCE: &str = "fun touch() {}\n\
     \x20   }\n\
     }\n\
     fun box(): String {\n\
-    \x20   parameter(\"a\")\n\
+    \x20   parameter(Receiver())\n\
     \x20   primitive(1, 2L)\n\
     \x20   Receiver().member()\n\
     \x20   return \"OK\"\n\

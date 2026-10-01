@@ -11,15 +11,22 @@
 
 use super::common;
 
-const LOCAL_CLASS: &str = "class Outer { fun left() = \"O\" }\n\
-    class Inner { fun right() = \"K\" }\n\
+const LOCAL_CLASS: &str = "object OuterPiece\n\
+    object InnerPiece\n\
+    class Joined(val outer: OuterPiece, val inner: InnerPiece)\n\
+    class Outer { fun left() = OuterPiece }\n\
+    class Inner { fun right() = InnerPiece }\n\
     fun <T> withOuter(value: Outer, block: Outer.() -> T): T = value.block()\n\
     fun <T> withInner(value: Inner, block: Inner.() -> T): T = value.block()\n\
-    fun box(): String = withOuter(Outer()) outer@{\n\
+    fun result(): Joined = withOuter(Outer()) outer@{\n\
     \x20   class Local {\n\
-    \x20       fun read(): String = withInner(Inner()) inner@{ this@outer.left() + this@inner.right() }\n\
+    \x20       fun read(): Joined = withInner(Inner()) inner@{ Joined(this@outer.left(), this@inner.right()) }\n\
     \x20   }\n\
     \x20   Local().read()\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val result = result()\n\
+    \x20   return if (result.outer === OuterPiece && result.inner === InnerPiece) \"OK\" else \"fail\"\n\
     }\n";
 
 /// Both labelled receivers resolve inside the nested receiver lambda: `this@inner` is its own
@@ -35,22 +42,30 @@ fn a_receiver_lambda_in_a_local_class_member_reads_the_captured_receiver() {
 }
 
 const NAMED_CONTEXT_LOCAL_FUNCTION: &str = "// LANGUAGE: +ContextParameters\n\
-    class Outer(val text: String)\n\
-    class Inner(val text: String)\n\
-    class Marker(val text: String)\n\
+    object OuterPiece\n\
+    object InnerPiece\n\
+    object MarkerPiece\n\
+    class Joined(val marker: MarkerPiece, val outer: OuterPiece, val inner: InnerPiece)\n\
+    class Outer(val piece: OuterPiece)\n\
+    class Inner(val piece: InnerPiece)\n\
+    class Marker(val piece: MarkerPiece)\n\
     fun <T> withOuter(value: Outer, block: Outer.() -> T): T = value.block()\n\
     fun <T> withInner(value: Inner, block: Inner.() -> T): T = value.block()\n\
-    fun box(): String = withOuter(Outer(\"O\")) outer@{\n\
+    fun result(): Joined = withOuter(Outer(OuterPiece)) outer@{\n\
     \x20   class Local {\n\
-    \x20       fun read(): String {\n\
+    \x20       fun read(): Joined {\n\
     \x20           context(marker: Marker)\n\
-    \x20           fun local(): String = withInner(Inner(\"K\")) inner@{\n\
-    \x20               marker.text + this@outer.text + this@inner.text\n\
+    \x20           fun local(): Joined = withInner(Inner(InnerPiece)) inner@{\n\
+    \x20               Joined(marker.piece, this@outer.piece, this@inner.piece)\n\
     \x20           }\n\
-    \x20           return with(Marker(\"\")) { local() }\n\
+    \x20           return with(Marker(MarkerPiece)) { local() }\n\
     \x20       }\n\
     \x20   }\n\
     \x20   Local().read()\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val result = result()\n\
+    \x20   return if (result.marker === MarkerPiece && result.outer === OuterPiece && result.inner === InnerPiece) \"OK\" else \"fail\"\n\
     }\n";
 
 /// A named context parameter on the local function is a lexical value, not a receiver-tower rung.
@@ -101,19 +116,25 @@ fn a_builder_lambda_in_a_local_class_member_infers_the_outer_builder() {
     common::expect_box_same_as_kotlinc(BUILDER_LOCAL_CLASS, "NestedBuilderLocalClassRun");
 }
 
-const ANONYMOUS_OBJECT: &str = "class Outer { fun left() = \"O\" }\n\
-    class Inner { fun right() = \"K\" }\n\
+const ANONYMOUS_OBJECT: &str = "object OuterPiece\n\
+    object InnerPiece\n\
+    class Joined(val outer: OuterPiece, val inner: InnerPiece)\n\
+    class Outer { fun left() = OuterPiece }\n\
+    class Inner { fun right() = InnerPiece }\n\
     fun <T> withOuter(value: Outer, block: Outer.() -> T): T = value.block()\n\
     fun <T> withInner(value: Inner, block: Inner.() -> T): T = value.block()\n\
-    fun direct(): String = withOuter(Outer()) outer@{\n\
-    \x20   object { fun read(): String = this@outer.left() }.read()\n\
+    fun direct(): OuterPiece = withOuter(Outer()) outer@{\n\
+    \x20   object { fun read(): OuterPiece = this@outer.left() }.read()\n\
     }\n\
-    fun nested(): String = withOuter(Outer()) outer@{\n\
+    fun nested(): Joined = withOuter(Outer()) outer@{\n\
     \x20   object {\n\
-    \x20       fun read(): String = withInner(Inner()) inner@{ this@outer.left() + this@inner.right() }\n\
+    \x20       fun read(): Joined = withInner(Inner()) inner@{ Joined(this@outer.left(), this@inner.right()) }\n\
     \x20   }.read()\n\
     }\n\
-    fun box(): String = if (direct() == \"O\") nested() else \"fail\"\n";
+    fun box(): String {\n\
+    \x20   val nested = nested()\n\
+    \x20   return if (direct() === OuterPiece && nested.outer === OuterPiece && nested.inner === InnerPiece) \"OK\" else \"fail\"\n\
+    }\n";
 
 /// An anonymous object captures the receiver its member names as `this@outer`, whether the member
 /// reads it directly or from its own receiver lambda.
