@@ -91,39 +91,7 @@ pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
 
 /// Id-backed form of [`kotlin_name_to_ty`].
 pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
-    if name.matches("kotlin/Int") {
-        Ty::Int
-    } else if name.matches("kotlin/Char") {
-        Ty::Char
-    } else if name.matches("kotlin/Boolean") {
-        Ty::Boolean
-    } else if name.matches("kotlin/Long") {
-        Ty::Long
-    } else if name.matches("kotlin/Double") {
-        Ty::Double
-    } else if name.matches("kotlin/Float") {
-        Ty::Float
-    } else if name.matches("kotlin/Byte") {
-        Ty::Byte
-    } else if name.matches("kotlin/Short") {
-        Ty::Short
-    } else if name.matches("kotlin/UByte") {
-        Ty::UByte
-    } else if name.matches("kotlin/UShort") {
-        Ty::UShort
-    } else if name.matches("kotlin/UInt") {
-        Ty::UInt
-    } else if name.matches("kotlin/ULong") {
-        Ty::ULong
-    } else if name.matches("kotlin/String") {
-        Ty::String
-    } else if name.matches("kotlin/Unit") {
-        Ty::Unit
-    } else if name.matches("kotlin/Nothing") {
-        Ty::Nothing
-    } else {
-        Ty::obj_name(name)
-    }
+    crate::types::builtin_semantic(name).unwrap_or_else(|| Ty::obj_name(name))
 }
 
 /// Interned ids for the names the hot `@Metadata` alignment paths test against, so per-parameter

@@ -107,8 +107,11 @@ const KOTLIN_USHORT: TypeName = TypeName(NameId(11));
 const KOTLIN_UINT: TypeName = TypeName(NameId(12));
 const KOTLIN_ULONG: TypeName = TypeName(NameId(13));
 const KOTLIN_STRING: TypeName = TypeName(NameId(14));
+const KOTLIN_UNIT: TypeName = TypeName(NameId(15));
+const KOTLIN_NOTHING: TypeName = TypeName(NameId(16));
+const KOTLIN_ARRAY: TypeName = TypeName(NameId(17));
 
-const BUILTIN_TYPE_NAMES: [(&str, TypeName); 13] = [
+const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
     ("kotlin/Boolean", KOTLIN_BOOLEAN),
     ("kotlin/Byte", KOTLIN_BYTE),
     ("kotlin/Short", KOTLIN_SHORT),
@@ -122,7 +125,35 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 13] = [
     ("kotlin/UInt", KOTLIN_UINT),
     ("kotlin/ULong", KOTLIN_ULONG),
     ("kotlin/String", KOTLIN_STRING),
+    ("kotlin/Unit", KOTLIN_UNIT),
+    ("kotlin/Nothing", KOTLIN_NOTHING),
+    ("kotlin/Array", KOTLIN_ARRAY),
 ];
+
+/// Semantic type of a pre-interned builtin classifier, compared by identity.
+///
+/// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
+/// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
+pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+    Some(match name {
+        KOTLIN_BOOLEAN => Ty::Boolean,
+        KOTLIN_BYTE => Ty::Byte,
+        KOTLIN_SHORT => Ty::Short,
+        KOTLIN_INT => Ty::Int,
+        KOTLIN_LONG => Ty::Long,
+        KOTLIN_CHAR => Ty::Char,
+        KOTLIN_FLOAT => Ty::Float,
+        KOTLIN_DOUBLE => Ty::Double,
+        KOTLIN_UBYTE => Ty::UByte,
+        KOTLIN_USHORT => Ty::UShort,
+        KOTLIN_UINT => Ty::UInt,
+        KOTLIN_ULONG => Ty::ULong,
+        KOTLIN_STRING => Ty::String,
+        KOTLIN_UNIT => Ty::Unit,
+        KOTLIN_NOTHING => Ty::Nothing,
+        _ => return None,
+    })
+}
 
 /// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
 /// `segment` must be a single path segment; a multi-segment suffix falls back to the full insert.
@@ -861,11 +892,11 @@ impl Ty {
     /// element yields the specialized primitive array (`Int` → `IntArray` = `Obj("kotlin/IntArray")`,
     /// `[I`), any reference element yields the boxed `Array<T>` (`String` → `Obj("kotlin/Array", [String])`,
     /// `[Ljava/lang/String;`). To force a boxed `Array<Int>` (`[Ljava/lang/Integer;`) construct it
-    /// directly as `Ty::obj_args("kotlin/Array", &[Ty::Int])`.
+    /// directly as `Ty::obj_args_name(wk::array(), &[Ty::Int])`.
     pub fn array(elem: Ty) -> Ty {
         match prim_array_name(elem) {
             Some(n) => Ty::obj(n),
-            None => Ty::obj_args("kotlin/Array", &[elem]),
+            None => Ty::obj_args_name(wk::array(), &[elem]),
         }
     }
 
@@ -874,7 +905,7 @@ impl Ty {
     /// `Array<Int>`; the wrapper boxing is the backend's concern, not the type's).
     pub fn array_elem(self) -> Option<Ty> {
         match self {
-            Ty::Obj(n, args) if n.matches("kotlin/Array") => args.first().copied(),
+            Ty::Obj(n, args) if n == wk::array() => args.first().copied(),
             Ty::Obj(n, _) => prim_array_element(n),
             Ty::TyParam(_, b) | Ty::PlatformNullable(b) => b.array_elem(),
             _ => None,
@@ -897,14 +928,14 @@ impl Ty {
     /// `Array<T>` (`Obj("kotlin/Array", [T])`). The single array-ness predicate; consumers must use this
     /// instead of pattern-matching a specific spelling so the representation can migrate under them.
     pub fn is_array(self) -> bool {
-        matches!(self, Ty::Obj(n, _) if n.matches("kotlin/Array") || prim_array_element(n).is_some())
+        matches!(self, Ty::Obj(n, _) if n == wk::array() || prim_array_element(n).is_some())
     }
 
     /// Whether this is a boxed `Array<T>` (`aaload`/`aastore`, elements stored as objects) as opposed to
     /// a primitive specialized array (`IntArray` → `iaload`/`iastore`). The only bit the backend needs to
     /// pick array opcodes; a reference array boxes primitive [`array_elem`]s at the store boundary.
     pub fn is_reference_array(self) -> bool {
-        matches!(self, Ty::Obj(n, _) if n.matches("kotlin/Array"))
+        matches!(self, Ty::Obj(n, _) if n == wk::array())
     }
 
     /// The nullable form `T?` of a type. Idempotent (Kotlin has no `T??`), and degenerate inputs
@@ -1093,15 +1124,16 @@ impl Ty {
             Ty::PlatformNullable(inner) => inner.erased_recv(),
             Ty::DefinitelyNotNull(inner) | Ty::TyParam(_, inner) => inner.erased_recv(),
             // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
-            // `Array<List>`) — an array receiver keys per element class. Use `obj_args` (NOT `Ty::array`,
-            // which collapses a bare-primitive element to a `IntArray` = `[I`, breaking the boxed
-            // `Array<Int>` = `[Integer;` receiver) so the boxed array form is preserved.
-            Ty::Obj(n, args) if n.matches("kotlin/Array") => {
+            // `Array<List>`) — an array receiver keys per element class. Use the identity-form
+            // object constructor (NOT `Ty::array`, which collapses a bare-primitive element to an
+            // `IntArray` = `[I`, breaking the boxed `Array<Int>` = `[Integer;` receiver) so the
+            // boxed array form is preserved.
+            Ty::Obj(n, args) if n == wk::array() => {
                 let e = args
                     .first()
                     .copied()
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                Ty::obj_args("kotlin/Array", &[e.erased_recv()])
+                Ty::obj_args_name(wk::array(), &[e.erased_recv()])
             }
             Ty::Obj(n, _) => Ty::Obj(n, &[]),
             // `null`/`Nothing` (and the error placeholder) are subtypes of every reference type, so a
@@ -1119,12 +1151,12 @@ impl Ty {
             Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.extension_recv_key()),
             Ty::DefinitelyNotNull(inner) => inner.extension_recv_key(),
             Ty::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
-            Ty::Obj(n, args) if n.matches("kotlin/Array") => {
+            Ty::Obj(n, args) if n == wk::array() => {
                 let element = args
                     .first()
                     .copied()
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                Ty::obj_args("kotlin/Array", &[element.extension_recv_key()])
+                Ty::obj_args_name(wk::array(), &[element.extension_recv_key()])
             }
             Ty::Obj(n, _) => Ty::Obj(n, &[]),
             _ => self,
@@ -1136,8 +1168,8 @@ impl Ty {
     /// keep their precise erased key first so concrete overloads still win.
     pub fn erased_recv_candidates(self) -> Vec<Ty> {
         let mut keys = vec![self.erased_recv()];
-        if matches!(keys[0], Ty::Obj(n, _) if n.matches("kotlin/Array")) {
-            keys.push(Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Any")]));
+        if matches!(keys[0], Ty::Obj(n, _) if n == wk::array()) {
+            keys.push(Ty::obj_args_name(wk::array(), &[Ty::obj("kotlin/Any")]));
         }
         keys.push(Ty::obj("kotlin/Any"));
         keys.dedup();
@@ -1352,39 +1384,7 @@ impl Ty {
     pub fn canonical_semantic(self) -> Ty {
         match self {
             Ty::Obj(name, arguments) if arguments.is_empty() => {
-                if name.matches("kotlin/Int") {
-                    Ty::Int
-                } else if name.matches("kotlin/Byte") {
-                    Ty::Byte
-                } else if name.matches("kotlin/Short") {
-                    Ty::Short
-                } else if name.matches("kotlin/Long") {
-                    Ty::Long
-                } else if name.matches("kotlin/Float") {
-                    Ty::Float
-                } else if name.matches("kotlin/Double") {
-                    Ty::Double
-                } else if name.matches("kotlin/Boolean") {
-                    Ty::Boolean
-                } else if name.matches("kotlin/Char") {
-                    Ty::Char
-                } else if name.matches("kotlin/UByte") {
-                    Ty::UByte
-                } else if name.matches("kotlin/UShort") {
-                    Ty::UShort
-                } else if name.matches("kotlin/UInt") {
-                    Ty::UInt
-                } else if name.matches("kotlin/ULong") {
-                    Ty::ULong
-                } else if name.matches("kotlin/String") {
-                    Ty::String
-                } else if name.matches("kotlin/Unit") {
-                    Ty::Unit
-                } else if name.matches("kotlin/Nothing") {
-                    Ty::Nothing
-                } else {
-                    Ty::obj_name(name)
-                }
+                builtin_semantic(name).unwrap_or_else(|| Ty::obj_name(name))
             }
             Ty::Obj(name, arguments) => Ty::obj_args_name(
                 name,
@@ -2469,6 +2469,34 @@ mod tests {
     }
 
     #[test]
+    fn boxed_array_operations_preserve_the_well_known_identity() {
+        let list = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let array = Ty::obj_args_name(wk::array(), &[list]);
+
+        assert_eq!(array.array_elem(), Some(list));
+        assert!(array.is_array());
+        assert!(array.is_reference_array());
+        assert_eq!(Ty::array(Ty::String).obj_internal(), Some(wk::array()));
+
+        let erased = array.erased_recv();
+        assert_eq!(erased.obj_internal(), Some(wk::array()));
+        assert_eq!(
+            erased.array_elem(),
+            Some(Ty::obj("kotlin/collections/List"))
+        );
+
+        let generic = Ty::obj_args_name(wk::array(), &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]);
+        assert_eq!(
+            generic.extension_recv_key().obj_internal(),
+            Some(wk::array())
+        );
+        assert_eq!(
+            array.erased_recv_candidates()[1],
+            Ty::obj_args_name(wk::array(), &[Ty::obj("kotlin/Any")])
+        );
+    }
+
+    #[test]
     fn type_name_tree_operations_preserve_identity_without_text_round_trip() {
         let names = NameTree::default();
         let int = type_name_from(&names, names.insert("kotlin/Int"));
@@ -2512,6 +2540,17 @@ mod tests {
         assert_eq!(Ty::obj("kotlin/String").canonical_semantic(), Ty::String);
         assert_eq!(Ty::obj("kotlin/Unit").canonical_semantic(), Ty::Unit);
         assert_eq!(Ty::obj("kotlin/Nothing").canonical_semantic(), Ty::Nothing);
+        assert_eq!(builtin_semantic(type_name("kotlin/UInt")), Some(Ty::UInt));
+        assert_eq!(builtin_semantic(type_name("kotlin/Unit")), Some(Ty::Unit));
+        assert_eq!(
+            builtin_semantic(type_name("kotlin/Nothing")),
+            Some(Ty::Nothing)
+        );
+        assert_eq!(builtin_semantic(type_name("sample/NotABuiltin")), None);
+        assert_eq!(type_name("kotlin/Array"), wk::array());
+        assert_eq!(builtin_semantic(wk::array()), None);
+        let user = Ty::obj("sample/NotABuiltin");
+        assert_eq!(user.canonical_semantic(), user);
     }
 
     #[test]

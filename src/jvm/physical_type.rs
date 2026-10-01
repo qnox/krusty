@@ -4,7 +4,16 @@
 //! descriptor planning does not call back into emission.
 
 use crate::jvm::names::reference_array_element;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
+
+/// Signed scalar and `String` classifiers rewritten from an object type at the JVM physical-type
+/// boundary. Unsigned classifiers, `Unit`, and `Nothing` stay with the other representation arms.
+fn jvm_builtin_scalar(name: TypeName) -> Option<Ty> {
+    match crate::types::builtin_semantic(name) {
+        Some(ty) if !ty.is_unsigned() && ty != Ty::Unit && ty != Ty::Nothing => Some(ty),
+        _ => None,
+    }
+}
 
 /// Physical element stored by a Kotlin reference `Array<T>`. Boxing is selected from the semantic
 /// scalar before ordinary JVM erasure collapses unsigned values onto signed carriers; otherwise
@@ -89,19 +98,13 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
             if let Some(carrier) = crate::jvm::array_representation::prim_array_carrier(fq_name) {
                 return carrier;
             }
-            match () {
-                _ if fq_name.matches("kotlin/Int") => Ty::Int,
-                _ if fq_name.matches("kotlin/Long") => Ty::Long,
-                _ if fq_name.matches("kotlin/Short") => Ty::Short,
-                _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
-                _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
-                _ if fq_name.matches("kotlin/Char") => Ty::Char,
-                _ if fq_name.matches("kotlin/Double") => Ty::Double,
-                _ if fq_name.matches("kotlin/Float") => Ty::Float,
-                _ if fq_name.matches("kotlin/String") => Ty::String,
-                // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
-                // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
-                _ if fq_name.matches("kotlin/Array") => Ty::array(
+            if let Some(scalar) = jvm_builtin_scalar(fq_name) {
+                return scalar;
+            }
+            // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
+            // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
+            if fq_name == crate::types::wk::array() {
+                return Ty::array(
                     type_args
                         .first()
                         .map(|e| {
@@ -126,11 +129,11 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                             }
                         })
                         .unwrap_or(Ty::obj("java/lang/Object")),
-                ),
-                _ => Ty::obj_name(crate::jvm::jvm_class_map::to_jvm_classfile_type_name(
-                    fq_name,
-                )),
+                );
             }
+            Ty::obj_name(crate::jvm::jvm_class_map::to_jvm_classfile_type_name(
+                fq_name,
+            ))
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
@@ -145,5 +148,24 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jvm_builtin_scalar;
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn signed_scalars_and_string_are_the_physical_subset() {
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Int")), Some(Ty::Int));
+        assert_eq!(
+            jvm_builtin_scalar(type_name("kotlin/String")),
+            Some(Ty::String)
+        );
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/UInt")), None);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Unit")), None);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Nothing")), None);
+        assert_eq!(jvm_builtin_scalar(type_name("kotlin/Array")), None);
     }
 }
