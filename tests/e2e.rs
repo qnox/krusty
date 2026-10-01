@@ -841,6 +841,8 @@ mod generic_arity_overload_e2e;
 mod generic_base_member_type_e2e;
 #[path = "generic_bound_projection_e2e.rs"]
 mod generic_bound_projection_e2e;
+#[path = "generic_cast_number_e2e.rs"]
+mod generic_cast_number_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
 mod generic_constructor_parameter_scope_e2e;
 #[path = "generic_ctor_lambda_targs_e2e.rs"]

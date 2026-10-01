@@ -105,6 +105,7 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
         ir.physical_types.insert(expression, physical);
     }
     fold_nullable_widenings(ir, &boundaries);
+    fold_asserted_number_unbox(ir);
 }
 
 /// An erased reference slot read as a primitive and then widened to that primitive's nullable type
@@ -132,5 +133,66 @@ fn fold_nullable_widenings(ir: &mut IrFile, boundaries: &[(ExprId, ExprId, Ty, T
                 }
             }
         }
+    }
+}
+
+/// `val x: Int = f()!!`, where `f` returns an erased type parameter, null-checks the reference the
+/// call produced and unboxes a number through `java/lang/Number`. The nullable primitive
+/// substitution (`Int?`) is not a value that was stored or explicitly cast, so its wrapper
+/// `checkcast` would reject a `Long` that `Number.intValue` accepts. `Boolean` and `Char` use the
+/// same erased reference, then their own wrappers. A physical result that is already the wrapper
+/// keeps that cast.
+fn fold_asserted_number_unbox(ir: &mut IrFile) {
+    let folds = (0..ir.exprs.len())
+        .filter_map(|index| {
+            let IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: assertion,
+                type_operand: primitive,
+            } = &ir.exprs[index]
+            else {
+                return None;
+            };
+            let (assertion, primitive) = (*assertion, *primitive);
+            if !primitive.is_numeric() && primitive != Ty::Boolean && primitive != Ty::Char {
+                return None;
+            }
+            let IrExpr::NotNullAssert {
+                operand: inner,
+                message: None,
+            } = &ir.exprs[assertion as usize]
+            else {
+                return None;
+            };
+            let inner = *inner;
+            if !ir.declaration_result_coercions.contains(&inner) {
+                return None;
+            }
+            let IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: produced,
+                type_operand: nullable,
+            } = &ir.exprs[inner as usize]
+            else {
+                return None;
+            };
+            if nullable.nullable_primitive() != Some(primitive) {
+                return None;
+            }
+            let physical =
+                crate::jvm::physical_type::ir_ty_to_jvm(ir.physical_types.get(produced)?);
+            let wrapper = crate::jvm::physical_type::ir_ty_to_jvm(&primitive.boxed_ref()?);
+            if !physical.is_reference() || physical == wrapper {
+                return None;
+            }
+            Some((assertion, *produced, inner))
+        })
+        .collect::<Vec<_>>();
+    for (assertion, produced, inner) in folds {
+        let IrExpr::NotNullAssert { operand, .. } = &mut ir.exprs[assertion as usize] else {
+            continue;
+        };
+        *operand = produced;
+        ir.declaration_result_coercions.remove(&inner);
     }
 }
