@@ -26,6 +26,7 @@ names! {
     platform_dependent => "kotlin/internal/PlatformDependent",
     continuation => "kotlin/coroutines/Continuation",
     any => "kotlin/Any",
+    array => "kotlin/Array",
     java_object => "java/lang/Object",
     java_enum => "java/lang/Enum",
     kotlin_enum => "kotlin/Enum",
