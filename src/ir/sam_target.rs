@@ -31,4 +31,8 @@ pub struct IrSamTarget {
     /// and its implementation forwards to the value's `invoke`. A lambda literal converted directly
     /// implements the method with its own body instead.
     pub wraps_function_value: bool,
+    /// A nullable function value converts conditionally: `null` remains `null`, and only a
+    /// non-null function is wrapped. A lambda literal is never null, so its target leaves this
+    /// false; the flag belongs to the function-value adapter, whose single capture is that value.
+    pub nullable: bool,
 }
