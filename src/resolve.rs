@@ -133,6 +133,7 @@ mod receiver_capture_identity;
 mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
+use receiver_function_values::ImplicitReceiverFunctionInvoke;
 mod receiver_uses;
 mod reflection_locals;
 mod resolved_type_occurrences;
@@ -20164,6 +20165,10 @@ impl<'a> Checker<'a> {
                 // `invoke(this as String)` must keep the receiver from before that cast.
                 let callee_receivers = self.implicit_receivers(scope);
                 let callee_this = self.effective_this_narrow(scope);
+                // Filled when a local receiver-function value matches this call's shape but its
+                // context is absent. The error waits until no later callable accepts the name.
+                let mut deferred_function_value_context: Option<Vec<MissingContextParameter>> =
+                    None;
                 let local_value = self
                     .lookup(scope, &fname)
                     .map(|local| {
@@ -20210,14 +20215,14 @@ impl<'a> Checker<'a> {
                         .unwrap_or(receiver_ty);
                     let arg_tys =
                         self.invoke_operator_arg_tys(scope, call, argument_receiver_ty, args);
-                    if matches!(
+                    let skip_explicit_invoke = if matches!(
                         origin,
                         ReceiverFnValueOrigin::Local
                             | ReceiverFnValueOrigin::ClassStorage(_)
                             | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
                     ) {
-                        if let Some((signature, origin)) = receiver_function {
-                            if let Some(ret) = self.record_receiver_function_invoke(
+                        if let Some((signature, fn_origin)) = receiver_function {
+                            match self.classify_implicit_receiver_function_invoke(
                                 scope,
                                 CallArgs {
                                     call,
@@ -20226,33 +20231,48 @@ impl<'a> Checker<'a> {
                                 },
                                 &fname,
                                 signature,
-                                origin,
-                                None,
+                                fn_origin,
                             ) {
-                                return ret;
+                                ImplicitReceiverFunctionInvoke::Selected(ret) => return ret,
+                                ImplicitReceiverFunctionInvoke::Inapplicable {
+                                    missing_context,
+                                } => {
+                                    if !missing_context.is_empty() {
+                                        deferred_function_value_context = Some(missing_context);
+                                    }
+                                    true
+                                }
+                                ImplicitReceiverFunctionInvoke::TryExplicit => false,
                             }
+                        } else {
+                            false
                         }
-                    }
+                    } else {
+                        false
+                    };
                     // An extension-function value also has the ordinary function invocation
                     // shape whose first explicit argument is its receiver: `action(receiver)`.
                     // That shape is independent of where the value is stored. In particular, an
                     // anonymous/local-class capture is a `ClassStorageRead`, not a source-visible
                     // property that member lookup may rediscover. After the implicit-receiver form
                     // above declines the call, invoke the already selected value directly for every
-                    // storage origin.
-                    if let Some(ret) = self.record_invoke_or_report(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
-                        callee,
-                        receiver_ty,
-                        span,
-                        CallResultConstraint::direct(expected),
-                    ) {
-                        return ret;
+                    // storage origin. An inapplicable implicit spelling must not take that path:
+                    // `invoke` would commit a context error and hide a later applicable function.
+                    if !skip_explicit_invoke {
+                        if let Some(ret) = self.record_invoke_or_report(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            callee,
+                            receiver_ty,
+                            span,
+                            CallResultConstraint::direct(expected),
+                        ) {
+                            return ret;
+                        }
                     }
                 }
                 let local_overload_rungs =
@@ -20846,6 +20866,10 @@ impl<'a> Checker<'a> {
                 }
                 let unshadowed_name =
                     !self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                // The alias, if any, is the one `select_classifier_binding` attached to the winning
+                // rung. A later spelling lookup would rediscover a star-imported alias even after a
+                // same-package class won (`class Pick<A, B>` above `typealias Pick<T> = Pick<T, T>`).
+                let mut selected_constructor_alias = None;
                 let (bare_classifier, ambiguous_classifier, implicit_constructor_outer) =
                     if unshadowed_name {
                         let (nested, receiver) = self.implicit_nested_classifier(scope, &fname);
@@ -20859,11 +20883,14 @@ impl<'a> Checker<'a> {
                                 // than first committing the spelling as an ordinary value root. A
                                 // non-callable `val Registry` therefore contributes no candidate
                                 // and does not hide the independently scoped `class Registry`.
-                                // `select_classifier` is the common scope/import/provider query;
-                                // using `qualifier` here would incorrectly reintroduce value-root
-                                // precedence from qualified-expression resolution.
-                                match self.select_classifier(scope, &fname) {
+                                // `select_classifier_binding` is the common scope/import/provider
+                                // query; using `qualifier` here would incorrectly reintroduce
+                                // value-root precedence from qualified-expression resolution.
+                                let (selection, _, alias) =
+                                    self.select_classifier_binding(scope, &fname);
+                                match selection {
                                     InheritedNestedClassifier::Found(internal) => {
+                                        selected_constructor_alias = alias;
                                         let receiver = self
                                             .implicit_constructor_outer_for_classifier(
                                                 scope, &fname, internal,
@@ -20883,20 +20910,28 @@ impl<'a> Checker<'a> {
                 // classifier, while result typing must preserve the alias's complete substitution
                 // (`Alias<X> = Pair<String, X>`). Keeping both facets here prevents provider-shaped
                 // Pass-2 constructors from reapplying the alias's argument list directly to `Pair`.
-                let bare_alias_target = unshadowed_name
-                    .then(|| self.scoped_source_alias_call_ty(scope, call, &fname, expected))
-                    .flatten()
-                    // Alias expansion belongs to the classifier binding selected by this exact
-                    // scope-tower lookup. A lower import level may expose an unrelated alias with
-                    // the same source spelling as a lexical, nested, or same-package class; that
-                    // alias must not donate either its result shape or its inference variables to
-                    // the winning class constructor. Primitive/function/array aliases have no
-                    // classifier facet, so they remain eligible when classifier lookup found none.
-                    .filter(|target| {
-                        bare_classifier.is_none_or(|classifier| {
-                            target.kotlin_class_internal() == Some(classifier)
-                        })
-                    });
+                // A lower import may still name an alias with this spelling, including one whose
+                // expansion is the winning class. That alias's type arguments are not this call's.
+                // Primitive, function, and array aliases have no classifier facet, so they remain
+                // eligible only when classifier lookup found none.
+                let bare_alias_target = if let Some(alias) = selected_constructor_alias.as_ref() {
+                    Some(self.alias_constructor_call_ty(
+                        scope,
+                        call,
+                        &fname,
+                        &alias.formals,
+                        alias.expansion,
+                        expected,
+                    ))
+                } else if unshadowed_name && bare_classifier.is_none() {
+                    self.scoped_source_alias_call_ty(scope, call, &fname, expected)
+                } else {
+                    None
+                }
+                .filter(|target| {
+                    bare_classifier
+                        .is_none_or(|classifier| target.kotlin_class_internal() == Some(classifier))
+                });
                 if bare_alias_target == Some(Ty::Error) {
                     return Ty::Error;
                 }
@@ -23788,6 +23823,9 @@ impl<'a> Checker<'a> {
                             reference,
                         )
                     }
+                } else if let Some(missing) = deferred_function_value_context {
+                    self.report_function_value_context_gaps(call, &missing);
+                    return Ty::Error;
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.

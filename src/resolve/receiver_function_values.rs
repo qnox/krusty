@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// Result of trying the implicit `value()` spelling of a receiver-function value.
+pub(super) enum ImplicitReceiverFunctionInvoke {
+    Selected(Ty),
+    /// Value-parameter arity does not match. The explicit form `value(receiver, args)` may.
+    TryExplicit,
+    /// The implicit spelling is this call's shape and it is not applicable. A later callable may
+    /// still own the name; `missing_context` is reported only when nothing else is.
+    Inapplicable {
+        missing_context: Vec<MissingContextParameter>,
+    },
+}
+
 /// A receiver-function signature's parameters split at kotlinc's function-type boundaries.
 pub(super) struct ReceiverFunctionParts {
     pub(super) context: &'static [Ty],
@@ -265,5 +277,79 @@ impl Checker<'_> {
             },
         );
         Some(signature.ret)
+    }
+
+    /// Decide whether `name()` is an implicit invoke of this receiver-function value.
+    ///
+    /// Applicability requires the extension receiver and every context argument. A miss is not yet
+    /// a diagnostic: kotlinc keeps searching, so an applicable top-level `fun name()` wins over a
+    /// local `context(Needed) Receiver.() -> T` whose `Needed` is not in scope. The context gaps
+    /// are reported only when this value is the only candidate. Anonymous function-type context
+    /// parameters are `p1`, `p2`, … in source order.
+    pub(super) fn classify_implicit_receiver_function_invoke(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        name: &str,
+        signature: &'static crate::types::FnSig,
+        origin: ReceiverFnValueOrigin,
+    ) -> ImplicitReceiverFunctionInvoke {
+        let Some(parts) = Self::receiver_function_parts(signature) else {
+            return ImplicitReceiverFunctionInvoke::TryExplicit;
+        };
+        if parts.values.len() != call_args.arg_tys.len() {
+            return ImplicitReceiverFunctionInvoke::TryExplicit;
+        }
+        let receiver_matches = self
+            .receiver_function_implicit_receiver(
+                scope,
+                parts.receiver,
+                parts.values.len(),
+                call_args.arg_tys.len(),
+            )
+            .is_some();
+        let missing_context = self.unavailable_context_parameters(scope, parts.context);
+        if !receiver_matches || !missing_context.is_empty() {
+            return ImplicitReceiverFunctionInvoke::Inapplicable { missing_context };
+        }
+        self.record_receiver_function_invoke(scope, call_args, name, signature, origin, None)
+            .map_or(
+                ImplicitReceiverFunctionInvoke::TryExplicit,
+                ImplicitReceiverFunctionInvoke::Selected,
+            )
+    }
+
+    pub(super) fn report_function_value_context_gaps(
+        &mut self,
+        call: ExprId,
+        missing: &[MissingContextParameter],
+    ) {
+        let width = missing
+            .iter()
+            .map(|gap| gap.index)
+            .max()
+            .map_or(0, |index| index + 1);
+        let names = (0..width)
+            .map(|index| format!("p{}", index + 1))
+            .collect::<Vec<_>>();
+        for &gap in missing {
+            self.report_missing_context_parameter(call, gap, &names);
+        }
+    }
+
+    fn unavailable_context_parameters(
+        &self,
+        scope: &CheckerScope<'_>,
+        context: &[Ty],
+    ) -> Vec<MissingContextParameter> {
+        context
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| {
+                self.select_context_arguments_with_types(scope, &[**ty])
+                    .is_err()
+            })
+            .map(|(index, &ty)| MissingContextParameter { index, ty })
+            .collect()
     }
 }

@@ -7130,6 +7130,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/resolve/alias_constructor_application.rs`. Tests:
   `tests/typealias_constructor_inference_e2e.rs::an_omitted_stdlib_alias_argument_is_inferred_from_the_constructor_arguments`,
   `tests/typealias_constructor_inference_e2e.rs::an_omitted_source_alias_argument_is_inferred_through_the_alias_expansion`.
+  The alias that supplies those arguments is the declaration selected on the classifier tower, not
+  every later alias of the same spelling. A same-package `class Pick<A, B>` outranks
+  `import lower.*; typealias Pick<T> = sample.Pick<T, T>`, so `Pick<First, Second>(First, Second)`
+  is the class. Re-reading the spelling after selection would apply the alias and reject two type
+  arguments. The same selected binding is what an applied callable reference
+  (`Pick<First, Second>::selected`) already uses. Test:
+  `tests/callable_ref_e2e.rs::an_applied_callable_reference_keeps_the_selected_classifier_rung`.
 - **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
@@ -7612,6 +7619,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   like a written argument; omitting that left an `int` in an `Object` slot, which is a `VerifyError`
   at class load rather than a wrong answer.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
+
+- **A receiver-function value with a missing context does not hide a later callable.**
+  `val action: context(Needed) Receiver.() -> Mark` invoked as `action()` is applicable only when
+  both an implicit `Receiver` and a `Needed` are in scope. When `Needed` is absent, the value is
+  not a committed error: an applicable top-level `fun action(): Mark` is selected and runs. When
+  that value is the only candidate, the diagnostic names each missing anonymous function-type
+  context parameter in source order (`no context argument for 'p1: Needed' found.`). Reporting the
+  gap from `FunctionN.invoke` instead hides that later function.
+  Tests:
+  `tests/context_function_type_e2e.rs::a_receiver_function_value_without_context_does_not_hide_an_applicable_callable`,
+  `tests/context_function_type_e2e.rs::a_lone_receiver_function_value_reports_its_missing_context`.
 
 - **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
   proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start

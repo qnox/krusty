@@ -492,3 +492,25 @@ fn a_receiver_function_value_without_context_does_not_hide_an_applicable_callabl
     common::assert_accepted_like_kotlinc(SOURCE);
     common::expect_box_same_as_kotlinc(SOURCE, "MissingContextReceiverFunctionFallbackRun");
 }
+
+/// With no later callable, the same local value owns the diagnostic. Anonymous function-type
+/// context parameters are numbered `p1`, `p2`, … rather than reported as an unresolved name.
+#[test]
+fn a_lone_receiver_function_value_reports_its_missing_context() {
+    const SOURCE: &str = "// LANGUAGE: +ContextParameters\n\
+        interface Mark\n\
+        object Selected : Mark\n\
+        class Needed\n\
+        class Receiver\n\
+        fun use(receiver: Receiver): Mark {\n\
+        \x20   val action: context(Needed) Receiver.() -> Mark = { Selected }\n\
+        \x20   return with(receiver) { action() }\n\
+        }\n";
+    let sources = [("Main.kt", SOURCE)];
+    let result = common::compiler_diagnostics_with_reference_args(
+        &sources,
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SOURCE),
+    );
+    common::expect_identical_rejection(&result, "lone receiver-function missing context");
+}
