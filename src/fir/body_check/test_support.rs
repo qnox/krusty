@@ -55,6 +55,17 @@ pub(super) fn checked_function_body_rewriting(
     features: &LangFeatures,
     rewrite: impl FnOnce(&mut crate::ast::File, &mut crate::resolve::TypeInfo),
 ) -> (FirBody, ResolvedModuleIndex) {
+    try_checked_function_body_rewriting(source, function_name, platform, features, rewrite)
+        .expect("body must build checked FIR")
+}
+
+pub(super) fn try_checked_function_body_rewriting(
+    source: &str,
+    function_name: &str,
+    platform: Box<dyn SemanticPlatform>,
+    features: &LangFeatures,
+    rewrite: impl FnOnce(&mut crate::ast::File, &mut crate::resolve::TypeInfo),
+) -> Result<(FirBody, ResolvedModuleIndex), BodyCheckFailure> {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("FirBody")],
@@ -147,9 +158,8 @@ pub(super) fn checked_function_body_rewriting(
         &index,
         sources.origins_mut(),
         &mut session,
-    )
-    .expect("body must build checked FIR");
-    (body, index)
+    )?;
+    Ok((body, index))
 }
 
 pub(super) fn root_expression(body: &FirBody) -> FirExprId {
