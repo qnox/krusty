@@ -215,7 +215,6 @@ sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt
 sam/topLevelConversions.kt
 secondaryConstructors/localClasses.kt
-smartCasts/invokeRecieverSmartcastK2.kt
 specialBuiltins/enumAsOrdinaled.kt
 suspendConversion/suspendConversionNullableCCE.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

@@ -85,8 +85,18 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
     ) -> Vec<super::implicit_rungs::ImplicitRung<ImplicitReceiver>> {
+        self.implicit_rungs_with(scope, self.implicit_receivers(scope))
+    }
+
+    /// Receiver tower already read for this call. Argument checking must not replace it: the
+    /// implicit receiver is evaluated before those arguments.
+    pub(super) fn implicit_rungs_with(
+        &self,
+        scope: &CheckerScope<'_>,
+        receivers: Vec<ImplicitReceiver>,
+    ) -> Vec<super::implicit_rungs::ImplicitRung<ImplicitReceiver>> {
         super::implicit_rungs::implicit_rungs(
-            self.implicit_receivers(scope),
+            receivers,
             self.static_scope_classifiers(scope),
             |receiver| {
                 receiver

@@ -2740,6 +2740,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   narrowing applies only while `this` is still the receiver it was proven against (never inside a
   receiver lambda or inner class); and the bare/`this.`-qualified forms of an own member `val`
   share one narrowing.
+- **An invoke receiver runs before its arguments, and the arguments see that flow.** `(a as String)(a)`
+  and `(a as String).invoke(a)` select `String.invoke(String)`. The same order applies to a not-null
+  assertion (`(n!! + 0)(n)` reads `n` as non-null) and to an assignment both branches of the
+  receiver perform (`if (c) { a = Derived() } else { a = Derived() }` then `a(a)`). A conditional
+  or short-circuit receiver publishes a fact only when every completing path proved it:
+  `(if (c) a as String else a)(a)` stays `Any.invoke(Any)`, and `(c && (a as String).isNotEmpty())(a)`
+  does not see the cast, while `((a as String).isNotEmpty() && c)(a)` does. A cast written in an
+  argument does not flow backward onto the receiver. The callee is checked once; a postponed lambda
+  callee is the explicit exception whose argument probes supply its shape.
+  `tests/invoke_receiver_smartcast_e2e.rs`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.
