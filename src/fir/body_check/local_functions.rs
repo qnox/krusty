@@ -241,14 +241,9 @@ impl BodyFirChecker<'_> {
                 nested.bind_local(&parameter.name, ty)
             };
             let origin = nested.origins.source(nested.source, parameter.ty.span);
-            nested.body.add_parameter(
-                FirValueParameter::bound(origin, value, ty).with_inline_modifier(
-                    crate::types::InlineParameterModifier::written(
-                        parameter.is_materialized_lambda,
-                        parameter.is_crossinline,
-                    ),
-                ),
-            );
+            nested
+                .body
+                .add_parameter(FirValueParameter::bound(origin, value, ty));
         }
         for capture in &info.captures {
             if let Some((depth, binding)) = nested.outer_values.get(&capture.name).copied() {

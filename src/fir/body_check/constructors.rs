@@ -1005,6 +1005,7 @@ fn checked_constructor_parameters<'a>(
             ty,
             span: *span,
             context_kind: *context_kind,
+            inline_modifier: crate::types::InlineParameterModifier::None,
         })
         .collect::<Vec<_>>();
     let defaults = source

@@ -7,14 +7,8 @@ use super::common;
 #[test]
 fn inline_non_function_parameter_materializes_a_lambda_once() {
     const SRC: &str = "\
-val sb = StringBuilder()\n\
-inline fun foo(x: Any) {\n\
-    sb.append(if (x === x) \"OK\" else \"FAIL\")\n\
-}\n\
-fun box(): String {\n\
-    foo { 42 }\n\
-    return sb.toString()\n\
-}\n";
+inline fun same(x: Any): Boolean = x === x\n\
+fun box(): String = if (same { 42 }) \"OK\" else \"FAIL\"\n";
     common::expect_box_same_as_kotlinc(SRC, "LambdaAsAny");
 }
 

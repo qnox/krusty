@@ -174,6 +174,7 @@ pub struct CheckedBodyParameter<'a> {
     pub ty: ResolvedTy,
     pub span: Span,
     pub context_kind: crate::types::ContextParameterKind,
+    pub inline_modifier: crate::types::InlineParameterModifier,
 }
 
 #[derive(Clone, Copy)]
@@ -348,6 +349,34 @@ fn check_body_unit_with_parameters_and_defaults(
             .collect(),
         receiver_shape.extension_receiver,
     );
+    let mut inline_modifiers = parameters
+        .iter()
+        .map(|parameter| parameter.inline_modifier)
+        .collect::<Vec<_>>();
+    let mut inline_expansion_modes = parameters
+        .iter()
+        .map(|parameter| {
+            crate::types::InlineExpansionMode::declared(
+                false,
+                matches!(parameter.ty.get(), Ty::Fun(_)),
+                parameter.inline_modifier,
+            )
+        })
+        .collect::<Vec<_>>();
+    if receiver_shape.extension_receiver.is_some() {
+        let receiver_position = receiver_shape.context_receivers.len();
+        inline_modifiers.insert(
+            receiver_position,
+            crate::types::InlineParameterModifier::None,
+        );
+        inline_expansion_modes.insert(
+            receiver_position,
+            crate::types::InlineExpansionMode::Receiver,
+        );
+    }
+    checker
+        .body
+        .publish_inline_parameter_contract(inline_modifiers, inline_expansion_modes);
     bind_parameters_and_check_defaults(&mut checker, parameters, defaults, receiver_shape)?;
     if let Some(root) = root {
         let origin = checker.expression_origin(root)?;

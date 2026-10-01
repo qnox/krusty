@@ -177,6 +177,7 @@ fn class_initialization_parameters<'a>(
                 ty,
                 span: parameter.span,
                 context_kind: crate::types::ContextParameterKind::None,
+                inline_modifier: crate::types::InlineParameterModifier::None,
             })
         })
         .collect()
@@ -647,6 +648,7 @@ fn check_and_dispatch_property_body(
             ty,
             span: parameter.ty.span,
             context_kind: parameter.context_kind,
+            inline_modifier: crate::types::InlineParameterModifier::None,
         })
         .collect::<Vec<_>>();
     // A member property initializer or delegate expression runs inside the constructor, where the primary-constructor
@@ -674,6 +676,7 @@ fn check_and_dispatch_property_body(
             ty: signature.result,
             span: property.span,
             context_kind: crate::types::ContextParameterKind::None,
+            inline_modifier: crate::types::InlineParameterModifier::None,
         });
     }
     let property_storage_type = property
@@ -916,6 +919,10 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
             ty,
             span: parameter.ty.span,
             context_kind: parameter.context_kind,
+            inline_modifier: crate::types::InlineParameterModifier::written(
+                parameter.is_materialized_lambda,
+                parameter.is_crossinline,
+            ),
         })
         .collect::<Vec<_>>();
     // Defaults were checked and moved to `DefaultArgumentStore` during Pass 1. A declaration with
@@ -1022,6 +1029,10 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
             ty,
             span: parameter.ty.span,
             context_kind: parameter.context_kind,
+            inline_modifier: crate::types::InlineParameterModifier::written(
+                parameter.is_materialized_lambda,
+                parameter.is_crossinline,
+            ),
         })
         .collect::<Vec<_>>();
     let defaults = function

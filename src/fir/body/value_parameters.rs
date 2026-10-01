@@ -8,9 +8,6 @@ pub struct FirValueParameter {
     pub value: LocalValueId,
     pub ty: ResolvedTy,
     pub name: FirValueParameterName,
-    /// `noinline` / `crossinline` as the declaration wrote it. Lowering copies this onto the
-    /// parameter's expansion mode; it does not look the modifier up again.
-    pub inline_modifier: crate::types::InlineParameterModifier,
 }
 
 /// What names a value parameter. Kotlin gives the two parameters that bind no name of their own
@@ -33,13 +30,7 @@ impl FirValueParameter {
             value,
             ty,
             name: FirValueParameterName::Bound,
-            inline_modifier: crate::types::InlineParameterModifier::None,
         }
-    }
-
-    pub fn with_inline_modifier(mut self, modifier: crate::types::InlineParameterModifier) -> Self {
-        self.inline_modifier = modifier;
-        self
     }
 }
 

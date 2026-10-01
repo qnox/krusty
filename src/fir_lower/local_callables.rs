@@ -936,15 +936,10 @@ impl BodyLowering<'_> {
         }
         let parameter_identities =
             local_function_parameter_identities(self.body, &self.capture_slots, body)?;
-        let expansion_modes = local_function_expansion_modes(body, &parameter_identities);
-        let info = self
-            .ir
+        self.ir
             .fn_params
             .entry(function)
             .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities));
-        if info.expansion_modes.is_empty() {
-            info.expansion_modes = expansion_modes;
-        }
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
@@ -1222,72 +1217,6 @@ fn inline_callable_body(
             value: Some(value),
         })
     }
-}
-
-fn local_function_expansion_modes(
-    body: &FirBody,
-    identities: &[crate::ir::IrParameterIdentity],
-) -> Vec<crate::types::InlineExpansionMode> {
-    use crate::ir::IrParameterRole;
-
-    let types = local_function_parameters(body);
-    assert_eq!(
-        identities.len(),
-        types.len(),
-        "local expansion modes follow the parameter identities"
-    );
-    let mut named_context = body
-        .parameters()
-        .iter()
-        .take(body.context_value_count() as usize);
-    let mut values = body
-        .parameters()
-        .iter()
-        .skip(body.context_value_count() as usize);
-    identities
-        .iter()
-        .zip(types)
-        .map(|(identity, ty)| {
-            let (is_receiver, modifier) = match identity.role {
-                IrParameterRole::ExtensionReceiver => {
-                    (true, crate::types::InlineParameterModifier::None)
-                }
-                IrParameterRole::CapturedReceiver { .. } => {
-                    return crate::types::InlineExpansionMode::Materialize;
-                }
-                IrParameterRole::CapturedValue { .. } => {
-                    return crate::types::InlineExpansionMode::Materialize;
-                }
-                IrParameterRole::ContextValue { .. } => {
-                    let modifier = named_context
-                        .next()
-                        .expect("a named context identity has a FIR parameter")
-                        .inline_modifier;
-                    (false, modifier)
-                }
-                IrParameterRole::Value
-                | IrParameterRole::UnusedValue
-                | IrParameterRole::DestructuredValue => {
-                    let modifier = values
-                        .next()
-                        .expect("a value identity has a FIR parameter")
-                        .inline_modifier;
-                    (false, modifier)
-                }
-                IrParameterRole::AnonymousContextParameter { .. }
-                | IrParameterRole::ContextReceiver { .. }
-                | IrParameterRole::PropertySetterValue
-                | IrParameterRole::Generated(_) => {
-                    (false, crate::types::InlineParameterModifier::None)
-                }
-            };
-            crate::types::InlineExpansionMode::declared(
-                is_receiver,
-                matches!(ty, Ty::Fun(_)),
-                modifier,
-            )
-        })
-        .collect()
 }
 
 fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
