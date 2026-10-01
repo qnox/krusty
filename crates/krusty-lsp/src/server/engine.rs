@@ -33,6 +33,11 @@ const MAX_SYMBOL_INDEX_CHUNK_FILES: usize = 128;
 /// Byte ceiling on URIs awaiting symbol indexing. Each admitted URI owns two strings until its
 /// chunk is taken: the chunk entry and the dedup key. Symbol chunks are never promoted.
 const MAX_QUEUED_SYMBOL_INDEX_BYTES: usize = 16 * 1024 * 1024;
+/// Symbol chunks run ahead of the diagnostic sweep, but handing a chunk out releases its URIs, so
+/// a watcher can enqueue that file again while the chunk is in flight. One such chunk may run
+/// while a sweep chunk is already waiting. The next dequeue serves the sweep. The re-enqueued URI
+/// stays queued, so the latest write is still indexed after that sweep chunk.
+const SYMBOL_CHUNKS_BEFORE_SWEEP: usize = 1;
 
 fn symbol_queued_uri_bytes(uri: &str) -> usize {
     workspace_index_uri_bytes(uri).saturating_mul(2)
@@ -326,11 +331,16 @@ struct CommandState {
     pending: VecDeque<EngineCommand>,
     neighborhood: VecDeque<IndexJob>,
     sweep: VecDeque<IndexJob>,
-    /// Symbol chunks, drained after interactive work and ahead of both diagnostic levels.
+    /// Symbol chunks, drained after interactive work and ahead of the diagnostic sweep until
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`] of them have run while a sweep chunk is waiting.
     symbols: VecDeque<SymbolIndexJob>,
-    /// URIs already sitting in `symbols`. A watched file that changes again before its chunk runs
-    /// must not enqueue another copy: symbol chunks sit ahead of the diagnostic sweep, so a
-    /// repeating watcher would keep the sweep from ever starting.
+    /// How many symbol chunks have been handed out since the last sweep chunk, while a sweep
+    /// chunk was already queued.
+    symbol_chunks_since_sweep: usize,
+    /// URIs already sitting in `symbols`. A watched file that changes again before its chunk is
+    /// handed out must not enqueue another copy. Once the chunk is handed out the URI may be
+    /// queued again, and that later chunk yields to a waiting sweep after
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`] symbol chunks.
     symbol_queued: HashSet<String>,
     symbol_queued_bytes: usize,
     /// The level each queued URI currently belongs to. Promotion rewrites the level here and
@@ -566,32 +576,49 @@ impl CommandState {
         }
     }
 
-    /// Interactive work first, then the neighbourhood, then the sweep. The levels are the
-    /// priority, so there is no comparator and no heap.
+    /// Interactive work first, then the neighbourhood, then symbol chunks, then the sweep. The
+    /// levels are the priority, so there is no comparator and no heap. A symbol chunk handed out
+    /// while a sweep chunk is waiting counts toward [`SYMBOL_CHUNKS_BEFORE_SWEEP`]; the next
+    /// dequeue serves the sweep before another symbol chunk.
     fn take(&mut self) -> Option<EngineCommand> {
         if let Some(command) = self.pending.pop_front() {
             return Some(command);
         }
         loop {
-            let job = match self.neighborhood.pop_front() {
-                Some(job) => job,
-                // Symbol chunks come between the two diagnostic levels. Ahead of the sweep, because
-                // they are a parse each and project-wide search should not wait hours for a sweep
-                // that is a full analysis per chunk. Behind the neighbourhood level, because that
-                // level is the fast lane for a file the user just saved, and a whole project's
-                // worth of symbol chunks in front of it would be a latency regression.
-                None => match self.take_symbol_chunk() {
-                    Some(command) => return Some(command),
-                    None => self.sweep.pop_front()?,
-                },
-            };
-            let Some(job) = self.claim(job) else {
-                // Every URI in the chunk was promoted to a higher level; it is a stale duplicate.
+            if let Some(job) = self.neighborhood.pop_front() {
+                if let Some(job) = self.finish_index_chunk(job) {
+                    return Some(EngineCommand::Index(job));
+                }
                 continue;
+            }
+            let sweep_due = !self.sweep.is_empty()
+                && self.symbol_chunks_since_sweep >= SYMBOL_CHUNKS_BEFORE_SWEEP;
+            if !sweep_due {
+                if let Some(command) = self.take_symbol_chunk() {
+                    if self.sweep.is_empty() {
+                        self.symbol_chunks_since_sweep = 0;
+                    } else {
+                        self.symbol_chunks_since_sweep =
+                            self.symbol_chunks_since_sweep.saturating_add(1);
+                    }
+                    return Some(command);
+                }
+            }
+            let Some(job) = self.sweep.pop_front() else {
+                self.symbol_chunks_since_sweep = 0;
+                return self.take_symbol_chunk();
             };
-            self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
-            return Some(EngineCommand::Index(job));
+            self.symbol_chunks_since_sweep = 0;
+            if let Some(job) = self.finish_index_chunk(job) {
+                return Some(EngineCommand::Index(job));
+            }
         }
+    }
+
+    fn finish_index_chunk(&mut self, job: IndexJob) -> Option<IndexJob> {
+        let job = self.claim(job)?;
+        self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
+        Some(job)
     }
 
     fn take_symbol_chunk(&mut self) -> Option<EngineCommand> {
@@ -676,6 +703,7 @@ impl CommandState {
         self.neighborhood.clear();
         self.sweep.clear();
         self.symbols.clear();
+        self.symbol_chunks_since_sweep = 0;
         self.symbol_queued.clear();
         self.symbol_queued_bytes = 0;
         self.queued.clear();
@@ -2223,9 +2251,7 @@ mod tests {
         let Some(EngineCommand::IndexSymbols(symbols)) = state.take() else {
             panic!("the symbol chunk should be the only work ahead of the sweep");
         };
-        let mut uris = symbols.uris;
-        uris.sort();
-        assert_eq!(uris, vec!["file:///w/Also.kt", "file:///w/Same.kt"]);
+        assert_eq!(symbols.uris, vec!["file:///w/Same.kt", "file:///w/Also.kt"]);
         assert!(matches!(
             state.take(),
             Some(EngineCommand::Index(IndexJob {
@@ -2234,8 +2260,61 @@ mod tests {
             }))
         ));
         assert!(state.take().is_none());
+        assert!(state.symbol_queued.is_empty());
         assert_eq!(state.symbol_queued_bytes, 0);
         assert!(!state.symbol_admission_truncated);
+    }
+
+    #[test]
+    fn a_handed_out_symbol_change_cannot_postpone_the_sweep() {
+        let mut state = CommandState::default();
+        for index in 0..8 {
+            state.enqueue(EngineCommand::Index(IndexJob {
+                generation: 0,
+                priority: IndexPriority::Sweep,
+                uris: vec![format!("file:///w/Far{index}.kt")],
+            }));
+        }
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+
+        let mut sweeps_seen = 0;
+        let mut symbols_between = 0;
+        while sweeps_seen < 8 {
+            match state.take() {
+                Some(EngineCommand::IndexSymbols(job)) => {
+                    assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+                    symbols_between += 1;
+                    assert!(
+                        symbols_between <= SYMBOL_CHUNKS_BEFORE_SWEEP,
+                        "symbol work must yield to a sweep chunk that is already waiting"
+                    );
+                    // The chunk is in flight. The watcher reports a newer write of the same file.
+                    state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+                        generation: 0,
+                        uris: vec!["file:///w/Same.kt".into()],
+                    }));
+                }
+                Some(EngineCommand::Index(job)) => {
+                    assert_eq!(job.priority, IndexPriority::Sweep);
+                    assert_eq!(job.uris, vec![format!("file:///w/Far{sweeps_seen}.kt")]);
+                    symbols_between = 0;
+                    sweeps_seen += 1;
+                }
+                other => panic!("expected symbol or sweep work, got {other:?}"),
+            }
+        }
+        match state.take() {
+            Some(EngineCommand::IndexSymbols(job)) => {
+                assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+            }
+            other => panic!("the in-flight change must still be indexed, got {other:?}"),
+        }
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
+        assert!(state.take().is_none());
     }
 
     #[test]
@@ -2246,6 +2325,8 @@ mod tests {
             uris: vec!["file:///w/Same.kt".into()],
         }));
         assert!(state.take().is_some());
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
 
         state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
             generation: 0,
@@ -2265,7 +2346,7 @@ mod tests {
             generation: 0,
             uris: vec!["file:///w/Same.kt".into()],
         }));
-        state.replace_index_generation();
+        let generation = state.replace_index_generation();
         state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
             generation: 0,
             uris: vec!["file:///w/Same.kt".into()],
@@ -2274,7 +2355,9 @@ mod tests {
         let Some(EngineCommand::IndexSymbols(job)) = state.take() else {
             panic!("a new generation must not inherit the previous symbol queue");
         };
+        assert_eq!(job.generation, generation);
         assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+        assert!(state.symbol_queued.is_empty());
         assert_eq!(state.symbol_queued_bytes, 0);
     }
 
