@@ -1537,7 +1537,7 @@ fn hoisted_value_ty(
         IrExpr::StaticInstance { ty, .. } => ir
             .classes
             .get(*ty as usize)
-            .map(|class| Ty::obj(&class.fq_name())),
+            .map(|class| Ty::obj_name(class.fq_name)),
         IrExpr::ExternalStaticInstance { ty, .. } => Some(Ty::obj_name(*ty)),
         IrExpr::ExternalStaticField { descriptor, .. } => {
             let ty = crate::jvm::ir_emit::ty_from_field_descriptor(descriptor);
@@ -1621,6 +1621,21 @@ mod tests {
             suspension_bindings, 2,
             "each reference to a shared expression is a distinct evaluation"
         );
+    }
+
+    #[test]
+    fn a_static_instance_uses_the_stored_class_identity() {
+        let mut ir = IrFile::default();
+        ir.classes
+            .push(crate::ir::test_support::blank_class("example/Outer$Widget"));
+        let instance = ir.add_expr(IrExpr::StaticInstance {
+            owner: 0,
+            ty: 0,
+            field: "INSTANCE",
+        });
+        let ty =
+            hoisted_value_ty(&ir, instance, &[], &HashMap::new()).expect("static instance type");
+        assert_eq!(ty, Ty::obj_name(type_name("example/Outer$Widget")));
     }
 
     #[test]

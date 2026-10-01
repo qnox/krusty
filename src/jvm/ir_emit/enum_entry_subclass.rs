@@ -68,8 +68,8 @@ pub(super) fn emit_enum_entry_subclass(
             Ty::Unit,
             [init_body],
         );
-        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq_name));
-        e.slots.insert(0, (receiver, Ty::obj(&fq_name))); // `this`
+        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
+        e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name))); // `this`
         for (index, &ty) in ctor_params.iter().enumerate() {
             e.frame.enter(FrameKey::Parameter(index as u16), ty);
         }
