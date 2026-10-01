@@ -144,6 +144,8 @@ mod tests {
                 check: Some("shared".to_string()),
                 anonymous_super_forward: None,
                 capture: None,
+                provenance: crate::ir::IrCtorParameterProvenance::Value,
+                capture_identity: None,
             },
             IrCtorArg {
                 name: Some("plain".to_string()),
@@ -158,6 +160,8 @@ mod tests {
                 check: Some("plain".to_string()),
                 anonymous_super_forward: None,
                 capture: None,
+                provenance: crate::ir::IrCtorParameterProvenance::Value,
+                capture_identity: None,
             },
         ];
         let class = ir.add_class(class);

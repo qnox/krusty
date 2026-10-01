@@ -50,6 +50,10 @@ pub struct AnonymousObjectCapture {
     /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
     /// establish their own identity when checked; transitive captures preserve the upstream field.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
+    /// Stable identity of the implicit-receiver rung this capture holds. Absent for lexical values
+    /// and for an enclosing class instance. Two classifiers that capture the same rung share it;
+    /// the callable or lambda label is not this identity.
+    pub(crate) receiver_capture: Option<u32>,
 }
 
 impl AnonymousObjectCapture {
@@ -155,6 +159,8 @@ pub(super) struct AnonymousCaptureCandidate {
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
+    /// Closure identity assigned from `receiver_identity`. This is the coordinate checked FIR keeps.
+    pub(super) receiver_capture: Option<u32>,
 }
 
 impl Checker<'_> {
@@ -187,6 +193,151 @@ impl Checker<'_> {
                 .insert(declaration, fields);
         }
     }
+
+    /// Receiver captures a statement-position local class may need, snapshotted before its body
+    /// is checked. Each implicit rung is published through [`Checker::implicit_receiver_capture_id`]
+    /// so a later superclass prefix and the enclosing field share one closure identity.
+    pub(super) fn local_class_receiver_candidates(
+        &mut self,
+        scope: &CheckerScope<'_>,
+    ) -> Vec<ObservedReceiverCapture> {
+        let innermost_class = scope.innermost_class_receiver_identity();
+        let mut class_receiver_ordinal = 0usize;
+        let implicit_receivers = self.implicit_receivers(scope);
+        implicit_receivers
+            .into_iter()
+            // Lexical object/companion singletons are materialized from their published
+            // singleton identity and deliberately use `usize::MAX` instead of a scoped
+            // receiver coordinate. They are not closure captures.
+            .filter(|receiver| receiver.receiver_depth != usize::MAX)
+            .map(|receiver| {
+                let class_label_identity = receiver
+                    .class_receiver
+                    .then(|| {
+                        let ordinal = class_receiver_ordinal;
+                        class_receiver_ordinal += 1;
+                        self.this_labels
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .filter(|(_, (_, _, is_class))| *is_class)
+                            .nth(ordinal)
+                            .map(|(index, _)| super::receiver_label_identity(index))
+                    })
+                    .flatten();
+                let label = self
+                    .this_labels
+                    .len()
+                    .checked_sub(receiver.receiver_depth + 1)
+                    .and_then(|index| self.this_labels.get(index))
+                    .filter(|(_, _, is_class)| !*is_class)
+                    .map(|(label, _, _)| label.clone().into_boxed_str());
+                let source = if innermost_class == Some(receiver.identity) {
+                    AnonymousObjectCaptureSource::EnclosingInstance {
+                        current: receiver.current,
+                        depth: u32::try_from(receiver.receiver_depth)
+                            .expect("too many implicit receiver rungs"),
+                    }
+                } else {
+                    AnonymousObjectCaptureSource::ImplicitReceiver {
+                        current: receiver.current,
+                        depth: u32::try_from(receiver.receiver_depth)
+                            .expect("too many implicit receiver rungs"),
+                    }
+                };
+                let receiver_capture =
+                    self.implicit_receiver_capture_id(receiver.class_receiver, receiver.identity);
+                let capture = AnonymousObjectCapture {
+                    name: if matches!(
+                        source,
+                        AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                    ) {
+                        "this$0".to_string()
+                    } else if receiver.current {
+                        "this$receiver".to_string()
+                    } else {
+                        format!("this$receiver${}", receiver.receiver_depth)
+                    },
+                    ty: receiver.ty,
+                    shared_cell: false,
+                    storage_ty: None,
+                    source,
+                    receiver_label: label,
+                    receiver: Some(self.captured_receiver(
+                        scope,
+                        receiver.identity,
+                        receiver.extension_receiver,
+                        receiver.class_receiver,
+                    )),
+                    semantic_receiver: Some(
+                        if matches!(
+                            source,
+                            AnonymousObjectCaptureSource::EnclosingInstance { .. }
+                        ) {
+                            AnonymousObjectReceiverSource::EnclosingInstance {
+                                current: receiver.current,
+                                depth: u32::try_from(receiver.receiver_depth)
+                                    .expect("too many implicit receiver rungs"),
+                            }
+                        } else {
+                            AnonymousObjectReceiverSource::ImplicitReceiver {
+                                current: receiver.current,
+                                depth: u32::try_from(receiver.receiver_depth)
+                                    .expect("too many implicit receiver rungs"),
+                            }
+                        },
+                    ),
+                    lexical_shadow_depth: 0,
+                    capture_dependency: None,
+                    receiver_capture,
+                };
+                let mut identities = vec![receiver.identity];
+                if let Some(identity) = class_label_identity {
+                    if identity != receiver.identity {
+                        identities.push(identity);
+                    }
+                }
+                let uses_before = identities
+                    .into_iter()
+                    .map(|identity| {
+                        (
+                            identity,
+                            self.implicit_receiver_identity_use_count(identity),
+                        )
+                    })
+                    .collect();
+                ObservedReceiverCapture {
+                    capture,
+                    uses_before,
+                }
+            })
+            .collect()
+    }
+}
+
+pub(super) struct ObservedReceiverCapture {
+    pub(super) capture: AnonymousObjectCapture,
+    pub(super) uses_before: Vec<((usize, usize), usize)>,
+}
+
+/// Keep one capture per semantic source. A capture already recorded for that source still
+/// receives the closure id when publication of the local-class inventory ran first.
+pub(super) fn merge_local_receiver_capture(
+    captures: &mut Vec<AnonymousObjectCapture>,
+    bindings: &mut Vec<Option<u32>>,
+    candidate: AnonymousObjectCapture,
+) {
+    if let Some(existing) = captures
+        .iter_mut()
+        .find(|existing| existing.source == candidate.source)
+    {
+        if existing.receiver_capture.is_none() {
+            existing.receiver_capture = candidate.receiver_capture;
+        }
+        return;
+    }
+    captures.push(candidate);
+    bindings.push(None);
 }
 
 #[derive(Clone, Copy)]
@@ -352,6 +503,7 @@ pub(super) fn record_anonymous_construction_captures(
             semantic_receiver: candidate.semantic_receiver,
             lexical_shadow_depth: 0,
             capture_dependency: None,
+            receiver_capture: candidate.receiver_capture,
         })
         .collect::<Vec<_>>();
     crate::trace_compiler!(

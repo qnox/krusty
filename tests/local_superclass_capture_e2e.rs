@@ -175,6 +175,197 @@ fn a_subclass_uses_the_selected_secondary_constructor_capture_prefix() {
     );
 }
 
+/// An inner class does not grow a constructor parameter for a superclass capture the enclosing
+/// local class already stores. The super call reads that field from the enclosing-instance
+/// parameter, ahead of the arguments written in source.
+#[test]
+fn an_inner_class_reads_a_superclass_capture_from_the_enclosing_instance() {
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+        common::stdlib_jar(),
+        common::jdk_modules(),
+    ]));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    );
+    let (files, diagnostics) = common::capture_common_ir(
+        "fun String.bar(): String {\n\
+         \x20   open class Local(val extra: String) {\n\
+         \x20       fun result() = this@bar + extra\n\
+         \x20   }\n\
+         \x20   class Outer {\n\
+         \x20       inner class Inner : Local(\"K\") {\n\
+         \x20           fun outer() = this@Outer\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   return Outer().Inner().result()\n\
+         }\n\
+         fun box() = \"O\".bar()\n",
+        "InnerSuperEnclosingCapture",
+        platform,
+    );
+    assert!(diagnostics.is_empty(), "frontend rejected: {diagnostics:?}");
+    let ir = files.into_iter().next().expect("one lowered file");
+    let inner_index = ir
+        .classes
+        .iter()
+        .position(|class| class.is_inner_class)
+        .expect("inner class");
+    let inner = &ir.classes[inner_index];
+    let parent = ir
+        .class_id_by_name(inner.superclass)
+        .expect("local superclass is in this file");
+    let enclosing = inner
+        .ctor_args
+        .iter()
+        .find(|argument| {
+            argument.provenance == krusty::ir::IrCtorParameterProvenance::EnclosingInstance
+        })
+        .expect("enclosing-instance parameter");
+    let outer = ir
+        .class_id_by_name(enclosing.ty.obj_internal().expect("enclosing class"))
+        .expect("enclosing class");
+    let describe = |class: krusty::ir::ClassId| {
+        ir.classes[class as usize]
+            .ctor_args
+            .iter()
+            .map(|argument| {
+                format!(
+                    "field={:?} ty={:?} capture={:?}",
+                    argument.field_index, argument.ty, argument.capture
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        inner.constructor_prefix_count,
+        1,
+        "inner keeps only the enclosing instance\ninner {:?}\nparent {:?}\nouter {:?}",
+        describe(inner_index as u32),
+        describe(parent),
+        describe(outer),
+    );
+    let [field_read, written] = inner.super_args.as_slice() else {
+        panic!(
+            "super arguments {:?}\nparent {:?}\nouter {:?}",
+            inner
+                .super_args
+                .iter()
+                .map(|argument| format!("{:?}", ir.expr(*argument)))
+                .collect::<Vec<_>>(),
+            describe(parent),
+            describe(outer),
+        );
+    };
+    let krusty::ir::IrExpr::GetField {
+        receiver,
+        class,
+        index,
+    } = ir.expr(*field_read)
+    else {
+        panic!("leading super argument {:?}", ir.expr(*field_read));
+    };
+    assert!(
+        matches!(ir.expr(*receiver), krusty::ir::IrExpr::GetValue(1)),
+        "the field is read from the enclosing-instance parameter, not from this: {:?}",
+        ir.expr(*receiver)
+    );
+    assert_eq!(*class, outer);
+    let outer_argument = ir.classes[outer as usize]
+        .ctor_args
+        .iter()
+        .find(|argument| argument.field_index == Some(*index))
+        .expect("enclosing capture field");
+    let capture = outer_argument.capture.as_ref();
+    assert!(
+        matches!(
+            capture,
+            Some(krusty::ir::IrConstructorCapture {
+                receiver: Some(krusty::ir::IrCapturedReceiver::Callable(label)),
+                ..
+            }) if label.as_ref() == "bar"
+        ),
+        "{capture:?}"
+    );
+    assert!(matches!(
+        ir.expr(*written),
+        krusty::ir::IrExpr::Const(krusty::ir::IrConst::String(text)) if text.as_str() == Some("K")
+    ));
+}
+
+/// The same program kotlinc runs: the inner constructor passes the outer class's captured
+/// extension receiver into the local superclass and `box` returns that receiver.
+#[test]
+fn an_inner_local_class_returns_the_captured_extension_receiver() {
+    agrees_with_kotlinc(
+        "InnerOfLocalCaptureExtensionReceiver",
+        "fun String.bar(): String {\n\
+         \x20   open class Local {\n\
+         \x20       fun result() = this@bar\n\
+         \x20   }\n\
+         \x20   class Outer {\n\
+         \x20       inner class Inner : Local() {\n\
+         \x20           fun outer() = this@Outer\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   return Outer().Inner().result()\n\
+         }\n\
+         fun box() = \"OK\".bar()\n",
+    );
+}
+
+/// A function and a lambda spelled `bar` are different receivers. The superclass reads the lambda.
+/// The enclosing class also captures the function's `Host` receiver, and that field is not the
+/// super argument.
+#[test]
+fn same_spelled_extension_receivers_do_not_cross_on_the_enclosing_instance() {
+    agrees_with_kotlinc(
+        "DistinctExtensionReceiverLabels",
+        "class Host(val mark: String)\n\
+         fun Host.bar(): String {\n\
+         \x20   return \"OK\".run bar@{\n\
+         \x20       open class Local {\n\
+         \x20           fun read() = this@bar\n\
+         \x20       }\n\
+         \x20       class Holder {\n\
+         \x20           fun fromHost() = mark\n\
+         \x20           inner class Inner : Local()\n\
+         \x20       }\n\
+         \x20       val inner = Holder().Inner().read()\n\
+         \x20       val seen = Holder().fromHost()\n\
+         \x20       if (inner == \"OK\" && seen == \"NO\") \"OK\" else inner + seen\n\
+         \x20   }\n\
+         }\n\
+         fun box() = Host(\"NO\").bar()\n",
+    );
+}
+
+/// Two lambdas spelled `label` are different receivers. The superclass reads the inner `String`
+/// lambda. The enclosing class also stores the outer `Host` lambda, which carries the same label.
+#[test]
+fn same_spelled_lambda_receivers_do_not_cross_on_the_enclosing_instance() {
+    agrees_with_kotlinc(
+        "DistinctLambdaReceiverLabels",
+        "class Host(val mark: String)\n\
+         fun box(): String {\n\
+         \x20   return Host(\"NO\").run label@{\n\
+         \x20       \"OK\".run label@{\n\
+         \x20           open class Local {\n\
+         \x20               fun read() = this@label\n\
+         \x20           }\n\
+         \x20           class Holder {\n\
+         \x20               fun fromHost() = mark\n\
+         \x20               inner class Inner : Local()\n\
+         \x20           }\n\
+         \x20           val seen = Holder().fromHost()\n\
+         \x20           val inner = Holder().Inner().read()\n\
+         \x20           if (inner == \"OK\" && seen == \"NO\") \"OK\" else inner + seen\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n",
+    );
+}
+
 /// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
 /// not mention `result`; it carries that value solely because its local superclass requires it.
 #[test]
