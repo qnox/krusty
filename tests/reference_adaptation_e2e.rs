@@ -1,8 +1,146 @@
 //! Callable-reference adaptation for defaults, varargs, generic expected types, and return coercion.
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
+}
+
+/// A star-projected callable reference retains its semantic capture through common IR. The JVM
+/// carrier must derive the selected declaration's reflection descriptor from the capture's exact
+/// upper bound; a projection wrapper itself is not a JVM value descriptor.
+#[test]
+fn star_projected_member_and_extension_references_use_their_declared_bounds() {
+    const SRC: &str = r#"
+        interface Label
+
+        class Unbounded<T> {
+            fun member(value: T): T = value
+        }
+
+        class Bounded<T : Label> {
+            fun member(value: T): T = value
+        }
+
+        fun <T> Unbounded<T>.extension(value: T): T = value
+        fun <T : Label> Bounded<T>.extension(value: T): T = value
+
+        fun box(): String {
+            val unboundedMember = Unbounded<*>::member
+            val boundedMember = Bounded<*>::member
+            val unboundedExtension = Unbounded<*>::extension
+            val boundedExtension = Bounded<*>::extension
+            return "OK"
+        }
+    "#;
+
+    common::expect_box_same_as_kotlinc(SRC, "callable_reference_projection_bounds");
+    assert_eq!(
+        krusty_reflection_identities(SRC),
+        kotlinc_reflection_identities(SRC),
+        "projected callable-reference carriers must record kotlinc's owner and descriptor"
+    );
+}
+
+/// Owner class, reflected name, and the descriptor string passed to `FunctionReferenceImpl`.
+fn krusty_reflection_identities(source: &str) -> BTreeSet<String> {
+    let classes = common::expect_classes_with_stdlib(source, "Main");
+    let dir = common::scratch_dir().expect("scratch dir");
+    let mut identities = BTreeSet::new();
+    for (name, bytes) in classes {
+        let path = dir.join(format!("{name}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("class directory");
+        }
+        std::fs::write(&path, bytes).expect("write class");
+        if let Some(identity) = reflection_identity(&path) {
+            identities.insert(identity);
+        }
+    }
+    assert!(
+        !identities.is_empty(),
+        "krusty emitted no callable-reference reflection identity"
+    );
+    identities
+}
+
+fn kotlinc_reflection_identities(source: &str) -> BTreeSet<String> {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let out = dir.join("kotlinc");
+    std::fs::create_dir_all(&out).expect("kotlinc output");
+    let source_path = dir.join("Main.kt");
+    std::fs::write(&source_path, source).expect("write fixture");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        out.to_string_lossy().into_owned(),
+        source_path.to_string_lossy().into_owned(),
+    ])
+    .expect("kotlinc");
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the projection fixture: {diagnostics}"
+    );
+    let mut classes = Vec::new();
+    class_files(&out, &mut classes);
+    let identities: BTreeSet<String> = classes
+        .iter()
+        .filter_map(|path| reflection_identity(path))
+        .collect();
+    assert!(
+        !identities.is_empty(),
+        "kotlinc emitted no callable-reference reflection identity"
+    );
+    identities
+}
+
+fn class_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read class directory") {
+        let path = entry.expect("class entry").path();
+        if path.is_dir() {
+            class_files(&path, out);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "class")
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn reflection_identity(class_file: &Path) -> Option<String> {
+    let dump = common::javap(&["-p", "-c", "-s", &class_file.to_string_lossy()])?;
+    let mut in_constructor = false;
+    let mut owner = None;
+    let mut name = None;
+    let mut signature = None;
+    for line in dump.lines() {
+        let trimmed = line.trim();
+        if trimmed.ends_with("();") && !trimmed.contains(' ') {
+            in_constructor = true;
+            continue;
+        }
+        if in_constructor && (trimmed.starts_with("public ") || trimmed.starts_with("static ")) {
+            break;
+        }
+        if !in_constructor {
+            continue;
+        }
+        let Some(payload) = trimmed.split("// ").nth(1) else {
+            continue;
+        };
+        if let Some(class_name) = payload.strip_prefix("class ") {
+            owner = Some(class_name.trim().to_string());
+        } else if let Some(text) = payload.strip_prefix("String ") {
+            if text.contains('(') {
+                signature = Some(text.trim().to_string());
+            } else {
+                name = Some(text.trim().to_string());
+            }
+        }
+    }
+    Some(format!("{} {} {}", owner?, name?, signature?))
 }
 
 #[test]

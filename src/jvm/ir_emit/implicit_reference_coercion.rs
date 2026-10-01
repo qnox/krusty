@@ -2,7 +2,7 @@
 
 use crate::ir::{IrConst, IrExpr};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder};
-use crate::jvm::names::{instanceof_internal_name, type_descriptor};
+use crate::jvm::names::instanceof_internal_name;
 use crate::types::Ty;
 
 /// Narrow one already-emitted reference operand when its physical target requires a JVM cast.
@@ -19,7 +19,7 @@ pub(super) fn emit(
 ) {
     if !source.is_reference()
         || !target.is_reference()
-        || type_descriptor(source) == type_descriptor(target)
+        || crate::jvm::names::same_type_descriptor(source, target)
         || matches!(operand, IrExpr::Const(IrConst::Null))
     {
         return;

@@ -75,6 +75,16 @@ fn diverging_call_in_argument_position() {
     common::expect_box_ok_with_stdlib(SRC, "diverging_argument_position");
 }
 
+/// A source `return` is itself a bottom-typed expression. When it occupies an argument slot, the
+/// outer call must observe `Nothing` rather than attempting to describe an error placeholder.
+#[test]
+fn return_expression_in_argument_position() {
+    const SRC: &str = "class Token\n\
+        fun consume(first: Token, second: Token) {}\n\
+        fun box(): String { consume(Token(), return \"OK\") }\n";
+    common::expect_box_same_as_kotlinc(SRC, "return_expression_argument_position");
+}
+
 #[test]
 fn println_overloads_are_ambiguous_for_a_diverging_argument() {
     const SRC: &str = "fun boom(): Nothing = error(\"boom\")\n\

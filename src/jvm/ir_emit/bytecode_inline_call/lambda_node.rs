@@ -199,7 +199,7 @@ impl Emitter<'_> {
             .flatten()
             .filter(|&class| {
                 !semantic.is_nullable()
-                    && type_descriptor(physical) == type_descriptor(Ty::obj_name(class))
+                    && crate::jvm::names::same_type_descriptor(physical, Ty::obj_name(class))
             })
             .and_then(|class| {
                 crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
@@ -307,7 +307,7 @@ impl Emitter<'_> {
             Some(class) if !semantic.is_nullable() => InvokeCoercion::ValueClass(class),
             Some(_) => InvokeCoercion::Unported,
             None if semantic.non_null().obj_internal().is_some_and(|class| {
-                type_descriptor(carrier) == type_descriptor(Ty::obj_name(class))
+                crate::jvm::names::same_type_descriptor(carrier, Ty::obj_name(class))
             }) =>
             {
                 InvokeCoercion::Plain

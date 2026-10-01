@@ -2899,6 +2899,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
+- **A source `return` in value position is `Nothing`.** `consume(Token(), return "OK")` types the
+  `return` expression as a bottom value, the same way `throw`, `break`, and `continue` do. The JVM
+  value-type walk reports `Nothing` for that expression, so the outer call does not describe an
+  error placeholder. Test: `return_expression_in_argument_position` in
+  `tests/diverging_value_position_e2e.rs`.
+- **A callable reference's reflection descriptor uses a projection's readable bound.** Common IR
+  keeps the selected declaration's use-site captures. A top-level `out` or star capture is not a
+  JVM value type: the carrier's reflection signature uses that capture's exact upper bound
+  (`Unbounded<*>::member` reflects `member(Ljava/lang/Object;)Ljava/lang/Object;`, and
+  `Bounded<*>::member` where `T : Label` reflects `member(LLabel;)LLabel;`). An `in` projection
+  stays intact and erases to `Object`. This is representation of an already-selected declaration.
+  Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
+  `tests/reference_adaptation_e2e.rs`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
