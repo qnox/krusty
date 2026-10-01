@@ -420,10 +420,14 @@ impl BodyLowering<'_> {
             FirExprKind::LocalPropertyReference {
                 name,
                 property_type,
-            } => self.ir.add_expr(IrExpr::LocalPropertyReference {
-                name: name.clone(),
-                property_type: property_type.get(),
-            }),
+                declaration,
+            } => self.ir.add_expr(IrExpr::LocalPropertyReference(
+                crate::ir::IrLocalPropertyReference {
+                    name: name.clone(),
+                    property_type: property_type.get(),
+                    declaration: *declaration,
+                },
+            )),
             FirExprKind::PropertyReference {
                 target,
                 function_type,

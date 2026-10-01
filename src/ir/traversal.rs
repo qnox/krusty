@@ -215,7 +215,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         IrExpr::KClassLiteral { value, .. } => value.iter().for_each(|&value| f(value)),
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
-        | IrExpr::LocalPropertyReference { .. }
+        | IrExpr::LocalPropertyReference(_)
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }

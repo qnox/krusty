@@ -1,5 +1,6 @@
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
+use crate::fir::LocalDelegatedPropertyId;
 
 fn expressions(body: &FirBody) -> impl Iterator<Item = &FirExpr> {
     (0..body.expression_count()).filter_map(|raw| {
@@ -112,7 +113,7 @@ fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_refe
     assert!(expressions(&body).any(|expression| {
         matches!(
             &expression.kind,
-            FirExprKind::LocalPropertyReference { name, property_type }
+            FirExprKind::LocalPropertyReference { name, property_type, .. }
                 if name.as_ref() == "value" && property_type.get() == Ty::String
         )
     }));
@@ -551,4 +552,114 @@ fn delegated_property_constructor_lambda_preserves_its_generic_result_constraint
 
         fun box(): String = if (Owner.value.number == 42) "OK" else "Fail""#,
     );
+}
+
+/// The declaration named by every local property reference in `body` and the bodies of the
+/// lambdas it contains, in checker order.
+fn local_property_references(body: &FirBody) -> Vec<LocalDelegatedPropertyId> {
+    let mut references = Vec::new();
+    for expression in expressions(body) {
+        match &expression.kind {
+            FirExprKind::LocalPropertyReference { declaration, .. } => {
+                references.push(*declaration)
+            }
+            FirExprKind::Lambda { body, .. } => references.extend(local_property_references(body)),
+            _ => {}
+        }
+    }
+    references
+}
+
+const DELEGATE: &str = "class Delegate(val value: String) {\n\
+                            operator fun getValue(owner: Any?, property: Any?): String = value\n\
+                        }\n";
+
+#[test]
+fn same_named_local_delegates_in_sibling_scopes_are_different_properties() {
+    let (body, _) = checked_function_body(
+        &format!(
+            "{DELEGATE}fun sibling(flag: Boolean): String {{\n\
+                 if (flag) {{ val x by Delegate(\"a\"); return x }}\n\
+                 else {{ val x by Delegate(\"b\"); return x }}\n\
+             }}\n"
+        ),
+        "sibling",
+    );
+    let references = local_property_references(&body);
+    let [first, second] = references[..] else {
+        panic!("two local property references, found {references:?}")
+    };
+    assert_ne!(first, second);
+    assert_eq!(first.owner(), second.owner());
+    assert_eq!((first.ordinal(), second.ordinal()), (0, 1));
+}
+
+#[test]
+fn a_shadowing_local_delegate_is_a_different_property_from_the_one_it_shadows() {
+    let (body, _) = checked_function_body(
+        &format!(
+            "{DELEGATE}fun nested(): String {{\n\
+                 val x by Delegate(\"outer\")\n\
+                 val inner = if (x.length > 0) {{ val x by Delegate(\"inner\"); x }} else \"\"\n\
+                 return inner + x\n\
+             }}\n"
+        ),
+        "nested",
+    );
+    let mut references = local_property_references(&body);
+    references.sort_by_key(|declaration| declaration.ordinal());
+    let [outer, outer_again, inner] = references[..] else {
+        panic!("outer read twice and inner read once, found {references:?}")
+    };
+    assert_eq!(outer, outer_again);
+    assert_ne!(outer, inner);
+    assert_eq!(outer.owner(), inner.owner());
+    assert_eq!((outer.ordinal(), inner.ordinal()), (0, 1));
+}
+
+#[test]
+fn a_captured_local_delegate_keeps_its_declaration_identity_inside_a_lambda() {
+    let (body, _) = checked_function_body(
+        &format!(
+            "{DELEGATE}fun invoke(block: () -> String): String = block()\n\
+             fun captured(): String {{\n\
+                 val x by Delegate(\"c\")\n\
+                 return invoke {{ x }} + x\n\
+             }}\n"
+        ),
+        "captured",
+    );
+    let references = local_property_references(&body);
+    let [lambda_read, enclosing_read] = references[..] else {
+        panic!("exactly the lambda and its caller must read the property, found {references:?}")
+    };
+    assert_eq!(lambda_read, enclosing_read);
+    assert_eq!(lambda_read.ordinal(), 0);
+}
+
+#[test]
+fn provide_read_write_and_lambda_name_one_local_property() {
+    let (body, _) = checked_function_body(
+        "class Delegate(var value: String) {\n\
+             operator fun provideDelegate(thisRef: Any?, property: Any?): Delegate = this\n\
+             operator fun getValue(thisRef: Any?, property: Any?): String = value\n\
+             operator fun setValue(thisRef: Any?, property: Any?, value: String) {\n\
+                 this.value = value\n\
+             }\n\
+         }\n\
+         fun observe(block: () -> String): String = block()\n\
+         fun use(): String {\n\
+             var value by Delegate(\"v\")\n\
+             value = value\n\
+             return observe { value }\n\
+         }\n",
+        "use",
+    );
+    let references = local_property_references(&body);
+    let [provided, read, written, lambda_read] = references[..] else {
+        panic!(
+            "exactly provideDelegate, read, write and lambda must name the property, found {references:?}"
+        )
+    };
+    assert_eq!([read, written, lambda_read], [provided; 3]);
 }

@@ -550,6 +550,7 @@ struct ReceiverFrame {
 pub struct BodyCheckSession {
     class_bodies: HashMap<DeclarationId, ClassBodyContext>,
     local_callables: HashMap<BodyLocalCallableDeclarationId, PublishedLocalCallable>,
+    local_delegated_properties: super::local_delegated_properties::LocalDelegatedPropertyIds,
     active_source: Option<ActiveSourceDeclarations>,
 }
 
@@ -1338,25 +1339,6 @@ impl BodyFirChecker<'_> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
-    }
-
-    fn local_delegate(&self, name: &str) -> Option<LocalDelegateBinding> {
-        self.delegate_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).cloned())
-    }
-
-    fn delegated_binding(&self, name: &str) -> Option<(u32, LocalDelegateBinding)> {
-        self.local_delegate(name)
-            .map(|binding| (u32::MAX, binding))
-            .or_else(|| self.outer_delegates.get(name).cloned())
-            .or_else(|| {
-                self.class_delegates
-                    .get(name)
-                    .cloned()
-                    .map(|binding| (u32::MAX, binding))
-            })
     }
 
     fn binding_source_at_shadow_depth(

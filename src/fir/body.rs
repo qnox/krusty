@@ -1,6 +1,7 @@
-use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
+use super::delegate_calls::FirPropertyDelegatePlan;
 use super::local_callables::BodyLocalCallableDeclarationId;
 use super::local_class_names::FirGeneratedClassProvenance;
+use super::local_delegated_properties::{LocalDelegateBinding, LocalDelegatedPropertyId};
 use std::collections::{HashMap, HashSet};
 
 mod context_parameters;
@@ -409,15 +410,6 @@ impl DelegateStorage {
             Self::ClassField(_) => None,
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LocalDelegateBinding {
-    pub(crate) storage: DelegateStorage,
-    pub(crate) property_ty: ResolvedTy,
-    pub(crate) get_value: FirDelegateCall,
-    pub(crate) set_value: Option<FirDelegateCall>,
-    pub(crate) name: Box<str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1173,6 +1165,10 @@ pub enum FirExprKind {
     LocalPropertyReference {
         name: Box<str>,
         property_type: ResolvedTy,
+        /// The local delegated property's declaration identity. Every convention call of one
+        /// declaration names it, wherever the read or write is; two declarations never share it,
+        /// whatever their names or origins.
+        declaration: LocalDelegatedPropertyId,
     },
     PropertyReference {
         target: FirPropertyReferenceTarget,
