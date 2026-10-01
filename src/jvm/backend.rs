@@ -80,7 +80,9 @@ pub(crate) struct BackendPassFacts {
 ///    and fold the conversion chain it belongs to.
 ///
 /// 5. `realize_call_result_boundaries` — retain the selected declaration's erased JVM result slot
-///    and fold its marked conversion chain; later representation passes may refine the slot.
+///    and fold its marked conversion chain. A `!!` that immediately unboxes a generic scalar reads
+///    that erased reference: a number through `Number`, `Boolean` and `Char` through their wrappers.
+///    Later representation passes may refine the slot.
 ///
 /// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
