@@ -98,11 +98,11 @@ impl Classpath {
 impl PackageTree {
     /// The first classpath entry whose class file is stored as `internal`. The spelling is the
     /// zip entry without `.class`. A miss does not intern it.
-    fn first_jar_for_spelling(&self, internal: &str) -> Option<JarId> {
+    pub(super) fn first_jar_for_spelling(&self, internal: &str) -> Option<JarId> {
         self.first_jar_for_id(self.names.get(internal)?)
     }
 
-    fn first_jar_for_id(&self, class: NameId) -> Option<JarId> {
+    pub(super) fn first_jar_for_id(&self, class: NameId) -> Option<JarId> {
         let start = self
             .classes
             .partition_point(|&(candidate, _)| candidate.0 < class.0);

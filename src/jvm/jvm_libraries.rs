@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod builtin_classifier_shapes;
+mod catalog_presence;
 mod classifier_facts;
 mod generic_signatures;
 mod inline_body_plan;
@@ -1247,6 +1248,7 @@ impl JvmLibraries {
             .map_err(|error| crate::libraries::PlatformInitializationError {
                 message: format!("cannot load Kotlin builtins dependency: {error}"),
             })?;
+        cp.validate_catalog()?;
         let common_expectations =
             super::common_metadata::CommonExpectationIndex::load(cp.common_expectation_klib())
                 .map_err(|error| crate::libraries::PlatformInitializationError {
@@ -3509,22 +3511,6 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
     false
 }
 
-/// Textual internal name of a namespace probe. Used only when an incomplete catalog must open class
-/// bytes; a complete catalog answers [`JvmLibraries::proven_classifier`] without this spelling.
-fn classifier_spelling(namespace: SymbolNamespace, name: &str) -> String {
-    let namespace_name = namespace.name().render();
-    match namespace {
-        SymbolNamespace::Package(_) => {
-            if namespace_name.is_empty() {
-                name.to_string()
-            } else {
-                format!("{namespace_name}/{name}")
-            }
-        }
-        SymbolNamespace::Classifier(_) => format!("{namespace_name}${name}"),
-    }
-}
-
 impl JvmLibraries {
     /// Federate the classpath package catalog with the core declaration source. `symbols()` already
     /// combines those sources; package-prefix resolution must expose the same namespace or an explicit
@@ -4397,28 +4383,6 @@ impl JvmLibraries {
         self.cp
             .cache_library_type_name(internal_name, built.clone());
         built
-    }
-
-    /// Promote `name` only after the classpath catalog proves an exact class file. A complete catalog
-    /// answers from the package name tree, so a function or property probe does not render a classifier
-    /// spelling. An incomplete catalog still verifies the textual internal name against class bytes.
-    fn proven_classifier(&self, namespace: SymbolNamespace, name: &str) -> Option<TypeName> {
-        let tree = self.cp.package_tree();
-        if !tree.catalog_complete() {
-            let spelling = classifier_spelling(namespace, name);
-            return self
-                .cp
-                .class_exists(&spelling)
-                .then(|| type_name(&spelling));
-        }
-        let declared = match namespace {
-            SymbolNamespace::Package(package) => tree.contains_exact_class(package, name),
-            SymbolNamespace::Classifier(owner) => tree.contains_nested_class(owner, name),
-        };
-        declared.then(|| match namespace {
-            SymbolNamespace::Package(package) => crate::types::type_name_child(package, name),
-            SymbolNamespace::Classifier(owner) => crate::types::type_name_nested_child(owner, name),
-        })
     }
 
     fn symbols(

@@ -19,7 +19,11 @@ fn write_compiled_lib(tag: &str, classes: &[(String, Vec<u8>)]) -> PathBuf {
     let dir = common::scratch_dir()
         .unwrap_or_else(|| panic!("{tag}: allocate class-metadata scratch directory"));
     for (name, bytes) in classes {
-        let path = dir.join(format!("{name}.class"));
+        let path = if name.contains('.') {
+            dir.join(name)
+        } else {
+            dir.join(format!("{name}.class"))
+        };
         let parent = path
             .parent()
             .unwrap_or_else(|| panic!("{tag}: emitted class path has no parent"));

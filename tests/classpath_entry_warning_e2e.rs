@@ -43,23 +43,30 @@ fn a_missing_classpath_entry_warns_in_kotlinc_words_and_compiles() {
 }
 
 #[test]
-fn a_truncated_jar_on_the_classpath_warns_and_compiles() {
+fn a_truncated_jar_on_the_classpath_is_a_terminal_inventory_error() {
     let dir = std::env::temp_dir().join(format!("krusty_cpwarn_jar_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let jar = dir.join("core.jar");
     std::fs::write(&jar, b"PK\x03\x04 not really a zip").unwrap();
     let (ok, stderr, emitted) = compile_with_cp("truncated", &jar);
+    let source = std::env::temp_dir().join(format!(
+        "krusty_cpwarn_truncated_{}/Main.kt",
+        std::process::id()
+    ));
     assert_eq!(
         stderr,
         format!(
-            "warning: cannot read classpath entry {}: not a readable archive \
-             (invalid Zip archive: Could not find EOCD)\n",
-            jar.display()
+            "warning: cannot read classpath entry {jar}: not a readable archive \
+             (invalid Zip archive: Could not find EOCD)\n\
+             {source}:1:1: error: cannot inventory classpath entry {jar}: package/class catalog is incomplete\n\
+             krusty: 1 error(s)\n",
+            jar = jar.display(),
+            source = source.display(),
         )
     );
     assert!(
-        ok && emitted,
-        "the compile must still succeed; stderr:\n{stderr}"
+        !ok && !emitted,
+        "an unreadable archive must not compile; stderr:\n{stderr}"
     );
 }
