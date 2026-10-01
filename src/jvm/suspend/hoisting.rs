@@ -819,6 +819,28 @@ fn hoist_expr(
             };
             e
         }
+        IrExpr::Equality { op, mode, lhs, rhs } => {
+            let operands = [Some(lhs), Some(rhs)];
+            let Some(new_operands) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return e;
+            };
+            let nl = new_operands[0].expect("equality operands have no default-argument holes");
+            let nr = new_operands[1].expect("equality operands have no default-argument holes");
+            ir.exprs[e as usize] = IrExpr::Equality {
+                op,
+                mode,
+                lhs: nl,
+                rhs: nr,
+            };
+            e
+        }
         IrExpr::ReifiedTypeOp {
             cast,
             negated,
@@ -1493,6 +1515,7 @@ fn hoisted_value_ty(
             .and_then(|function| orig_rets.get(*function as usize))
             .copied(),
         IrExpr::InvokeFunction { ret, .. } => Some(*ret),
+        IrExpr::Equality { .. } => Some(Ty::Boolean),
         IrExpr::PrimitiveBinOp { op, lhs, .. } => Some(match op {
             IrBinOp::Lt
             | IrBinOp::Le

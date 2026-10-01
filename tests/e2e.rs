@@ -889,6 +889,8 @@ mod hides_members_overload_e2e;
 mod iconsapi_byte_residue_e2e;
 #[path = "ieee754_equality_e2e.rs"]
 mod ieee754_equality_e2e;
+#[path = "ieee754_inline_equality_e2e.rs"]
+mod ieee754_inline_equality_e2e;
 #[path = "implicit_any_super_method_e2e.rs"]
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]

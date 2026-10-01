@@ -195,10 +195,49 @@ impl BodyFirChecker<'_> {
                     checker.selected_value_conversion_from(source, value, actual, target, cause)?;
                 Ok(checker.convert_fir_value(value, target, cause, conversion))
             };
+        let lhs = operand(self, lhs)?;
+        let rhs = operand(self, rhs)?;
+        if matches!(
+            operation,
+            FirBinaryOperation::Equal | FirBinaryOperation::NotEqual
+        ) {
+            let lhs_ty = self
+                .body
+                .expr(lhs)
+                .expect("the equality operand was just built")
+                .ty
+                .get();
+            let rhs_ty = self
+                .body
+                .expr(rhs)
+                .expect("the equality operand was just built")
+                .ty
+                .get();
+            return Ok(FirExprKind::Equality {
+                operation,
+                mode: source_equality_mode(lhs_ty, rhs_ty),
+                lhs,
+                rhs,
+            });
+        }
         Ok(FirExprKind::Binary {
             operation,
-            lhs: operand(self, lhs)?,
-            rhs: operand(self, rhs)?,
+            lhs,
+            rhs,
         })
+    }
+}
+
+/// The equality mode of the types written at the comparison, before inline substitution.
+fn source_equality_mode(lhs: Ty, rhs: Ty) -> crate::types::EqualityMode {
+    use crate::types::EqualityMode;
+    let left = lhs.canonical_semantic().scalar_value_repr();
+    let right = rhs.canonical_semantic().scalar_value_repr();
+    match (left, right) {
+        (Some(left), Some(right)) if matches!(left, Ty::Float | Ty::Double) && left == right => {
+            EqualityMode::Ieee754
+        }
+        (Some(_), Some(_)) => EqualityMode::Primitive,
+        _ => EqualityMode::Structural,
     }
 }

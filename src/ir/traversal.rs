@@ -138,7 +138,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::NewArray { size: arg, .. }
         | IrExpr::PrimitiveNeg { operand: arg, .. } => f(*arg),
         IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } | IrExpr::Equality { lhs, rhs, .. } => {
             f(*lhs);
             f(*rhs);
         }

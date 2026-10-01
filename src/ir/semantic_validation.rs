@@ -313,6 +313,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
         | IrExpr::PrimitiveBinOp { .. }
+        | IrExpr::Equality { .. }
         | IrExpr::StringConcat(_)
         | IrExpr::EnclosingInstance { .. }
         | IrExpr::GetField { .. }

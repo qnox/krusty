@@ -84,7 +84,9 @@ impl Emitter<'_> {
         // comparison path so `(a == b) == false` branches directly on `a != b`, and an intrinsic
         // Boolean result is consumed by one `ifeq`/`ifne` rather than materialized and compared
         // again. This is a JVM realization optimization over already-checked common IR.
-        if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
+        if let IrExpr::PrimitiveBinOp { op, lhs, rhs } | IrExpr::Equality { op, lhs, rhs, .. } =
+            *self.ir.expr(cond)
+        {
             if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
                 let literal = match (self.ir.expr(lhs), self.ir.expr(rhs)) {
                     (IrExpr::Const(IrConst::Boolean(value)), _)
@@ -145,7 +147,8 @@ impl Emitter<'_> {
                 return false;
             }
         }
-        if let IrExpr::PrimitiveBinOp { op, .. } = *self.ir.expr(cond) {
+        if let IrExpr::PrimitiveBinOp { op, .. } | IrExpr::Equality { op, .. } = *self.ir.expr(cond)
+        {
             use IrBinOp::*;
             if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {
                 self.emit_comparison_branch(cond, target, jump_when_true, code);

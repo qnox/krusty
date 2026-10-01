@@ -1,6 +1,6 @@
 //! `krusty-ir` to JavaScript source emission.
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{Callee, EqualityMode, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
 use crate::types::Ty;
 
@@ -589,6 +589,25 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 js_op(*op),
                 emit_expr(ir, *rhs, inst)
             )
+        }
+        IrExpr::Equality { op, mode, lhs, rhs } => {
+            let left = emit_expr(ir, *lhs, inst);
+            let right = emit_expr(ir, *rhs, inst);
+            let equal = match mode {
+                // JavaScript `Object.is` has Kotlin's boxed floating-point behavior: NaN equals
+                // itself and negative zero differs from positive zero.
+                EqualityMode::Structural => format!("Object.is({left}, {right})"),
+                // Strict equality on JS numbers is IEEE equality, including `-0 === 0` and
+                // `NaN !== NaN`; it is also the native realization for other primitive scalars.
+                EqualityMode::Ieee754 | EqualityMode::Primitive => {
+                    format!("({left} === {right})")
+                }
+            };
+            match op {
+                IrBinOp::Eq => equal,
+                IrBinOp::Ne => format!("(!{equal})"),
+                _ => unreachable!("checked equality has equality operator {op:?}"),
+            }
         }
         IrExpr::StringConcat(parts) => {
             let parts = parts

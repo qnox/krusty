@@ -165,6 +165,7 @@ pub(super) fn realize(
             | IrExpr::Continue { .. }
             | IrExpr::Variable { .. }
             | IrExpr::PrimitiveBinOp { .. }
+            | IrExpr::Equality { .. }
             | IrExpr::PrimitiveNeg { .. }
             | IrExpr::StringConcat(_)
             | IrExpr::PropertyRead { .. }
