@@ -123,7 +123,7 @@ use class_pool_seed::{
     seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
     PlainClassPoolSeed,
 };
-use enclosure::class_enclosure;
+pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
@@ -1603,7 +1603,11 @@ pub(crate) fn emit_all_with_checked_classifiers(
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         default_call_operands: facts.default_call_operands,
-        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
+        inner_classes: crate::jvm::inner_classes::InnerClasses::new(
+            ir,
+            facts.metadata.override_results,
+            facade,
+        ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
 }

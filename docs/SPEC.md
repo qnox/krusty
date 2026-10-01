@@ -5129,6 +5129,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
   package-private class itself. Test:
   `tests/inner_class_declaration_order_e2e.rs::an_enum_entry_subclass_lists_itself_as_a_nested_class`.
+- **A class lists every local class its code declares.** kotlinc's `ClassCodegen` generates a
+  class declared in executable code from the class whose code declares it (the class its
+  `EnclosingMethod` names) and adds it to that class's `InnerClasses`, whether or not the code
+  names it: `fun make() { class Unused }` gives the class declaring `make` an `Unused` row, and
+  a local class in a top-level function a row in the file facade. The row sorts by its declaration
+  path like any other. Test:
+  `tests/inner_class_declaration_order_e2e.rs::a_class_lists_every_local_class_its_code_declares`.
+  An inline function from another file of the module declares its objects in that file: a caller
+  that only inlines it lists no row for them. Test:
+  `a_caller_lists_no_local_class_of_an_inline_function_in_another_file`.
 - **What an enum entry's body declares is enclosed by the entry class's constructor.** An enum
   entry with a body compiles to its own class, whose `(String, int, ...)V` constructor runs the
   body's initializers. An object or local class declared in one of them names that constructor in
