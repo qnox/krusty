@@ -1584,7 +1584,7 @@ mod tests {
             1,
             1,
             &LangFeatures::new(),
-            &[],
+            &[] as &[&str],
             Some(&classpath),
         )
         .unwrap();
@@ -2324,13 +2324,14 @@ mod tests {
         classpath: Option<&[PathBuf]>,
     ) {
         let sources = [source];
+        let java_sources: Vec<&str> = java_sources.iter().map(String::as_str).collect();
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[0],
             result_count: 1,
             inferred_count: 1,
             language_features: &[],
-            java_sources,
+            java_sources: &java_sources,
             classpath,
         })
         .unwrap();
