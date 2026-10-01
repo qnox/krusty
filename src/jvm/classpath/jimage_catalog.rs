@@ -190,6 +190,11 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
             .locations
             .insert(class, (content + offset) as u64, stored, compressed != 0);
     }
+    // Growth kept every superseded child table so a probe still inside the old one stays valid.
+    // This build is the only user of the tree, so those tables are just retained capacity.
+    Arc::get_mut(&mut index.names)
+        .expect("jimage name tree is private until publication")
+        .reclaim_retired_tables();
     Some(index)
 }
 
