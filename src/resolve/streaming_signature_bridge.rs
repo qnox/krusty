@@ -62,7 +62,7 @@ enum SelectedTopLevelCall {
     /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
     /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
     ClassifierInvoke(TypeName, Option<Ty>),
-    Constructor(Box<crate::libraries::LibraryMember>),
+    Constructor(Box<crate::symbol_resolver::SelectedConstructorDeclaration>),
     /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
     /// constructor, so this is not a `Constructor` selection — the result is the interface itself.
     SamConstructor(crate::types::TypeName),
@@ -2533,19 +2533,18 @@ impl ProductionSignatureSemantics<'_> {
     fn constructor_result(
         &self,
         scope: crate::fir::SignatureScope,
-        member: &crate::libraries::LibraryMember,
+        selected: &crate::symbol_resolver::SelectedConstructorDeclaration,
         arguments: &[Ty],
         bound_outer: Option<Ty>,
         explicit_type_arguments: &[Ty],
         expected: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        use crate::symbol_resolver::selected_constructor::unlisted_constructor_type;
+        let member = &selected.declaration;
         let owner = member.owner.ok_or_else(Self::failure)?;
         let Some(class) = self.table.class_by_type_name(owner) else {
-            let result = if member.ret.obj_internal() == Some(owner) {
-                member.ret
-            } else {
-                Ty::obj_name(owner)
-            };
+            let result =
+                unlisted_constructor_type(selected, owner, explicit_type_arguments, expected);
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
         };
         // Constructor selection has already applied explicit arguments, literal adaptation,

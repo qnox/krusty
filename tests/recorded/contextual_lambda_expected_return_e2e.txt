@@ -1,0 +1,14 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_statement_before_the_lambda_result_does_not_fail_signature_inference]
+2.4.20:
+
+[conditional_constructor_in_a_lambda_uses_the_expected_type]
+2.4.20:
+
+[return_only_call_in_a_lambda_uses_the_expected_type]
+2.4.20:
+
+[thread_local_lambda_constructs_the_expected_map]
+2.4.20:
