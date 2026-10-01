@@ -973,8 +973,8 @@ mod tests {
             "Ljava/lang/String;[ILjava/lang/Integer;"
         );
         assert_eq!(
-            method_descriptor(&params, Ty::obj("java/lang/Object")),
-            "(Ljava/lang/String;[ILjava/lang/Integer;)Ljava/lang/Object;"
+            method_descriptor(&params, Ty::obj("sample/Result")),
+            "(Ljava/lang/String;[ILjava/lang/Integer;)Lsample/Result;"
         );
     }
 
