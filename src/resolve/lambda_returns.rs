@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprId, File, StmtId};
 use crate::types::Ty;
@@ -26,6 +26,24 @@ pub enum ReturnTarget {
     Lambda(ExprId),
 }
 
+/// Where the lambda's result constraint came from. An open call-inference variable can currently
+/// have the same upper-bound type as a source-declared result (`Any`), so the type alone cannot
+/// answer whether it is allowed to be fixed by the body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LambdaResultConstraint {
+    Open,
+    Fixed(Ty),
+}
+
+impl LambdaResultConstraint {
+    fn expected(self) -> Option<Ty> {
+        match self {
+            Self::Open => None,
+            Self::Fixed(expected) => Some(expected),
+        }
+    }
+}
+
 /// All mutable return state for the body currently checked. Keeping labels, targets, contributed
 /// result types, and expected result types together makes entering a nested body an explicit
 /// ownership transfer instead of a collection of parallel `Checker` fields.
@@ -36,12 +54,21 @@ pub(super) struct LambdaReturnScopes {
     expected_types: HashMap<ExprId, Ty>,
     bare_target: ReturnTarget,
     active_chain: Vec<ExprId>,
+    /// The root body expression paired with each active lambda. Only that block's trailing
+    /// expression can become the lambda result; nested blocks remain ordinary expressions.
+    active_bodies: Vec<ExprId>,
+    active_constraints: Vec<LambdaResultConstraint>,
     /// Parallel to `active_chain`: whether each active lambda is inlined into the frame around it,
     /// which is kotlinc's `InlineStatus.returnAllowed`. A return may leave only through lambdas
     /// passed to a plain (neither `crossinline` nor `noinline`) parameter of an inline callee.
     active_inlined: Vec<bool>,
     /// The lambda whose individual value returns are being collected, with those returns.
     collected_returns: Option<(ExprId, Vec<Ty>)>,
+    /// Valueless and valued exits already bound to each lambda. The key is the lambda expression
+    /// the return resolved to, so two literals that share a label do not share an exit set.
+    exits: HashMap<ExprId, LambdaExitForms>,
+    /// Open lambda results fixed to `Unit` while their owning body was checked once.
+    unit_from_exits: HashSet<ExprId>,
 }
 
 impl Default for LambdaReturnScopes {
@@ -53,8 +80,12 @@ impl Default for LambdaReturnScopes {
             expected_types: HashMap::new(),
             bare_target: ReturnTarget::Function,
             active_chain: Vec::new(),
+            active_bodies: Vec::new(),
+            active_constraints: Vec::new(),
             active_inlined: Vec::new(),
             collected_returns: None,
+            exits: HashMap::new(),
+            unit_from_exits: HashSet::new(),
         }
     }
 }
@@ -64,6 +95,8 @@ pub(super) struct FunctionReturnFrame {
     label: Option<String>,
     bare_target: ReturnTarget,
     chain: Vec<ExprId>,
+    bodies: Vec<ExprId>,
+    constraints: Vec<LambdaResultConstraint>,
     inlined: Vec<bool>,
 }
 
@@ -71,6 +104,14 @@ pub(super) struct LambdaReturnFrame {
     label_depth: usize,
     chain_depth: usize,
     previous_expected: Option<Ty>,
+}
+
+/// Exits bound to one lambda. A valueless exit contributes `Unit`. A valued exit is a real result
+/// and is joined with the tail.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LambdaExitForms {
+    valueless: bool,
+    valued: bool,
 }
 
 impl LambdaReturnScopes {
@@ -103,6 +144,8 @@ impl LambdaReturnScopes {
             label: std::mem::replace(&mut self.function_label, label),
             bare_target: std::mem::replace(&mut self.bare_target, ReturnTarget::Function),
             chain: std::mem::take(&mut self.active_chain),
+            bodies: std::mem::take(&mut self.active_bodies),
+            constraints: std::mem::take(&mut self.active_constraints),
             inlined: std::mem::take(&mut self.active_inlined),
         }
     }
@@ -111,6 +154,8 @@ impl LambdaReturnScopes {
         self.function_label = frame.label;
         self.bare_target = frame.bare_target;
         self.active_chain = frame.chain;
+        self.active_bodies = frame.bodies;
+        self.active_constraints = frame.constraints;
         self.active_inlined = frame.inlined;
     }
 
@@ -121,22 +166,27 @@ impl LambdaReturnScopes {
     pub(super) fn enter_lambda(
         &mut self,
         lambda: ExprId,
+        body: ExprId,
         label: Option<String>,
-        expected: Option<Ty>,
+        constraint: LambdaResultConstraint,
         inlined: bool,
     ) -> LambdaReturnFrame {
         let frame = LambdaReturnFrame {
             label_depth: self.labels.len(),
             chain_depth: self.active_chain.len(),
-            previous_expected: match expected {
+            previous_expected: match constraint.expected() {
                 Some(expected) => self.expected_types.insert(lambda, expected),
                 None => self.expected_types.remove(&lambda),
             },
         };
+        self.exits.remove(&lambda);
+        self.unit_from_exits.remove(&lambda);
         if let Some(label) = label {
             self.labels.push((label, lambda));
         }
         self.active_chain.push(lambda);
+        self.active_bodies.push(body);
+        self.active_constraints.push(constraint);
         self.active_inlined.push(inlined);
         self.returned_types.remove(&lambda);
         frame
@@ -149,7 +199,44 @@ impl LambdaReturnScopes {
         };
         self.labels.truncate(frame.label_depth);
         self.active_chain.truncate(frame.chain_depth);
+        self.active_bodies.truncate(frame.chain_depth);
+        self.active_constraints.truncate(frame.chain_depth);
         self.active_inlined.truncate(frame.chain_depth);
+        self.exits.remove(&lambda);
+        self.unit_from_exits.remove(&lambda);
+    }
+
+    /// Record one resolved exit of `lambda`. `valueless` is a bare `return@label`.
+    pub(super) fn record_lambda_exit(&mut self, lambda: ExprId, valueless: bool) {
+        let forms = self.exits.entry(lambda).or_default();
+        if valueless {
+            forms.valueless = true;
+        } else {
+            forms.valued = true;
+        }
+    }
+
+    /// Whether `body` is the owning body of the active lambda and semantic return binding has
+    /// established that its still-open result has only valueless exits.
+    fn open_body_has_only_valueless_exits(&self, body: ExprId) -> Option<ExprId> {
+        let lambda = *self.active_chain.last()?;
+        if self.active_bodies.last() != Some(&body)
+            || self.active_constraints.last() != Some(&LambdaResultConstraint::Open)
+        {
+            return None;
+        }
+        self.exits
+            .get(&lambda)
+            .is_some_and(|forms| forms.valueless && !forms.valued)
+            .then_some(lambda)
+    }
+
+    fn mark_unit_from_exits(&mut self, lambda: ExprId) {
+        self.unit_from_exits.insert(lambda);
+    }
+
+    fn take_unit_from_exits(&mut self, lambda: ExprId) -> bool {
+        self.unit_from_exits.remove(&lambda)
     }
 
     /// Whether a return to `target` leaves a frame it may not: a lambda that is not inlined into
@@ -260,6 +347,207 @@ impl Checker<'_> {
             },
         }
     }
+
+    /// Type the lambda body once. Labelled exits are resolved and recorded by that ordinary
+    /// checker traversal; the owning block uses those records immediately before checking its
+    /// trailing expression.
+    pub(super) fn type_lambda_body(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        lambda: ExprId,
+        body: ExprId,
+        coerce_return_to_unit: bool,
+        result_constraint: LambdaResultConstraint,
+    ) -> (Ty, bool) {
+        let checked = self.check_lambda_body(scope, body, coerce_return_to_unit, result_constraint);
+        let unit_from_exits = self.lambda_returns.take_unit_from_exits(lambda);
+        (checked, unit_from_exits)
+    }
+
+    pub(super) fn record_labelled_lambda_exit(
+        &mut self,
+        target: ReturnTarget,
+        labelled: bool,
+        valueless: bool,
+    ) {
+        if labelled {
+            if let ReturnTarget::Lambda(lambda) = target {
+                self.lambda_returns.record_lambda_exit(lambda, valueless);
+            }
+        }
+    }
+
+    /// Check the trailing expression of an open lambda as a `Unit` statement once semantic return
+    /// binding has established that all exits from this exact lambda are valueless.
+    pub(super) fn type_open_lambda_unit_tail(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        body: ExprId,
+        expression: ExprId,
+    ) -> Option<Ty> {
+        let lambda = self
+            .lambda_returns
+            .open_body_has_only_valueless_exits(body)?;
+        self.lambda_returns.mark_unit_from_exits(lambda);
+        self.expected = Some(Ty::Unit);
+        Some(match self.expr_statement(scope, expression) {
+            Ty::Nothing => Ty::Nothing,
+            Ty::Error => Ty::Error,
+            _ => Ty::Unit,
+        })
+    }
+
+    /// The lambda's result after its body has been typed. A `Unit` result from valueless exits is
+    /// already fixed; completing an expectation-free generic tail as `Nothing` would drop it.
+    pub(super) fn lambda_result_type(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        lambda: ExprId,
+        body: ExprId,
+        tail: Ty,
+        coerce_to_unit: bool,
+        result_constraint: LambdaResultConstraint,
+    ) -> Ty {
+        let inferred = self.lambda_ret_ty(scope, lambda, tail, coerce_to_unit);
+        let inferred = if !coerce_to_unit
+            && result_constraint == LambdaResultConstraint::Open
+            && !self.file.anon_fun_ret.contains_key(&lambda.0)
+        {
+            let result = super::conditional_branch::branch_value_expression(self.file, body);
+            self.unbound_contextual_result_signature(result)
+                .map(|signature| {
+                    crate::symbol_resolver::instantiate_unconstrained_result(&signature, inferred)
+                })
+                .unwrap_or(inferred)
+        } else {
+            inferred
+        };
+        match result_constraint {
+            LambdaResultConstraint::Fixed(expected) => {
+                let result = super::conditional_branch::branch_value_expression(self.file, body);
+                self.expect_assignable(expected, inferred, self.span(result), "return");
+                expected
+            }
+            LambdaResultConstraint::Open => inferred,
+        }
+    }
+
+    fn check_lambda_body(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        body: ExprId,
+        coerce_return_to_unit: bool,
+        result_constraint: LambdaResultConstraint,
+    ) -> Ty {
+        if coerce_return_to_unit {
+            return match self.expr_statement(scope, body) {
+                Ty::Nothing => Ty::Nothing,
+                Ty::Error => Ty::Error,
+                _ => Ty::Unit,
+            };
+        }
+        match result_constraint {
+            LambdaResultConstraint::Fixed(expected) => self.expr_declared(scope, body, expected),
+            LambdaResultConstraint::Open => self.expr(scope, body),
+        }
+    }
+
+    /// Install the exact return scope for one lambda while checking its body. The explicit literal
+    /// label wins over the call-site's implicit label. Anonymous functions also own bare returns;
+    /// ordinary lambdas leave bare returns targeted at the enclosing function.
+    pub(super) fn with_lambda_return_scope<R>(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        body: ExprId,
+        implicit_label: Option<&str>,
+        mut result_constraint: LambdaResultConstraint,
+        check: impl FnOnce(&mut Self, LambdaResultConstraint) -> R,
+    ) -> R {
+        let label = self
+            .file
+            .lambda_labels
+            .get(&e.0)
+            .map(String::as_str)
+            .or(implicit_label)
+            .map(str::to_string);
+        // Only a lambda whose selected parameter inlines it runs in the caller's frame. Any other
+        // lambda (no call argument, or one no selected inline parameter took) has kotlinc's
+        // `InlineStatus.Unknown`, which does not allow a return to leave through it.
+        let inlined_argument = self.argument_lambda_inlining.get(&e) == Some(&true);
+        if let Some(reference) = self.file.anon_fun_ret.get(&e.0).cloned() {
+            result_constraint = LambdaResultConstraint::Fixed(self.type_ref_ty(scope, &reference));
+        }
+        let frame = self.lambda_returns.enter_lambda(
+            e,
+            body,
+            label.clone(),
+            result_constraint,
+            inlined_argument,
+        );
+        crate::trace_compiler!(
+            "resolve",
+            "lambda return scope enter expression={e:?} label={label:?}"
+        );
+        let anonymous = self.file.anon_fun_lambdas.contains(&e.0);
+        // A lambda is a control-flow boundary — EXCEPT an inlined one. Since Kotlin 2.2
+        // (`BreakContinueInInlineLambdas`, default-on at the 2.4 language level krusty targets) a
+        // `break`/`continue` inside an inline lambda targets the enclosing loop, because the body is
+        // spliced into it. `allow_lambda_mutation` is set from the callee's `is_inline` and brackets
+        // this body check, and it means exactly "this body is inlined into the caller's frame" — the
+        // same property that makes the jump legal.
+        let inlined = self.allow_lambda_mutation;
+        let outer_loop_labels = if inlined {
+            self.loop_labels.clone()
+        } else {
+            std::mem::take(&mut self.loop_labels)
+        };
+        let outer_loop_depth = if inlined {
+            self.loop_depth
+        } else {
+            std::mem::replace(&mut self.loop_depth, 0)
+        };
+        let saved = anonymous.then(|| {
+            let declared = self.file.anon_fun_ret.get(&e.0).cloned();
+            let ret = match declared {
+                Some(reference) => self.type_ref_ty(scope, &reference),
+                None => Ty::Unit,
+            };
+            let state = (
+                self.ret_ty,
+                self.return_allowed,
+                self.lambda_returns
+                    .replace_bare_target(ReturnTarget::Lambda(e)),
+            );
+            self.ret_ty = ret;
+            self.return_allowed = true;
+            state
+        });
+        // Suppressing receiver accounting is scoped to the immediate expression evaluated at an
+        // anonymous object's construction site. A non-inline lambda is a later execution/capture
+        // boundary: receiver selections in its body must be retained by that closure (and by any
+        // parser-hoisted anonymous constructor that carries the closure). An inline lambda remains
+        // part of the surrounding expression and therefore keeps the suppression.
+        let previous_capture_accounting = (!inlined)
+            .then(|| std::mem::replace(&mut self.suppress_receiver_capture_accounting, false));
+        let out = check(self, result_constraint);
+        if let Some(previous) = previous_capture_accounting {
+            self.suppress_receiver_capture_accounting = previous;
+        }
+        if let Some((ret_ty, return_allowed, bare_return_target)) = saved {
+            self.ret_ty = ret_ty;
+            self.return_allowed = return_allowed;
+            self.lambda_returns.replace_bare_target(bare_return_target);
+        }
+        self.loop_labels = outer_loop_labels;
+        self.loop_depth = outer_loop_depth;
+        self.lambda_returns.leave_lambda(e, frame);
+        crate::trace_compiler!(
+            "resolve",
+            "lambda return scope exit expression={e:?} label={label:?}"
+        );
+        out
+    }
 }
 
 impl Checker<'_> {
@@ -299,14 +587,26 @@ mod tests {
         let outer = ExprId(1);
         let inner = ExprId(2);
         let mut scopes = LambdaReturnScopes::default();
-        let outer_frame = scopes.enter_lambda(outer, Some("scope".into()), Some(Ty::String), true);
+        let outer_frame = scopes.enter_lambda(
+            outer,
+            ExprId(11),
+            Some("scope".into()),
+            LambdaResultConstraint::Fixed(Ty::String),
+            true,
+        );
         assert_eq!(
             scopes.target(Some("scope")),
             Some(ReturnTarget::Lambda(outer))
         );
         assert_eq!(scopes.expected_type(outer), Some(Ty::String));
 
-        let inner_frame = scopes.enter_lambda(inner, Some("scope".into()), Some(Ty::Int), true);
+        let inner_frame = scopes.enter_lambda(
+            inner,
+            ExprId(12),
+            Some("scope".into()),
+            LambdaResultConstraint::Fixed(Ty::Int),
+            true,
+        );
         assert_eq!(
             scopes.target(Some("scope")),
             Some(ReturnTarget::Lambda(inner))
@@ -328,10 +628,22 @@ mod tests {
         let inlined = ExprId(1);
         let stored = ExprId(2);
         let mut scopes = LambdaReturnScopes::default();
-        let inlined_frame = scopes.enter_lambda(inlined, Some("plain".into()), None, true);
+        let inlined_frame = scopes.enter_lambda(
+            inlined,
+            ExprId(11),
+            Some("plain".into()),
+            LambdaResultConstraint::Open,
+            true,
+        );
         assert!(!scopes.leaves_its_frame(ReturnTarget::Function));
 
-        let stored_frame = scopes.enter_lambda(stored, Some("kept".into()), None, false);
+        let stored_frame = scopes.enter_lambda(
+            stored,
+            ExprId(12),
+            Some("kept".into()),
+            LambdaResultConstraint::Open,
+            false,
+        );
         assert!(scopes.leaves_its_frame(ReturnTarget::Function));
         assert!(scopes.leaves_its_frame(ReturnTarget::Lambda(inlined)));
         assert!(!scopes.leaves_its_frame(ReturnTarget::Lambda(stored)));
@@ -339,5 +651,45 @@ mod tests {
 
         assert!(!scopes.leaves_its_frame(ReturnTarget::Function));
         scopes.leave_lambda(inlined, inlined_frame);
+    }
+
+    #[test]
+    fn same_label_exits_follow_the_resolved_lambda_and_do_not_leak() {
+        let outer = ExprId(1);
+        let inner = ExprId(2);
+        let outer_body = ExprId(11);
+        let inner_body = ExprId(12);
+        let mut scopes = LambdaReturnScopes::default();
+        let outer_frame = scopes.enter_lambda(
+            outer,
+            outer_body,
+            Some("label".into()),
+            LambdaResultConstraint::Open,
+            true,
+        );
+
+        let inner_frame = scopes.enter_lambda(
+            inner,
+            inner_body,
+            Some("label".into()),
+            LambdaResultConstraint::Open,
+            true,
+        );
+        let ReturnTarget::Lambda(resolved) = scopes.target(Some("label")).unwrap() else {
+            panic!("the inner label resolves to a lambda");
+        };
+        assert_eq!(resolved, inner);
+        scopes.record_lambda_exit(resolved, true);
+        assert_eq!(
+            scopes.open_body_has_only_valueless_exits(inner_body),
+            Some(inner)
+        );
+        assert_eq!(scopes.open_body_has_only_valueless_exits(outer_body), None);
+        scopes.record_lambda_exit(outer, false);
+
+        scopes.leave_lambda(inner, inner_frame);
+        assert_eq!(scopes.open_body_has_only_valueless_exits(outer_body), None);
+        scopes.leave_lambda(outer, outer_frame);
+        assert_eq!(scopes.open_body_has_only_valueless_exits(outer_body), None);
     }
 }

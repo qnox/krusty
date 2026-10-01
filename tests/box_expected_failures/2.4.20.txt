@@ -101,7 +101,6 @@ funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt
-inference/coercionToUnitWithLastLambdaExpression.kt
 inference/kt67609.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt

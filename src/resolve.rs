@@ -205,7 +205,7 @@ use lambda_expectation::{
     written_inline_modifier, FunctionalArgumentExpectation, MemberLambdaShape,
 };
 pub use lambda_returns::ReturnTarget;
-use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
+use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaReturnScopes};
 use local_class_scope::EnclosingTypeParameterDeclaration;
 pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
@@ -12020,7 +12020,7 @@ struct FunctionLambdaShape<'a> {
     signature: &'static crate::types::FnSig,
     specialized_params: &'a [Ty],
     has_receiver: bool,
-    fixed_expected_return: bool,
+    result_constraint: LambdaResultConstraint,
 }
 
 /// A call's argument expressions with their checked types — parallel slices that must stay the
@@ -19836,7 +19836,8 @@ impl<'a> Checker<'a> {
                                                 LambdaCheckMode {
                                                     suspend: false,
                                                     coerce_return_to_unit,
-                                                    expected_return: None,
+                                                    result_constraint:
+                                                        LambdaResultConstraint::Open,
                                                 },
                                             );
                                     }
@@ -22049,7 +22050,7 @@ impl<'a> Checker<'a> {
                                         LambdaCheckMode {
                                             suspend: false,
                                             coerce_return_to_unit,
-                                            expected_return: None,
+                                            result_constraint: LambdaResultConstraint::Open,
                                         },
                                     )
                                 });
@@ -22068,7 +22069,7 @@ impl<'a> Checker<'a> {
                                         LambdaCheckMode {
                                             suspend: false,
                                             coerce_return_to_unit,
-                                            expected_return: None,
+                                            result_constraint: LambdaResultConstraint::Open,
                                         },
                                     )
                                 });
@@ -22482,15 +22483,31 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_default();
                             let collect_postponed =
                                 ty_mentions_param(Ty::Fun(expected_function), postponed_formals);
-                            let callee_return_is_fixed =
-                                sig.generic_sig.as_ref().is_none_or(|generic| {
-                                    !ty_mentions_param(expected_function.ret, &generic.formals)
+                            let open_callee_result =
+                                sig.generic_sig.as_ref().is_some_and(|generic| {
+                                    let declared =
+                                        generic.params.get(pi).copied().map(|parameter| {
+                                            if sig.vararg_index == Some(pi) {
+                                                parameter.array_read_elem().unwrap_or(parameter)
+                                            } else {
+                                                parameter
+                                            }
+                                        });
+                                    declared.and_then(Ty::fun_ret).is_some_and(|result| {
+                                        generic.formals.iter().any(|formal| {
+                                            !known_generic_bindings.contains_key(formal)
+                                                && ty_mentions_param(
+                                                    result,
+                                                    std::slice::from_ref(formal),
+                                                )
+                                        })
+                                    })
                                 });
                             // A caller declaration's visible `<T>` is universally quantified
                             // and therefore a fixed expectation. A symbolic result introduced
                             // by a surrounding generic call (`getResult(...): B1`) is still an
                             // inference variable and must remain postponed with that call.
-                            let fixed_expected_return = callee_return_is_fixed
+                            let fixed_expected_return = !open_callee_result
                                 && Self::type_is_lexically_fixed(scope, expected_function.ret);
                             if collect_postponed {
                                 self.postponed_call_constraints
@@ -22510,7 +22527,7 @@ impl<'a> Checker<'a> {
                                             call_fn_name.as_deref(),
                                         );
                                     }
-                                    c.check_lambda_with_function_type_labeled(
+                                    c.check_lambda_with_open_function_type_labeled(
                                         scope,
                                         a,
                                         expected_function,
@@ -25623,9 +25640,12 @@ impl<'a> Checker<'a> {
             let ReturnTarget::Lambda(lambda) = target else {
                 unreachable!("the labelled lambda-return branch checked its target")
             };
+            self.record_labelled_lambda_exit(target, true, e.is_none());
             let returned = match e {
                 Some(expression) => self.check_lambda_return_value(scope, expression, lambda),
-                None => Ty::Unit,
+                None => {
+                    self.check_lambda_valueless_return(lambda, self.file.stmt_spans[s.0 as usize])
+                }
             };
             self.record_lambda_returned_type(lambda, returned);
             return;
@@ -25674,6 +25694,21 @@ impl<'a> Checker<'a> {
         } else {
             expected
         }
+    }
+
+    /// Validate a valueless exit at the resolved lambda boundary. A fixed `Unit` or `Unit?` result
+    /// preserves Kotlin's implicit Unit value (and nullable widening); ordinary assignability to a
+    /// wider type such as `Any` does not turn the source construct into a value-returning exit. Open
+    /// results retain `Unit` as an inference contribution, which is what permits a bare exit to make
+    /// an otherwise-generic lambda `Unit`.
+    fn check_lambda_valueless_return(&mut self, lambda: ExprId, span: Span) -> Ty {
+        let Some(expected) = self.lambda_returns.expected_type(lambda) else {
+            return Ty::Unit;
+        };
+        if expected != Ty::Error && expected.non_null() != Ty::Unit {
+            self.report_assignability_error(expected, Ty::Unit, span, "return");
+        }
+        expected
     }
 
     fn stmt_for(
@@ -39023,7 +39058,7 @@ struct MemberExtensionLambdaPlan {
 struct LambdaCheckMode {
     suspend: bool,
     coerce_return_to_unit: bool,
-    expected_return: Option<Ty>,
+    result_constraint: LambdaResultConstraint,
 }
 
 type AnnotationElements = Vec<(String, Ty)>;
@@ -60472,7 +60507,6 @@ impl<'a> Checker<'a> {
         }
         // Consume the propagated expectation so it reaches only THIS expression; a nested
         // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
-        let value_required = value_required || expected.is_some();
         // Grow the stack per level, not only at the `check_file` entry: one nesting level of a
         // CALL expression stacks `expr_inner` + `check_call` (far larger unoptimized frames than
         // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
@@ -61531,12 +61565,12 @@ impl<'a> Checker<'a> {
         // (`m.onErrorResume { Mono.empty() }` takes its element type from the SAM's own result).
         // A result that still mentions a callee formal is not fixed yet and must not be pushed —
         // overload inference owns it until it is.
-        let expected_return = expectation
+        let result_constraint = expectation
             .result
-            .filter(|result| *result != Ty::Unit)
             .filter(|result| {
                 *result != Ty::Error && !result.mentions_ty_param() && !result.mentions_pending()
-            });
+            })
+            .map_or(LambdaResultConstraint::Open, LambdaResultConstraint::Fixed);
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
             self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
@@ -61550,7 +61584,7 @@ impl<'a> Checker<'a> {
                 LambdaCheckMode {
                     suspend: false,
                     coerce_return_to_unit,
-                    expected_return,
+                    result_constraint,
                 },
             )
         } else {
@@ -61566,7 +61600,7 @@ impl<'a> Checker<'a> {
                 LambdaCheckMode {
                     suspend: false,
                     coerce_return_to_unit,
-                    expected_return,
+                    result_constraint,
                 },
             )
         }
@@ -62404,6 +62438,7 @@ impl<'a> Checker<'a> {
                         .error(self.span(e), "'return' is prohibited here.");
                 }
                 self.expr_return_targets.insert(e, target);
+                self.record_labelled_lambda_exit(target, label.is_some(), value.is_none());
                 if let Some(v) = value {
                     let returned = if label.is_none() || matches!(target, ReturnTarget::Function) {
                         self.expr_expected(scope, v, self.ret_ty)
@@ -62418,6 +62453,9 @@ impl<'a> Checker<'a> {
                     if let ReturnTarget::Lambda(lambda) = target {
                         self.record_lambda_returned_type(lambda, returned);
                     }
+                } else if let ReturnTarget::Lambda(lambda) = target {
+                    let returned = self.check_lambda_valueless_return(lambda, self.span(e));
+                    self.record_lambda_returned_type(lambda, returned);
                 }
                 Ty::Nothing
             }
@@ -62894,10 +62932,18 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     self.declare(scope, name, pty, false);
                 }
-                self.with_lambda_return_scope(scope, e, implicit_label, None, |c| {
-                    c.expr(scope, body)
-                })
+                self.with_lambda_return_scope(
+                    scope,
+                    e,
+                    body,
+                    implicit_label,
+                    LambdaResultConstraint::Open,
+                    |c, result_constraint| {
+                        c.type_lambda_body(scope, e, body, false, result_constraint)
+                    },
+                )
             };
+            let (bret, unit_from_exits) = bret;
             // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
             // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
             // type comes from the body.
@@ -62910,7 +62956,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                 })
                 .collect();
-            let ret = self.lambda_ret_ty(scope, e, bret, false);
+            let ret = self.lambda_ret_ty(scope, e, bret, unit_from_exits);
             // A `suspend { … }` literal (the parser marked it) is a suspend function type —
             // `suspend () -> Unit` erases to `Function1` at runtime (trailing `Continuation`),
             // exactly like a declared `suspend (…) -> …` type.
@@ -66359,11 +66405,18 @@ impl<'a> Checker<'a> {
                 Some(te) => {
                     let trailing_ty = if suppressed_continuation && !diverged {
                         self.unreachable_statement_depth += 1;
-                        let ty = self.expr_result(scope, te, expected, value_required);
+                        let ty = self
+                            .type_open_lambda_unit_tail(scope, e, te)
+                            .unwrap_or_else(|| {
+                                self.expr_result(scope, te, expected, value_required)
+                            });
                         self.unreachable_statement_depth -= 1;
                         ty
                     } else {
-                        self.expr_result(scope, te, expected, value_required)
+                        self.type_open_lambda_unit_tail(scope, e, te)
+                            .unwrap_or_else(|| {
+                                self.expr_result(scope, te, expected, value_required)
+                            })
                     };
                     // Only where the block's VALUE is used. A statement block after a diverging
                     // statement transfers control and produces nothing — `fun f() { return "OK"; …
@@ -70607,7 +70660,32 @@ impl<'a> Checker<'a> {
                 signature,
                 specialized_params,
                 has_receiver,
-                fixed_expected_return: false,
+                result_constraint: if signature.ret.mentions_ty_param() {
+                    LambdaResultConstraint::Open
+                } else {
+                    LambdaResultConstraint::Fixed(signature.ret)
+                },
+            },
+            label,
+        )
+    }
+
+    fn check_lambda_with_open_function_type_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        signature: &'static crate::types::FnSig,
+        has_receiver: bool,
+        label: Option<&str>,
+    ) -> Ty {
+        self.check_lambda_with_function_type_and_params_mode_labeled(
+            scope,
+            e,
+            FunctionLambdaShape {
+                signature,
+                specialized_params: &signature.params,
+                has_receiver,
+                result_constraint: LambdaResultConstraint::Open,
             },
             label,
         )
@@ -70629,7 +70707,7 @@ impl<'a> Checker<'a> {
                 signature,
                 specialized_params,
                 has_receiver,
-                fixed_expected_return: true,
+                result_constraint: LambdaResultConstraint::Fixed(signature.ret),
             },
             label,
         )
@@ -70646,7 +70724,7 @@ impl<'a> Checker<'a> {
             signature,
             mut specialized_params,
             has_receiver,
-            fixed_expected_return,
+            result_constraint,
         } = shape;
         // A generic callable parameter can become a complete function type only after call-site
         // substitution (`listOf<Canvas.() -> Unit> { ... }`). In that case the declaration-side
@@ -70675,11 +70753,6 @@ impl<'a> Checker<'a> {
         } else {
             (None, remaining)
         };
-        // An unbound result variable is an inference output, not a contextual expected type. Its
-        // upper bound (`Any`) must not coerce the body before the enclosing call can bind `R` from
-        // the body's real type.
-        let expected_return =
-            (fixed_expected_return || !signature.ret.mentions_ty_param()).then_some(signature.ret);
         self.check_lambda_with_implicit_receivers_and_return_labeled(
             scope,
             e,
@@ -70692,7 +70765,7 @@ impl<'a> Checker<'a> {
             LambdaCheckMode {
                 suspend: signature.suspend,
                 coerce_return_to_unit: signature.ret == Ty::Unit,
-                expected_return,
+                result_constraint,
             },
         )
     }
@@ -70736,115 +70809,6 @@ impl<'a> Checker<'a> {
         self.expr_expected(scope, expression, expected)
     }
 
-    /// Install the exact return scope for one lambda while checking its body. The explicit literal
-    /// label wins over the call-site's implicit label. Anonymous functions also own bare returns;
-    /// ordinary lambdas leave bare returns targeted at the enclosing function.
-    fn with_lambda_return_scope<R>(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        implicit_label: Option<&str>,
-        expected_return: Option<Ty>,
-        check: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let label = self
-            .file
-            .lambda_labels
-            .get(&e.0)
-            .map(String::as_str)
-            .or(implicit_label)
-            .map(str::to_string);
-        // Only a lambda whose selected parameter inlines it runs in the caller's frame. Any other
-        // lambda (no call argument, or one no selected inline parameter took) has kotlinc's
-        // `InlineStatus.Unknown`, which does not allow a return to leave through it.
-        let inlined_argument = self.argument_lambda_inlining.get(&e) == Some(&true);
-        let frame =
-            self.lambda_returns
-                .enter_lambda(e, label.clone(), expected_return, inlined_argument);
-        crate::trace_compiler!(
-            "resolve",
-            "lambda return scope enter expression={e:?} label={label:?}"
-        );
-        let anonymous = self.file.anon_fun_lambdas.contains(&e.0);
-        // A lambda is a control-flow boundary — EXCEPT an inlined one. Since Kotlin 2.2
-        // (`BreakContinueInInlineLambdas`, default-on at the 2.4 language level krusty targets) a
-        // `break`/`continue` inside an inline lambda targets the enclosing loop, because the body is
-        // spliced into it. `allow_lambda_mutation` is set from the callee's `is_inline` and brackets
-        // this body check, and it means exactly "this body is inlined into the caller's frame" — the
-        // same property that makes the jump legal.
-        let inlined = self.allow_lambda_mutation;
-        let outer_loop_labels = if inlined {
-            self.loop_labels.clone()
-        } else {
-            std::mem::take(&mut self.loop_labels)
-        };
-        let outer_loop_depth = if inlined {
-            self.loop_depth
-        } else {
-            std::mem::replace(&mut self.loop_depth, 0)
-        };
-        let saved = anonymous.then(|| {
-            let declared = self.file.anon_fun_ret.get(&e.0).cloned();
-            let ret = match declared {
-                Some(r) => self.type_ref_ty(scope, &r),
-                None => Ty::Unit,
-            };
-            let state = (
-                self.ret_ty,
-                self.return_allowed,
-                self.lambda_returns
-                    .replace_bare_target(ReturnTarget::Lambda(e)),
-            );
-            self.ret_ty = ret;
-            self.return_allowed = true;
-            state
-        });
-        // Suppressing receiver accounting is scoped to the immediate expression evaluated at an
-        // anonymous object's construction site. A non-inline lambda is a later execution/capture
-        // boundary: receiver selections in its body must be retained by that closure (and by any
-        // parser-hoisted anonymous constructor that carries the closure). An inline lambda remains
-        // part of the surrounding expression and therefore keeps the suppression.
-        let previous_capture_accounting = (!inlined)
-            .then(|| std::mem::replace(&mut self.suppress_receiver_capture_accounting, false));
-        let out = check(self);
-        if let Some(previous) = previous_capture_accounting {
-            self.suppress_receiver_capture_accounting = previous;
-        }
-        if let Some((ret_ty, return_allowed, bare_return_target)) = saved {
-            self.ret_ty = ret_ty;
-            self.return_allowed = return_allowed;
-            self.lambda_returns.replace_bare_target(bare_return_target);
-        }
-        self.loop_labels = outer_loop_labels;
-        self.loop_depth = outer_loop_depth;
-        self.lambda_returns.leave_lambda(e, frame);
-        crate::trace_compiler!(
-            "resolve",
-            "lambda return scope exit expression={e:?} label={label:?}"
-        );
-        out
-    }
-
-    fn check_lambda_body(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        body: ExprId,
-        coerce_return_to_unit: bool,
-        expected_return: Option<Ty>,
-    ) -> Ty {
-        if coerce_return_to_unit {
-            return match self.expr_statement(scope, body) {
-                Ty::Nothing => Ty::Nothing,
-                Ty::Error => Ty::Error,
-                _ => Ty::Unit,
-            };
-        }
-        match expected_return {
-            Some(expected) => self.expr_declared(scope, body, expected),
-            None => self.expr(scope, body),
-        }
-    }
-
     fn check_lambda_with_implicit_receivers_labeled(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -70861,7 +70825,7 @@ impl<'a> Checker<'a> {
             LambdaCheckMode {
                 suspend,
                 coerce_return_to_unit: false,
-                expected_return: None,
+                result_constraint: LambdaResultConstraint::Open,
             },
         )
     }
@@ -71049,11 +71013,19 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let coerce = mode.coerce_return_to_unit;
-                let expected_return = mode.expected_return;
-                self.with_lambda_return_scope(scope, e, receiver_label, expected_return, |c| {
-                    c.check_lambda_body(scope, body, coerce, expected_return)
-                })
+                let result_constraint = mode.result_constraint;
+                self.with_lambda_return_scope(
+                    scope,
+                    e,
+                    body,
+                    receiver_label,
+                    result_constraint,
+                    |c, result_constraint| {
+                        c.type_lambda_body(scope, e, body, coerce, result_constraint)
+                    },
+                )
             };
+            let (bret, unit_from_exits) = bret;
             self.this_labels.truncate(labels_depth);
             self.this_extension_receiver = prev_extension_receiver;
             let mut pts = context_types.to_vec();
@@ -71082,34 +71054,14 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                 }));
             }
-            let inferred_ret = self.lambda_ret_ty(scope, e, bret, mode.coerce_return_to_unit);
-            // A result-only generic call at the tail of an expectation-free lambda is still a
-            // postponed producer, not a proper symbolic type owned by the enclosing call. Publish
-            // its declaration-defined unconstrained result for this lambda constraint. If the
-            // enclosing call later fixes the lambda result, selected-argument commitment rechecks
-            // the same retained call against that exact expectation.
-            let inferred_ret =
-                if mode.expected_return.is_none() && !self.file.anon_fun_ret.contains_key(&e.0) {
-                    let result = conditional_branch::branch_value_expression(self.file, body);
-                    self.unbound_contextual_result_signature(result)
-                        .map(|signature| {
-                            crate::symbol_resolver::instantiate_unconstrained_result(
-                                &signature,
-                                inferred_ret,
-                            )
-                        })
-                        .unwrap_or(inferred_ret)
-                } else {
-                    inferred_ret
-                };
-            let ret = match mode.expected_return {
-                Some(expected) => {
-                    let result = conditional_branch::branch_value_expression(self.file, body);
-                    self.expect_assignable(expected, inferred_ret, self.span(result), "return");
-                    expected
-                }
-                None => inferred_ret,
-            };
+            let ret = self.lambda_result_type(
+                scope,
+                e,
+                body,
+                bret,
+                mode.coerce_return_to_unit || unit_from_exits,
+                mode.result_constraint,
+            );
             let ty = Ty::fun_with_shape(
                 pts,
                 ret,
@@ -71161,7 +71113,7 @@ impl<'a> Checker<'a> {
             LambdaCheckMode {
                 suspend: false,
                 coerce_return_to_unit,
-                expected_return: None,
+                result_constraint: LambdaResultConstraint::Open,
             },
         )
     }
