@@ -885,9 +885,14 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::function_references::realize(&mut file.ir, &file.callables, &facade)
-        {
+        if let Err(target) = crate::jvm::function_references::realize(
+            &mut file.ir,
+            &file.callables,
+            crate::jvm::function_references::Facades {
+                current: &facade,
+                stems,
+            },
+        ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!(
