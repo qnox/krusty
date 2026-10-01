@@ -6,12 +6,15 @@ pub(crate) mod anonymous_origin;
 pub use inline_class::InlineClass;
 pub(super) mod builtin_bridge;
 mod class_identity;
+mod function;
 mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod string_table;
 mod type_aliases;
 mod value_parameter;
+
+pub use function::MetaFn;
 
 use property_declarations::decode_properties;
 use property_identity::{
@@ -32,7 +35,7 @@ use super::classfile::{
 };
 use super::classreader::ClassInfo;
 use super::names::method_descriptor;
-use crate::libraries::{CallSig, GenericSig, ParamList, TypeKind};
+use crate::libraries::{GenericSig, ParamList, TypeKind};
 use crate::metadata::decode::{
     packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
@@ -1338,17 +1341,17 @@ fn build_property_generic_sig(
 pub struct MfnFlags(u16);
 
 impl MfnFlags {
-    const IS_INLINE: u16 = 1 << 0;
-    const IS_SUSPEND: u16 = 1 << 1;
-    const IS_EXTENSION: u16 = 1 << 2;
-    const RET_NULLABLE: u16 = 1 << 3;
-    const IS_OPERATOR: u16 = 1 << 4;
-    const IS_INFIX: u16 = 1 << 5;
-    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
-    const DEPRECATED_HIDDEN: u16 = 1 << 7;
-    const IS_ABSTRACT: u16 = 1 << 8;
-    const IS_FINAL: u16 = 1 << 9;
-    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
+    pub(super) const IS_INLINE: u16 = 1 << 0;
+    pub(super) const IS_SUSPEND: u16 = 1 << 1;
+    pub(super) const IS_EXTENSION: u16 = 1 << 2;
+    pub(super) const RET_NULLABLE: u16 = 1 << 3;
+    pub(super) const IS_OPERATOR: u16 = 1 << 4;
+    pub(super) const IS_INFIX: u16 = 1 << 5;
+    pub(super) const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
+    pub(super) const DEPRECATED_HIDDEN: u16 = 1 << 7;
+    pub(super) const IS_ABSTRACT: u16 = 1 << 8;
+    pub(super) const IS_FINAL: u16 = 1 << 9;
+    pub(super) const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1360,7 +1363,7 @@ impl MfnFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u16) -> bool {
+    pub(super) const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -1407,202 +1410,6 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_companion_block_member(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
-    }
-}
-
-/// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
-/// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
-/// name + descriptor (from the `method_signature` extension when present), Kotlin visibility/`inline`/
-/// `suspend`/`operator`, and the extension-receiver class. For an `inline` function the bytecode is
-/// `private`/synthetic, so these flags differ from the access flags — metadata is primary, bytecode is
-/// fallback.
-#[derive(Clone, Debug)]
-pub struct MetaFn {
-    pub kotlin_name: String,
-    pub jvm_name: String,
-    /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
-    /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
-    pub jvm_desc: Option<&'static str>,
-    pub visibility: crate::types::Visibility,
-    /// Bit-packed `is_inline`/`is_suspend`/`is_extension`/`is_operator`/`ret_nullable` (read via the
-    /// accessors below).
-    /// `is_extension` — whether this is an EXTENSION (a receiver of any kind, class or
-    /// type parameter) vs a true top-level function; lets the classpath ext index avoid mis-indexing a
-    /// top-level generic as an extension on its first parameter's type. `ret_nullable` — whether the
-    /// Kotlin return type is nullable (`T?`, `Type.nullable`); the JVM descriptor/`Signature` erase this,
-    /// only `@Metadata` carries it, and it drives the elvis null-check for a nullable-returning scope fn.
-    pub flags: MfnFlags,
-    /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
-    /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
-    pub receiver_class: Option<TypeName>,
-    /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
-    pub ret_class: Option<TypeName>,
-    /// SOURCE value parameters in declaration order. The LENGTH is the source arity: it excludes
-    /// synthetic JVM descriptor params such as suspend `Continuation` or Compose `Composer`/masks.
-    pub value_params: Vec<MetaValueParam>,
-    /// Leading context parameters. Named context parameters retain the same metadata shape as ordinary
-    /// value parameters; legacy unnamed context receivers have an empty name.
-    pub context_params: Vec<MetaValueParam>,
-    /// Typed context roles decoded at the metadata boundary. Consumers never inspect the encoded
-    /// empty/`<unused var>` spellings to distinguish legacy, anonymous, and named contexts.
-    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
-    /// The metadata-primary generic signature (type parameters + parameter/return gsig nodes), decoded
-    /// straight from `@Metadata` rather than the JVM `Signature` attribute — a JVM-agnostic, Kotlin-faithful
-    /// source (nullability, variance, Kotlin type identities). `None` when the return type won't decode.
-    pub generic_sig: Option<GenericSig>,
-    /// The function's declared contract (`Function.contract`, field 32), decoded into the shared
-    /// contract IR — the effects the checker applies at call sites (`returns(…) implies …`,
-    /// `callsInPlace`). `None` when the function declares no contract.
-    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
-    /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
-    pub equality_bound: Option<Ty>,
-    pub return_value_status: crate::types::ReturnValueStatus,
-    /// Function formals carrying Kotlin's internal `@OnlyInputTypes` inference policy.
-    pub only_input_type_formals: Vec<String>,
-    /// Annotation class identities declared on this function (from \`Function.annotation\`).
-    /// The decoder keeps these as interned \`TypeName\`s so consumers — overload resolution,
-    /// deprecation handling, etc. — can check for the annotations they care about without the
-    /// metadata layer hard-coding any one annotation's semantics.
-    pub annotations: Vec<crate::types::TypeName>,
-}
-
-impl MetaFn {
-    #[inline]
-    pub fn is_public(&self) -> bool {
-        self.visibility == crate::types::Visibility::Public
-    }
-    #[inline]
-    pub fn is_inline(&self) -> bool {
-        self.flags.has(MfnFlags::IS_INLINE)
-    }
-    #[inline]
-    pub fn is_suspend(&self) -> bool {
-        self.flags.has(MfnFlags::IS_SUSPEND)
-    }
-    #[inline]
-    pub fn is_abstract(&self) -> bool {
-        self.flags.has(MfnFlags::IS_ABSTRACT)
-    }
-    #[inline]
-    pub fn is_final(&self) -> bool {
-        self.flags.has(MfnFlags::IS_FINAL)
-    }
-    #[inline]
-    pub fn is_extension(&self) -> bool {
-        self.flags.has(MfnFlags::IS_EXTENSION)
-    }
-    #[inline]
-    pub fn is_operator(&self) -> bool {
-        self.flags.has(MfnFlags::IS_OPERATOR)
-    }
-    #[inline]
-    pub fn is_infix(&self) -> bool {
-        self.flags.has(MfnFlags::IS_INFIX)
-    }
-    #[inline]
-    pub fn has_reified_type_params(&self) -> bool {
-        self.flags.has(MfnFlags::HAS_REIFIED_TYPE_PARAMS)
-    }
-    /// A `companion { … }` block member: a static member of the class that declares the block, called
-    /// through the classifier with no receiver.
-    #[inline]
-    pub fn is_companion_block_member(&self) -> bool {
-        self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
-    }
-    #[inline]
-    pub fn ret_nullable(&self) -> bool {
-        self.flags.has(MfnFlags::RET_NULLABLE)
-    }
-    /// `@Deprecated(level = HIDDEN)`: the declaration exists for binary compatibility only and
-    /// kotlinc removes it from overload resolution entirely. Stamped from the realization
-    /// method's `kotlin.Deprecated` annotation after metadata decode.
-    #[inline]
-    pub fn deprecated_hidden(&self) -> bool {
-        self.flags.has(MfnFlags::DEPRECATED_HIDDEN)
-    }
-    pub fn context_count(&self) -> usize {
-        self.context_params.len()
-    }
-
-    pub fn parameters(&self) -> impl Iterator<Item = &MetaValueParam> {
-        self.context_params.iter().chain(&self.value_params)
-    }
-
-    pub fn member_call_sig(&self) -> CallSig {
-        assert_eq!(
-            self.context_params.len(),
-            self.context_parameter_kinds.len(),
-            "metadata functions must publish one typed role per context parameter"
-        );
-        let parameters: Vec<_> = self.parameters().collect();
-        let (lambda_receivers, lambda_receiver_params) = self.lambda_receiver_shape();
-        let mut sig = CallSig::metadata_function(
-            parameters.len(),
-            parameters.iter().map(|p| p.name.clone()).collect(),
-            parameters.iter().map(|p| p.has_default()).collect(),
-            lambda_receivers,
-            lambda_receiver_params,
-            parameters.iter().map(|p| p.inline_modifier()).collect(),
-            self.vararg_index()
-                .map(|index| index + self.context_count()),
-        );
-        for (ordinal, (parameter, kind)) in self
-            .context_params
-            .iter()
-            .zip(&self.context_parameter_kinds)
-            .enumerate()
-        {
-            sig.parameter_identities[ordinal] = match kind {
-                crate::types::ContextParameterKind::Named => {
-                    crate::fir::ResolvedParameterIdentity::ContextValue {
-                        ordinal: ordinal as u32,
-                        source_name: parameter.name.as_str().into(),
-                    }
-                }
-                crate::types::ContextParameterKind::Anonymous => {
-                    crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                        ordinal: ordinal as u32,
-                    }
-                }
-                crate::types::ContextParameterKind::LegacyReceiver => {
-                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                        ordinal: ordinal as u32,
-                    }
-                }
-                crate::types::ContextParameterKind::None => {
-                    panic!("a metadata context prefix must carry a context role")
-                }
-            };
-        }
-        sig.platform_nullable_params = parameters.iter().map(|p| p.nullable()).collect();
-        sig.only_input_type_formals = self.only_input_type_formals.clone();
-        sig.no_infer_params = parameters
-            .iter()
-            .map(|parameter| parameter.no_infer())
-            .collect();
-        sig
-    }
-
-    /// Decode the semantic receiver-function shape once for every metadata function consumer.
-    /// A concrete `Recv.() -> R` carries both the receiver type and the mark; a generic
-    /// `T.() -> R` carries only the mark and recovers `T` after call-site substitution.
-    pub(super) fn lambda_receiver_shape(&self) -> (Vec<Option<Ty>>, Vec<bool>) {
-        (
-            self.parameters()
-                .map(|p| p.recv_fun_receiver.map(crate::types::Ty::obj_name))
-                .collect(),
-            self.parameters().map(|p| p.recv_fun()).collect(),
-        )
-    }
-
-    pub fn vararg_index(&self) -> Option<usize> {
-        self.value_params
-            .iter()
-            .position(|parameter| parameter.vararg())
-    }
-
-    pub fn extension_call_sig(&self) -> CallSig {
-        self.member_call_sig()
     }
 }
 
@@ -2578,7 +2385,7 @@ fn decode_functions(
                         };
                         Some(method_descriptor(&physical_params, physical_ret))
                     });
-                    out.push(MetaFn {
+                    out.push(MetaFn::from_decoded(function::DecodedFunction {
                         kotlin_name,
                         jvm_name,
                         jvm_desc: jvm_desc.map(|s| intern(&s)),
@@ -2620,7 +2427,7 @@ fn decode_functions(
                         context_params,
                         context_parameter_kinds,
                         annotations: annotation_names(&pf.annotation_bodies, records, d2),
-                    });
+                    }));
                 }
             }
             (_, w) => {
@@ -3652,6 +3459,9 @@ mod module_reader_tests {
         assert_eq!(signature.receiver, Some(Ty::String));
         assert_eq!(signature.params, vec![Ty::Int]);
         assert_eq!(signature.ret, Ty::Int);
+        assert!(function.context_params().is_empty());
+        assert!(function.only_input_type_formals().is_empty());
+        assert_eq!(function.equality_bound(), None);
     }
 
     #[test]
