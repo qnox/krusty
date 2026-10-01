@@ -4,7 +4,9 @@
 //! is not assigned at run time at all; everything else is stored by `<clinit>` in declaration order.
 //! Field flags are decided here too, and they are not uniform: a `const val`'s field takes its
 //! DECLARATION's visibility, while a plain `val`/`var` is private whatever the source said, because
-//! every reader outside the facade goes through the generated accessor.
+//! every reader outside the facade goes through the generated accessor. A public or internal
+//! `lateinit var` is the exception: its field is `public static`, and the default getter throws
+//! while that field is null.
 
 use super::*;
 
@@ -80,7 +82,13 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             };
             visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
-            0x000A // PRIVATE | STATIC
+            // A public or internal `lateinit var` is `public static`: `isInitialized` and other
+            // raw reads `getstatic` it. A private one, and every plain `var`, stays private.
+            if s.is_lateinit && !s.visibility.is_private() {
+                0x0009 // PUBLIC | STATIC
+            } else {
+                0x000A // PRIVATE | STATIC
+            }
         } else {
             0x001A // PRIVATE | STATIC | FINAL
         };
@@ -265,6 +273,24 @@ pub(super) fn emit_default_static_accessor(
     }
     let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
+    if s.is_lateinit {
+        // kotlinc's getter: return the value, or throw and then `aconst_null; areturn` so the
+        // null path has a reference for the verifier.
+        g.dup();
+        let missing = g.new_label();
+        g.ifnull(missing);
+        emit_return(jt, &mut g);
+        g.bind(missing);
+        g.pop();
+        g.push_string(&s.name, cw);
+        let throw = cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "throwUninitializedPropertyAccessException",
+            "(Ljava/lang/String;)V",
+        );
+        g.invokestatic(throw, 1, 0);
+        g.aconst_null();
+    }
     emit_return(jt, &mut g);
     finish_code_sig::<0x0019>(
         cw,
@@ -563,14 +589,53 @@ pub(super) fn emit_class_static_initializer(
     }
 }
 
+/// The guard on a private top-level `lateinit` read. The field value is already on the stack.
+fn emit_lateinit_use_guard(name: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    code.dup();
+    let initialized = code.new_label();
+    code.ifnonnull(initialized);
+    code.pop();
+    code.push_string(name, cw);
+    let throw = cw.methodref(
+        "kotlin/jvm/internal/Intrinsics",
+        "throwUninitializedPropertyAccessException",
+        "(Ljava/lang/String;)V",
+    );
+    code.invokestatic(throw, 1, 0);
+    code.aconst_null();
+    code.bind(initialized);
+}
+
 impl Emitter<'_> {
+    /// Straight-line expressions, except a private top-level `lateinit` read that inlines its guard.
+    pub(super) fn static_expr_branches(&self, expr: u32, node: &crate::ir::IrExpr) -> bool {
+        let crate::ir::IrExpr::GetStatic(index) = node else {
+            return false;
+        };
+        self.static_lateinit_read_branches(*index, expr)
+    }
+
+    /// Whether this `GetStatic` inlines the uninitialized guard. A public getter hides the branch;
+    /// a private read, including the one after `access$get<X>$p`, does not. An initialization probe
+    /// loads the field and does not branch here.
+    pub(super) fn static_lateinit_read_branches(&self, index: u32, expr: u32) -> bool {
+        let is_lateinit = self.ir.statics[index as usize].is_lateinit;
+        is_lateinit
+            && !self.ir.lateinit_initialization_probes.contains(&expr)
+            && !self.ir.has_jvm_default_static_getter(index)
+    }
+
     /// Read static `index` from wherever its storage lives, as seen from the class being emitted.
-    pub(super) fn emit_get_static(&mut self, i: u32, code: &mut CodeBuilder) {
+    pub(super) fn emit_get_static(&mut self, i: u32, expr: u32, code: &mut CodeBuilder) {
         let s = &self.ir.statics[i as usize];
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
         let is_const = s.is_const;
+        let is_lateinit = s.is_lateinit;
+        let is_private = s.visibility.is_private();
         let facade = self.facade.clone();
+        let probe = self.ir.lateinit_initialization_probes.contains(&expr);
+        let calls_getter = is_lateinit && !probe && self.ir.has_jvm_default_static_getter(i);
         // A PRIVATE property's field, or the backing field of a source-declared getter, read from
         // another class, goes through its owner's accessor. Calling the declared getter would
         // re-enter it: the read is inside that getter.
@@ -587,6 +652,10 @@ impl Emitter<'_> {
                 &format!("(){}", type_descriptor(jt)),
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
+            // `access$get<X>$p` is a raw `getstatic`. The use site throws; `isInitialized` does not.
+            if is_lateinit && !probe {
+                emit_lateinit_use_guard(&name, code, self.cw);
+            }
             return;
         }
         // A static declaring an OWNER lives on that class, not the facade. Within the owner
@@ -627,14 +696,23 @@ impl Emitter<'_> {
         }
         // Within the facade (or a `const val`, which is public) read the field directly; from
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
-        // cross-file property-access compilation.
-        else if self.static_owner == Some(StaticOwner::Facade) || is_const {
+        // cross-file property-access compilation. A public `lateinit` calls `getX()` even from the
+        // facade, so the throw lives in the getter. `isInitialized` still `getstatic`s the public
+        // field. A private `lateinit` inlines the guard on the raw read.
+        else if (self.static_owner == Some(StaticOwner::Facade)
+            || is_const
+            || (probe && !is_private))
+            && !calls_getter
+        {
             let fref = self.cw.fieldref(
                 &facade,
                 self.ir.static_field_jvm_name(i),
                 &type_descriptor(jt),
             );
             code.getstatic(fref, slot_words(jt) as i32);
+            if is_lateinit && !probe {
+                emit_lateinit_use_guard(&name, code, self.cw);
+            }
         } else {
             let m = self.cw.methodref(
                 &facade,

@@ -84,6 +84,7 @@ pub(super) fn add_cached_descriptor(
         init: Some(init),
         is_var: false,
         is_const: false,
+        is_lateinit: false,
         owner: Some(owner),
         visibility: Visibility::Private,
         setter_jvm_name: None,

@@ -1398,6 +1398,7 @@ mod tests {
             init: Some(init),
             is_var: true,
             is_const: false,
+            is_lateinit: false,
             owner: None,
             visibility: crate::types::Visibility::Public,
             setter_jvm_name: None,

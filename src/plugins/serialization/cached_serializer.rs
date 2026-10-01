@@ -99,6 +99,7 @@ pub(super) fn add_cached_serializer_delegate(
         init: Some(lazy),
         is_var: false,
         is_const: false,
+        is_lateinit: false,
         owner: Some(class_name),
         visibility: crate::types::Visibility::Private,
         setter_jvm_name: None,
