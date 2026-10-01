@@ -5152,8 +5152,8 @@ fn select_instance_info(
 /// keys + `resolve_type` supertypes — NO JVM descriptors — so `kotlin/UInt` ≠ `kotlin/Int` ≠ `kotlin/Result`
 /// are distinct by their class, a generic value-class receiver (`Result<T>`) binds a concrete one
 /// (`Result<String>` — `erased_recv` drops type arguments), and `UInt` never binds an `Int` extension.
-/// Replaces the descriptor-based `extension_receiver_rank`, whose value-class special-case existed only
-/// because the erased `I`/`Object` descriptors tied distinct value classes together.
+/// This source-identity walk replaces legacy descriptor-based platform ranking, whose value-class
+/// special-case existed only because erased `I`/`Object` descriptors tied distinct value classes together.
 /// Whether the declared receiver's type arguments are consistent with the actual receiver's, position by
 /// position, under Kotlin's COVARIANT reading of a receiver position: each actual argument must be
 /// assignable to the declared one (`ReceiverMro::rank` reaching from actual to declared). A declared

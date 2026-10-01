@@ -645,18 +645,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         ty.nullable_primitive().or_else(|| self.boxed_primitive(ty))
     }
 
-    /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
-    /// `recv`: `0` when the extension's receiver IS the receiver's own type, increasing up the receiver's
-    /// supertype chain (with the platform's primitive/array/value-class widening — an `Int` widens through
-    /// `Number`/`Comparable`/`Any`), so a `List` extension outranks an `Iterable` one. `None` when
-    /// `decl_recv` is not in the receiver's MRO (the extension does not apply). This is the receiver-coupled
-    /// "most specific receiver wins" order Kotlin overload resolution uses, recovered by the consumer for a
-    /// receiver-agnostic `resolve_symbols` overload (which carries no rung). Default: apply only on an exact
-    /// type match (a target with no supertype model).
-    fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
-        (self.library_value_form(recv) == self.library_value_form(decl_recv)).then_some(0)
-    }
-
     /// If values of this type can be invoked like a Kotlin function, return their arity. Plain
     /// `Ty::Fun` is handled by the default; platform providers can add callable runtime types such as
     /// property references without the checker knowing their class names.

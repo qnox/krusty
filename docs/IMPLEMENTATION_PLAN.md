@@ -2893,10 +2893,9 @@ bodies exist only as jar bytecode):
   (MutableList/Set/Map + concrete ArrayList mutate; read-only `List += x` reassigns and does NOT mutate the
   original) and `metadata_return_types::{builtins_supertypes_decode_collection_hierarchy,
   kotlin_collection_subtyping, plus_assign_receiver_is_mutable}`.
-- Follow-up: the gate is keyed lazily by `@Metadata` only for collection receivers (cheap); generalizing
-  Kotlin-receiver applicability to ALL extension resolution (and indexing extensions by their Kotlin
-  receiver) would let the same mechanism replace remaining JVM-erased shortcuts. The `arg_fits`/
-  `supertype_descriptors` JVM-erased lookup remains as the candidate-enumeration layer.
+- Follow-up completed: extension applicability and ranking use the source-identity `ReceiverMro` over
+  normalized declarations and direct supertypes. The retired platform descriptor walk is not retained as
+  a compatibility path; JVM descriptors remain provider-boundary lookup and representation facts only.
 
 ### Phase 421 — numeric overload resolution prefers the widest int (`until` MIN_VALUE guard)  ✅
 - krusty collapses `Byte`/`Short`/`Int` → `Ty::Int` (`desc_to_ty`), so numeric overloads that differ only
