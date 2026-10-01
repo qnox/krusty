@@ -1265,6 +1265,15 @@ mod tests {
             Some(code)
         }
 
+        fn body_name(
+            &self,
+            _owner: crate::types::TypeName,
+            _name: &str,
+            _descriptor: &str,
+        ) -> Option<MethodCode> {
+            None
+        }
+
         fn member_is_private(&self, owner: &str, _name: &str, _descriptor: &str) -> bool {
             owner == self.part && self.part_is_private
         }

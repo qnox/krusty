@@ -65,6 +65,10 @@ pub trait MethodBodies {
     /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
 
+    /// The compiled body for an already-resolved semantic owner. Implementations answer this
+    /// identity capability directly; no rendered-name compatibility path is implied.
+    fn body_name(&self, owner: TypeName, name: &str, descriptor: &str) -> Option<MethodCode>;
+
     /// The class file of `internal`, for a class an inlined body's objects are copied from.
     fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
         None
@@ -150,10 +154,17 @@ mod tests {
 
     struct IdentityProbe {
         owner: RefCell<Option<TypeName>>,
+        body: RefCell<Option<(TypeName, String, String)>>,
     }
 
     impl MethodBodies for IdentityProbe {
         fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+
+        fn body_name(&self, owner: TypeName, name: &str, descriptor: &str) -> Option<MethodCode> {
+            self.body
+                .replace(Some((owner, name.to_owned(), descriptor.to_owned())));
             None
         }
 
@@ -167,9 +178,24 @@ mod tests {
     fn interface_probe_preserves_the_resolved_owner_identity() {
         let probe = IdentityProbe {
             owner: RefCell::new(None),
+            body: RefCell::new(None),
         };
         let interface = type_name("sample/Interface");
         assert!(probe.owner_is_interface_name(interface));
         assert_eq!(probe.owner.take(), Some(interface));
+    }
+
+    #[test]
+    fn body_probe_preserves_the_resolved_owner_identity() {
+        let probe = IdentityProbe {
+            owner: RefCell::new(None),
+            body: RefCell::new(None),
+        };
+        let owner = type_name("shared/Pool");
+        assert!(probe.body_name(owner, "answer", "()I").is_none());
+        assert_eq!(
+            probe.body.take(),
+            Some((owner, "answer".to_owned(), "()I".to_owned()))
+        );
     }
 }

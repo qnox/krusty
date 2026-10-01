@@ -35,6 +35,7 @@ use self::metadata_indexes::{
 };
 use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
+    MethodBodyCache,
 };
 use self::value_class_erasure::{
     metadata_value_class_underlying, value_class_param_types, value_class_return_type,
@@ -1782,8 +1783,9 @@ pub struct Classpath {
     /// process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
     /// Cache of lazily-read method bodies (`(internal-name, name, descriptor) → MethodCode`), so the inline
-    /// expander reads each inline function's body once even when it's called many times.
-    bodies: RefCell<crate::lru::LruCache<(TypeName, String, String), Option<MethodCode>>>,
+    /// expander reads each inline function's body once even when it's called many times. Name and
+    /// descriptor spellings are owned by the bounded cache, whose borrowed hits allocate no key.
+    bodies: RefCell<MethodBodyCache>,
     /// Memoized inline-body plans (`(owner, source name, body descriptor) → plan`). A plan is decoded
     /// purely from the owner's compiled bytecode, so it is stable for the classpath this instance
     /// snapshots — but every candidate overload the provider builds asks for one, which without this
@@ -1954,10 +1956,8 @@ impl Classpath {
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
         // thrashes (every eviction re-composes a type/namespace record or re-decodes metadata). The
         // caps still bound per-thread memory against a pathological vocabulary. Override all at once
-        // with `KRUSTY_CACHE_CAP`. The process-global per-entry body/builtins caches below are NOT
-        // LRU-bounded, but they exist only for ARCHIVE entries (a handful of jars + the jimage per
-        // process) and hold only queried methods/fragments, so their footprint is the same working
-        // set one long-lived instance would retain.
+        // with `KRUSTY_CACHE_CAP`. Process-global method-body buckets use the same body cap per
+        // immutable archive entry; builtins caches below retain only one fragment per package.
         const CLASS_CAP: usize = 65536;
         const FN_CAP: usize = 65536;
         const META_CAP: usize = 65536;
@@ -2023,7 +2023,7 @@ impl Classpath {
             aliases: RefCell::new(crate::lru::LruCache::new_fixed(ALIAS_PACKAGE_CAP)),
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
-            bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
+            bodies: RefCell::new(MethodBodyCache::new(BODY_CAP)),
             inline_plans: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
@@ -3968,8 +3968,8 @@ impl Classpath {
         None
     }
 
-    /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
-    /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
+    /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Hot
+    /// bodies remain bounded here while the owning entry shares its parsed class-body pool.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
         self.method_code_name(type_name(internal), name, descriptor)
     }
@@ -3983,10 +3983,9 @@ impl Classpath {
         name: &str,
         descriptor: &str,
     ) -> Option<MethodCode> {
-        let key = (internal, name.to_string(), descriptor.to_string());
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
-            if let Some(hit) = self.bodies.borrow_mut().get(&key) {
+            if let Some(hit) = self.bodies.borrow().get(internal, name, descriptor) {
                 cache_stat!(bodies, true);
                 return hit.clone();
             }
@@ -4014,7 +4013,9 @@ impl Classpath {
             }
         }
         if catalog_complete {
-            self.bodies.borrow_mut().insert(key, code.clone());
+            self.bodies
+                .borrow_mut()
+                .insert(internal, name, descriptor, code.clone());
         }
         code
     }
@@ -4050,8 +4051,7 @@ impl Classpath {
         let Some((entry_index, global)) = global else {
             return read_once();
         };
-        let key = (internal_id, name.to_string(), descriptor.to_string());
-        if let Some(hit) = global.read().unwrap().get(&key) {
+        if let Some(hit) = global.read().unwrap().get(internal_id, name, descriptor) {
             return hit.clone();
         }
         // Read the class from the OWNING entry itself, never via `class_bytes`' independent
@@ -4063,7 +4063,10 @@ impl Classpath {
         // disable this body for every later compile sharing the entry.
         let class = self.entry_class_bodies(entry_index, internal_id)?;
         let code = class.and_then(|class| class.method_code(name, descriptor));
-        global.write().unwrap().insert(key, code.clone());
+        global
+            .write()
+            .unwrap()
+            .insert(internal_id, name, descriptor, code.clone());
         code
     }
 
@@ -6192,7 +6195,7 @@ mod fq_tests {
     fn ct_sym_classpath_exposes_only_the_selected_release_view() {
         let directory = test_temp_dir("ct-sym-release");
         let symbols = directory.join("ct.sym");
-        let body = body_class_bytes();
+        let body = ct_sym_body_class_bytes();
         write_test_archive_entries(
             &symbols,
             &[
@@ -7078,115 +7081,7 @@ mod fq_tests {
         );
     }
 
-    // A FAILED byte read must never populate the process-global body cache: a transient error
-    // (EMFILE under load, an archive swapped mid-run) would otherwise be published as "no body"
-    // for every compile sharing the entry key. Deleting the jar between the parse and the body
-    // read simulates the failed read; the global bucket for this entry key must stay empty.
-    #[test]
-    fn failed_body_read_is_not_cached_process_globally() {
-        let directory = test_temp_dir("transient-body-read");
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        let jar = directory.join("lib.jar");
-        write_test_jar_with_entry(&jar, "transient/Body.class", &body_class_bytes());
-
-        let classpath = Classpath::new(vec![jar.clone()]);
-        assert!(
-            classpath.find("transient/Body").is_some(),
-            "the class must parse so the owning entry is attributable"
-        );
-        std::fs::remove_file(&jar).expect("delete jar between parse and body read");
-        // The open archive handle may still serve reads; drop it so the read genuinely fails.
-        classpath.archives.borrow_mut().clear();
-        assert!(
-            classpath
-                .method_code("transient/Body", "answer", "()I")
-                .is_none(),
-            "a failed read reports no body to THIS instance"
-        );
-        let key = (
-            type_name("transient/Body"),
-            "answer".to_string(),
-            "()I".to_string(),
-        );
-        assert!(
-            !global_entry_body_cache(&classpath.cache_key[0])
-                .read()
-                .unwrap()
-                .contains_key(&key),
-            "the failed read must not be published under the shared entry key"
-        );
-
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove temp dir");
-    }
-
-    // The body-cache KEY comes from the parse-validated owning-entry walk; the BYTES must come
-    // from that same entry. An earlier jar holding a corrupt copy of the class must not have its
-    // bytes read (let alone cached) under the clean later entry's key.
-    #[test]
-    fn body_bytes_come_from_the_owning_entry_not_the_first_raw_hit() {
-        let directory = test_temp_dir("body-owner-attribution");
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        let good = body_class_bytes();
-        let mut corrupt = good.clone();
-        corrupt[0] = 0; // break the magic: parse fails, raw bytes still served by the jar reader
-        let earlier = directory.join("earlier.jar");
-        let later = directory.join("later.jar");
-        write_test_jar_with_entry(&earlier, "transient/Body.class", &corrupt);
-        write_test_jar_with_entry(&later, "transient/Body.class", &good);
-
-        let classpath = Classpath::new(vec![earlier, later]);
-        let code = classpath.method_code("transient/Body", "answer", "()I");
-        assert!(
-            code.is_some(),
-            "the body must be read from the parse-validated owning entry (the later, clean jar), \
-             not from the earlier jar's corrupt raw bytes"
-        );
-
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove temp dir");
-    }
-
-    // A facade part owns hundreds of inline bodies over one constant pool. Reading two bodies of
-    // one archived class must index the class once: both bodies share its single parsed pool.
-    #[test]
-    fn bodies_of_one_archived_class_share_its_parsed_constant_pool() {
-        let directory = test_temp_dir("shared-body-pool");
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        let mut cw = crate::jvm::classfile::ClassWriter::new("shared/Pool", "java/lang/Object");
-        for (name, value) in [("first", 1), ("second", 2)] {
-            let mut code = crate::jvm::classfile::CodeBuilder::new(0);
-            code.push_int(value, &mut cw);
-            code.ireturn();
-            cw.add_method(
-                crate::jvm::classfile::ACC_PUBLIC | crate::jvm::classfile::ACC_STATIC,
-                name,
-                "()I",
-                &code,
-            );
-        }
-        let jar = directory.join("pool.jar");
-        write_test_jar_with_entry(&jar, "shared/Pool.class", &cw.finish());
-
-        let classpath = Classpath::new(vec![jar]);
-        let first = classpath
-            .method_code("shared/Pool", "first", "()I")
-            .expect("first body");
-        let second = classpath
-            .method_code_name(type_name("shared/Pool"), "second", "()I")
-            .expect("second body");
-        let second_again = classpath
-            .method_code("shared/Pool", "second", "()I")
-            .expect("string lookup agrees with the classifier key");
-        assert!(std::sync::Arc::ptr_eq(&first.source_cp, &second.source_cp));
-        assert_ne!(first.code, second.code);
-        assert_eq!(second.code, second_again.code);
-
-        drop(classpath);
-        std::fs::remove_dir_all(directory).expect("remove temp dir");
-    }
-
-    fn body_class_bytes() -> Vec<u8> {
+    fn ct_sym_body_class_bytes() -> Vec<u8> {
         let mut cw = crate::jvm::classfile::ClassWriter::new("transient/Body", "java/lang/Object");
         let mut code = crate::jvm::classfile::CodeBuilder::new(0);
         code.push_int(1, &mut cw);

@@ -8,6 +8,9 @@ impl crate::jvm::inline::MethodBodies for Classpath {
     fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
         self.method_code(owner, name, descriptor)
     }
+    fn body_name(&self, owner: TypeName, name: &str, descriptor: &str) -> Option<MethodCode> {
+        self.method_code_name(owner, name, descriptor)
+    }
     fn class_file(&self, internal: &str) -> Option<Vec<u8>> {
         self.class_bytes(internal)
     }

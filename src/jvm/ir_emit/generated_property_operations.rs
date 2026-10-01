@@ -170,6 +170,15 @@ mod tests {
             None
         }
 
+        fn body_name(
+            &self,
+            _owner: TypeName,
+            _name: &str,
+            _descriptor: &str,
+        ) -> Option<MethodCode> {
+            None
+        }
+
         fn owner_is_interface_name(&self, owner: TypeName) -> bool {
             self.seen.borrow_mut().push(owner);
             owner == self.interface

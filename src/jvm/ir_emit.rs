@@ -52,6 +52,8 @@ use field_nullability::{
     field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
+#[cfg(test)]
+mod empty_method_bodies;
 mod enclosure;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -11237,7 +11239,7 @@ impl<'a> Emitter<'a> {
                 args,
             } if inline.can_inline() => {
                 self.bodies
-                    .body(&owner.render(), name, descriptor)
+                    .body_name(*owner, name, descriptor)
                     .is_some_and(|body| !body.handlers.is_empty())
                     || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
                     || args
@@ -12343,18 +12345,10 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
 
 #[cfg(test)]
 mod invariant_tests {
+    use super::empty_method_bodies::NoBodies;
     use super::*;
     use crate::ir::{IrExpr, IrFile, IrFunction};
-    use crate::jvm::classreader::MethodCode;
-    use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
-
-    pub(super) struct NoBodies;
-    impl MethodBodies for NoBodies {
-        fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
-            None
-        }
-    }
 
     struct NoClassifiers;
 
