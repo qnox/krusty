@@ -39,6 +39,8 @@ pub(super) enum FrameKey {
     /// no local for it: the operand is on the stack until its call, or in the call's own
     /// argument temporary.
     CallOperand(u32),
+    /// An inline-expansion frame boundary, keyed by its declaration. It is not a semantic value.
+    InlineFrameMarker(u32),
 }
 
 /// What an unkeyed temporary holds. It only labels trace reports: a temporary's identity is its

@@ -201,6 +201,8 @@ impl BodyLowering<'_> {
         substitutions: &[FirTypeSubstitution],
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
+        // The name its inline frames are opened under.
+        let callee = self.index.callable_name(target)?.to_owned();
         let function_shape = self.ir.functions.get(function as usize)?;
         let parameter_count = u32::try_from(
             function_shape.params.len() + usize::from(function_shape.dispatch_receiver.is_some()),
@@ -688,7 +690,12 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         for invocation in inline_invocations {
-            self.splice_inline_lambda_invocation(invocation)?;
+            self.splice_inline_lambda(
+                invocation,
+                LambdaParameterBinding::Declared {
+                    callee: Some(&callee),
+                },
+            )?;
         }
         for (function, body, inline_only) in default_lambda_methods {
             self.ir.functions.get_mut(function as usize)?.body = body;
@@ -696,6 +703,10 @@ impl BodyLowering<'_> {
                 self.ir.inline_only_fns.remove(&function);
             }
         }
+
+        // kotlinc opens the expansion's frame once its operands are bound.
+        operand_declarations
+            .push(self.inline_marker(callee, IrDebugLocalProvenance::FunctionFrameMarker));
 
         // An expansion whose ONLY return is its tail needs neither a result local nor the loop that
         // carries a non-local return out: the value is simply the body's value, which is what kotlinc
@@ -807,14 +818,20 @@ impl BodyLowering<'_> {
         expression
     }
 
-    pub(super) fn splice_inline_lambda_invocation(&mut self, invocation: ExprId) -> Option<()> {
-        self.splice_inline_lambda(invocation, LambdaParameterBinding::Declared)
+    /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
+    /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
+    /// store, and the spelling.
+    fn inline_marker(&mut self, callee: String, provenance: IrDebugLocalProvenance) -> ExprId {
+        let declaration = self.ir.add_expr(IrExpr::InlineFrameMarker);
+        self.ir.value_names.insert(declaration, callee);
+        self.ir.set_debug_local_provenance(declaration, provenance);
+        declaration
     }
 
     pub(super) fn splice_inline_lambda(
         &mut self,
         invocation: ExprId,
-        binding: LambdaParameterBinding,
+        binding: LambdaParameterBinding<'_>,
     ) -> Option<()> {
         let IrExpr::InvokeFunction {
             func,
@@ -918,6 +935,20 @@ impl BodyLowering<'_> {
             };
             formal_slots.push(slot);
         }
+        // Once its parameters are bound, the body opens its own frame, named after the inline
+        // callable it was passed to.
+        if let LambdaParameterBinding::Declared {
+            callee: Some(callee),
+        } = binding
+        {
+            declarations.push(self.inline_marker(
+                callee.to_owned(),
+                IrDebugLocalProvenance::LambdaFrameMarker {
+                    implementation: impl_fn,
+                    depth: 0,
+                },
+            ));
+        }
 
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
         let local_base = self.next_temporary;
@@ -943,10 +974,11 @@ impl BodyLowering<'_> {
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
 #[derive(Clone, Copy)]
-pub(super) enum LambdaParameterBinding {
+pub(super) enum LambdaParameterBinding<'callee> {
     /// A named parameter becomes a local of the splice holding its argument, as at an inline
-    /// function's call site.
-    Declared,
+    /// function's call site. `callee` names the inline callable whose frame the body opens inside,
+    /// when the splice realizes one: the body then declares that frame's inline-depth marker.
+    Declared { callee: Option<&'callee str> },
     /// Every argument is a read of a value the parameter simply becomes, with no local of its own:
     /// kotlinc's `IrInlinable.inline`, which remaps the lambda's parameters onto the variables it
     /// is given. An argument that is not such a read cannot be spliced this way.
@@ -1158,6 +1190,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::Lambda { sam: None, .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }

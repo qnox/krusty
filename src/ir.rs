@@ -701,6 +701,11 @@ pub enum IrExpr {
     /// the CPS pass rewrites it to the real continuation value once the trailing `Continuation`
     /// parameter exists. It must never survive to the emitter.
     CurrentContinuation,
+    /// A debugger frame boundary opened by an inline expansion. It is not a value: no code reads
+    /// it, and it allocates no common-IR local. The callee is recorded in `value_names` and the
+    /// role in `debug_local_provenance`. A backend that emits debug locals materializes the slot,
+    /// the zero store, and the name.
+    InlineFrameMarker,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
@@ -1708,6 +1713,10 @@ pub struct IrFile {
     /// The class name a target chose for each source callable reference and lambda, by
     /// expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
+    /// The class a JVM naming pass realized for each lambda's inline-depth marker, by
+    /// implementation. Only that pass writes it, from [`IrLambdaOrigin::class_provenance`];
+    /// common lowering never stores a target spelling here.
+    pub(crate) lambda_class_names: std::collections::HashMap<FunId, TypeName>,
     /// The declaration path a target sorts each class it named from provenance by, keyed by that
     /// name: kotlinc's `fqNameWhenAvailable`.
     pub(crate) declaration_paths: std::collections::HashMap<TypeName, String>,

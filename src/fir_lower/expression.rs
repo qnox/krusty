@@ -1391,6 +1391,14 @@ impl BodyLowering<'_> {
                 );
                 let lambda = self.checked_lambda(*callable, body, suspend)?;
                 self.record_generated_class_provenance(expression_id, lambda as usize);
+                // Every lambda keeps its place in the naming walk, whether or not a target writes
+                // a class for it: a spliced lambda's inline-depth marker is spelled after it.
+                if let IrExpr::Lambda { impl_fn, .. } = self.ir.exprs[lambda as usize] {
+                    let provenance = self.generated_class_name_provenance(expression_id);
+                    if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
+                        origin.class_provenance = provenance;
+                    }
+                }
                 if suspend {
                     let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
                         unreachable!("a checked lambda lowers to a lambda")
@@ -1474,43 +1482,45 @@ impl BodyLowering<'_> {
                 .callable_reference_enclosures
                 .insert(node as u32, enclosure);
         }
-        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
-            return;
-        };
+        if let Some(provenance) = self.generated_class_name_provenance(expression_id) {
+            self.ir
+                .callable_reference_provenance
+                .insert(node as u32, provenance);
+        }
+    }
+
+    /// The naming walk's position for the class the source node `expression_id` compiles to, in
+    /// common-IR terms. `None` when the walk gave it none, or its owner has no identity here.
+    fn generated_class_name_provenance(
+        &self,
+        expression_id: crate::fir::FirExprId,
+    ) -> Option<crate::ir::IrLocalClassNameProvenance> {
+        let provenance = self.body.generated_class_provenance(expression_id)?;
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
                 Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
-                None => match self
-                    .index
-                    .classifier_header(owner)
-                    .filter(|_| self.index.local_class_name_provenance(owner).is_none())
-                {
-                    Some(header) => Some(crate::ir::IrLocalClassOwner::External(header.classifier)),
-                    None => return,
-                },
+                None => {
+                    let header = self
+                        .index
+                        .classifier_header(owner)
+                        .filter(|_| self.index.local_class_name_provenance(owner).is_none())?;
+                    Some(crate::ir::IrLocalClassOwner::External(header.classifier))
+                }
             },
             None => None,
         };
-        let Some(source) = self
+        let source = self
             .index
-            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
-            .map(|anchor| anchor.source)
-        else {
-            return;
-        };
-        let Some(package) = self.index.source_package(source) else {
-            return;
-        };
-        self.ir.callable_reference_provenance.insert(
-            node as u32,
-            crate::ir::IrLocalClassNameProvenance {
-                source: crate::ir::IrModuleSource { source, package },
-                lexical_owner,
-                segments: provenance.segments.clone(),
-                ordinal: provenance.ordinal,
-                parents: provenance.parents.clone(),
-            },
-        );
+            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))?
+            .source;
+        let package = self.index.source_package(source)?;
+        Some(crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrModuleSource { source, package },
+            lexical_owner,
+            segments: provenance.segments.clone(),
+            ordinal: provenance.ordinal,
+            parents: provenance.parents.clone(),
+        })
     }
 
     /// Preserve the checked semantic conversion from a declaration's result to its call-site

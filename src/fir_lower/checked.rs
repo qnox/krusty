@@ -742,7 +742,7 @@ impl BodyLowering<'_> {
                 if matches!(
                     operation,
                     crate::fir::FirIntrinsic::SuspendCoroutine
-                        | crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                        | crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. }
                 ) {
                     return self
                         .suspend_coroutine_primitive(
@@ -1359,7 +1359,7 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 "safe suspend coroutine blocks are structurally lowered before this mapping"
             )
         }
-        crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn => {
+        crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. } => {
             unreachable!("suspend coroutine blocks are structurally lowered before this mapping")
         }
         crate::fir::FirIntrinsic::UnsignedToString { source } => {

@@ -989,6 +989,10 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    // Signature defaults are checked before Pass 2's body dispatch, which is what otherwise
+    // installs this binding. Without it, a default lambda inside an expect class drops the naming
+    // walk's owner and the inline-depth marker has nothing to be spelled from.
+    session.install_active_source(active);
     let provider = index
         .declaration_anchor(work.provider)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;

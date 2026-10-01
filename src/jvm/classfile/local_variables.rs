@@ -2,6 +2,25 @@
 
 use super::{ClassWriter, CodeBuilder};
 
+impl CodeBuilder {
+    /// How many `LocalVariableTable` entries the method has recorded so far.
+    pub(crate) fn local_entry_count(&self) -> usize {
+        self.local_entries.len()
+    }
+
+    /// Record a local's entry at `position` in table order, ahead of the entries recorded since
+    /// that position was read. kotlinc's inliner writes an inlined lambda's inline-depth marker
+    /// before the locals the lambda's body declares, although its range closes after theirs.
+    pub(crate) fn insert_local_entry(
+        &mut self,
+        position: usize,
+        entry: (u16, Option<u16>, u16, String, String),
+    ) {
+        let position = position.min(self.local_entries.len());
+        self.local_entries.insert(position, entry);
+    }
+}
+
 impl ClassWriter {
     /// Intern a method's `LocalVariableTable` names and descriptors, in table order, once its body
     /// is complete. ASM visits the local variables after the instructions and before `visitMaxs`,

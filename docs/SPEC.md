@@ -3385,6 +3385,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   doesn't read jimage constructor descriptors yet, so classes whose `<init>` lives only in the jimage —
   e.g. `StringBuilder` — are skipped). `throw e` emits `athrow` (`tests/throw_e2e.rs`).
 
+- **A same-module inline expansion opens kotlinc's inline frames.** Common lowering
+  (`fir_lower/inlining.rs`) records, once an expansion's operands are bound, a frame boundary
+  whose provenance is `FunctionFrameMarker` and whose retained name is the callee's. The boundary
+  is not a value and allocates no temporary. A lambda spliced into it keeps each named parameter
+  in a local of its own and then records a `LambdaFrameMarker` for the callee it was passed to
+  (for `suspendCoroutineUninterceptedOrReturn` too, whose selected name the checker keeps on the
+  intrinsic). The JVM emission boundary materializes each boundary as `iconst_0; istore` into a
+  slot that is not a semantic value, and the debug-name boundary (`jvm/debug_local_names.rs`)
+  spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`. The class is the naming walk's
+  `class_provenance`, realized by the JVM naming pass (`Kt$f$r$1` for a lambda bound to `val r`,
+  `Kt$f$2` in a suspend function whose continuation takes position 1). A default lambda written on
+  an `expect` declaration is named from the actual classifier that survives actualization
+  (`Foo$member$1`, `PlatformKt$topLevel$1`), because the expect header is gone before the default
+  is checked (`tests/expect_default_lambda_marker_e2e.rs`). A marker whose provenance
+  was not realized is an error; the name is not rebuilt from the owner and an ordinal. A frame's
+  marker is listed ahead of the locals binding its
+  operands, a lambda's also ahead of the locals its body declares, and a cloned lambda marker gains `$iv` per enclosing expansion while a function
+  marker never does, as kotlinc's tables read. A spliced lambda's block ends with kotlinc's return
+  to the invocation's line and a `nop`, which the nop cleanup keeps only when nothing else runs on
+  that line. Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
+  evaluated first and stored in reverse, kotlinc spills the operand stack before a lambda body
+  splices into an expression, the inline body's lines are not remapped through a source map, and a
+  suspend function that the coroutine transformer does not route records no locals.   Tests:
+  `tests/same_module_inline_frame_markers_e2e.rs` (instructions and local tables against kotlinc,
+  and a run), `tests/expect_default_lambda_marker_e2e.rs`, `jvm::debug_local_names::tests`.
+
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
   argument temps, and a lambda argument is inlined at the call sites of its function-typed parameter
@@ -8422,7 +8448,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constant, even when nothing folds). Rounds repeat while one changes anything. The popped loads and
   constants are left to the later passes. Nothing that runs changes: the folded comparison had one
   outcome. An inline function called with a constant it branches on keeps only the branch taken
-  (`pick(true)` is `iconst_1; ireturn` apart from kotlinc's `$i$f$` marker local), and a comparison of
+  (`pick(true)` is kotlinc's `$i$f$` marker local, then `iconst_1; ireturn`), and a comparison of
   locals holding constants folds. Tests: the unit tests beside the pass, and
   `tests/constant_conditions_e2e.rs` (instructions and frames against kotlinc, and the samples at run
   time). Because this step removes code without touching the tables, the final dead-code step drops
@@ -8445,7 +8471,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   dead-code transformer then runs (step `DeadCode`), keeping the local variables for the `nop` step;
   only the final run drops the empty ones. Nothing that runs changes: only values nobody used stop
   being pushed, and a call keeps its own `pop`. A discarded inline `if (c) a else b` of `Int`s is
-  `iload c; ifeq L; L: return` (apart from kotlinc's `$i$f$` marker local), a discarded boxed one
+  `iload c; ifeq L; L: return` after kotlinc's `$i$f$` marker local, a discarded boxed one
   the same, and a discarded `if (c) a else ext()` keeps only the call and its `pop` behind a negated
   jump. Tests: the unit tests beside the pass and in `dead_code` and `pipeline`, and
   `tests/pop_backward_e2e.rs` (instructions against kotlinc, and the samples at run time).

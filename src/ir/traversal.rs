@@ -230,7 +230,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumEntries { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
-        | IrExpr::CurrentContinuation => {}
+        | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker => {}
     }
 }
 

@@ -278,20 +278,22 @@ impl BodyFirChecker<'_> {
         provenance: &crate::ast::LocalClassNameProvenance,
         expression: FirExprId,
     ) {
-        let lexical_owner = match provenance.lexical_owner {
-            Some(owner) => {
-                let Some(owner) = self
-                    .session
-                    .active_source
-                    .as_ref()
-                    .and_then(|active| active.classifier_declaration(owner))
-                else {
-                    return;
-                };
-                Some(owner)
-            }
-            None => None,
-        };
+        let lexical_owner =
+            match provenance.lexical_owner {
+                Some(owner) => {
+                    // The walk names the parser classifier that lexically contains the node. After
+                    // actualization that parser node is the expect class, whose header is gone, and
+                    // the same binding is aliased onto the actual classifier that is emitted. The
+                    // surviving header is the owner the JVM class is realized from.
+                    let Some(owner) = self.session.active_source.as_ref().and_then(|active| {
+                        active.canonical_classifier_declaration(owner, self.index)
+                    }) else {
+                        return;
+                    };
+                    Some(owner)
+                }
+                None => None,
+            };
         self.body.set_generated_class_provenance(
             expression,
             crate::fir::FirGeneratedClassProvenance {

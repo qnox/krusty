@@ -75,9 +75,9 @@ fn a_jump_on_constants_folds_like_kotlincs() {
             "6: ireturn",
         ])
     );
-    // The inline calls fold the same way. kotlinc also keeps its `$i$f$` marker local per inlined
-    // call (`iconst_0; istore`), which krusty's inliner does not write yet.
-    for (member, reference, krusty) in [
+    // The inline calls fold the same way, after the `$i$f$` marker local (`iconst_0; istore`)
+    // each expansion opens with.
+    for (member, expected) in [
         (
             "int constCond()",
             &[
@@ -88,7 +88,6 @@ fn a_jump_on_constants_folds_like_kotlincs() {
                 "4: iconst_1",
                 "5: ireturn",
             ][..],
-            &["0: iconst_1", "1: istore_0", "2: iconst_1", "3: ireturn"][..],
         ),
         (
             "int constCondFalse()",
@@ -100,7 +99,6 @@ fn a_jump_on_constants_folds_like_kotlincs() {
                 "4: iconst_2",
                 "5: ireturn",
             ][..],
-            &["0: iconst_0", "1: istore_0", "2: iconst_2", "3: ireturn"][..],
         ),
         (
             "int signOfMinus()",
@@ -111,12 +109,6 @@ fn a_jump_on_constants_folds_like_kotlincs() {
                 "5: istore_1",
                 "6: iconst_m1",
                 "7: ireturn",
-            ][..],
-            &[
-                "0: sipush -200",
-                "3: istore_0",
-                "4: iconst_m1",
-                "5: ireturn",
             ][..],
         ),
         // `x > limit` with `limit` bound to `0` compares `x` with zero (`ifle`), and the popped
@@ -141,32 +133,16 @@ fn a_jump_on_constants_folds_like_kotlincs() {
                 "22: iconst_2",
                 "23: ireturn",
             ][..],
-            &[
-                "0: iload_0",
-                "1: istore_1",
-                "2: iconst_0",
-                "3: istore_2",
-                "4: iload_1",
-                "5: ifle 12",
-                "8: iconst_1",
-                "9: goto 13",
-                "12: iconst_0",
-                "13: ifeq 20",
-                "16: iconst_1",
-                "17: goto 21",
-                "20: iconst_2",
-                "21: ireturn",
-            ][..],
         ),
     ] {
         assert_eq!(
             method_instructions(&built.reference, member),
-            rows(reference),
+            rows(expected),
             "{member} (kotlinc)"
         );
         assert_eq!(
             method_instructions(&built.krusty, member),
-            rows(krusty),
+            rows(expected),
             "{member}"
         );
     }

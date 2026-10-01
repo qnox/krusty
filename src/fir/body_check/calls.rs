@@ -1781,7 +1781,9 @@ impl BodyFirChecker<'_> {
                 Some(FirIntrinsic::SuspendCoroutine)
             }
             Some(crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
-                Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn)
+                Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {
+                    callee: selected.callable.name.as_str().into(),
+                })
             }
             _ => None,
         };
