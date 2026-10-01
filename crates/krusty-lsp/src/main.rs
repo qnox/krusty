@@ -14,7 +14,9 @@ mod project_analysis_group;
 mod support_splice;
 
 use project_analysis_group::{
-    project_analysis_groups, project_group_compiler_config, project_group_fingerprint,
+    fail_project_group, open_documents_from_modules, project_analysis_groups,
+    project_group_compiler_config, project_group_fingerprint, project_source_size_limit_message,
+    retain_analysis_cache_budget, source_bytes, CachedProjectAnalysis,
 };
 
 use krusty::source::SourceKind;
@@ -1658,8 +1660,12 @@ impl krusty_lsp::Analysis for WorkerHost {
                         open_uris,
                         krusty_lsp::MAX_SOURCE_SET_BYTES,
                     )
-                    .map(|(sources, inferred_count, java_sources)| {
-                        (Cow::Borrowed(sources), inferred_count, java_sources)
+                    .map(|loaded| {
+                        (
+                            Cow::Borrowed(loaded.kotlin),
+                            loaded.inferred_count,
+                            loaded.java,
+                        )
                     }),
                 _ => Ok((Cow::Owned(Vec::new()), 0, Vec::new())),
             };
@@ -1712,8 +1718,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                 document_indices
                     .iter()
                     .map(|&index| documents[index].1)
-                    .chain(group_support.iter().map(|(_, source)| *source))
-                    .chain(java_sources.iter().map(String::as_str)),
+                    .chain(group_support.iter().map(|source| source.text()))
+                    .chain(java_sources.iter().map(|source| source.text())),
             );
             let fits_worker =
                 group_source_bytes.is_some_and(|bytes| bytes <= krusty_lsp::MAX_SOURCE_SET_BYTES);
@@ -1768,6 +1774,11 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .map(|input| input.text.to_string())
                     .collect::<Vec<_>>();
                 let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+                let retained_java = group
+                    .java_sources
+                    .iter()
+                    .map(|source| source.text().to_string())
+                    .collect::<Vec<_>>();
                 self.retained.record(
                     true,
                     &AnalysisPayload {
@@ -1776,7 +1787,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                         uris: &retained_uris,
                         result_count: documents.len(),
                         inferred_count: documents.len() + group.inferred_support_count,
-                        java_sources: &group.java_sources,
+                        java_sources: &retained_java,
                         language_arguments,
                         classpath: classpath.as_deref(),
                     },
@@ -2020,18 +2031,6 @@ fn next_worker_reconfigure_retry(now_ms: u64, previous_backoff_ms: u64) -> (u64,
     (now_ms.saturating_add(backoff), backoff)
 }
 
-fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
-    if uri.ends_with(".java") {
-        return krusty::source::SourceKind::Java;
-    }
-    url::Url::parse(uri)
-        .ok()
-        .and_then(|uri| uri.to_file_path().ok())
-        .as_deref()
-        .and_then(krusty::source::kind)
-        .unwrap_or(krusty::source::SourceKind::Kotlin)
-}
-
 fn project_module_assignments(
     snapshot: Option<&krusty_lsp::project::model::SourceModuleGraph>,
     documents: &[(&str, &str)],
@@ -2056,14 +2055,6 @@ fn project_module_assignments(
     )
 }
 
-struct CachedProjectAnalysis {
-    module_index: Option<usize>,
-    fingerprint: u64,
-    document_indices: Vec<usize>,
-    analyses: Vec<DocumentAnalysis>,
-    retained_bytes: usize,
-}
-
 fn dependencies_excluding_friends(dependencies: &[usize], friends: &[usize]) -> Vec<usize> {
     let friends: HashSet<usize> = friends.iter().copied().collect();
     dependencies
@@ -2071,78 +2062,6 @@ fn dependencies_excluding_friends(dependencies: &[usize], friends: &[usize]) -> 
         .copied()
         .filter(|index| !friends.contains(index))
         .collect()
-}
-
-fn open_documents_from_modules<'a>(
-    visible_indices: &[usize],
-    documents: &[(&'a str, &'a str)],
-    module_assignments: &[Option<usize>],
-) -> Vec<(usize, &'a str, &'a str)> {
-    let visible: HashSet<usize> = visible_indices.iter().copied().collect();
-    documents
-        .iter()
-        .zip(module_assignments)
-        .enumerate()
-        .filter_map(|(document_index, ((uri, source), assignment))| {
-            if assignment.is_some_and(|index| visible.contains(&index)) {
-                Some((document_index, *uri, *source))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn retain_analysis_cache_budget(
-    cache: &mut Vec<CachedProjectAnalysis>,
-    incoming_bytes: usize,
-    max_bytes: usize,
-) {
-    let mut retained = cache
-        .iter()
-        .map(|cached| cached.retained_bytes)
-        .sum::<usize>();
-    while !cache.is_empty() && incoming_bytes > max_bytes.saturating_sub(retained) {
-        retained = retained.saturating_sub(cache.remove(0).retained_bytes);
-    }
-}
-
-fn source_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Option<usize> {
-    sources
-        .into_iter()
-        .try_fold(0usize, |bytes, source| bytes.checked_add(source.len()))
-}
-
-fn project_source_size_limit_message() -> String {
-    format!(
-        "module source set exceeds analysis limit (maximum {} MiB); semantic diagnostics suppressed",
-        krusty_lsp::MAX_SOURCE_SET_BYTES / (1024 * 1024)
-    )
-}
-
-fn project_source_error_analysis(message: &str) -> DocumentAnalysis {
-    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-        span: krusty::diag::Span::new(0, 0),
-        editor_span: None,
-        identity: None,
-        severity: krusty::diag::Severity::Error,
-        kind: krusty::diag::DiagnosticKind::Compiler,
-        msg: message.to_string(),
-        file: 0,
-    }])
-}
-
-fn fail_project_group(
-    analyses: &mut [DocumentAnalysis],
-    cache: &mut Vec<CachedProjectAnalysis>,
-    module_index: Option<usize>,
-    document_indices: &[usize],
-    message: &str,
-) {
-    cache.retain(|cached| cached.module_index != module_index);
-    for &index in document_indices {
-        analyses[index] = project_source_error_analysis(message);
-    }
 }
 
 #[cfg(test)]
@@ -2520,7 +2439,10 @@ mod tests {
         let dependency_group = ProjectAnalysisGroup::new(
             Some(0),
             vec![0],
-            vec![dependency_support],
+            vec![krusty_lsp::SupportText::kotlin(
+                dependency_support.0,
+                dependency_support.1,
+            )],
             1,
             Vec::new(),
             vec![(3, 3)],
@@ -2528,7 +2450,10 @@ mod tests {
         let consumer_group = ProjectAnalysisGroup::new(
             Some(1),
             vec![2],
-            vec![consumer_support, (dependency_uri.as_str(), documents[0].1)],
+            vec![
+                krusty_lsp::SupportText::kotlin(consumer_support.0, consumer_support.1),
+                krusty_lsp::SupportText::kotlin(dependency_uri.as_str(), documents[0].1),
+            ],
             1,
             Vec::new(),
             vec![(3, 4), (4, 0)],
@@ -2566,6 +2491,21 @@ mod tests {
         ];
         assert_ne!(
             project_group_fingerprint(&consumer_changed, &consumer_group),
+            fingerprint
+        );
+        let replaced_support = ProjectAnalysisGroup::new(
+            consumer_group.module_index,
+            consumer_group.document_indices.clone(),
+            vec![
+                krusty_lsp::SupportText::kotlin(consumer_support.0, "fun changed() {}"),
+                krusty_lsp::SupportText::kotlin(dependency_uri.as_str(), documents[0].1),
+            ],
+            consumer_group.inferred_support_count,
+            consumer_group.java_sources.clone(),
+            consumer_group.navigation_file_remaps.clone(),
+        );
+        assert_ne!(
+            project_group_fingerprint(&documents, &replaced_support),
             fingerprint
         );
 
@@ -2723,12 +2663,14 @@ mod tests {
             shared,
             ("file:///first-support.kt", "class FirstSupport"),
             documents[0],
-        ];
+        ]
+        .map(|(uri, text)| krusty_lsp::SupportText::kotlin(uri, text));
         let second_support = [
             shared,
             ("file:///second-support.kt", "class SecondSupport"),
             documents[0],
-        ];
+        ]
+        .map(|(uri, text)| krusty_lsp::SupportText::kotlin(uri, text));
         let mut support_documents = Vec::new();
         let mut support_indices = HashMap::new();
         let mut next_discarded = u32::MAX;
@@ -2772,7 +2714,8 @@ mod tests {
             ("file:///kept.kt", "x"),
             ("file:///shed.kt", "yy"),
             ("file:///also-shed.kt", "zzz"),
-        ];
+        ]
+        .map(|(uri, text)| krusty_lsp::SupportText::kotlin(uri, text));
         let mut support_documents = Vec::new();
         let mut support_indices = HashMap::new();
         let mut next_discarded = u32::MAX;
@@ -2793,7 +2736,7 @@ mod tests {
                 support_documents[0].0.as_str(),
                 support_documents[0].1.as_str()
             ),
-            support[0]
+            (support[0].uri(), support[0].text())
         );
         assert_eq!(remaps, [(1, 1), (2, u32::MAX), (3, u32::MAX - 1)]);
         assert_eq!(next_discarded, u32::MAX - 2);
@@ -2843,9 +2786,9 @@ mod tests {
             Some(1),
             vec![2],
             vec![
-                ("file:///consumer-support.kt", "fun helper() {}"),
+                krusty_lsp::SupportText::kotlin("file:///consumer-support.kt", "fun helper() {}"),
                 // Open dependency text, carried as support rather than a dumpable slot.
-                ("file:///dependency.kt", "fun dependency() {}"),
+                krusty_lsp::SupportText::kotlin("file:///dependency.kt", "fun dependency() {}"),
             ],
             1,
             Vec::new(),

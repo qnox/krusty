@@ -37,13 +37,13 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKER_READY: &[u8] = b"ready";
 
 #[derive(Serialize)]
-struct AnalysisRequest<'a> {
+struct AnalysisRequest<'a, J> {
     sources: &'a [&'a str],
     source_kinds: &'a [u8],
     result_count: usize,
     inferred_count: usize,
     language_features: &'a [&'a str],
-    java_sources: &'a [String],
+    java_sources: &'a [J],
     classpath: Option<&'a [PathBuf]>,
 }
 
@@ -100,8 +100,8 @@ struct OwnedDumpRequest {
 
 /// A dump request as the supervisor sends it, borrowing the retained source texts.
 #[derive(Serialize)]
-struct DumpRequest<'a> {
-    analysis: AnalysisRequest<'a>,
+struct DumpRequest<'a, J> {
+    analysis: AnalysisRequest<'a, J>,
     target: usize,
     label: &'a str,
     cache_key: &'a str,
@@ -114,8 +114,8 @@ struct DumpRequest<'a> {
 /// every source text before a byte reaches the bounded writer, and its internal `unwrap` would turn
 /// a non-UTF-8 `cache_root` — legal on Linux and macOS — into a panic in the supervisor process.
 #[derive(Serialize)]
-struct DumpEnvelope<'a> {
-    dump: &'a DumpRequest<'a>,
+struct DumpEnvelope<'a, J> {
+    dump: &'a DumpRequest<'a, J>,
 }
 
 /// Everything a dump needs from the session that produced the retained analysis payload.
@@ -344,19 +344,19 @@ pub fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool {
         .is_some_and(|total| total <= MAX_SOURCE_SET_BYTES)
 }
 
-fn encode_request(
+fn encode_request<J: AsRef<str> + Serialize>(
     inputs: &[SourceInput<'_>],
     result_count: usize,
     inferred_count: usize,
     features: &LangFeatures,
-    java_sources: &[String],
+    java_sources: &[J],
     classpath: Option<&[PathBuf]>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
             .iter()
             .map(|source| source.text.len())
-            .chain(java_sources.iter().map(String::len)),
+            .chain(java_sources.iter().map(|source| source.as_ref().len())),
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -602,13 +602,13 @@ impl WorkerProcess {
         }
     }
 
-    fn analyze(
+    fn analyze<J: AsRef<str> + Serialize>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
         language_features: &LangFeatures,
-        java_sources: &[String],
+        java_sources: &[J],
         classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let request = encode_request(
@@ -728,15 +728,15 @@ impl AnalysisWorker {
             .iter()
             .map(|source| SourceInput::kotlin(source))
             .collect::<Vec<_>>();
-        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len(), &[])
+        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len(), &[] as &[&str])
     }
 
-    pub fn analyze_inputs_prefix(
+    pub fn analyze_inputs_prefix<J: AsRef<str> + Serialize>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
-        java_sources: &[String],
+        java_sources: &[J],
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let features = self.language_features.clone();
         self.request(|process| {
@@ -751,12 +751,12 @@ impl AnalysisWorker {
         })
     }
 
-    pub fn analyze_inputs_prefix_with_config(
+    pub fn analyze_inputs_prefix_with_config<J: AsRef<str> + Serialize>(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
-        java_sources: &[String],
+        java_sources: &[J],
         language_arguments: &[String],
         classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
@@ -1304,9 +1304,51 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, Cursor, Read};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    /// Java texts are serialized from the caller's borrow. A cache hit and a dump must not build
+    /// an intermediate copy of those strings just to encode the request.
+    #[test]
+    fn request_encoding_serializes_each_borrowed_java_source_once() {
+        struct Counted<'a> {
+            text: &'a str,
+            visits: &'a AtomicUsize,
+        }
+
+        impl AsRef<str> for Counted<'_> {
+            fn as_ref(&self) -> &str {
+                self.text
+            }
+        }
+
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.visits.fetch_add(1, Ordering::Relaxed);
+                serializer.serialize_str(self.text)
+            }
+        }
+
+        let visits = AtomicUsize::new(0);
+        let java = [
+            Counted {
+                text: "class A {}",
+                visits: &visits,
+            },
+            Counted {
+                text: "class B {}",
+                visits: &visits,
+            },
+        ];
+        let inputs = [SourceInput::kotlin("fun main() {}")];
+        let encoded = encode_request(&inputs, 1, 1, &LangFeatures::new(), &java, None).unwrap();
+        assert_eq!(visits.load(Ordering::Relaxed), java.len());
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(text.contains("class A {}"));
+        assert!(text.contains("class B {}"));
+    }
 
     struct DelayedEof {
         delay: Duration,
@@ -1472,13 +1514,13 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[] as &[&str], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[], None)
+            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[] as &[&str], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -1517,7 +1559,8 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[], None).unwrap();
+        let request =
+            encode_request(&inputs, 1, 1, &LangFeatures::new(), &[] as &[&str], None).unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1577,7 +1620,7 @@ mod tests {
             1,
             1,
             &LangFeatures::new(),
-            &[],
+            &[] as &[&str],
             Some(&classpath),
         )
         .unwrap();
@@ -1992,7 +2035,7 @@ mod tests {
             cache_root: Path::new("/tmp/krusty"),
             result_count: 1,
             inferred_count: 1,
-            java_sources: &[],
+            java_sources: &[] as &[String],
             language_arguments: None,
             classpath: None,
         };
@@ -2156,7 +2199,7 @@ mod tests {
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &[],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: None,
         })
         .unwrap();
@@ -2203,7 +2246,7 @@ mod tests {
             result_count: 1,
             inferred_count: 1,
             language_features: &[],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: Some(&[]),
         })
         .unwrap();
@@ -2373,7 +2416,7 @@ mod tests {
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &[],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: None,
         })
         .unwrap();
@@ -2398,7 +2441,7 @@ mod tests {
         let java = "package demo;\n\npublic record Gadget(int width, int height) {\n}\n";
         let sources = [java, "package demo\n\nfun make(): Gadget? = null\n"];
         let source_kinds = vec![SourceKind::Java.wire_code(), SourceKind::Kotlin.wire_code()];
-        let java_sources = vec![java.to_string()];
+        let java_sources = [java];
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
@@ -2464,7 +2507,7 @@ fun combine(entries: Array<Entry>): String {
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &["NameBasedDestructuring"],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: None,
         })
         .unwrap();
@@ -2488,7 +2531,7 @@ fun combine(entries: Array<Entry>): String {
             result_count: 1,
             inferred_count: 1,
             language_features: &[],
-            java_sources: &[],
+            java_sources: &[] as &[&str],
             classpath: None,
         })
         .unwrap();

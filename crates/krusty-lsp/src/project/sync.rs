@@ -587,8 +587,7 @@ mod tests {
                 32 * 1024 * 1024,
             )
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
         tree.write("build.gradle.kts", "dependencies {}");
         assert_eq!(
             sync.refresh(&FakeRunner::default()),
@@ -602,8 +601,7 @@ mod tests {
                 32 * 1024 * 1024,
             )
             .unwrap()
-            .0
-            .to_vec();
+            .kotlin_pairs();
 
         assert_eq!(
             first,

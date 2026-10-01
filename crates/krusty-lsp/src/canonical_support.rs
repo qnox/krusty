@@ -22,9 +22,34 @@ impl<'a> OpenDocumentSlots<'a> {
     }
 }
 
-pub(super) fn register_canonical_support(
+pub(super) trait CanonicalSupport {
+    fn uri(&self) -> &str;
+    fn text(&self) -> &str;
+}
+
+impl CanonicalSupport for (&str, &str) {
+    fn uri(&self) -> &str {
+        self.0
+    }
+
+    fn text(&self) -> &str {
+        self.1
+    }
+}
+
+impl CanonicalSupport for krusty_lsp::SupportText<'_> {
+    fn uri(&self) -> &str {
+        krusty_lsp::SupportText::uri(*self)
+    }
+
+    fn text(&self) -> &str {
+        krusty_lsp::SupportText::text(*self)
+    }
+}
+
+pub(super) fn register_canonical_support<S: CanonicalSupport>(
     open_documents: &OpenDocumentSlots<'_>,
-    group_support: &[(&str, &str)],
+    group_support: &[S],
     support_documents: &mut Vec<(String, String)>,
     support_indices: &mut HashMap<String, usize>,
     mut remaining_bytes: usize,
@@ -33,7 +58,9 @@ pub(super) fn register_canonical_support(
 ) -> (Vec<(u32, u32)>, usize) {
     let mut added_bytes = 0usize;
     let mut remaps = Vec::with_capacity(group_support.len());
-    for (local_index, &(uri, source)) in group_support.iter().enumerate() {
+    for (local_index, source) in group_support.iter().enumerate() {
+        let uri = source.uri();
+        let source = source.text();
         let canonical = if let Some(&index) = open_documents.by_uri.get(uri) {
             index as u32
         } else if let Some(&index) = support_indices.get(uri) {

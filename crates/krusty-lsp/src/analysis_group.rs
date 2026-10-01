@@ -10,9 +10,9 @@ pub(super) struct ProjectAnalysisGroup<'a> {
     pub(super) module_index: Option<usize>,
     pub(super) document_indices: Vec<usize>,
     members: HashSet<usize>,
-    pub(super) support_documents: Vec<(&'a str, &'a str)>,
+    pub(super) support_documents: Vec<krusty_lsp::SupportText<'a>>,
     pub(super) inferred_support_count: usize,
-    pub(super) java_sources: Vec<String>,
+    pub(super) java_sources: Vec<&'a krusty_lsp::DigestedJavaSource>,
     pub(super) navigation_file_remaps: Vec<(u32, u32)>,
 }
 
@@ -20,9 +20,9 @@ impl<'a> ProjectAnalysisGroup<'a> {
     pub(super) fn new(
         module_index: Option<usize>,
         document_indices: Vec<usize>,
-        support_documents: Vec<(&'a str, &'a str)>,
+        support_documents: Vec<krusty_lsp::SupportText<'a>>,
         inferred_support_count: usize,
-        java_sources: Vec<String>,
+        java_sources: Vec<&'a krusty_lsp::DigestedJavaSource>,
         navigation_file_remaps: Vec<(u32, u32)>,
     ) -> Self {
         let members = document_indices.iter().copied().collect();
@@ -40,6 +40,18 @@ impl<'a> ProjectAnalysisGroup<'a> {
     pub(super) fn contains_document(&self, index: usize) -> bool {
         self.members.contains(&index)
     }
+}
+
+fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
+    if uri.ends_with(".java") {
+        return krusty::source::SourceKind::Java;
+    }
+    url::Url::parse(uri)
+        .ok()
+        .and_then(|uri| uri.to_file_path().ok())
+        .as_deref()
+        .and_then(krusty::source::kind)
+        .unwrap_or(krusty::source::SourceKind::Kotlin)
 }
 
 /// The group's worker slots in wire order, each paired with the URI it may be dumped under.
@@ -68,15 +80,15 @@ pub(super) fn project_group_slots<'a>(
             (
                 if in_group { *uri } else { "" },
                 krusty::source::SourceInput::new(
-                    super::source_kind_from_uri(uri),
+                    source_kind_from_uri(uri),
                     if in_group { source } else { "" },
                 ),
             )
         })
-        .chain(group.support_documents.iter().map(|(uri, source)| {
+        .chain(group.support_documents.iter().map(|source| {
             (
                 "",
-                krusty::source::SourceInput::new(super::source_kind_from_uri(uri), source),
+                krusty::source::SourceInput::new(source_kind_from_uri(source.uri()), source.text()),
             )
         }))
 }
