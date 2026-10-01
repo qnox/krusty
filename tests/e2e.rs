@@ -1999,6 +1999,8 @@ mod throw_e2e;
 mod top_level_custom_accessor_e2e;
 #[path = "top_level_generic_property_inference_e2e.rs"]
 mod top_level_generic_property_inference_e2e;
+#[path = "top_level_lateinit_e2e.rs"]
+mod top_level_lateinit_e2e;
 #[path = "top_level_property_e2e.rs"]
 mod top_level_property_e2e;
 #[path = "toplevel_array_inference_e2e.rs"]

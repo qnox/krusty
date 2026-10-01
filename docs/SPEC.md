@@ -2782,9 +2782,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   listOf(s, s) }` emitted successfully and failed at link time with `VerifyError: Inconsistent stackmap
   frames at branch target N`. This is emitter-only: the guard shape, and the fact that a `lateinit` read
   still throws while the field is null, are unchanged — spilling only moves *when* the earlier operands
-  are evaluated relative to it. `lateinit` on a top-level/`object` property is a separate, still-declined
-  shape (the IR backend skips the file). `tests/lateinit_operand_stack_e2e.rs`,
-  `tests/lateinit_companion_read_e2e.rs`.
+  are evaluated relative to it. A top-level `lateinit var` is a facade static. A public or internal
+  one is a `public static` field whose default getter throws (`getstatic; dup; ifnull; areturn; pop;
+  ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
+  and cross-file reads call that getter. A private one keeps a `private static` field and inlines the
+  guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
+  aconst_null`). `::prop.isInitialized` loads that field with no guard. An `object` member `lateinit`
+  stays on the instance-field path. `tests/top_level_lateinit_e2e.rs`,
+  `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/

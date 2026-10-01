@@ -164,9 +164,6 @@ properties/backingField/nullableSupertypeWithValueClassExplicitBackingField.kt
 properties/backingField/supertypePropertyWithValueClassExplicitBackingField.kt
 properties/backingField/typeCheckSupertypeWithValueClassExplicitBackingField.kt
 properties/complexPropertyInitializer.kt
-properties/lateinit/topLevel/accessorException.kt
-properties/lateinit/topLevel/uninitializedMemberAccess.kt
-properties/lateinit/topLevel/uninitializedRead.kt
 ranges/contains/generated/doubleRangeUntil.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inOptimizableDoubleRange.kt

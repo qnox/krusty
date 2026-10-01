@@ -586,6 +586,8 @@ fn materialize_top_level_property(
             init,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),
+            is_lateinit: companion_block_owner.is_none()
+                && property.flags.has(DeclarationFlags::LATEINIT),
             owner: companion_block_owner.map(|class| ir.classes[class as usize].fq_name_id()),
             visibility: property.visibility,
             setter_jvm_name: None,
@@ -944,6 +946,7 @@ fn materialize_member_property(
             init: Some(initializer),
             is_var: false,
             is_const: true,
+            is_lateinit: false,
             owner: Some(owner),
             visibility: property.visibility,
             setter_jvm_name: None,
@@ -1634,6 +1637,10 @@ fn realize_backing_field_operations(
     realizations: &HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     for raw in 0..ir.exprs.len() {
+        let raw_probe = matches!(
+            ir.exprs[raw],
+            IrExpr::Checked(IrCheckedOperation::LateinitFieldRead { .. })
+        );
         let operation = match ir.exprs[raw].clone() {
             IrExpr::Checked(operation) => operation,
             _ => continue,
@@ -1673,6 +1680,11 @@ fn realize_backing_field_operations(
             )?,
             _ => continue,
         };
+        if raw_probe && matches!(replacement, IrExpr::GetStatic(_)) {
+            let id =
+                u32::try_from(raw).map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+            ir.raw_lateinit_static_reads.insert(id);
+        }
         ir.exprs[raw] = replacement;
     }
     Ok(())

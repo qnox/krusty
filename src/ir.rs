@@ -2121,6 +2121,9 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: std::collections::HashSet<ExprId>,
+    /// Top-level `lateinit` reads that must load the field raw: `::prop.isInitialized`. An ordinary
+    /// read of the same static throws while it is null; this probe only compares the field with null.
+    pub raw_lateinit_static_reads: std::collections::HashSet<ExprId>,
     /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
     /// the same generic `when` written by hand must remain distinguishable.
     pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,

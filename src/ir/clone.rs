@@ -380,6 +380,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
     }
+    if ir.raw_lateinit_static_reads.contains(&source) {
+        ir.raw_lateinit_static_reads.insert(target);
+    }
     if ir.written_casts.contains(&source) {
         ir.written_casts.insert(target);
     }
