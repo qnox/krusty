@@ -176,6 +176,7 @@ mod tests {
                 "value".to_owned(),
                 AnnotationValue::String(KtString::from("custom")),
             )],
+            facts: Default::default(),
         };
         assert_eq!(
             generated_external_serializer(
@@ -198,6 +199,7 @@ mod tests {
                 "other".to_owned(),
                 AnnotationValue::String(KtString::from("custom")),
             )],
+            facts: Default::default(),
         };
         assert_eq!(
             generated_external_serializer(
@@ -245,6 +247,7 @@ mod tests {
         let unreadable = ResolvedAnnotation {
             annotation: type_name(SERIAL_NAME_FQ),
             arguments: Vec::new(),
+            facts: Default::default(),
         };
         assert_eq!(
             generated_external_serializer(

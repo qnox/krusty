@@ -2077,6 +2077,20 @@ impl AnnotationValue {
 pub struct ResolvedAnnotation {
     pub annotation: TypeName,
     pub arguments: Vec<(String, AnnotationValue)>,
+    pub facts: AnnotationSemanticFacts,
+}
+
+impl ResolvedAnnotation {
+    pub fn is_deprecated_hidden(&self) -> bool {
+        self.facts.deprecated_hidden
+    }
+}
+
+/// Provider-normalized meaning of an annotation application. Consumers inspect these facts instead
+/// of recovering semantics from an enum constant's source spelling or physical encoding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnnotationSemanticFacts {
+    pub deprecated_hidden: bool,
 }
 
 /// A plugin-generated classifier published with the source header that owns it. The common
@@ -2213,6 +2227,7 @@ pub trait ClassifierFactSource {
 pub struct AppliedAnnotation {
     pub internal: TypeName,
     pub values: Vec<(String, AnnotationValue)>,
+    pub facts: AnnotationSemanticFacts,
     pub retention: AnnotationRetention,
     /// The annotation's DECLARED `@Target` set, as far as it decides where an application written
     /// without a use-site prefix lands (see [`AnnotationTargets`]).

@@ -11340,6 +11340,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
   annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
   reject sources that compile today.
+- **A HIDDEN-deprecated member is not a Kotlin source overload.** The provider that checks
+  `@Deprecated(level = DeprecationLevel.HIDDEN)` publishes that meaning as a semantic fact from the
+  resolved enum-entry identity. Qualified and imported references therefore agree without later
+  phases inspecting the constant's spelling. Source overload identity excludes the hidden
+  declaration, and candidate collection cannot select it; `WARNING` and `ERROR` declarations remain
+  visible. The JVM backend still emits the hidden declaration for binary compatibility and diagnoses
+  a physical descriptor collision after representation when its parameter and return descriptors
+  match another member. Erroneous or pending source signatures do not acquire a guessed overload
+  identity. Method annotations are folded and published on stable declarations before cross-file
+  candidate collection; value-parameter annotations remain owned by the method body fragment.
+  Test: `tests/hidden_deprecation_overload_e2e.rs`.
 - **A type variable is solved through the declaration's own bound relation.** A generic declaration
   states constraints beyond its parameter types, and both are load-bearing at a call site. For
   `fun <T : Base<T>, C : T> C.f(subs: Iterable<T>)`, an argument can pin `T` to a type its OWN bound

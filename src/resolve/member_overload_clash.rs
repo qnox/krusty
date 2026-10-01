@@ -40,6 +40,14 @@ impl Checker<'_> {
             let Some(declaration) = self.member_declaration(class_decl, owner, index) else {
                 continue;
             };
+            if self.resolved_index.is_some_and(|index| {
+                index
+                    .declaration_applied_annotations(declaration)
+                    .iter()
+                    .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+            }) {
+                continue;
+            }
             let Some(key) = self.member_overload_key(declaration) else {
                 continue;
             };

@@ -22,6 +22,7 @@ pub(super) fn write_self_annotations() -> DeclarationAnnotations {
             internal: type_name("kotlin/jvm/JvmStatic"),
             values: Vec::new(),
         },
+        facts: Default::default(),
     }])
 }
 
@@ -141,6 +142,9 @@ pub(super) fn generated_serializer_annotations() -> DeclarationAnnotations {
                     AnnoValue::Enum(type_name("kotlin/DeprecationLevel"), "HIDDEN".to_string()),
                 ),
             ],
+        },
+        facts: crate::types::AnnotationSemanticFacts {
+            deprecated_hidden: true,
         },
     }])
 }

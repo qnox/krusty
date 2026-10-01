@@ -211,10 +211,18 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                 }
             }
             Decl::Class(class) => {
-                // Checked classifier metadata is published after stable signature finalization.
-                // Retain only the class declaration's own annotation expressions for that bounded
-                // pass; member annotations remain owned by their ordinary declaration units.
+                // Checked declaration metadata is published after stable signature finalization.
+                // Retain the classifier's own annotation expressions and each method's annotation
+                // arguments: both are folded before any body is checked. Method bodies stay with
+                // their ordinary declaration units.
                 retained.roots(file, class.annotation_args.iter().flatten().copied());
+                retained.roots(
+                    file,
+                    class
+                        .methods
+                        .iter()
+                        .flat_map(|method| method.annotation_args.iter().flatten().copied()),
+                );
                 retained.roots(
                     file,
                     class.props.iter().filter_map(|parameter| parameter.default),
@@ -404,10 +412,19 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
 
 pub(super) fn has_classifier_annotation_arguments(file: &File) -> bool {
     file.decl_arena.iter().any(|declaration| {
-        matches!(
-            declaration,
-            Decl::Class(class) if class.annotation_args.iter().any(|arguments| !arguments.is_empty())
-        )
+        let Decl::Class(class) = declaration else {
+            return false;
+        };
+        class
+            .annotation_args
+            .iter()
+            .any(|arguments| !arguments.is_empty())
+            || class.methods.iter().any(|method| {
+                method
+                    .annotation_args
+                    .iter()
+                    .any(|arguments| !arguments.is_empty())
+            })
     })
 }
 
@@ -1110,5 +1127,36 @@ mod tests {
             FunBody::Expr(MISSING_EXPR)
         ));
         assert_eq!(file.expr_arena.len(), 1);
+    }
+
+    #[test]
+    fn method_annotation_arguments_are_retained_without_the_method_body() {
+        let source = "class Subject {\n\
+            \x20 @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+            \x20 fun hidden(): String = \"body\"\n\
+            }\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+        assert!(has_classifier_annotation_arguments(&file));
+
+        compact(&mut file);
+
+        let Decl::Class(class) = file.decl(file.decls[0]) else {
+            panic!("expected class declaration");
+        };
+        let arguments = &class.methods[0].annotation_args[0];
+        assert_eq!(arguments.len(), 2);
+        assert!(arguments
+            .iter()
+            .all(|argument| (argument.0 as usize) < file.expr_arena.len()));
+        assert_eq!(
+            file.const_string_value(arguments[0])
+                .expect("retained deprecation message")
+                .to_lossy(),
+            "gone",
+        );
+        assert!(matches!(class.methods[0].body, FunBody::Expr(MISSING_EXPR)));
     }
 }

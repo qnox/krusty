@@ -487,6 +487,7 @@ impl<'a> ModuleSymbols<'a> {
                 .map(|annotation| crate::types::ResolvedAnnotation {
                     annotation,
                     arguments: Vec::new(),
+                    facts: Default::default(),
                 })
                 .collect(),
             retention: None,

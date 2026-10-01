@@ -1100,6 +1100,7 @@ fn read_resolved_annotation(
     Ok(crate::types::ResolvedAnnotation {
         annotation,
         arguments,
+        facts: Default::default(),
     })
 }
 
@@ -1763,6 +1764,7 @@ mod tests {
                         ),
                     ],
                 },
+                facts: Default::default(),
             },
         ]));
 
@@ -1789,6 +1791,7 @@ mod tests {
                         )),
                     ),
                 ],
+                facts: Default::default(),
             }]
         );
     }

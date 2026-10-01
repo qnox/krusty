@@ -145,6 +145,7 @@ mod tests {
                             ),
                         ],
                     },
+                    facts: Default::default(),
                 },
             ]),
         }
