@@ -176,3 +176,27 @@ impl Classpath {
         members
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_name_builtin_keeps_its_qualified_intrinsic_annotation() {
+        let Some(jar) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let members = Classpath::new(vec![jar]).builtin_members("kotlin/Enum");
+        let member = members
+            .iter()
+            .find(|member| {
+                member.name == "name"
+                    && member.realization == crate::libraries::MemberRealization::Dispatch
+            })
+            .expect("kotlin.Enum.name declaration");
+        assert_eq!(
+            member.annotations,
+            vec![crate::types::wk::intrinsic_const_evaluation()]
+        );
+    }
+}

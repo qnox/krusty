@@ -1130,6 +1130,16 @@ fn semantic_property(
         tables.qnames,
         "property declaration",
     )?;
+    // `.kotlin_builtins` writes a property's annotations to `BuiltInsProtoBuf.propertyAnnotation`
+    // (field 150), the same extension number a function uses. The other annotation fields above are
+    // accessor and KLIB extensions; this one is the property declaration's own annotations.
+    let annotations = annotation_identities(
+        body,
+        &[150],
+        tables.strings,
+        tables.qnames,
+        "property declaration",
+    )?;
     let type_parameter_bodies = message_bodies(body, 4, "property declaration")?;
     let (formals, type_parameters) =
         tables.type_parameters(&type_parameter_bodies, inherited, "property declaration")?;
@@ -1240,7 +1250,7 @@ fn semantic_property(
         param_names: Vec::new(),
         param_defaults: Vec::new(),
         vararg: None,
-        annotations: Vec::new(),
+        annotations,
     };
     let property = top_level.then(|| metadata::KotlinProperty {
         name,
@@ -1814,6 +1824,13 @@ mod tests {
         function
     }
 
+    fn property_with_return(name: u64, return_body: &[u8]) -> Vec<u8> {
+        let mut property = Vec::new();
+        int_field(&mut property, 2, name);
+        bytes_field(&mut property, 3, return_body);
+        property
+    }
+
     fn package_with_function(function: &[u8], table: Option<&[u8]>) -> Vec<u8> {
         let mut package = Vec::new();
         bytes_field(&mut package, 3, function);
@@ -1879,6 +1896,48 @@ mod tests {
                 "annotation field {annotation_field}"
             );
         }
+    }
+
+    /// `.kotlin_builtins` field 150 belongs to the property declaration, not its getter. Decode it
+    /// on that exact member and retain the annotation's qualified identity.
+    #[test]
+    fn property_annotation_keeps_its_qualified_identity() {
+        let strings = [
+            "name",
+            "kotlin",
+            "String",
+            "Enum",
+            "internal",
+            "IntrinsicConstEvaluation",
+        ];
+        let qnames = [
+            qname(1, None, 1),
+            qname(2, Some(0), 0),
+            qname(3, Some(0), 0),
+            qname(4, Some(0), 1),
+            qname(5, Some(3), 0),
+        ];
+        let mut annotation = Vec::new();
+        int_field(&mut annotation, 1, 4);
+        let mut property = property_with_return(0, &class_type(1));
+        bytes_field(&mut property, 150, &annotation);
+        let mut enum_class = Vec::new();
+        int_field(&mut enum_class, 3, 2);
+        bytes_field(&mut enum_class, 10, &property);
+
+        let package = parse_package_fragment_checked(&fragment_with_classes(
+            &strings,
+            &qnames,
+            &[enum_class],
+        ))
+        .expect("valid annotated property");
+        let member = &package.classes["kotlin/Enum"].members[0];
+        assert!(member.is_property);
+        assert_eq!(member.name, "name");
+        assert_eq!(
+            member.annotations,
+            vec![crate::types::wk::intrinsic_const_evaluation()]
+        );
     }
 
     #[test]
