@@ -809,8 +809,10 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "the matrix reuses one CLI build"
     );
     assert!(
-        workflow.contains("cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}"),
-        "PR updates may auto-cancel, but master builds must always finish"
+        workflow.contains(
+            "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
+        ),
+        "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
     );
     assert!(
         workflow.contains("KRUSTY_REQUIRE_KSP_E2E: \"1\"")

@@ -14,10 +14,10 @@ on:
 permissions:
   contents: read
 
-# One run per ref. A newer pull-request or merge-group update supersedes its older run. Every master
-# push remains authoritative evidence and must finish even when a newer master commit is queued.
+# One run per pull-request or merge-group ref, so an update supersedes its older run. Every master
+# push uses a unique group and remains authoritative evidence even when a newer commit is queued.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
