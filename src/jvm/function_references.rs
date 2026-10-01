@@ -35,6 +35,17 @@ fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_re
         | (i32::from(unit_conversion) << 2)
 }
 
+/// The JVM type of a reflected declaration slot specialized through a covariant capture. The
+/// capture records its exact upper bound, which is the declaration's erased value type. An `in`
+/// projection records only a lower bound, so it deliberately remains unsupported and reaches the
+/// determined-descriptor invariant instead of being guessed as `Object`.
+fn reflection_descriptor_ty(ty: Ty) -> Ty {
+    match ty {
+        Ty::OutProjection(upper_bound) | Ty::StarProjection(upper_bound) => *upper_bound,
+        ty => ty,
+    }
+}
+
 /// The class a callable reference at `expression` compiles to: the name the source file's
 /// local-class naming walk gives it. A reference that walk never saw (one lowering synthesized, or
 /// a second copy an inline splice made) keeps an internal name.
@@ -266,6 +277,15 @@ fn realize_adapter_reference(
             reference.declaration_result,
         ),
     };
+    // Common IR retains the selected declaration's use-site captures for reflection identity. A
+    // top-level projection is not a JVM value type, however: the carrier's physical reflection
+    // descriptor uses the capture's exact readable upper bound. This is representation lowering
+    // of an already-selected declaration, not another resolution or a descriptor fallback.
+    reflection_parameters = reflection_parameters
+        .into_iter()
+        .map(reflection_descriptor_ty)
+        .collect();
+    reflection_result = reflection_descriptor_ty(reflection_result);
     if reference.declaration_suspend {
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");

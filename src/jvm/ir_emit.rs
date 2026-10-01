@@ -12254,7 +12254,10 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand, .. } => self.value_ty(*operand),
             IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
-            IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
+            IrExpr::Return(_)
+            | IrExpr::Throw { .. }
+            | IrExpr::Break { .. }
+            | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),

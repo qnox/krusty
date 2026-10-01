@@ -5,6 +5,37 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
+/// A star-projected callable reference retains its semantic capture through common IR. The JVM
+/// carrier must derive the selected declaration's reflection descriptor from the capture's exact
+/// upper bound; a projection wrapper itself is not a JVM value descriptor.
+#[test]
+fn star_projected_member_and_extension_references_use_their_declared_bounds() {
+    const SRC: &str = r#"
+        interface Label
+
+        class Unbounded<T> {
+            fun member(value: T): T = value
+        }
+
+        class Bounded<T : Label> {
+            fun member(value: T): T = value
+        }
+
+        fun <T> Unbounded<T>.extension(value: T): T = value
+        fun <T : Label> Bounded<T>.extension(value: T): T = value
+
+        fun box(): String {
+            val unboundedMember = Unbounded<*>::member
+            val boundedMember = Bounded<*>::member
+            val unboundedExtension = Unbounded<*>::extension
+            val boundedExtension = Bounded<*>::extension
+            return "OK"
+        }
+    "#;
+
+    common::expect_box_ok_with_stdlib(SRC, "callable_reference_projection_bounds");
+}
+
 #[test]
 fn classpath_fun_interface_with_inherited_concrete_property_is_a_sam() {
     let library = r#"
