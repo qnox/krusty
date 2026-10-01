@@ -5315,6 +5315,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The choice is fixed from the class being emitted and both singleton IR forms share it. Verified
   against kotlinc 2.4.20. Tests: `tests/interface_companion_e2e.rs`,
   `tests/interface_companion_anon_e2e.rs`.
+- **A property reference to a `const val` returns the declaration's compile-time payload.** A
+  `const val` has no getter, and kotlinc emits the constant directly in the synthesized reference
+  carrier's `get()` rather than selecting a target field or access bridge. The normalized constant
+  travels with the selected property identity for same-file, same-module, and dependency
+  declarations. Evaluating a bound reference such as `Property::PROPERTY_VALUE` still evaluates
+  and captures its semantic receiver, so the object's initializer runs even though `get()` itself
+  returns the constant directly. Tests: `tests/delegated_prop_e2e.rs`.
 
 - **Reordered named arguments evaluate in SOURCE order (`f(b = X(), a = Y())`).** Kotlin evaluates
   arguments in written order, then binds each to its parameter position. When a reordering moves a

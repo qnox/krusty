@@ -2092,6 +2092,7 @@ impl Classpath {
         name: &str,
         getter: crate::fir::ExternalCallableId,
         setter: Option<crate::fir::ExternalCallableId>,
+        compile_time_constant: Option<crate::libraries::LibraryConst>,
     ) -> crate::fir::ExternalPropertyId {
         let key = ExternalPropertyKey { getter, setter };
         if let Some(identity) = self.external_property_ids.borrow().get(&key).copied() {
@@ -2108,6 +2109,7 @@ impl Classpath {
             getter,
             setter,
             declares_value_class_storage,
+            compile_time_constant,
         });
         self.external_property_ids
             .borrow_mut()

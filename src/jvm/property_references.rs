@@ -416,6 +416,7 @@ fn classifier_property(
             setter_function: None,
             physical_getter_ret: None,
             physical_setter_value: None,
+            getter_constant: None,
             getter_field: None,
             setter_field: None,
             declares_value_class_storage: false,
@@ -446,6 +447,10 @@ fn external_property(
     // target that may be renamed or value-class-mangled.
     let property_declaration = declared_property(classpath, getter)?;
     let name = property_declaration.name.clone();
+    let getter_constant = property_declaration
+        .compile_time_constant
+        .as_ref()
+        .and_then(crate::ir::IrConst::from_library_constant);
     let getter = external_accessor(classpath, getter, false)?;
     let setter = setter
         .map(|setter| external_accessor(classpath, setter, true))
@@ -541,7 +546,10 @@ fn external_property(
                 .ok_or(failure)
         })
         .transpose()?;
-    let getter_field = field_access(&getter.1, callable.physical_ret);
+    let getter_field = getter_constant
+        .is_none()
+        .then(|| field_access(&getter.1, callable.physical_ret))
+        .flatten();
     let setter_field = setter
         .as_ref()
         .zip(physical_setter_value)
@@ -604,6 +612,7 @@ fn external_property(
             setter_function: None,
             physical_getter_ret: Some(callable.physical_ret),
             physical_setter_value,
+            getter_constant,
             getter_field,
             setter_field,
             declares_value_class_storage,
@@ -694,10 +703,19 @@ fn module_property(
             .ok_or(failure)?;
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
-    let access_bridge = enclosing.is_some()
+    let getter_constant = if property.flags.has(crate::fir::DeclarationFlags::CONST) {
+        Some(property.compile_time_constant.clone().ok_or(failure)?)
+    } else {
+        None
+    };
+    let access_bridge = getter_constant.is_none()
+        && enclosing.is_some()
         && (property.visibility.is_private()
             || reference_mutable && property.setter_visibility.is_private());
-    let protected_bridge = enclosing
+    let protected_bridge = getter_constant
+        .is_none()
+        .then_some(enclosing)
+        .flatten()
         .zip(reference_owner)
         .filter(|(declaring, caller)| declaring.namespace() != caller.namespace())
         .filter(|_| property.extension_receiver.is_none() && !companion_associated)
@@ -760,9 +778,9 @@ fn module_property(
             crate::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
         })
     };
-    // `@JvmField` makes the declaration's storage its JVM surface; the field is the one its own
-    // identity realizes, never one found by owner and spelling.
-    let field = (!access_bridge)
+    // `@JvmField` makes the declaration's storage its JVM surface. A compile-time constant instead
+    // returns its semantic payload directly, matching kotlinc without choosing a field owner.
+    let field = (getter_constant.is_none() && !access_bridge)
         .then(|| super::module_calls::jvm_field_storage(property, stems))
         .flatten()
         .map(|(owner, is_static)| PropertyFieldAccess {
@@ -842,6 +860,7 @@ fn module_property(
             // descriptor of its own for one, and the synthesized ones above are built from it.
             physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),
             physical_setter_value,
+            getter_constant,
             getter_field,
             setter_field,
             declares_value_class_storage: declared.value_class_storage,
