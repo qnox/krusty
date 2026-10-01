@@ -124,9 +124,10 @@ pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
         },
         Some(b'[') => {
             let element = field_slot(&descriptor[1..]);
-            // A class element stays a reference array. `Ty::array` would see the scalar
-            // classifier `kotlin/UInt` and select the specialized `UIntArray` (`[I`).
-            let ty = if descriptor_element_is_reference(&descriptor[1..]) {
+            // A reference element stays a reference array. `Ty::array` would see a scalar class
+            // such as `kotlin/UInt` and select the specialized `UIntArray` (`[I`). The marker is
+            // JVM-local: common semantic nullability is never reconstructed from the descriptor.
+            let ty = if element.reference {
                 reference_array_slot(element.ty)
             } else {
                 Ty::array(element.ty)
@@ -145,57 +146,32 @@ pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
 
 /// Operand type for a descriptor slot.
 ///
-/// Every class or reference-array slot is paired with the checked type when that type is itself
-/// a non-scalar reference and not a specialized primitive array. A missing or unusable checked
-/// type keeps the parsed slot when that slot is already such a reference, and otherwise a plain
-/// object reference. A primitive-array descriptor (`[I`) keeps the specialized array it names.
-/// Neither path invents nullability from the descriptor spelling.
+/// An ordinary class or array descriptor already names its exact physical type and must not be
+/// replaced by a common semantic constructor parameter. The checked type participates only when
+/// `Ty` collapsed a scalar class descriptor (`Lkotlin/UInt;`) onto its unboxed scalar variant.
+/// Arrays preserve that reference category recursively while parsing, and primitive arrays keep
+/// the specialized representation their descriptor names.
 pub(crate) fn operand_slot_ty(descriptor: &str, checked: Option<Ty>) -> Ty {
     let slot = field_slot(descriptor);
-    if !slot.reference || primitive_array_descriptor(descriptor) {
+    if !(slot.reference && slot.ty.is_jvm_scalar()) {
         return slot.ty;
     }
     checked
         .map(|ty| ir_ty_to_jvm(&crate::types::stored_value_ty(ty)))
-        .filter(|ty| usable_reference_operand(*ty))
-        .unwrap_or_else(|| {
-            if usable_reference_operand(slot.ty) {
-                slot.ty
-            } else {
-                Ty::obj("java/lang/Object")
-            }
-        })
+        .filter(|ty| ty.is_reference() && !ty.is_jvm_scalar())
+        .unwrap_or_else(|| Ty::obj("java/lang/Object"))
 }
 
-/// `[I` and `[[I` name specialized primitive arrays. `[L…;` does not.
-fn primitive_array_descriptor(descriptor: &str) -> bool {
-    let element = descriptor.trim_start_matches('[');
-    descriptor.len() > element.len()
-        && element.len() == 1
-        && matches!(
-            element.as_bytes().first(),
-            Some(b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z')
-        )
-}
-
-fn descriptor_element_is_reference(descriptor: &str) -> bool {
-    matches!(descriptor.as_bytes().first(), Some(b'L' | b'['))
-        && !primitive_array_descriptor(descriptor)
-}
-
-/// A class-array slot. A scalar classifier cannot be the element: `Ty::array` would turn it into
-/// the specialized primitive array whose descriptor is the carrier, not `[Lkotlin/UInt;`.
+/// A reference-array slot. Nullable scalar spelling is an internal physical marker: it keeps a
+/// class element boxed so `Ty::array` cannot turn `[Lkotlin/UInt;` into the carrier array `[I`.
+/// An array element is already a reference and remains exact (`[[I`, `[[LPoint;`, and so on).
 fn reference_array_slot(element: Ty) -> Ty {
-    let element = if element.is_jvm_scalar() || specialized_primitive_array(element) {
-        Ty::obj("java/lang/Object")
+    let element = if element.is_jvm_scalar() {
+        Ty::nullable(element)
     } else {
         element
     };
     Ty::obj_args_name(crate::types::wk::array(), &[element])
-}
-
-fn usable_reference_operand(ty: Ty) -> bool {
-    ty.is_reference() && !ty.is_jvm_scalar() && !specialized_primitive_array(ty)
 }
 
 fn specialized_primitive_array(ty: Ty) -> bool {
@@ -405,10 +381,7 @@ mod tests {
         let bare = super::operand_slot_ty("[Lkotlin/UInt;", None);
         assert!(bare.is_reference_array(), "{:?}", bare);
         assert!(!super::specialized_primitive_array(bare));
-        assert_eq!(
-            crate::jvm::names::type_descriptor(bare),
-            "[Ljava/lang/Object;"
-        );
+        assert_eq!(crate::jvm::names::type_descriptor(bare), "[Lkotlin/UInt;");
         assert_eq!(
             crate::jvm::names::type_descriptor(super::field_slot("[Ljava/lang/String;").ty),
             "[Ljava/lang/String;"
@@ -424,6 +397,38 @@ mod tests {
         assert_eq!(
             crate::jvm::names::type_descriptor(constructor[0]),
             "[Lkotlin/UInt;"
+        );
+    }
+
+    #[test]
+    fn an_exact_class_descriptor_is_not_replaced_by_a_semantic_constructor_parameter() {
+        let payload = Ty::obj("fixture/Payload");
+        assert_eq!(
+            crate::jvm::names::type_descriptor(super::operand_slot_ty(
+                "Lfixture/CaptureCell;",
+                Some(payload),
+            )),
+            "Lfixture/CaptureCell;"
+        );
+
+        let checked_array = Ty::obj_args_name(crate::types::wk::array(), &[payload]);
+        assert_eq!(
+            crate::jvm::names::type_descriptor(super::operand_slot_ty(
+                "[Lfixture/Exact;",
+                Some(checked_array),
+            )),
+            "[Lfixture/Exact;"
+        );
+
+        let constructor = super::constructor_operand_tys(
+            "(Lfixture/Entry$Special;)V",
+            Some(&[Ty::obj("fixture/Entry")]),
+        )
+        .expect("constructor descriptor");
+        assert_eq!(constructor.len(), 1);
+        assert_eq!(
+            crate::jvm::names::type_descriptor(constructor[0]),
+            "Lfixture/Entry$Special;"
         );
     }
 

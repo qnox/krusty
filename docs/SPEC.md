@@ -1515,12 +1515,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot for every classifier, including `Lkotlin/UInt;`. A class-array descriptor such as
   `[Lkotlin/UInt;` stays a reference array: the element is not passed through `Ty::array`, which
   would select the specialized `UIntArray` (`[I`). A primitive-array descriptor `[I` stays that
-  specialized array. Every other reference slot is paired with the checked type; a missing checked
-  type uses a reference that is not a primitive array. Constructor arguments, including ones
-  spilled to temporaries and reloaded, use that operand type. The parse does not invent semantic
-  nullability and does not special-case unsigned names: the checked type decides whether a scalar
-  class reference is boxed or unboxed. A getter that already returned the box is not boxed again,
-  and `toString` unboxes it once.
+  specialized array. Ordinary class and array descriptors retain their exact physical identity;
+  the checked type participates only where a scalar class descriptor cannot otherwise be
+  distinguished from its unboxed carrier. Constructor arguments, including ones spilled to
+  temporaries and reloaded, use that operand type. The parse does not invent common semantic
+  nullability and does not special-case unsigned names: the checked type decides whether an
+  ambiguous scalar class reference is boxed or unboxed. A getter that already returned the box is
+  not boxed again, and `toString` unboxes it once.
   Tests: `jvm::physical_type::tests::every_class_descriptor_is_a_reference_slot_without_semantic_nullability`,
   `jvm::physical_type::tests::a_boxed_unsigned_array_is_not_the_primitive_array`,
   `tests/nullable_uint_property_e2e.rs`, box `unsignedTypes/kt43286.kt`. `Ty::nullable` is
