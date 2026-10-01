@@ -127,7 +127,7 @@ impl BodyFirChecker<'_> {
 
     fn extension_receiver_capture(&self) -> FirCapturedReceiver {
         if let Some(lambda) = self.body.source_lambda() {
-            return FirCapturedReceiver::Lambda(lambda.label().map(str::into));
+            return FirCapturedReceiver::Lambda(lambda.label().map(Box::<str>::from));
         }
         if let Some(name) = self.body.debug_name() {
             return FirCapturedReceiver::Callable(name.into());
