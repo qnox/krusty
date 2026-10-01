@@ -570,14 +570,13 @@ mod tests {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::Const(IrConst::Null));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: crate::types::type_name("java/lang/String"),
-                name: "takesTwo".into(),
-                descriptor: "(Ljava/lang/String;I)V".into(),
-                params: None,
-                interface: false,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                crate::types::type_name("java/lang/String"),
+                "takesTwo".into(),
+                "(Ljava/lang/String;I)V".into(),
+                None,
+                false,
+            ),
             dispatch_receiver: Some(receiver),
             args: vec![],
         });

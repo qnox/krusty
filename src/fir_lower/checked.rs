@@ -653,8 +653,7 @@ impl BodyLowering<'_> {
                 realization,
                 descriptor,
                 physical_result,
-                source,
-                external,
+                declaration,
                 source_member,
                 suspend,
             } => {
@@ -692,11 +691,11 @@ impl BodyLowering<'_> {
                         crate::fir::FirSuperCallKind::Function => {
                             crate::ir::IrSuperCallKind::Function
                         }
-                        crate::fir::FirSuperCallKind::PropertyGetter => {
-                            crate::ir::IrSuperCallKind::PropertyGetter
+                        crate::fir::FirSuperCallKind::PropertyGetter(property) => {
+                            crate::ir::IrSuperCallKind::PropertyGetter(*property)
                         }
-                        crate::fir::FirSuperCallKind::PropertySetter => {
-                            crate::ir::IrSuperCallKind::PropertySetter
+                        crate::fir::FirSuperCallKind::PropertySetter(property) => {
+                            crate::ir::IrSuperCallKind::PropertySetter(*property)
                         }
                     },
                     name: name.clone(),
@@ -705,10 +704,9 @@ impl BodyLowering<'_> {
                     interface: *interface,
                     realization: *realization,
                     descriptor: descriptor.clone(),
-                    source: *source,
-                    external: *external,
+                    declaration: *declaration,
                     defaults,
-                    source_member: source_member.clone(),
+                    source_member: *source_member,
                 };
                 let call = self.ir.add_expr(IrExpr::Call {
                     callee,

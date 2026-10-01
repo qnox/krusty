@@ -3169,7 +3169,7 @@ fn selected_super_call_retains_named_and_default_argument_mapping() {
     assert!(matches!(
         call.target,
         FirCallTarget::Super {
-            source: Some(_),
+            declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::Module(_)),
             realization: crate::libraries::MemberRealization::Dispatch,
             ..
         }

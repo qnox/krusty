@@ -3257,7 +3257,7 @@ pub(crate) fn lower_single_source_with_platform(
     ir
 }
 
-pub(super) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
+pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
     #[derive(Default)]
     struct DeferredBodies(Vec<(crate::fir::BodyOwnerId, FirBody)>);
 

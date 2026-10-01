@@ -2809,6 +2809,32 @@ impl BodyFirChecker<'_> {
 }
 
 impl BodyFirChecker<'_> {
+    /// The function a `super` call selected: its current-module callable, or its dependency
+    /// callable. A function selection with neither has no stable target to call. An accessor has
+    /// no callable of its own; its [`crate::fir::FirSuperCallKind`] names its property instead.
+    fn super_declaration(
+        &self,
+        span: Option<Span>,
+        target: &crate::resolve::ResolvedSuperCall,
+        kind: crate::fir::FirSuperCallKind,
+    ) -> Result<Option<crate::fir::ResolvedFunctionOverrideTarget>, BodyCheckFailure> {
+        if kind != crate::fir::FirSuperCallKind::Function {
+            return Ok(None);
+        }
+        match (target.stable_declaration, target.external_declaration) {
+            (Some(declaration), _) => self
+                .index
+                .callable_for_declaration(declaration)
+                .map(|callable| crate::fir::ResolvedFunctionOverrideTarget::Module(callable.id)),
+            (None, Some(external)) => Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                external,
+            )),
+            (None, None) => None,
+        }
+        .map(Some)
+        .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
+    }
+
     /// Check a `super`-qualified call against the supertype declaration the checker already selected.
     ///
     /// `super` is not a receiver expression: the recorded [`ImplicitReceiverSelection`] names which
@@ -2926,12 +2952,8 @@ impl BodyFirChecker<'_> {
                 physical_result: ResolvedTy::new(target.physical_ret).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                 })?,
-                source: target
-                    .stable_declaration
-                    .and_then(|declaration| self.index.callable_for_declaration(declaration))
-                    .map(|callable| callable.id),
-                external: target.external,
-                source_member: target.source_member.clone(),
+                declaration: self.super_declaration(span, target, kind)?,
+                source_member: target.source_member,
                 suspend: target.suspend,
             },
             dispatch_receiver: Some(dispatch_receiver),

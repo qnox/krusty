@@ -53,14 +53,13 @@ pub(super) fn resumed_carrier(
         type_operand: Ty::nullable(Ty::obj_name(classifier)),
     });
     let unboxed = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: classifier,
-            name: "unbox-impl".to_string(),
+        callee: Callee::realized_virtual(
+            classifier,
+            "unbox-impl".to_string(),
             descriptor,
-            params: None,
-            interface: false,
-            module_target: None,
-        },
+            None,
+            false,
+        ),
         dispatch_receiver: Some(boxed),
         args: Vec::new(),
     });

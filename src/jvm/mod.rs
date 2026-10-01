@@ -67,6 +67,8 @@ mod property_realizations;
 mod property_references;
 pub mod property_storage;
 mod ranges;
+#[cfg(test)]
+pub(crate) mod realization_test_support;
 mod reified_arguments;
 mod reified_operations;
 mod result_null_checks;

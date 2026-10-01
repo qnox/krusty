@@ -1595,6 +1595,9 @@ impl BodyLowering<'_> {
                         params: Some((declaration_parameter_types, declaration_result)),
                         interface: flags.has(crate::fir::DeclarationFlags::INTERFACE),
                         module_target: Some(target),
+                        target: Some(crate::ir::IrVirtualTarget::Function(
+                            crate::fir::ResolvedFunctionOverrideTarget::Module(target),
+                        )),
                     },
                     dispatch_receiver: Some(receiver),
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,
@@ -1624,7 +1627,16 @@ impl BodyLowering<'_> {
             }
             Some(_) => return None,
             None if has_defaults => {
-                if physical_function.is_none() {
+                if let Some(function) = physical_function {
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::LocalWithDefaults {
+                            function,
+                            defaults: default_argument_positions.clone().into_boxed_slice(),
+                        },
+                        dispatch_receiver: None,
+                        args: slots.into_iter().flatten().collect(),
+                    })
+                } else {
                     self.ir.add_expr(IrExpr::Call {
                         callee: Callee::ModuleWithDefaults {
                             target,
@@ -1638,17 +1650,6 @@ impl BodyLowering<'_> {
                                 u32::try_from(extension_position)
                                     .expect("too many source parameters")
                             }),
-                        },
-                        dispatch_receiver: None,
-                        args: slots.into_iter().flatten().collect(),
-                    })
-                } else {
-                    let function =
-                        physical_function.expect("same-file default callable realization");
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::LocalWithDefaults {
-                            function,
-                            defaults: default_argument_positions.clone().into_boxed_slice(),
                         },
                         dispatch_receiver: None,
                         args: slots.into_iter().flatten().collect(),

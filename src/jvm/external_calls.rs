@@ -836,6 +836,10 @@ pub(super) fn realize(
             bridge_external_result(ir, index, physical_result, semantic_ret);
             continue;
         }
+        // A member dispatch realizes the dependency declaration the frontend selected.
+        let selected = crate::ir::IrVirtualTarget::Function(
+            crate::fir::ResolvedFunctionOverrideTarget::External(target),
+        );
         match kind {
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {
@@ -933,6 +937,7 @@ pub(super) fn realize(
                                 .then_some((semantic_params.clone(), semantic_ret)),
                             interface,
                             module_target: None,
+                            target: Some(selected),
                         };
                     }
                 }
@@ -977,6 +982,7 @@ pub(super) fn realize(
                                 params: None,
                                 interface: false,
                                 module_target: None,
+                                target: Some(selected),
                             }
                         }
                         None => {
@@ -993,6 +999,7 @@ pub(super) fn realize(
                                 params: None,
                                 interface,
                                 module_target: None,
+                                target: Some(selected),
                             }
                         }
                     };
@@ -1025,6 +1032,7 @@ pub(super) fn realize(
                                 params: None,
                                 interface,
                                 module_target: None,
+                                target: Some(selected),
                             }
                         }
                     };

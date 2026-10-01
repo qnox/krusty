@@ -25,6 +25,7 @@ pub(super) fn getter(
             params: None,
             interface: false,
             module_target: None,
+            target: None,
         },
         dispatch_receiver: Some(receiver),
         args: vec![],

@@ -27,9 +27,10 @@ pub struct ResolvedSuperCall {
     /// Stable source declaration selected for this call. Dependency declarations leave this unset;
     /// current-compilation defaults use it to retain their exact checked default-expression owner.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// Stable dependency declaration selected for this call. Resolution keeps the declaration it
-    /// selected; a target realizes the declaration's physical holder from this identity.
-    pub external: Option<crate::fir::ExternalCallableId>,
+    /// The dependency callable selected for this call. Source declarations leave this unset and
+    /// are named by [`Self::stable_declaration`] instead. A target realizes that declaration's
+    /// physical holder from this identity.
+    pub external_declaration: Option<crate::fir::ExternalCallableId>,
     /// Kotlin property declaration selected by property syntax. The callable declaration above is
     /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
     /// to reach the source property rather than its generated getter or setter.
@@ -52,7 +53,7 @@ impl ResolvedSuperCall {
     ) -> Option<Self> {
         let realization = member.realization;
         let stable_declaration = member.stable_declaration;
-        let external = member.external_identity;
+        let external_declaration = member.external_identity;
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let suspend = member.suspend();
@@ -88,11 +89,52 @@ impl ResolvedSuperCall {
             interface,
             realization,
             stable_declaration,
-            external,
+            external_declaration,
             property_declaration: None,
             source_member,
             external_property,
             suspend,
+        })
+    }
+
+    /// The setter of `super.property = value`, selected on the direct supertype `owner`. A
+    /// directly realized setter is named on its declaring owner, as [`Self::selected`] names a
+    /// member; an abstract or intrinsic one cannot be a super target.
+    pub(super) fn selected_setter(
+        receiver: ImplicitReceiverSelection,
+        owner: TypeName,
+        interface: bool,
+        selected: crate::symbol_resolver::ResolvedPropertySetter,
+        property_declaration: Option<crate::fir::DeclarationId>,
+    ) -> Option<Self> {
+        let callable = selected.callable;
+        if callable.is_abstract {
+            return None;
+        }
+        let realization = callable.member_realization;
+        let physical_owner = match realization {
+            crate::libraries::MemberRealization::Dispatch => owner,
+            crate::libraries::MemberRealization::Direct { .. } => callable.owner,
+            crate::libraries::MemberRealization::Intrinsic(_)
+            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+        };
+        Some(Self {
+            receiver,
+            owner: physical_owner,
+            name: callable.name,
+            params: callable.params,
+            physical_params: callable.physical_params,
+            ret: callable.ret,
+            physical_ret: callable.physical_ret,
+            descriptor: callable.descriptor,
+            interface,
+            realization,
+            stable_declaration: selected.stable_declaration,
+            external_declaration: callable.external_identity,
+            property_declaration,
+            source_member: selected.source_member,
+            external_property: callable.external_property_identity,
+            suspend: false,
         })
     }
 }
@@ -257,36 +299,13 @@ impl Checker<'_> {
                 .and_then(|property| property.stable_declaration);
             if setter {
                 let setter = selected.setter()?;
-                let stable_declaration = setter.stable_declaration;
-                let callable = setter.callable;
-                if callable.is_abstract {
-                    return None;
-                }
-                let realization = callable.member_realization;
-                let physical_owner = match realization {
-                    crate::libraries::MemberRealization::Dispatch => owner,
-                    crate::libraries::MemberRealization::Direct { .. } => callable.owner,
-                    crate::libraries::MemberRealization::Intrinsic(_)
-                    | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
-                };
-                Some(ResolvedSuperCall {
-                    receiver: receiver.clone(),
-                    owner: physical_owner,
-                    name: callable.name,
-                    params: callable.params,
-                    physical_params: callable.physical_params,
-                    ret: callable.ret,
-                    physical_ret: callable.physical_ret,
-                    descriptor: callable.descriptor,
+                ResolvedSuperCall::selected_setter(
+                    receiver.clone(),
+                    owner,
                     interface,
-                    realization,
-                    stable_declaration,
-                    external: callable.external_identity,
+                    setter,
                     property_declaration,
-                    source_member: setter.source_member,
-                    external_property: callable.external_property_identity,
-                    suspend: false,
-                })
+                )
             } else {
                 let member = selected.read(applied_owner)?;
                 if member.member.is_abstract() {

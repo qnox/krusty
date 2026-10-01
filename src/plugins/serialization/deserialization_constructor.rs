@@ -55,14 +55,13 @@ pub(super) fn add_cached_descriptor(
         let name = ir.add_expr(IrExpr::Const(IrConst::String(name.clone())));
         let optional = ir.add_expr(IrExpr::Const(IrConst::Boolean(*optional)));
         statements.push(ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: type_name("kotlinx/serialization/internal/PluginGeneratedSerialDescriptor"),
-                name: "addElement".to_string(),
-                descriptor: "(Ljava/lang/String;Z)V".to_string(),
-                params: None,
-                interface: false,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                type_name("kotlinx/serialization/internal/PluginGeneratedSerialDescriptor"),
+                "addElement".to_string(),
+                "(Ljava/lang/String;Z)V".to_string(),
+                None,
+                false,
+            ),
             dispatch_receiver: Some(receiver),
             args: vec![name, optional],
         }));
@@ -112,14 +111,13 @@ fn descriptor_access(
         field: "INSTANCE",
     });
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner: ir.classes[serializer_id as usize].fq_name_id(),
-            name: "getDescriptor".to_string(),
-            descriptor: "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
-            params: None,
-            interface: false,
-            module_target: None,
-        },
+        callee: Callee::realized_virtual(
+            ir.classes[serializer_id as usize].fq_name_id(),
+            "getDescriptor".to_string(),
+            "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
+            None,
+            false,
+        ),
         dispatch_receiver: Some(instance),
         args: vec![],
     })

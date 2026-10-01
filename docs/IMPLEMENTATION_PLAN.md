@@ -4915,3 +4915,30 @@ supertype, a nullable Java function-value conversion, and a provider member with
 `fun_interface_constructor_reference_returns_a_checked_sam_delegate` (exact `method_target` and
 `wraps_function_value`), and `tests/fun_interface_value_class_e2e.rs` (the abstract slot among
 same-name, same-arity siblings).
+
+## The selected declaration on a super call  ✅
+
+A `super` call names the function the checker selected (`Callee::Super::declaration`, a module or
+dependency callable, required by the checker and shared with checked FIR's
+`FirCallTarget::Super::declaration`), so a backend reaches `super.toString()` through the provider's
+own declaration rather than its spelling. A dependency declaration whose physical entry is a
+receiver-first holder is realized from that same external identity. A `super` accessor names its
+current-module property (`IrSuperCallKind::PropertyGetter/Setter`), taken from the property
+declaration the resolver selected; an accessor has no callable of its own. A dependency property
+reached through `super` is already a property operation. The JVM realization reads the module
+declaration as it read the old module-only `source`. Tests: `fir_lower/call_target_tests.rs`, and
+`fir/body_check/receiver_tests.rs` for a dependency `super.toString()`. Gap: the serialization
+plugin's synthesized super call names no declaration.
+
+## The selected member on a virtual call  ✅
+
+A virtual call names the member the frontend selected (`Callee::Virtual::target`, an
+`IrVirtualTarget`): a current-module or dependency function, or the getter or setter of a
+current-module property. Common lowering sets it on every virtual call it builds (a sibling-file
+member, an interface-delegation forwarder, a delegate convention on a sibling-file class), and so
+does the shared accessor realization (`backend/local_properties.rs`) for a member-extension or
+context-parameter accessor. A backend finds the dispatch slot by that identity, never by `name` and
+`params`. Only calls a target backend or a compiler plugin builds for its own realization leave it
+unset (`Callee::realized_virtual`). The JVM backend does not read it. Tests:
+`fir_lower/call_target_tests.rs`, `local_property_accessor_tests.rs`. Gap: the serialization
+plugin's synthesized calls name no selection.

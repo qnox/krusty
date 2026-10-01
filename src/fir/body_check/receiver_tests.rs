@@ -1,4 +1,6 @@
-use super::test_support::{checked_function_body, root_expression};
+use super::test_support::{
+    checked_function_body, checked_function_body_with_platform, root_expression,
+};
 use super::*;
 
 #[test]
@@ -652,4 +654,80 @@ fn companion_property_wins_over_same_named_zero_argument_member_function() {
             ..
         }
     ));
+}
+
+/// Every `super` call the checker published in `body`, as `(name, declaration)`, in expression
+/// order.
+fn super_declarations(
+    body: &FirBody,
+) -> Vec<(String, Option<crate::fir::ResolvedFunctionOverrideTarget>)> {
+    (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::Call(FirCall {
+                target:
+                    FirCallTarget::Super {
+                        name, declaration, ..
+                    },
+                ..
+            }) => Some((name.clone(), *declaration)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_super_call_names_its_dependency_or_module_declaration() {
+    let mut paths = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
+    paths.extend(crate::toolchain::jdk_modules());
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let (body, index) = checked_function_body_with_platform(
+        "open class Base {\n\
+             open fun toString(x: Int): String = \"base\"\n\
+         }\n\
+         class Named : Base() {\n\
+             fun describe(): String = super.toString() + super.toString(1)\n\
+         }\n",
+        "describe",
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
+    );
+    let declarations = super_declarations(&body);
+    let [(inherited_name, Some(crate::fir::ResolvedFunctionOverrideTarget::External(inherited))), (declared_name, Some(crate::fir::ResolvedFunctionOverrideTarget::Module(declared)))] =
+        &declarations[..]
+    else {
+        panic!("a dependency and a module super call, found {declarations:?}")
+    };
+    let realization = classpath
+        .external_callable(*inherited)
+        .expect("the provider answers for its own identity");
+    assert_eq!(
+        (
+            inherited_name.as_str(),
+            realization.callable.owner,
+            realization.callable.name.as_str(),
+            realization.callable.params.as_slice(),
+            declared_name.as_str(),
+            index.callable_name(*declared),
+            index
+                .callable(*declared)
+                .and_then(|callable| index.signature(callable.declaration))
+                .map(|signature| signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>()),
+        ),
+        (
+            "toString",
+            crate::types::type_name("java/lang/Object"),
+            "toString",
+            &[][..],
+            "toString",
+            Some("toString"),
+            Some(vec![crate::types::Ty::Int]),
+        )
+    );
 }

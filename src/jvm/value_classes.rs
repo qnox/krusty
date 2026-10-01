@@ -391,7 +391,7 @@ pub(crate) fn lower_value_classes(
     let orig_fields: Vec<Vec<Ty>> = ir
         .classes
         .iter()
-        .map(|c| c.fields.iter().map(|f| f.ty.clone()).collect())
+        .map(|c| c.fields.iter().map(|f| f.ty).collect())
         .collect();
     // Pre-erasure constructor-parameter types per class (parallel to `ir.classes`) — the slot types for
     // an `init { … }` block's box/unbox analysis (slot 0 = `this`, slots 1.. = the ctor params).
@@ -599,7 +599,7 @@ pub(crate) fn lower_value_classes(
 
     // Per-function value-slot types (parameters + local `Variable`s) and return types, captured BEFORE
     // erasure so the box/unbox analysis sees `Class{X}` (non-null = unboxed, nullable = boxed).
-    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret).collect();
     // Shared-cell (`Ref$XxxRef`) element types, also pre-erasure: a write into a cell whose element
     // is a boxed `X?` (or reference) is a box boundary for an unboxed value.
     let orig_ref_elems: HashMap<ExprId, Ty> = ir
@@ -1142,14 +1142,13 @@ pub(crate) fn lower_value_classes(
         for id in targets {
             let get = ir.add_expr(IrExpr::GetValue(slot));
             ir.exprs[id as usize] = IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: x,
-                    name: "unbox-impl".to_string(),
-                    descriptor: format!("(){}", desc(&u)),
-                    params: None,
-                    interface: false,
-                    module_target: None,
-                },
+                callee: Callee::realized_virtual(
+                    x,
+                    "unbox-impl".to_string(),
+                    format!("(){}", desc(&u)),
+                    None,
+                    false,
+                ),
                 dispatch_receiver: Some(get),
                 args: vec![],
             };
@@ -3256,7 +3255,7 @@ pub(crate) fn lower_value_classes(
                                 defaults,
                                 *default_prefix_count,
                             ))
-                            .map(|(a, p)| (*a, p.clone()))
+                            .map(|(a, p)| (*a, *p))
                             .collect()
                     }
                 }
@@ -3425,7 +3424,7 @@ pub(crate) fn lower_value_classes(
                                 {
                                     return None;
                                 }
-                                Some((a.as_ref().copied()?, params.get(i)?.clone()))
+                                Some((a.as_ref().copied()?, *params.get(i)?))
                             })
                             .collect()
                     })
@@ -3439,7 +3438,7 @@ pub(crate) fn lower_value_classes(
                     init: Some(v),
                     ..
                 } => match slots.get(index) {
-                    Some(t) => vec![(*v, t.clone())],
+                    Some(t) => vec![(*v, *t)],
                     None => continue,
                 },
                 // A FIELD store is the same boundary, decided by the field's PRE-erasure declared

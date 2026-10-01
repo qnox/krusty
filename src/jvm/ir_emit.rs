@@ -9962,6 +9962,7 @@ impl<'a> Emitter<'a> {
                     params,
                     interface,
                     module_target: _,
+                    target: _,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
                     let semantic_receiver = self.value_ty(recv);
@@ -10068,7 +10069,6 @@ impl<'a> Emitter<'a> {
                     if let Some((param_tys, ret_ty)) = params {
                         let owner_identity = *owner;
                         let owner = owner.render();
-                        let name = name.clone();
                         let ptys = jvm_tys(param_tys);
                         let ret = self.physical_call_result(e, jvm_declared_ty(ret_ty));
                         let descriptor = method_descriptor(&ptys, ret);

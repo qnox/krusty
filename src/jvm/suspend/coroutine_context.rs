@@ -26,14 +26,13 @@ pub(super) fn realize_coroutine_context(ir: &mut IrFile, e: ExprId, continuation
         debug_assert!(dispatch_receiver.is_none());
         debug_assert!(args.is_empty());
         ir.exprs[read as usize] = IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: type_name("kotlin/coroutines/Continuation"),
-                name: "getContext".to_string(),
-                descriptor: "()Lkotlin/coroutines/CoroutineContext;".to_string(),
-                params: None,
-                interface: true,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                type_name("kotlin/coroutines/Continuation"),
+                "getContext".to_string(),
+                "()Lkotlin/coroutines/CoroutineContext;".to_string(),
+                None,
+                true,
+            ),
             dispatch_receiver: Some(context_receiver),
             args: Vec::new(),
         };

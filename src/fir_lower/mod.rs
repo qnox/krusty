@@ -17,6 +17,8 @@ mod body_trace;
 mod bottom_value_tests;
 #[cfg(test)]
 mod builtin_operation_tests;
+#[cfg(test)]
+mod call_target_tests;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
