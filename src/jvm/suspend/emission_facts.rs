@@ -37,12 +37,17 @@ pub(crate) enum SuspendedResultReturn {
 pub(crate) type SuspendedResultReturns =
     std::collections::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
 
+/// JVM value indices holding the continuation passed to an unintercepted intrinsic suspension
+/// point. The CPS pass owns this physical choice; common IR retains only the semantic point kind.
+pub(crate) type IntrinsicProbeContinuations = std::collections::HashMap<crate::ir::ExprId, u32>;
+
 /// What building a file's machines records for their emission.
 pub(super) struct MachineOutputs<'b> {
     pub(super) continuation_metadata: &'b mut ContinuationMetadataMap,
     pub(super) default_call_operands:
         &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
     pub(super) suspended_result_returns: &'b mut SuspendedResultReturns,
+    pub(super) intrinsic_probe_continuations: &'b mut IntrinsicProbeContinuations,
 }
 
 /// The function an IR state machine is built for: its body, whether it returns `Unit`, the

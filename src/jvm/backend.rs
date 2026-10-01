@@ -44,6 +44,7 @@ pub(crate) struct BackendPassFacts {
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: crate::jvm::suspend::IntrinsicProbeContinuations,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
@@ -232,6 +233,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
         &mut facts.suspended_result_returns,
+        &mut facts.intrinsic_probe_continuations,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -627,6 +629,23 @@ pub struct JvmState {
     module_packages: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// A checked file after every JVM representation pass has selected its physical facts. Keeping the
+/// handoff together makes the boundary explicit: emission consumes this closed product and must not
+/// recover any of its decisions.
+struct BackendReadyIr<'a> {
+    ir: crate::ir::IrFile,
+    stem: &'a str,
+    module_name: &'a str,
+    facade_name: String,
+    package: String,
+    signature_symbols: &'a dyn BackendClassifierSource,
+    inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
+    pass_facts: BackendPassFacts,
+    metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
+    has_facade_members: bool,
+    property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+}
+
 impl JvmBackend {
     fn emit_streamed_ir(
         &self,
@@ -678,39 +697,43 @@ impl JvmBackend {
         let inner_class_resolver =
             checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
         self.emit_backend_ready_ir(
-            ir,
-            stem,
-            module_name,
-            facade_name,
-            package,
-            &classifiers,
-            inner_class_resolver,
-            pass_facts,
-            metadata,
-            has_facade_members,
-            property_realizations,
+            BackendReadyIr {
+                ir,
+                stem,
+                module_name,
+                facade_name,
+                package,
+                signature_symbols: &classifiers,
+                inner_class_resolver,
+                pass_facts,
+                metadata,
+                has_facade_members,
+                property_realizations,
+            },
             state,
             diags,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_backend_ready_ir(
         &self,
-        mut ir: crate::ir::IrFile,
-        stem: &str,
-        module_name: &str,
-        facade_name: String,
-        package: String,
-        signature_symbols: &dyn BackendClassifierSource,
-        inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
-        pass_facts: BackendPassFacts,
-        metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
-        has_facade_members: bool,
-        property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+        ready: BackendReadyIr<'_>,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
+        let BackendReadyIr {
+            mut ir,
+            stem,
+            module_name,
+            facade_name,
+            package,
+            signature_symbols,
+            inner_class_resolver,
+            pass_facts,
+            metadata,
+            has_facade_members,
+            property_realizations,
+        } = ready;
         let mut outputs = Vec::new();
         if !self.param_assertions {
             crate::jvm::ir_emit::strip_param_assertions(&mut ir);
@@ -731,6 +754,7 @@ impl JvmBackend {
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
             suspended_result_returns: &pass_facts.suspended_result_returns,
+            intrinsic_probe_continuations: &pass_facts.intrinsic_probe_continuations,
             bridge_adaptations: &pass_facts.bridge_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
