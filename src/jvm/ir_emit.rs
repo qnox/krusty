@@ -2380,7 +2380,7 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
     match ty {
         Ty::String => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
-        Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => {
+        Ty::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
             Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
         _ => None,

@@ -111,3 +111,84 @@ fn implicit_any_super_dispatch_matches_kotlinc_physical_targets() {
     );
     fs::remove_dir_all(dir).expect("remove scratch dir");
 }
+
+#[test]
+fn cloneable_class_inherits_protected_object_clone() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+data class A(val s: String) : Cloneable {
+    fun externalClone(): A = clone() as A
+}
+fun box(): String {
+    val a = A("OK")
+    val b = a.externalClone()
+    if (a != b) return "Fail equals"
+    if (a === b) return "Fail identity"
+    return b.s
+}
+"#,
+        "CloneableWithoutClone",
+    );
+}
+
+#[test]
+fn cloneable_super_clone_realizes_object() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+data class A(var x: Int) : Cloneable {
+    public override fun clone(): A = super.clone() as A
+}
+fun box(): String {
+    val a = A(42)
+    val b = a.clone()
+    if (a != b) return "Fail equals"
+    if (a === b) return "Fail identity"
+    return "OK"
+}
+"#,
+        "CloneCallsSuper",
+    );
+}
+
+#[test]
+fn cloneable_super_clone_can_modify_the_copy() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+data class A(var x: Int) : Cloneable {
+    public override fun clone(): A {
+        val result = super.clone() as A
+        result.x = 239
+        return result
+    }
+}
+fun box(): String {
+    val a = A(42)
+    val b = a.clone()
+    if (a == b) return "Fail equal"
+    if (a === b) return "Fail identity"
+    if (b.x != 239) return "Fail value"
+    return "OK"
+}
+"#,
+        "CloneCallsSuperAndModifies",
+    );
+}
+
+#[test]
+fn cloneable_override_uses_inherited_clone_declaration() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+data class A(var x: Int) : Cloneable {
+    public override fun clone(): A = A(x)
+}
+fun box(): String {
+    val a = A(42)
+    val b = a.clone()
+    if (b != a) return "Fail equals"
+    if (b === a) return "Fail identity"
+    return "OK"
+}
+"#,
+        "CloneCallsConstructor",
+    );
+}
