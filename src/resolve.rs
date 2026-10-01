@@ -66627,22 +66627,12 @@ impl<'a> Checker<'a> {
             for record in &arm_results {
                 self.report_unbound_conditional_branch(scope, record.body);
             }
-            // Preserve source order when joining arm types. A declared expectation stands in for
-            // an intersection `Ty` does not synthesize, the same way an `if` does: `ArrayList<T>`
-            // and `LinkedHashSet<T>` meet at `MutableCollection<T>` when that is the expected type.
-            let result = arm_results.iter().fold(None, |result: Option<Ty>, record| {
-                Some(match result {
-                    Some(r) => conditional_branch::join_types(
-                        self,
-                        scope,
-                        expected,
-                        r,
-                        record.ty,
-                        record.body,
-                    ),
-                    None => record.ty,
-                })
-            });
+            let result = conditional_branch::join_results(
+                self,
+                scope,
+                expected,
+                arm_results.iter().map(|record| (record.ty, record.body)),
+            );
             let missing = if has_else {
                 None
             } else {

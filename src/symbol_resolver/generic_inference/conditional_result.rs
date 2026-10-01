@@ -2,7 +2,7 @@
 
 use super::{
     infer_generic_return_bindings, infer_generic_return_bindings_from_symbols, receiver_hierarchy,
-    GenericSig, SourceOracle, SymbolSource, Ty,
+    GenericSig, SymbolSource, Ty,
 };
 
 /// An expectation that instantiates `signature`'s return-only formals from a conditional sibling.
@@ -12,8 +12,10 @@ use super::{
 /// subtype of the sibling binds through that sibling (`linkedSetOf(): LinkedHashSet<T>` beside
 /// `hashSetOf<E>(): HashSet<E>`, since `LinkedHashSet<T> <: HashSet<T>`). A sibling that is a
 /// subtype of the result binds through the result's applied supertype (`emptyList(): List<T>`
-/// beside `mutableListOf("a")`). Otherwise the two meet at a shared generic supertype
-/// (`linkedSetOf()` beside `arrayListOf<E>()` meet at a `MutableCollection<E>` face).
+/// beside `mutableListOf("a")`). Otherwise the two meet at their unique nearest generic
+/// supertype (`linkedSetOf()` beside `arrayListOf<E>()` meet at a `MutableCollection<E>` face).
+/// Equally-near unrelated faces are ambiguous and contribute no expectation; declaration order is
+/// never a type-system tie breaker.
 pub(crate) fn generic_return_expectation_from_sibling(
     source: &dyn SymbolSource,
     signature: &GenericSig,
@@ -31,34 +33,49 @@ pub(crate) fn generic_return_expectation_from_sibling(
                 .is_some()
     }
 
-    if binds(source, signature, sibling, &mut admits) {
-        return Some(sibling);
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        expectation: Ty,
+        distance: u32,
     }
-    if let Some(applied) =
-        crate::assignable::applied_supertype(&SourceOracle(source), sibling, signature.ret)
-    {
-        if binds(source, signature, applied, &mut admits) {
-            return Some(applied);
-        }
-    }
+
     let sibling_hierarchy = receiver_hierarchy(source, sibling.non_null());
-    let declared_owner = signature.ret.non_null().kotlin_class_internal();
-    for (declared_applied, _) in receiver_hierarchy(source, signature.ret.non_null()) {
+    let mut candidates = Vec::new();
+    if binds(source, signature, sibling, &mut admits) {
+        candidates.push(Candidate {
+            expectation: sibling,
+            distance: 0,
+        });
+    }
+    for (declared_applied, declared_depth) in receiver_hierarchy(source, signature.ret.non_null()) {
         let Some(owner) = declared_applied.kotlin_class_internal() else {
             continue;
         };
-        if Some(owner) == declared_owner || declared_applied.is_erased_top() {
+        if declared_applied.is_erased_top() {
             continue;
         }
-        let Some((sibling_face, _)) = sibling_hierarchy
+        for (sibling_face, sibling_depth) in sibling_hierarchy
             .iter()
-            .find(|(ty, _)| ty.kotlin_class_internal() == Some(owner) && !ty.is_erased_top())
-        else {
-            continue;
-        };
-        if binds(source, signature, *sibling_face, &mut admits) {
-            return Some(*sibling_face);
+            .copied()
+            .filter(|(ty, _)| ty.kotlin_class_internal() == Some(owner) && !ty.is_erased_top())
+        {
+            if binds(source, signature, sibling_face, &mut admits) {
+                candidates.push(Candidate {
+                    expectation: sibling_face,
+                    distance: declared_depth + sibling_depth,
+                });
+            }
         }
     }
-    None
+
+    let nearest = candidates
+        .iter()
+        .map(|candidate| candidate.distance)
+        .min()?;
+    candidates.retain(|candidate| candidate.distance == nearest);
+    candidates.dedup_by_key(|candidate| candidate.expectation);
+    let [candidate] = candidates.as_slice() else {
+        return None;
+    };
+    Some(candidate.expectation)
 }

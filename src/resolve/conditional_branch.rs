@@ -45,6 +45,25 @@ pub(super) fn join_types(
     semantic_join.unwrap_or_else(|| checker.join(left, right, span))
 }
 
+/// Fold conditional results in source order behind the conditional-typing boundary. A declared
+/// expectation stands in for an intersection [`Ty`] does not synthesize, as it does for `if`.
+///
+/// `resolve.rs` owns expression dispatch; the common-supertype policy and its declared-expectation
+/// handling belong here with the other conditional result rules.
+pub(super) fn join_results(
+    checker: &mut Checker<'_>,
+    scope: &CheckerScope<'_>,
+    expected: Option<Ty>,
+    results: impl IntoIterator<Item = (Ty, ExprId)>,
+) -> Option<Ty> {
+    results.into_iter().fold(None, |result, (ty, expression)| {
+        Some(match result {
+            Some(current) => join_types(checker, scope, expected, current, ty, expression),
+            None => ty,
+        })
+    })
+}
+
 /// Join a `try`'s body and catch types where [`join_types`] does not apply: the `try` is a
 /// statement, or a value-position one has a primitive branch.
 ///

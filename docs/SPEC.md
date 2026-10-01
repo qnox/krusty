@@ -2610,13 +2610,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result type that can bind them. The sibling does not have to use the call's own class. A result
   that is a subtype of the sibling binds through that sibling (`linkedSetOf()` beside
   `hashSetOf<T>()`), a more specific sibling binds through the call's applied supertype
-  (`emptyList()` beside `mutableListOf("a")`), and otherwise the two bind through a shared generic
-  supertype (`linkedSetOf()` beside `arrayListOf<T>()`). A `when` whose arms meet only in an
-  intersection uses the declared expected type, the same way an `if` does. Branch order does not
-  affect the binding.
+  (`emptyList()` beside `mutableListOf("a")`), and otherwise the two bind through their unique
+  nearest shared generic supertype (`linkedSetOf()` beside `arrayListOf<T>()`). Equally-near
+  unrelated faces are ambiguous rather than being selected by declaration order. A `when` whose
+  arms meet only in an intersection uses the declared expected type, the same way an `if` does.
+  Branch order does not affect the binding.
   If no sibling can bind the formals, the cannot-infer diagnostic is reported at the call. Two
   unbound calls still cannot infer from each other. Test:
-  `tests/conditional_branch_inference_e2e.rs`.
+  `tests/conditional_branch_inference_e2e.rs`, `tests/conditional_sibling_rebind_e2e.rs`.
 - **A formal that appears only inside another formal's projected bound is inferred from that
   argument.** `<R, C : MutableCollection<in R>> id(c: C)` applied to `MutableCollection<T>` or
   `ArrayList<T>` binds `R` to `T`, including when `T` belongs to the caller. A star argument
