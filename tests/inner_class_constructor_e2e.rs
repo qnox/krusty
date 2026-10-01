@@ -80,7 +80,7 @@ fn a_capturing_local_secondary_constructor_has_no_signature_of_its_prefix() {
                   fun make(offset: Offset): Outcome {\n\
                   \x20   class Piece(val size: Offset) : Outcome {\n\
                   \x20       constructor(label: Label) : this(offset)\n\
-                  \x20       fun captured() = size\n\
+                  \x20       fun captured(): Offset = offset\n\
                   \x20   }\n\
                   \x20   return Piece(Label())\n\
                   }\n";
