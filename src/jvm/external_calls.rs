@@ -434,11 +434,15 @@ pub(super) fn realize(
         // with no JVM method. Checked FIR publishes the operation for an ordinary call; a callable-
         // reference adapter body keeps the provider identity in an ordinary external-call node, so
         // realize that exact declaration with the common primitive operation at this target
-        // boundary. `String.get` and a scalar's `hashCode` keep their own calls below.
+        // boundary. `String.get`, the array element accessors, and a scalar's `hashCode` keep
+        // their own intrinsic calls below.
         if let crate::libraries::MemberRealization::Intrinsic(intrinsic) = member_realization {
             if !matches!(
                 intrinsic,
                 crate::libraries::CompilerIntrinsic::StringGet
+                    | crate::libraries::CompilerIntrinsic::ArrayGet
+                    | crate::libraries::CompilerIntrinsic::ArraySet
+                    | crate::libraries::CompilerIntrinsic::ArraySize
                     | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
                     | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
@@ -785,6 +789,8 @@ pub(super) fn realize(
             }
             Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
+                | crate::libraries::CompilerIntrinsic::ArrayGet
+                | crate::libraries::CompilerIntrinsic::ArraySet
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)
                 | crate::libraries::CompilerIntrinsic::CharCode
                 | crate::libraries::CompilerIntrinsic::StringLength
@@ -910,30 +916,41 @@ pub(super) fn realize(
                             descriptor,
                             inline: crate::libraries::InlineKind::None,
                         };
-                    } else {
-                        let semantic_array_declaration =
-                            crate::types::Ty::obj_name(callable.physical_owner).is_array();
-                        let (owner, interface) = if semantic_array_declaration {
-                            (callable.physical_owner, callable.owner_is_interface)
-                        } else {
-                            call_site_owner(
-                                classpath,
-                                callable.physical_owner,
-                                callable.owner_is_interface,
-                                ir.ext_call_source_receiver.get(&expression).copied(),
-                            )
+                    } else if let Some(array) =
+                        crate::jvm::names::array_class_descriptor(callable.physical_owner)
+                    {
+                        // An array classifier has no JVM class to dispatch on. Its remaining
+                        // dispatched member (`iterator()`) is implemented by the unique static
+                        // helper its metadata declares for the array's JVM class. The provider
+                        // attaches typed intrinsic realizations to `get`/`set`/`size`, so another
+                        // selected array dispatch without this helper is invalid backend input.
+                        let helper = array_member_helper(
+                            classpath,
+                            &callable.name,
+                            &array,
+                            &semantic_params,
+                            semantic_ret,
+                        )
+                        .ok_or(target)?;
+                        args.insert(0, dispatch_receiver.take().ok_or(target)?);
+                        *callee = Callee::Static {
+                            owner: crate::types::type_name(&helper.owner),
+                            name: helper.name,
+                            descriptor: helper.descriptor,
+                            inline: callable.inline,
                         };
+                    } else {
+                        let (owner, interface) = call_site_owner(
+                            classpath,
+                            callable.physical_owner,
+                            callable.owner_is_interface,
+                            ir.ext_call_source_receiver.get(&expression).copied(),
+                        );
                         *callee = Callee::Virtual {
                             owner,
                             name: callable.name,
                             descriptor,
-                            // Primitive/reference arrays are Kotlin classifiers but have no JVM
-                            // class on which `get`/`set`/`size` can dispatch. Retain the already
-                            // checked declaration shape so the emitter can realize that exact
-                            // selected member as an array operation. Ordinary classpath calls keep
-                            // their provider descriptor as the sole physical source.
-                            params: semantic_array_declaration
-                                .then_some((semantic_params.clone(), semantic_ret)),
+                            params: None,
                             interface,
                             module_target: None,
                             target: Some(selected),
@@ -963,6 +980,28 @@ pub(super) fn realize(
                             crate::ir::IrIntrinsic::StringGet
                         } else {
                             crate::ir::IrIntrinsic::NullableAnyToString
+                        },
+                        ret: semantic_ret,
+                    };
+                }
+                // An array classifier's own members: the provider attached the operation to the
+                // exact `get`/`set`/`size` declaration, so the call becomes that array operation
+                // (a `size` getter is called from a property-reference adapter body).
+                crate::libraries::MemberRealization::Intrinsic(
+                    intrinsic @ (crate::libraries::CompilerIntrinsic::ArrayGet
+                    | crate::libraries::CompilerIntrinsic::ArraySet
+                    | crate::libraries::CompilerIntrinsic::ArraySize),
+                ) => {
+                    physical_result = semantic_ret;
+                    *callee = Callee::Intrinsic {
+                        operation: match intrinsic {
+                            crate::libraries::CompilerIntrinsic::ArrayGet => {
+                                crate::ir::IrIntrinsic::ArrayGet
+                            }
+                            crate::libraries::CompilerIntrinsic::ArraySet => {
+                                crate::ir::IrIntrinsic::ArraySet
+                            }
+                            _ => crate::ir::IrIntrinsic::ArraySize,
                         },
                         ret: semantic_ret,
                     };
@@ -1158,6 +1197,32 @@ fn primitive_iterator_next(
         _ => return None,
     };
     Some((format!("next{element_name}"), element))
+}
+
+/// The static helper implementing a dispatched member of an array classifier, keyed by the
+/// member's declared name and its signature on the JVM array class (`iterator([I)` for
+/// `IntArray.iterator()`). A reference array's element is erased, so every `Array<T>` shares the
+/// `[Ljava/lang/Object;` form; any other array-typed operand is erased the same way.
+fn array_member_helper(
+    classpath: &Classpath,
+    name: &str,
+    array: &str,
+    parameters: &[crate::types::Ty],
+    result: crate::types::Ty,
+) -> Option<crate::jvm::inline::StaticMemberRealization> {
+    let erased = |ty: crate::types::Ty| {
+        ty.obj_internal()
+            .filter(|_| ty.is_array())
+            .and_then(crate::jvm::names::array_class_descriptor)
+            .unwrap_or_else(|| crate::jvm::names::type_descriptor(ty))
+    };
+    let mut descriptor = format!("({array}");
+    for parameter in parameters {
+        descriptor.push_str(&erased(*parameter));
+    }
+    descriptor.push(')');
+    descriptor.push_str(&erased(result));
+    classpath.static_array_member_realization(name, &descriptor)
 }
 
 fn call_site_owner(

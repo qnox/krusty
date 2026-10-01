@@ -3,18 +3,6 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
-    pub(super) fn bound_or_nested_classifier(
-        &self,
-        scope: crate::fir::SignatureScope,
-        spelling: &str,
-        bound: Option<crate::fir::DeclarationId>,
-    ) -> Option<crate::types::TypeName> {
-        match bound {
-            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
-            None => self.lexically_nested_classifier(scope, spelling),
-        }
-    }
-
     pub(super) fn bound_or_scoped_classifier(
         &self,
         scope: crate::fir::SignatureScope,
@@ -23,9 +11,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<crate::types::TypeName> {
         match bound {
             Some(declaration) => Some(self.bound_classifier_identity(declaration)),
-            None => self
-                .qualified_classifier(scope, spelling)
-                .or_else(|| self.lexically_nested_classifier(scope, spelling)),
+            None => self.qualified_classifier(scope, spelling),
         }
     }
 
@@ -620,8 +606,15 @@ impl ProductionSignatureSemantics<'_> {
                 .declarations
                 .anchor(scope.owner)
                 .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Classifier);
+        // The stable declaration chain is the lexical classifier rung for a body. An enum-entry
+        // body has no nominal classifier type, so its nested declarations are found here and
+        // precede file/import candidates. A class or constructor header has not entered that body:
+        // `class MyClass : Base` must not see `interface Base` declared inside MyClass.
+        let declaration_nested = (!header_scope && segments.len() == 1)
+            .then(|| self.lexically_nested_classifier_at(scope, first, true))
+            .flatten();
         self.with_resolver(scope, |resolver| {
-            let mut current = None;
+            let mut current = declaration_nested;
             let mut scope_failure = None;
             // A declaration nested directly in the lexical owner is the nearest classifier rung.
             // In an ordinary class body, inherited nested classifiers are the next rung. A class
@@ -1010,8 +1003,10 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    /// Lambda expectations for a bare call that resolves to a MEMBER of one of the implicit
-    /// receivers, mirroring the top-level selection above one receiver rung at a time.
+    /// Lambda expectations for a bare call that resolves on the MEMBER level of one of the
+    /// implicit receivers — its member functions and the constructors of a same-named inner
+    /// classifier (`class C : A { fun f() = B(arg) }` constructs `A.B` exactly as `this.B(arg)`) —
+    /// mirroring the top-level selection above one receiver rung at a time.
     pub(super) fn bare_member_call_expectations(
         &self,
         scope: crate::fir::SignatureScope,
@@ -1024,38 +1019,21 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
+        let call = super::semantics::ReceiverLevelCall {
+            scope,
+            spelling,
+            arguments,
+            type_arguments,
+            trailing_lambda,
+        };
         for receiver in self
             .implicit_receivers(scope)
             .into_iter()
             .chain(self.enclosing_lexical_singleton_receivers(scope))
         {
-            let selected = self.with_resolver(scope, |resolver| {
-                let (mut functions, properties) =
-                    resolver.receiver_callables(receiver, spelling).into_parts();
-                functions.overloads = self
-                    .implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
-                let callables = crate::libraries::Callables::from_parts(functions, properties);
-                let selected = self.receiver_family_postponed_parameters(
-                    resolver,
-                    callables,
-                    super::postponed_calls::PostponedReceiverCall {
-                        scope,
-                        receiver,
-                        spelling,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                    },
-                );
-                if let Some((parameters, _)) = &selected {
-                    crate::trace_compiler!(
-                        "signature",
-                        "member call expectation {spelling} receiver={receiver:?} parameters={parameters:?}",
-                    );
-                }
-                selected
-            });
-            if let Ok((parameters, slots)) = selected {
+            if let Some((parameters, slots)) =
+                self.receiver_member_level_expectations(receiver, call)?
+            {
                 return Ok(Self::postponed_expectations(arguments, &slots, &parameters));
             }
             // At each receiver rung, callable-valued properties follow ordinary functions before
@@ -1212,17 +1190,6 @@ impl ProductionSignatureSemantics<'_> {
             }
         }
         owners
-    }
-
-    /// A classifier named by BARE spelling from inside an enclosing class: `class Outer { class
-    /// Nested; fun test() = Nested() }`. Import-scope lookup only sees top-level and imported names,
-    /// so a lexically nested sibling had no way to resolve.
-    pub(super) fn lexically_nested_classifier(
-        &self,
-        scope: crate::fir::SignatureScope,
-        spelling: &str,
-    ) -> Option<crate::types::TypeName> {
-        self.lexically_nested_classifier_at(scope, spelling, true)
     }
 
     /// The source spelling that names `classifier` in a label or lexical lookup. A local

@@ -8762,6 +8762,74 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the next suffix, `name$delegate$1`, `name$delegate$2`, in declaration order, including when the
   delegate types differ. (`tests/extension_delegate_fields_e2e.rs`.)
 
+- **A reference to an array's own member reflects the JVM array class.** The array classifiers
+  (`IntArray`, `Array<T>`, ...) have no JVM class, and their `get`/`set`/`size` declarations have no
+  JVM method. The builtin provider attaches the array operation (`ArrayGet`, `ArraySet`,
+  `ArraySize`) to exactly those declarations (owner, operator modifier, full signature); JVM
+  target realization turns a selected call into that intrinsic, and the emitter only executes it.
+  The remaining dispatched array member, `iterator()`, is realized there as the static helper its
+  metadata declares for the JVM array class. A bound `values::get` is reflected, as kotlinc
+  reflects it, on the array's class constant (`[I`, and `[Ljava/lang/Object;` for any `Array<T>`)
+  under the signature the declaration maps to (`get(I)I`, `get(I)Ljava/lang/Object;`), not
+  top-level; its `invoke` reads the element with the array instruction. An `Array<Int>` read
+  unboxes the `Integer` its `aaload` loaded directly (`Integer.intValue`, not `checkcast Number;
+  Number.intValue`). (`tests/array_member_reference_e2e.rs`.)
+
+- **Interface delegates are stored in declaration order.** `class C(a: A, b: B) : A by a, B by b`
+  stores `$$delegate_0` and then `$$delegate_1` first thing in its constructor, before its own
+  initializers, as kotlinc does. (`tests/interface_delegation_e2e.rs`,
+  `delegates_are_stored_in_declaration_order`.)
+
+- **A delegated member keeps its context parameters' identities.** Delegating an interface whose
+  member declares `context(log: Log)` forwards that member with the context value as its leading
+  parameter, as kotlinc does. The forwarder's parameter identities come from the source
+  declaration's typed identities in the resolved index (a context value, not an ordinary parameter
+  spelled `log`), so the delegation resolves instead of declining. (`tests/interface_delegation_e2e.rs`,
+  `a_context_parameter_member_is_delegated`.)
+
+- **A receiver-bound inner constructor types postponed arguments.** In `fun f() = P().Q(W("K"))`
+  (or `P().R { ... }`) the argument needs an expected type before the call's result is known. The
+  receiver's member level supplies it: `P`'s classifier facet binds the inner class `P.Q`, whose
+  constructors supply the parameter shapes, so `f`'s return type infers as `P.Q`. The same member
+  level serves a bare inner construction on an implicit receiver.
+  (`tests/inner_class_construction_e2e.rs`, `a_receiver_inner_constructor_types_postponed_arguments`.)
+
+- **Inner constructors and same-named member functions are one overload family.** kotlinc places
+  the constructors of an `inner` classifier in the member level of the receiver that supplies its
+  outer instance, beside that receiver's member functions of the same name. `o.Inner(args)`,
+  `o?.Inner(args)`, and a bare `Inner(args)` resolved on an implicit receiver therefore run one
+  applicability and most-specific selection over both: `Inner(1)` picks the constructor
+  `Inner(x: Int)` over `fun Inner(x: String)`, a lambda's arity picks between
+  `inner class Make(f: (Int, Int) -> Int)` and `fun Make(f: (String) -> Int)`, and when neither is
+  more specific the call is `overload resolution ambiguity between candidates:` at the callee,
+  listing the constructors first as `Outer.constructor(x: Any, y: Int): Outer.Inner`, named by the
+  class that declares the inner class, then the functions. The constructor is never a fallback
+  tried after the functions fail. Both the body checker and signature inference collect the family
+  from `symbol_resolver::bound_inner_constructor_candidates`; the constructor path only
+  materializes the declaration selection chose. A receiver without same-named member functions
+  offers the constructors alone, still ahead of every extension level.
+  (`tests/inner_class_construction_e2e.rs`,
+  `inner_constructors_and_member_functions_are_one_overload_family`,
+  `member_level_selection_chooses_between_inner_constructors_and_functions`.)
+
+- **A bare constructor family shapes a postponed argument by what its members share.** Where a
+  classifier call cannot run constructor overload selection before its lambda is shaped (a named
+  or trailing argument, or a positional call selection cannot yet decide), every constructor whose
+  own names, defaults, and vararg consume the call belongs to the family, and the postponed
+  argument receives only the shape they all give it. `Box(2) { "s$it" }` against
+  `Box<T>(tag: String, f: (Int) -> T)` and `constructor(n: Int, f: (Int) -> T)` types the lambda
+  as `(Int) -> T` and final selection picks the secondary constructor. No constructor is chosen by
+  scanning for a single structural match.
+  (`tests/postponed_constructor_applicability_e2e.rs`,
+  `constructors_mapping_a_trailing_lambda_shape_it_together`.)
+
+- **An inferred property getter reads its context parameters.** In
+  `context(c: C) val p get() = c.v` (and its extension and companion-extension forms) the named
+  context parameter `c` is a value of the getter, so the property's type is inferred from it exactly
+  as a function's expression body reads its own context parameters. Signature inference binds a
+  property's named context parameters to its signature parameters; an anonymous `_` binds nothing.
+  (`tests/context_parameters_e2e.rs`, `an_inferred_property_getter_reads_its_context_parameters`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
