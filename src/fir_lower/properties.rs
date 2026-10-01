@@ -210,6 +210,85 @@ pub(super) fn predeclare_properties(
     Ok(())
 }
 
+/// A foreign inline accessor is a template in the caller's file, not a property declared there.
+/// Local classes copied out of that accessor still name it as their enclosure, which is resolved
+/// through the property layout. Publish the layout the template's functions already describe.
+fn publish_foreign_accessor_layouts(
+    index: &ResolvedModuleIndex,
+    ir: &IrFile,
+    realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
+) -> Result<(), FirFileLoweringFailure> {
+    let mut accessors: HashMap<crate::fir::PropertyId, (Option<FunId>, Option<FunId>)> =
+        HashMap::new();
+    for (&declaration, &function) in &ir.accessor_functions {
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.kind != DeclarationKind::Accessor {
+            continue;
+        }
+        let Some(property) = anchor.owner else {
+            continue;
+        };
+        let Some(property_id) = index.property_for_declaration(property) else {
+            continue;
+        };
+        if realizations.contains_key(&property_id) {
+            continue;
+        }
+        let slot = accessors.entry(property_id).or_default();
+        match anchor.sibling {
+            0 => slot.0 = Some(function),
+            1 => slot.1 = Some(function),
+            _ => return Err(FirFileLoweringFailure::MissingProperty(property)),
+        }
+    }
+    for (property_id, (getter, setter)) in accessors {
+        let Some(getter) = getter else {
+            continue;
+        };
+        let shape = index
+            .property(property_id)
+            .ok_or(FirFileLoweringFailure::MissingProperty(
+                DeclarationId::from_raw(property_id.raw()),
+            ))?;
+        let header = index
+            .declaration_header(shape.declaration)
+            .ok_or(FirFileLoweringFailure::MissingProperty(shape.declaration))?;
+        let extension = (!header.flags.has(DeclarationFlags::COMPANION))
+            .then_some(shape.extension_receiver)
+            .flatten()
+            .map(crate::fir::ResolvedTy::get);
+        let context_parameters = index
+            .signature(shape.declaration)
+            .and_then(|signature| {
+                signature
+                    .parameters
+                    .get(..shape.context_parameter_count as usize)
+            })
+            .ok_or(FirFileLoweringFailure::MissingProperty(shape.declaration))?
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        if index.enclosing_classifier(shape.declaration).is_some() {
+            // A member template's class is realized with the member. Only a package accessor is
+            // enclosed from this file, and its layout carries no storage of its own.
+            continue;
+        }
+        realizations.insert(
+            property_id,
+            IrLocalPropertyLayout::TopLevelAccessor {
+                getter,
+                setter,
+                receiver: extension,
+                context_parameters,
+                delegate: None,
+            },
+        );
+    }
+    Ok(())
+}
+
 /// Finish the declaration-oriented property structures consumed by common lowering and backends.
 /// The checked-property table is deliberately source-oriented while bodies are arriving; this step
 /// publishes storage and accessor declarations once every body in the file has been consumed.
@@ -330,6 +409,7 @@ pub(super) fn finalize_properties(
     }
     merge_class_initialization(ir, initialization)?;
     realize_backing_field_operations(index, ir, &realizations)?;
+    publish_foreign_accessor_layouts(index, ir, &mut realizations)?;
     ir.local_property_layouts.extend(realizations);
     // Accessor functions exist now, and checked reads still carry the call site's type arguments.
     // Splice `inline` accessors before a backend turns the read into a call and drops those

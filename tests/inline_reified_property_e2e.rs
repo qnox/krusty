@@ -141,11 +141,140 @@ fun box(): String {
     return text
 }
 "#;
-    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
-    let reference = common::kotlinc_box_files_result(&sources, "MainKt");
-    assert_eq!(reference, "OK", "kotlinc cross-file reference");
+    assert_eq!(
+        run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]),
+        common::kotlinc_box_files_result(&[("lib.kt", LIB), ("main.kt", MAIN)], "MainKt")
+    );
+}
+
+/// A cross-file inline extension property passes its function-typed receiver into a non-inline call.
+#[test]
+fn a_cross_file_inline_extension_property_keeps_its_receiver() {
+    const LIB: &str = r#"
+inline fun (Int.() -> String).foo(): String = noInlineRun(this)
+
+inline var (Int.() -> String).bar: String
+    get() = noInlineRun(this)
+    set(value) { noInlineRun(this) }
+
+fun noInlineRun(f: Int.() -> String): String = f(1)
+"#;
+    const MAIN: &str = r#"
+fun box() = { a: Int -> if (a == 1) "O" else "FA" }.foo() + { a: Int -> if (a == 1) "K" else "IL" }.bar
+"#;
+    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+}
+
+/// Local classes inside an anonymous object in a cross-file inline property are part of the splice.
+#[test]
+fn a_cross_file_inline_property_keeps_local_classes_in_an_anonymous_object() {
+    const LIB: &str = r#"
+inline fun foo(): String {
+    return object {
+        fun func(): String {
+            class C
+            C()
+            return "O"
+        }
+    }.func()
+}
+
+inline val bar: String get() {
+    return object {
+        fun func(): String {
+            class C
+            C()
+            return "K"
+        }
+    }.func()
+}
+"#;
+    const MAIN: &str = "fun box(): String = foo() + bar\n";
+    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+}
+
+/// An imported member extension on an object keeps its dispatch receiver when spliced in another file.
+#[test]
+fn an_imported_object_member_extension_property_is_spliced() {
+    const LIB: &str = r#"
+package test
+
+object A {
+    inline fun <T> bar(x: T) = 42
+    inline val <T> T.bar2 get() = 42
+}
+"#;
+    const MAIN: &str = r#"
+package test
+
+import test.A.bar
+import test.A.bar2
+
+fun <T> T.foo1(): Int = bar(this)
+fun <T> T.foo2(): Int = this.bar2
+
+fun box(): String {
+    10.foo1()
+    10.foo2()
+    return "OK"
+}
+"#;
+    assert_eq!(run_box_files(&[("lib.kt", LIB), ("main.kt", MAIN)]), "OK");
+}
+
+fn run_box_files(sources: &[(&str, &str)]) -> String {
     let jdk = common::jdk_modules();
-    let result =
-        common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(jdk.as_path()));
-    assert_eq!(result.as_deref(), Some(reference.as_str()));
+    let classpath = [common::stdlib_jar()];
+    if let Some(result) =
+        common::compile_and_run_box_files(sources, &classpath, Some(jdk.as_path()))
+    {
+        return result;
+    }
+    let report = compile_files_diagnostics(sources, &classpath, Some(jdk.as_path()));
+    panic!("cross-file inline property did not run: {report}");
+}
+
+fn compile_files_diagnostics(
+    sources: &[(&str, &str)],
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> String {
+    use krusty::diag::DiagSink;
+    use krusty::source::SourceInput;
+    let mut diags = DiagSink::new();
+    let stems = sources
+        .iter()
+        .map(|(name, _)| name.trim_end_matches(".kt").to_string())
+        .collect::<Vec<_>>();
+    let inputs = sources
+        .iter()
+        .zip(&stems)
+        .map(|((_, source), stem)| SourceInput::kotlin(source).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    let cp = common::cached_classpath(cp_jars, jdk_modules);
+    let platform =
+        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("JVM provider"));
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        common::with_native_plugins(platform),
+        &krusty::features::LangFeatures::default(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let _ = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    if diags.diags.is_empty() {
+        return "lowering/emit bailed without a diagnostic".to_string();
+    }
+    diags
+        .diags
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "file {} span {}..{}: {}",
+                diagnostic.file, diagnostic.span.lo, diagnostic.span.hi, diagnostic.msg
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
