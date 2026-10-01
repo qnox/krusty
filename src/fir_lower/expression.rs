@@ -228,7 +228,7 @@ impl BodyLowering<'_> {
                     substitutions,
                 )?;
                 let declared = match target {
-                    crate::fir::FirPropertyTarget::Module(property) => self
+                    crate::fir::FirPropertyTarget::Module { property, .. } => self
                         .index
                         .property_declaration(*property)
                         .and_then(|declaration| self.index.signature(declaration))

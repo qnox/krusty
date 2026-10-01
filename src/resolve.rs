@@ -12705,6 +12705,12 @@ impl CheckerScope<'_> {
         }
     }
 
+    fn declare_property_tparams(&self, prop: &PropDecl, types: &TParams) {
+        self.declare_tparams(&prop.type_params, types, |name| {
+            prop.reified_type_params.contains(name)
+        });
+    }
+
     /// The innermost type-parameter binding for `name`, or `None` when `name` is not a type
     /// parameter here. Walks [`classifier_rungs`](scope::Scope::classifier_rungs), so an outer
     /// declaration's parameters stop at a class rung that does not carry its outer instance.
@@ -55966,8 +55972,7 @@ impl<'a> Checker<'a> {
                                 self.file_index,
                                 bp.span.lo,
                             );
-                        property_scope
-                            .declare_tparams(&bp.type_params, &property_tparams, |_| false);
+                        property_scope.declare_property_tparams(bp, &property_tparams);
                         self.resolved_declaration_type_parameters.insert(
                             bp.span.lo,
                             bp.type_params
@@ -56998,8 +57003,7 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .is_none_or(|selected| selected.contains(&bp.span));
                     let mut body_inferred_property_type = None;
-                    // The property's own type parameters get a rung of their own, so they retire
-                    // with the iteration.
+                    // The property's type parameters get their own rung and retire with this iteration.
                     let property_scope = scope.child(ScopeKind::Function { receiver: None });
                     let scope = &property_scope;
                     let property_tparams = scope
@@ -57026,7 +57030,7 @@ impl<'a> Checker<'a> {
                             })
                             .collect(),
                     );
-                    scope.declare_tparams(&bp.type_params, &property_tparams, |_| false);
+                    scope.declare_property_tparams(bp, &property_tparams);
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
                     self.check_duplicate_param_names(
                         &bp.context_params,
@@ -57304,11 +57308,7 @@ impl<'a> Checker<'a> {
                     {
                         let accessor_tparam_scope =
                             dispatch_scope.child(ScopeKind::Function { receiver: None });
-                        accessor_tparam_scope.declare_tparams(
-                            &bp.type_params,
-                            &property_tparams,
-                            |_| false,
-                        );
+                        accessor_tparam_scope.declare_property_tparams(bp, &property_tparams);
                         let context_receivers = bp
                             .context_params
                             .iter()

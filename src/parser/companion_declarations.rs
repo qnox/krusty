@@ -128,31 +128,8 @@ impl Parser<'_> {
                     });
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
-                    let lateinit = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "lateinit");
-                    let mut property = self.parse_top_property_c(
-                        lateinit,
-                        false,
-                        member_modifiers.iter().any(|modifier| modifier == "const"),
-                        false,
-                    );
+                    let mut property = self.parse_member_property(&member_modifiers, false, false);
                     property.receiver = Some(receiver());
-                    property.visibility = visibility_of(&member_modifiers);
-                    property.is_open = !member_modifiers.iter().any(|modifier| modifier == "final")
-                        && member_modifiers
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override");
-                    property.is_override = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "override");
-                    property.is_external = member_modifiers
-                        .iter()
-                        .any(|modifier| modifier == "external");
-                    property.is_expect =
-                        member_modifiers.iter().any(|modifier| modifier == "expect");
-                    property.is_actual =
-                        member_modifiers.iter().any(|modifier| modifier == "actual");
                     property.is_companion_extension = true;
                     property.is_companion_block_member = true;
                     let declaration = self.file.add_decl(Decl::Property(property));

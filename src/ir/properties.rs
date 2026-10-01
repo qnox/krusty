@@ -2,6 +2,67 @@
 
 use super::*;
 
+/// One inline property use. `accessor` is the declaration the checker selected; `substitutions`
+/// already carry each type parameter's semantic name and reified flag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrInlinePropertySplice {
+    pub accessor: crate::fir::DeclarationId,
+    pub substitutions: Vec<IrInlineTypeSubstitution>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrInlineTypeSubstitution {
+    pub name: String,
+    pub reified: bool,
+    pub value: Ty,
+}
+
+/// Property-owned index used while checked inline accessors are materialized and spliced.
+#[derive(Default)]
+pub(crate) struct IrInlinePropertyAccess {
+    pub(crate) accessor_functions: std::collections::HashMap<crate::fir::DeclarationId, FunId>,
+    pub(crate) splices: std::collections::HashMap<ExprId, IrInlinePropertySplice>,
+}
+
+/// One source property declaration and the checked bodies that realize its language semantics.
+/// Storage and accessor naming remain backend choices; stable property/class identities and final
+/// types are already fixed here.
+#[derive(Clone, Debug)]
+pub struct IrCheckedProperty {
+    pub declaration: crate::fir::DeclarationId,
+    /// The declaration's stable source position, the key its accessors take in `fn_source_order`.
+    pub source_order: u32,
+    /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
+    /// output metadata, not a source locator: property realization copies it to the common-IR
+    /// declarations it creates after the syntax unit has already been dropped.
+    pub decl_line: u32,
+    /// For a primary-constructor property, the line its declaration starts on with its annotations
+    /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
+    /// store of the property maps here, its accessors to `decl_line`.
+    pub decl_start_line: u32,
+    /// Exact semantic position among the owning class's property initializers and `init` blocks.
+    /// This is copied from the stable FIR declaration header, never reconstructed from source.
+    pub initialization_order: Option<u32>,
+    pub class: Option<ClassId>,
+    pub name: String,
+    pub ty: Ty,
+    /// Checked explicit backing-field type, distinct from the public property/accessor type.
+    pub storage_ty: Option<Ty>,
+    pub visibility: crate::types::Visibility,
+    pub flags: crate::fir::DeclarationFlags,
+    pub initializer: Option<ExprId>,
+    pub delegate: Option<ExprId>,
+    pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
+    pub getter: Option<ExprId>,
+    pub setter: Option<ExprId>,
+    /// Accessor declarations and whether each was declared `inline`. Published with the property
+    /// so later expansion does not rediscover the flag from the declaration index.
+    pub getter_declaration: Option<crate::fir::DeclarationId>,
+    pub setter_declaration: Option<crate::fir::DeclarationId>,
+    pub getter_inline: bool,
+    pub setter_inline: bool,
+}
+
 /// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one
 /// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
 /// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and

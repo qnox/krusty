@@ -1473,6 +1473,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "const"),
                         false,
                     );
+                    Self::mark_inline_accessors(&mut d, &mods);
                     d.visibility = visibility_of(&mods);
                     d.is_override = mods.iter().any(|m| m == "override");
                     d.is_external |= mods.iter().any(|m| m == "external");
@@ -2272,7 +2273,6 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                let lateinit = mods.iter().any(|m| m == "lateinit");
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
                 }
@@ -2283,19 +2283,7 @@ impl<'a> Parser<'a> {
                         methods.push(function);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let mut property = self.parse_top_property_c(
-                            lateinit,
-                            false,
-                            mods.iter().any(|m| m == "const"),
-                            false,
-                        );
-                        property.visibility = visibility_of(&mods);
-                        property.is_open = !mods.iter().any(|m| m == "final")
-                            && mods.iter().any(|m| m == "open" || m == "override");
-                        property.is_override = mods.iter().any(|m| m == "override");
-                        property.is_external |= mods.iter().any(|m| m == "external");
-                        property.is_expect = mods.iter().any(|m| m == "expect");
-                        property.is_actual = mods.iter().any(|m| m == "actual");
+                        let property = self.parse_member_property(&mods, false, false);
                         init_order.push(ClassInit::PropInit(props.len()));
                         props.push(property);
                     }
@@ -2573,19 +2561,11 @@ impl<'a> Parser<'a> {
                             } else if self.at(TokenKind::KwFun) {
                                 body.push(self.parse_fun(&bmods));
                             } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
-                                let mut property = self.parse_top_property_c(
-                                    bmods.iter().any(|m| m == "lateinit"),
+                                let property = self.parse_member_property(
+                                    &bmods,
                                     false,
-                                    bmods.iter().any(|m| m == "const"),
                                     bmods.iter().any(|m| m == "abstract"),
                                 );
-                                property.visibility = visibility_of(&bmods);
-                                property.is_open = !bmods.iter().any(|m| m == "final")
-                                    && bmods.iter().any(|m| m == "open" || m == "override");
-                                property.is_override = bmods.iter().any(|m| m == "override");
-                                property.is_external |= bmods.iter().any(|m| m == "external");
-                                property.is_expect = bmods.iter().any(|m| m == "expect");
-                                property.is_actual = bmods.iter().any(|m| m == "actual");
                                 init_order.push(ClassInit::PropInit(bprops.len()));
                                 bprops.push(property);
                             } else if self.at(TokenKind::Ident)
@@ -2675,21 +2655,13 @@ impl<'a> Parser<'a> {
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
                     // the enum class, initialized in declaration order in the primary constructor.
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let mut p = self.parse_top_property_c(
-                            emods.iter().any(|m| m == "lateinit"),
+                        let property = self.parse_member_property(
+                            &emods,
                             true,
-                            emods.iter().any(|m| m == "const"),
                             emods.iter().any(|m| m == "abstract"),
                         );
-                        p.visibility = visibility_of(&emods);
-                        p.is_open = !emods.iter().any(|x| x == "final")
-                            && emods.iter().any(|x| x == "open" || x == "override");
-                        p.is_override = emods.iter().any(|m| m == "override");
-                        p.is_external |= emods.iter().any(|m| m == "external");
-                        p.is_expect = emods.iter().any(|m| m == "expect");
-                        p.is_actual = emods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(p);
+                        body_props.push(property);
                     }
                     TokenKind::Ident
                         if self.keyword_text("init")
@@ -3410,7 +3382,6 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                let lateinit = mods.iter().any(|m| m == "lateinit");
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 // All representable nested classifier kinds share one registration path. Keeping
                 // this outside the member-kind match prevents class/object/enum syntax branches from
@@ -3427,21 +3398,9 @@ impl<'a> Parser<'a> {
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
                         // value); an `abstract` property has no field and is marked accordingly.
-                        let mut p = self.parse_top_property_c(
-                            lateinit,
-                            !is_abstract,
-                            mods.iter().any(|m| m == "const"),
-                            is_abstract,
-                        );
-                        p.visibility = visibility_of(&mods);
-                        p.is_open = !mods.iter().any(|x| x == "final")
-                            && mods.iter().any(|x| x == "open" || x == "override");
-                        p.is_override = mods.iter().any(|m| m == "override");
-                        p.is_external |= mods.iter().any(|m| m == "external");
-                        p.is_expect = mods.iter().any(|m| m == "expect");
-                        p.is_actual = mods.iter().any(|m| m == "actual");
+                        let property = self.parse_member_property(&mods, !is_abstract, is_abstract);
                         init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(p);
+                        body_props.push(property);
                     }
                     TokenKind::Ident
                         if self.keyword_text("init")
@@ -3809,6 +3768,7 @@ impl<'a> Parser<'a> {
                             imods.iter().any(|m| m == "const"),
                             explicit_abstract,
                         );
+                        Self::mark_inline_accessors(&mut p, &imods);
                         if p.init.is_none() && p.getter.is_none() {
                             p.is_abstract = true;
                         }
@@ -3903,7 +3863,6 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                let lateinit = mods.iter().any(|m| m == "lateinit");
                 if self.parse_and_register_nested_classifier(owner, &mods, true) {
                     continue;
                 }
@@ -3914,21 +3873,9 @@ impl<'a> Parser<'a> {
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let mut p = self.parse_top_property_c(
-                            lateinit,
-                            true,
-                            mods.iter().any(|m| m == "const"),
-                            false,
-                        );
-                        p.visibility = visibility_of(&mods);
-                        p.is_open = !mods.iter().any(|x| x == "final")
-                            && mods.iter().any(|x| x == "open" || x == "override");
-                        p.is_override = mods.iter().any(|m| m == "override");
-                        p.is_external |= mods.iter().any(|m| m == "external");
-                        p.is_expect = mods.iter().any(|m| m == "expect");
-                        p.is_actual = mods.iter().any(|m| m == "actual");
+                        let property = self.parse_member_property(&mods, true, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(p);
+                        body_props.push(property);
                     }
                     TokenKind::Ident
                         if self.keyword_text("init")
@@ -4047,7 +3994,6 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                let lateinit = mods.iter().any(|m| m == "lateinit");
                 // Named singleton owners use the same classifier-registration invariant as class
                 // owners. The flag only excludes `inner` classes, whose semantics require an
                 // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
@@ -4062,21 +4008,10 @@ impl<'a> Parser<'a> {
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let mut p = self.parse_top_property_c(
-                            lateinit,
-                            true,
-                            mods.iter().any(|m| m == "const"),
-                            false,
-                        ); // init blocks may supply the value
-                        p.visibility = visibility_of(&mods);
-                        p.is_open = !mods.iter().any(|x| x == "final")
-                            && mods.iter().any(|x| x == "open" || x == "override");
-                        p.is_override = mods.iter().any(|m| m == "override");
-                        p.is_external |= mods.iter().any(|m| m == "external");
-                        p.is_expect = mods.iter().any(|m| m == "expect");
-                        p.is_actual = mods.iter().any(|m| m == "actual");
+                        // Init blocks may supply the value, so a missing initializer is retained.
+                        let property = self.parse_member_property(&mods, true, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(p);
+                        body_props.push(property);
                     }
                     TokenKind::Ident
                         if self.keyword_text("init")

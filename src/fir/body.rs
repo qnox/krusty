@@ -19,6 +19,11 @@ pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
     FirRuntimeFunction,
 };
+mod property_access;
+pub use property_access::{
+    FirClassifierProperty, FirInlineAccessorSplice, FirInlineTypeSubstitution, FirPropertyDispatch,
+    FirPropertyReferenceTarget, FirPropertyTarget,
+};
 
 use crate::kt_string::KtString;
 use crate::types::TypeName;
@@ -472,138 +477,6 @@ impl ClassBodyContext {
         self.callables.extend(context.callables);
         self.receivers.extend(context.receivers);
         self.enclosing_property = context.enclosing_property.or(self.enclosing_property);
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirPropertyDispatch {
-    Ordinary,
-    /// Non-virtual dispatch selected through `super`. This says nothing about physical storage:
-    /// the target backend still decides whether the exact property is a field or an accessor.
-    Super {
-        owner: TypeName,
-        interface: bool,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirPropertyTarget {
-    Module(PropertyId),
-    External {
-        property: super::ExternalPropertyId,
-        receiver: Option<ResolvedTy>,
-        parameters: Box<[ResolvedTy]>,
-        result: ResolvedTy,
-        /// Parameter slot occupied by the extension receiver when this accessor belongs to a
-        /// member-extension property. Ordinary members and top-level extensions use `None`.
-        extension_receiver_parameter: Option<u32>,
-        dispatch: FirPropertyDispatch,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirPropertyReferenceTarget {
-    Module(PropertyId),
-    /// A source-module property after callable-reference selection and generic specialization.
-    /// `property` is the stable declaration identity; the remaining fields are the final callable
-    /// view consumed by an adapted function value. Lowering must not reconstruct these types from
-    /// a symbolic declaration signature.
-    SpecializedModule {
-        property: PropertyId,
-        /// Accessor declaration spellings carried by the provider-selected property candidate.
-        /// These are declaration facts, not names reconstructed from the property spelling by a
-        /// later backend pass.
-        getter_name: Box<str>,
-        setter_name: Option<Box<str>>,
-        receiver: Option<ResolvedTy>,
-        extension_receiver: bool,
-        property_type: ResolvedTy,
-        /// The extension receiver and property type the declaration itself declares. Its
-        /// accessors are compiled once against these, so the reference's specialized receiver
-        /// and result cross into and out of them.
-        declared_receiver: Option<ResolvedTy>,
-        declared_property_type: ResolvedTy,
-    },
-    Classifier {
-        owner: TypeName,
-        property: FirClassifierProperty,
-        property_type: ResolvedTy,
-    },
-    /// A dependency property after callable-reference selection.
-    ///
-    /// It carries no name of its own. The property's is the provider's, decoded from the
-    /// declaration's metadata and reachable through `getter`'s [`ExternalPropertyId`]. A copy here
-    /// was the REFERENCE SITE's spelling, which is a different fact — a lookup may reach a
-    /// declaration under an import alias — and the accessor cannot stand in for it either, its name
-    /// being a physical call target a JVM realization may rename or value-class-mangle.
-    External {
-        reflection_owner: Option<ResolvedTy>,
-        getter: Box<FirPropertyTarget>,
-        setter: Option<Box<FirPropertyTarget>>,
-        extension_receiver: bool,
-        property_type: ResolvedTy,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirClassifierProperty {
-    EnumEntries,
-}
-
-impl From<PropertyId> for FirPropertyReferenceTarget {
-    fn from(target: PropertyId) -> Self {
-        Self::Module(target)
-    }
-}
-
-impl FirPropertyReferenceTarget {
-    pub const fn module(&self) -> Option<PropertyId> {
-        match self {
-            Self::Module(target) => Some(*target),
-            Self::SpecializedModule { property, .. } => Some(*property),
-            Self::Classifier { .. } | Self::External { .. } => None,
-        }
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        match self {
-            Self::Module(_) | Self::SpecializedModule { .. } | Self::Classifier { .. } => 0,
-            Self::External { getter, setter, .. } => {
-                getter.storage_payload_bytes()
-                    + setter
-                        .as_deref()
-                        .map_or(0, FirPropertyTarget::storage_payload_bytes)
-            }
-        }
-    }
-}
-
-impl From<PropertyId> for FirPropertyTarget {
-    fn from(target: PropertyId) -> Self {
-        Self::Module(target)
-    }
-}
-
-impl FirPropertyTarget {
-    pub fn module(&self) -> Option<PropertyId> {
-        match self {
-            Self::Module(target) => Some(*target),
-            Self::External { .. } => None,
-        }
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        match self {
-            Self::Module(_) => 0,
-            Self::External {
-                receiver,
-                parameters,
-                ..
-            } => {
-                parameters.len() * std::mem::size_of::<ResolvedTy>()
-                    + usize::from(receiver.is_some()) * std::mem::size_of::<ResolvedTy>()
-            }
-        }
     }
 }
 
@@ -2746,6 +2619,12 @@ impl FirBody {
                 FirExprKind::CallableReference { target, .. } => {
                     if let Some(callable) = target.module() {
                         callables.insert(callable);
+                    }
+                }
+                FirExprKind::PropertyRead { target, .. }
+                | FirExprKind::PropertyWrite { target, .. } => {
+                    if let Some(splice) = target.inline_splice() {
+                        callables.insert(splice.callable);
                     }
                 }
                 FirExprKind::Lambda { body, .. } => {

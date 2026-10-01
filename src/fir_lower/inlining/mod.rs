@@ -20,6 +20,14 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+mod property_accessors;
+
+pub(super) fn splice_inline_property_accessors(
+    ir: &mut crate::ir::IrFile,
+) -> Result<(), super::FirFileLoweringFailure> {
+    property_accessors::splice_inline_property_accessors(ir)
+}
+
 /// What one physical operand position of an inline expansion fills.
 enum InlineOperandRole {
     /// A receiver. It declares no value parameter, and kotlinc gives it a local of its own

@@ -102,7 +102,8 @@ pub use package_declarations::{
 };
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
-    IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
+    IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution, IrModuleProperty,
+    IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -375,39 +376,6 @@ pub struct IrCheckedConstructorBody {
     /// The ordinary constructor FIR has been consumed. Signature defaults may be attached to the
     /// predeclared constructor before this becomes true.
     pub body_attached: bool,
-}
-
-/// One source property declaration and the checked bodies that realize its language semantics.
-/// Storage and accessor naming remain backend choices; stable property/class identities and final
-/// types are already fixed here.
-#[derive(Clone, Debug)]
-pub struct IrCheckedProperty {
-    pub declaration: crate::fir::DeclarationId,
-    /// The declaration's stable source position, the key its accessors take in `fn_source_order`.
-    pub source_order: u32,
-    /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
-    /// output metadata, not a source locator: property realization copies it to the common-IR
-    /// declarations it creates after the syntax unit has already been dropped.
-    pub decl_line: u32,
-    /// For a PRIMARY-CONSTRUCTOR property, the line its declaration starts on with its annotations
-    /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
-    /// store of the property maps here, its accessors to `decl_line`.
-    pub decl_start_line: u32,
-    /// Exact semantic position among the owning class's property initializers and `init` blocks.
-    /// This is copied from the stable FIR declaration header, never reconstructed from source.
-    pub initialization_order: Option<u32>,
-    pub class: Option<ClassId>,
-    pub name: String,
-    pub ty: Ty,
-    /// Checked explicit backing-field type, distinct from the public property/accessor type.
-    pub storage_ty: Option<Ty>,
-    pub visibility: crate::types::Visibility,
-    pub flags: crate::fir::DeclarationFlags,
-    pub initializer: Option<ExprId>,
-    pub delegate: Option<ExprId>,
-    pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
-    pub getter: Option<ExprId>,
-    pub setter: Option<ExprId>,
 }
 
 #[derive(Clone, Debug)]
@@ -2260,6 +2228,8 @@ pub struct IrFile {
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
+    /// Checked inline-accessor functions and use-site splice records, owned with property IR.
+    pub(crate) inline_property_access: properties::IrInlinePropertyAccess,
     /// Function ids with a value parameter (context parameters excluded) or extension receiver of a
     /// function type, as the checker classified the declaration.
     pub function_typed_parameter_fns: std::collections::HashSet<u32>,

@@ -3,6 +3,33 @@
 use super::*;
 
 impl Parser<'_> {
+    /// Parse a class, object, or enum member property and apply the modifiers written on it.
+    /// `inline` on the property marks every accessor inline.
+    pub(super) fn parse_member_property(
+        &mut self,
+        modifiers: &[String],
+        allow_missing_initializer: bool,
+        is_abstract: bool,
+    ) -> PropDecl {
+        let mut property = self.parse_top_property_c(
+            modifiers.iter().any(|modifier| modifier == "lateinit"),
+            allow_missing_initializer,
+            modifiers.iter().any(|modifier| modifier == "const"),
+            is_abstract,
+        );
+        Self::mark_inline_accessors(&mut property, modifiers);
+        property.visibility = visibility_of(modifiers);
+        property.is_open = !modifiers.iter().any(|modifier| modifier == "final")
+            && modifiers
+                .iter()
+                .any(|modifier| modifier == "open" || modifier == "override");
+        property.is_override = modifiers.iter().any(|modifier| modifier == "override");
+        property.is_external |= modifiers.iter().any(|modifier| modifier == "external");
+        property.is_expect = modifiers.iter().any(|modifier| modifier == "expect");
+        property.is_actual = modifiers.iter().any(|modifier| modifier == "actual");
+        property
+    }
+
     pub(super) fn parse_top_property_c(
         &mut self,
         is_lateinit: bool,
@@ -272,6 +299,17 @@ impl Parser<'_> {
             span: Span::new(start.lo, end.hi),
             declaration_span: Span::new(declaration_start, end.hi),
             name_span,
+        }
+    }
+
+    /// `inline val`/`inline var` marks every accessor inline, the same as writing `inline` on each
+    /// of them. An accessor that already wrote `inline` stays inline.
+    pub(super) fn mark_inline_accessors(property: &mut PropDecl, modifiers: &[String]) {
+        if modifiers.iter().any(|modifier| modifier == "inline") {
+            property.getter_inline = true;
+            if let Some(setter) = property.setter.as_mut() {
+                setter.is_inline = true;
+            }
         }
     }
 }

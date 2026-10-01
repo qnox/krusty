@@ -68,7 +68,6 @@ enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/enumEntriesNameClashes.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
-extensionProperties/extensionPropertyWithInline.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
