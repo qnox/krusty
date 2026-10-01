@@ -1,5 +1,7 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
+use std::borrow::Cow;
+
 use crate::types::{InternalName, Ty, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
@@ -97,16 +99,45 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
     classifier.jvm_binary_name()
 }
 
-/// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
+/// Physical JVM classfile name of an interned classifier. Computed once per identity, then borrowed.
+/// The module's classfile-name wrappers call this; it is not a backend entry point.
+fn classfile_name(name: TypeName) -> &'static str {
+    thread_local! {
+        static LOCAL: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
+            std::cell::RefCell::default();
+    }
+    static INTERNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<TypeName, &'static str>>,
+    > = std::sync::OnceLock::new();
+
+    if let Some(physical) = LOCAL.with(|known| known.borrow().get(&name).copied()) {
+        return physical;
+    }
+    let physical = {
+        let mut known = INTERNED
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *known.entry(name).or_insert_with(|| {
+            // Type names live for the process, so retain exactly one matching backend spelling.
+            // The process-wide map prevents short-lived worker threads from leaking duplicates.
+            Box::leak(physical_classfile_name_of(name).into_boxed_str())
+        })
+    };
+    LOCAL.with(|known| known.borrow_mut().insert(name, physical));
+    physical
+}
+
+/// Convert a semantic classifier spelling to its physical JVM classfile name. Kotlin metadata spells
 /// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
 ///
-/// The mapping reads only whether the name is interned, and an interned name stays interned, so the
-/// physical name of a name interned before it is mapped is remembered per thread.
-pub fn classfile_internal_name(internal: &str) -> String {
-    if let Some(identity) = crate::types::existing_type_name(internal) {
-        return classfile_internal_name_of(identity).to_string();
+/// An interned identity borrows the remembered spelling. A spelling that was never interned is
+/// owned for this call and is not retained.
+pub(super) fn classfile_internal_name(internal: &str) -> Cow<'static, str> {
+    match crate::types::existing_type_name(internal) {
+        Some(identity) => Cow::Borrowed(classfile_name(identity)),
+        None => Cow::Owned(physical_classfile_name(internal)),
     }
-    physical_classfile_name(internal)
 }
 
 /// Physical JVM classfile name of an interned classifier. The spelling is retained once per
@@ -114,16 +145,7 @@ pub fn classfile_internal_name(internal: &str) -> String {
 /// Callers that already hold a [`TypeName`] use this instead of rendering the name into
 /// [`classfile_internal_name`].
 pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
-    thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
-            std::cell::RefCell::default();
-    }
-    if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {
-        return physical;
-    }
-    let physical = Box::leak(physical_classfile_name_of(internal).into_boxed_str());
-    INTERNED.with(|known| known.borrow_mut().insert(internal, physical));
-    physical
+    classfile_name(internal)
 }
 
 fn physical_classfile_name_of(internal: TypeName) -> String {
@@ -531,6 +553,34 @@ mod tests {
     }
 
     #[test]
+    fn an_interned_classfile_name_is_borrowed_once() {
+        let name = crate::types::type_name("kotlin/Any");
+        let first = classfile_name(name);
+        let second = classfile_name(name);
+        assert_eq!(first, "java/lang/Object");
+        assert!(std::ptr::eq(first, second));
+        assert!(std::ptr::eq(
+            classfile_internal_name("kotlin/Any").as_ref(),
+            first
+        ));
+        let from_another_thread = std::thread::spawn(move || classfile_name(name))
+            .join()
+            .expect("classfile-name worker");
+        assert!(std::ptr::eq(first, from_another_thread));
+
+        let unique = "sample/unretained/Once.Only";
+        assert!(crate::types::existing_type_name(unique).is_none());
+        let left = classfile_internal_name(unique);
+        assert!(crate::types::existing_type_name(unique).is_none());
+        let right = classfile_internal_name(unique);
+        assert!(crate::types::existing_type_name(unique).is_none());
+        assert_eq!(left, "sample/unretained/Once$Only");
+        assert_eq!(left, right);
+        assert!(matches!(left, Cow::Owned(_)));
+        assert!(!std::ptr::eq(left.as_ref(), right.as_ref()));
+    }
+
+    #[test]
     fn prepended_receiver_descriptor_does_not_intern_a_miss() {
         let owner = crate::types::type_name("probe/holder6044/Face");
         let nested = crate::types::type_name("probe/holder6044/Outer$Inner");
@@ -621,7 +671,7 @@ mod tests {
             let physical = classfile_internal_name_of(identity);
             assert_eq!(
                 physical,
-                classfile_internal_name(&identity.render()).as_str(),
+                classfile_internal_name(&identity.render()).as_ref(),
                 "{spelling}"
             );
             assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));
