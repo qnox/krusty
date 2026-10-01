@@ -38,11 +38,8 @@ pub(super) fn record_value_boundary(
                     let underlying = under
                         .get(&value_class)
                         .map(|underlying| erase(underlying, under).non_null());
-                    let own_underlying = underlying.as_ref() == Some(&parameter.non_null())
-                        && underlying
-                            .as_ref()
-                            .and_then(|ty| ty.obj_internal())
-                            .is_none_or(|name| !name.matches("java/lang/Object"));
+                    let own_underlying = underlying
+                        .is_some_and(|ty| ty == parameter.non_null() && !ty.is_erased_top());
                     parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
                 }
                 Repr::NotVc => false,
