@@ -25896,8 +25896,9 @@ impl<'a> Checker<'a> {
         // would; source `Set<E>?` remains nullable and is still rejected.
         let iteration_ty = it.platform_lower_bound();
         // An array element type covers primitive arrays and a boxed `Array<T>`
-        // (`Obj("kotlin/Array", [T])`) — iterate either as an array.
-        let elem = if let Some(e) = iteration_ty.array_elem() {
+        // (`Obj("kotlin/Array", [T])`) — iterate either as an array. The variable is a read of
+        // that element: `Array<out T>` and `Array<*>` yield `T`, not the projection wrapper.
+        let elem = if let Some(e) = iteration_ty.array_read_elem() {
             e
         } else {
             if iteration_ty == Ty::String {
