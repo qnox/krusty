@@ -1397,7 +1397,8 @@ where
                 ));
             }
             if batch_is_fresh {
-                analyzed_documents.push((uri.clone(), document.text));
+                let text = document.text.unwrap_or_else(|| open.text.clone());
+                analyzed_documents.push((uri.clone(), text));
             }
         }
         if batch_is_fresh {
@@ -7827,7 +7828,7 @@ mod tests {
         });
         let batch = batch.expect("inline backend is synchronous");
         assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 1)]);
-        assert_eq!(batch.documents[0].text, "fun a(){}");
+        assert_eq!(batch.documents[0].text.as_deref(), Some("fun a(){}"));
     }
 
     #[test]

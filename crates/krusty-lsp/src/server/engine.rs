@@ -1531,7 +1531,7 @@ mod tests {
             false,
         );
         assert_eq!(batch.documents[0].version, 3);
-        assert_eq!(batch.documents[0].text, "fun a(){}");
+        assert_eq!(batch.documents[0].text.as_deref(), Some("fun a(){}"));
         assert!(batch.complete);
     }
 
@@ -1560,7 +1560,7 @@ mod tests {
             match rx.recv().unwrap() {
                 Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
                     assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 2)]);
-                    assert_eq!(batch.documents[0].text, "fun a(){}");
+                    assert_eq!(batch.documents[0].text.as_deref(), Some("fun a(){}"));
                     assert!(batch.complete);
                     found = true;
                     break;

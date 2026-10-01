@@ -11,7 +11,10 @@ pub struct AnalyzedDocument {
     pub uri: String,
     pub version: i64,
     /// Text the analysis thread owned for this URI and version.
-    pub text: String,
+    ///
+    /// `Some` is the buffer that was analyzed, including `Some("")` for an empty file. `None`
+    /// means the caller did not carry a buffer; applying the batch uses the live editor text.
+    pub text: Option<String>,
     /// Absent for every document when the worker's result count does not match.
     pub analysis: Option<DocumentAnalysis>,
 }
@@ -43,7 +46,7 @@ impl AnalysisBatch {
             .map(|(uri, text, version)| AnalyzedDocument {
                 uri,
                 version,
-                text,
+                text: Some(text),
                 analysis: if complete { analyses.next() } else { None },
             })
             .collect();
@@ -55,25 +58,34 @@ impl AnalysisBatch {
         }
     }
 
-    /// Pair each URI and version with the analysis at the same position, with no source text.
+    /// Pair each URI and version with the analysis at the same position, with no carried text.
     ///
-    /// Callers that did not retain the buffer use this. A length mismatch still drops every
-    /// analysis, the same as [`Self::from_job`].
+    /// Callers that did not retain the buffer use this. Applying the batch falls back to the live
+    /// editor text, which is distinct from an analyzed empty file. A length mismatch still drops
+    /// every analysis, the same as [`Self::from_job`].
     pub fn from_versions(
         documents: Vec<(String, i64)>,
         analyses: Vec<DocumentAnalysis>,
         support_documents: Vec<(String, String)>,
         pending: bool,
     ) -> Self {
-        Self::from_job(
-            documents
-                .into_iter()
-                .map(|(uri, version)| (uri, String::new(), version))
-                .collect(),
-            analyses,
+        let complete = analyses.len() == documents.len();
+        let mut analyses = analyses.into_iter();
+        let documents = documents
+            .into_iter()
+            .map(|(uri, version)| AnalyzedDocument {
+                uri,
+                version,
+                text: None,
+                analysis: if complete { analyses.next() } else { None },
+            })
+            .collect();
+        Self {
+            documents,
+            complete,
             support_documents,
             pending,
-        )
+        }
     }
 
     pub fn versions(&self) -> Vec<(String, i64)> {
@@ -114,7 +126,7 @@ mod tests {
         assert!(batch.complete);
         assert_eq!(batch.documents[0].uri, "file:///a.kt");
         assert_eq!(batch.documents[0].version, 3);
-        assert_eq!(batch.documents[0].text, "");
+        assert!(batch.documents[0].text.is_none());
         assert!(batch.documents[0].analysis.is_some());
         assert_eq!(batch.versions(), vec![("file:///a.kt".into(), 3)]);
     }
@@ -257,5 +269,37 @@ mod tests {
             ]
         );
         assert!(service.source_set_for_test().is_empty());
+    }
+
+    #[test]
+    fn absent_text_uses_the_live_buffer_and_analyzed_empty_text_stays_empty() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.open_document_for_test("file:///a.kt", "fun live() {}", 1);
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
+        assert_eq!(
+            service.source_set_for_test(),
+            &[("file:///a.kt".into(), "fun live() {}".into())]
+        );
+
+        service.apply_analysis_batch(AnalysisBatch::from_job(
+            vec![("file:///a.kt".into(), String::new(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
+        assert_eq!(
+            service.source_set_for_test(),
+            &[("file:///a.kt".into(), String::new())]
+        );
     }
 }
