@@ -34,6 +34,35 @@ fn a_receiver_lambda_in_a_local_class_member_reads_the_captured_receiver() {
     common::expect_box_same_as_kotlinc(LOCAL_CLASS, "NestedReceiverLocalClassRun");
 }
 
+const NAMED_CONTEXT_LOCAL_FUNCTION: &str = "// LANGUAGE: +ContextParameters\n\
+    class Outer(val text: String)\n\
+    class Inner(val text: String)\n\
+    class Marker(val text: String)\n\
+    fun <T> withOuter(value: Outer, block: Outer.() -> T): T = value.block()\n\
+    fun <T> withInner(value: Inner, block: Inner.() -> T): T = value.block()\n\
+    fun box(): String = withOuter(Outer(\"O\")) outer@{\n\
+    \x20   class Local {\n\
+    \x20       fun read(): String {\n\
+    \x20           context(marker: Marker)\n\
+    \x20           fun local(): String = withInner(Inner(\"K\")) inner@{\n\
+    \x20               marker.text + this@outer.text + this@inner.text\n\
+    \x20           }\n\
+    \x20           return with(Marker(\"\")) { local() }\n\
+    \x20       }\n\
+    \x20   }\n\
+    \x20   Local().read()\n\
+    }\n";
+
+/// A named context parameter on the local function is a lexical value, not a receiver-tower rung.
+/// Only the nested receiver lambda shifts the local class's captured `this@outer` coordinate.
+#[test]
+fn a_named_context_local_function_does_not_shift_the_captured_receiver() {
+    common::expect_box_same_as_kotlinc(
+        NAMED_CONTEXT_LOCAL_FUNCTION,
+        "NestedReceiverNamedContextLocalFunction",
+    );
+}
+
 const BUILDER_LOCAL_CLASS: &str = "class TargetType\n\
     class Buildee<TV> {\n\
     \x20   var stored: Any? = null\n\

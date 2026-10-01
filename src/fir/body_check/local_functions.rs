@@ -165,8 +165,12 @@ impl BodyFirChecker<'_> {
         let class_values = self.nested_class_values()?;
         let class_capture_values = self.nested_class_capture_values()?;
         let class_delegates = self.nested_class_delegates()?;
+        // Named context parameters are lexical values, not implicit-receiver tower rungs.
+        let implicit_context_count = context_count
+            .checked_sub(function.context_value_count())
+            .expect("local-function context values exceed its context parameters");
         let owned_receiver_count =
-            u32::try_from(context_count + usize::from(info.receiver.is_some()))
+            u32::try_from(implicit_context_count + usize::from(info.receiver.is_some()))
                 .expect("too many local-function receiver rungs");
         let class_receivers = self.nested_class_receivers(owned_receiver_count)?;
         let mut nested = BodyFirChecker {

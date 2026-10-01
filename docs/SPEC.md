@@ -2472,10 +2472,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's PCLA session does for declarations inside the lambda. The nested receiver lambda's own
   receiver is the first rung of its receiver tower, so the captured receiver's coordinate there is
   the member's coordinate plus the nested body's own receivers; checked FIR shifted it by nothing
-  and found no capture (`nested_class_receivers`). Known gap: the implicit-return-type engine does
-  not yet bind a lambda's `this@label`, so `fun f() = build outerBuild@ { this@outerBuild.g() }`
-  still needs a declared result type. Tests: `tests/nested_receiver_lambda_captures_e2e.rs`; box:
-  `inference/pcla/issues/kt49160a.kt`.
+  and found no capture (`nested_class_receivers`). A named context parameter on a nested local
+  function is a lexical value and does not add a receiver-tower rung; only implicit context
+  receivers and an extension receiver shift the captured coordinate. Known gap: the
+  implicit-return-type engine does not yet bind a lambda's `this@label`, so
+  `fun f() = build outerBuild@ { this@outerBuild.g() }` still needs a declared result type. Tests:
+  `tests/nested_receiver_lambda_captures_e2e.rs`; box: `inference/pcla/issues/kt49160a.kt`.
 - **An anonymous object captures a receiver lambda's receiver under the lambda's label.** In
   `withOuter(o) outer@{ object { fun read() = this@outer.left() } }` the object's member names the
   lambda's receiver by its label, as it would in a local class. The capture recorded for that
