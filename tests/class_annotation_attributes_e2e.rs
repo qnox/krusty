@@ -201,3 +201,44 @@ annotation class Marked(val name: String, val n: Int, val kinds: Array<String>)
         "WithArgs: element values must be present: {krusty:?}"
     );
 }
+
+/// A value class declared with the deprecated `inline` modifier is realized as `@JvmInline`:
+/// kotlinc writes that annotation into the class file after the declared ones, for a top-level and
+/// a nested class alike. The `@Metadata` keeps only the declared annotations, so its
+/// `hasAnnotations` flag and annotation list must match kotlinc's too.
+#[test]
+fn a_legacy_inline_class_carries_jvm_inline_after_its_declared_annotations() {
+    let src = r#"
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Kept
+
+inline class Plain(val raw: Int)
+
+@Kept inline class Marked(val raw: Int)
+
+class Holder {
+    inline class Nested(val raw: Int)
+}
+"#;
+    let (krusty_dir, kotlinc_dir) =
+        compile_both("legacy_inline", src).expect("reference kotlinc is provisioned");
+    for class in ["Plain", "Marked", "Holder$Nested"] {
+        let krusty = class_annotations(&krusty_dir, class);
+        assert_eq!(
+            krusty,
+            class_annotations(&kotlinc_dir, class),
+            "{class}: class-level annotation attributes must match kotlinc's"
+        );
+        assert_eq!(
+            krusty["RuntimeVisibleAnnotations"]
+                .last()
+                .map(String::as_str),
+            Some("kotlin.jvm.JvmInline"),
+            "{class}: the implied annotation must be written"
+        );
+        let metadata =
+            common::metadata_diff_against_kotlinc_cp(class, src, class, &[common::stdlib_jar()])
+                .expect("reference kotlinc is provisioned");
+        metadata.unwrap_or_else(|diff| panic!("{class}: {diff}"));
+    }
+}

@@ -53,8 +53,9 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     } else {
         0
     };
-    // A value class carries `@JvmInline`, which sets `hasAnnotations`.
-    let has_annotations = u64::from(c.is_value || !c.applied_annotations.is_empty());
+    // Only DECLARED annotations set `hasAnnotations`: the `@JvmInline` the class file implies for a
+    // legacy `inline class` is not one (kotlinc: `inline class W(val x: Int)` flags 134).
+    let has_annotations = u64::from(!c.applied_annotations.is_empty());
     has_annotations
         | (visibility << 1)
         | (modality << 4)

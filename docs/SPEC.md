@@ -7406,6 +7406,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   different. See `docs/METADATA_NOTES.md` for the wire rules and interning order.
   Tests: `tests/typealias_abbreviated_type_e2e.rs`.
 
+- **A legacy `inline class` is annotated `@JvmInline` in its class file only.** kotlinc realizes a
+  value class declared with the deprecated `inline` modifier (`inline class W(val x: Int)`, nested
+  too) exactly like `@JvmInline value class W`: its class file carries
+  `RuntimeVisibleAnnotations` `kotlin.jvm.JvmInline`, after the declared annotations and before
+  `@Metadata`. The annotation is a JVM representation fact, so the JVM class writer adds it
+  (`jvm/value_classes/class_annotations.rs`) for a value class that does not declare it. The
+  `@Metadata` keeps the declared annotations only: a legacy inline class has `hasAnnotations`
+  clear (flags 134 for a public final one) and lists no `JvmInline`, while `@JvmInline value
+  class` records the declared one. Tests:
+  `tests/class_annotation_attributes_e2e.rs::a_legacy_inline_class_carries_jvm_inline_after_its_declared_annotations`.
+
 - **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`
   name the same declaration and must resolve identically. A dotted spelling reaches name resolution
   intact — the parse seam expands only what it can match — and qualified resolution answers it with

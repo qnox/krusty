@@ -3796,7 +3796,7 @@ fn emit_class(
             &mut cw,
         );
     }
-    cw.set_class_annotations(&c.applied_annotations);
+    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, env.override_results, c, opts))
