@@ -229,15 +229,15 @@ impl BodyFirChecker<'_> {
 }
 
 /// The equality mode of the types written at the comparison, before inline substitution.
-fn source_equality_mode(lhs: Ty, rhs: Ty) -> crate::fir::FirEqualityMode {
-    use crate::fir::FirEqualityMode;
+fn source_equality_mode(lhs: Ty, rhs: Ty) -> crate::equality::EqualityMode {
+    use crate::equality::EqualityMode;
     let left = lhs.canonical_semantic().scalar_value_repr();
     let right = rhs.canonical_semantic().scalar_value_repr();
     match (left, right) {
         (Some(left), Some(right)) if matches!(left, Ty::Float | Ty::Double) && left == right => {
-            FirEqualityMode::Ieee754
+            EqualityMode::Ieee754
         }
-        (Some(_), Some(_)) => FirEqualityMode::Primitive,
-        _ => FirEqualityMode::Structural,
+        (Some(_), Some(_)) => EqualityMode::Primitive,
+        _ => EqualityMode::Structural,
     }
 }

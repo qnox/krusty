@@ -2,7 +2,8 @@ use super::test_support::{
     checked_function_body, checked_function_body_with_platform, jvm_semantics, root_expression,
 };
 use super::*;
-use crate::fir::{FirBody, FirConstant, FirEqualityMode};
+use crate::equality::EqualityMode;
+use crate::fir::{FirBody, FirConstant};
 
 /// The only built-in binary operation in `body`, as `(operation, lhs, rhs)`.
 fn binary(body: &FirBody, operation: FirBinaryOperation) -> (FirExprId, FirExprId) {
@@ -180,7 +181,7 @@ fn double_type_parameter_against_any_stays_structural_equality() {
             kind,
             FirExprKind::Equality {
                 operation: FirBinaryOperation::Equal,
-                mode: FirEqualityMode::Structural,
+                mode: EqualityMode::Structural,
                 ..
             }
         ),
@@ -195,32 +196,32 @@ fn source_equality_mode_follows_the_static_operand_types() {
     let cases = [
         (
             "fun equal(a: Double, b: Double): Boolean = a == b\n",
-            FirEqualityMode::Ieee754,
+            EqualityMode::Ieee754,
             false,
         ),
         (
             "fun equal(a: Float, b: Float): Boolean = a == b\n",
-            FirEqualityMode::Ieee754,
+            EqualityMode::Ieee754,
             false,
         ),
         (
             "fun <T : Double> equal(a: T, b: T): Boolean = a == b\n",
-            FirEqualityMode::Ieee754,
+            EqualityMode::Ieee754,
             false,
         ),
         (
             "fun equal(a: Int, b: Int): Boolean = a == b\n",
-            FirEqualityMode::Primitive,
+            EqualityMode::Primitive,
             false,
         ),
         (
             "fun <T : Comparable<Double>> equal(a: T, b: T): Boolean = a == b\n",
-            FirEqualityMode::Structural,
+            EqualityMode::Structural,
             true,
         ),
         (
             "fun equal(a: Comparable<Double>, b: Comparable<Double>): Boolean = a == b\n",
-            FirEqualityMode::Structural,
+            EqualityMode::Structural,
             true,
         ),
     ];

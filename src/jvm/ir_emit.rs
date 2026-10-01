@@ -11257,31 +11257,14 @@ impl<'a> Emitter<'a> {
     /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
     /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.
     fn emits_control_flow(&self, e: u32) -> bool {
-        use IrBinOp::*;
         match self.ir.expr(e) {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             // The multi-part `StringConcat` itself spills branchy parts internally, so as a whole it
             // leaves only its `String` result — but a parent operand sequence still must treat it as
             // branchy if any part is (it builds the StringBuilder mid-stack otherwise).
             IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.emits_control_flow(p)),
-            IrExpr::Equality { op, mode, lhs, rhs } => {
-                (*mode != crate::fir::FirEqualityMode::Structural
-                    && matches!(op, Eq | Ne)
-                    && self.value_ty(*lhs).is_jvm_scalar())
-                    || (matches!(op, Eq | Ne)
-                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
-                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.emits_control_flow(*lhs)
-                    || self.emits_control_flow(*rhs)
-            }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
-                    || matches!(op, RefEq | RefNe)
-                    || (matches!(op, Eq | Ne)
-                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
-                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
-                    || self.emits_control_flow(*lhs)
-                    || self.emits_control_flow(*rhs)
+            IrExpr::Equality { .. } | IrExpr::PrimitiveBinOp { .. } => {
+                self.comparison_emits_control_flow(e)
             }
             IrExpr::Call {
                 callee,

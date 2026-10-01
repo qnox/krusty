@@ -886,19 +886,6 @@ pub enum FirUnaryOperation {
     BitwiseNot,
 }
 
-/// How a source `==`/`!=` was checked. Inline substitution may store a different value, and this
-/// mode stays the one the checker selected.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirEqualityMode {
-    /// `Intrinsics.areEqual` after boxing a primitive operand. A type parameter is this unless its
-    /// upper bound is one primitive float.
-    Structural,
-    /// Primitive IEEE-754 equality of one `Float` or `Double`, including a parameter bounded by it.
-    Ieee754,
-    /// Primitive `icmp`/`lcmp` of scalar operands that are not a floating pair.
-    Primitive,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirBinaryOperation {
     Add,
@@ -1387,7 +1374,7 @@ pub enum FirExprKind {
     /// Source `==`/`!=` with the equality mode the checker selected from the static operand types.
     Equality {
         operation: FirBinaryOperation,
-        mode: FirEqualityMode,
+        mode: crate::equality::EqualityMode,
         lhs: FirExprId,
         rhs: FirExprId,
     },

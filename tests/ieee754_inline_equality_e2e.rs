@@ -42,7 +42,9 @@ fn inline_comparable_equality_stays_structural_at_runtime() {
 #[test]
 fn inlined_equality_keeps_the_checked_mode() {
     let source = format!(
-        "{LIB}\nfun use(a: Double): Boolean = equalsGeneric(a, 0.0) && equals754(a, 0.0)\n"
+        "{LIB}\n\
+         fun structuralUse(a: Double): Boolean = equalsGeneric(a, 0.0)\n\
+         fun ieeeUse(a: Double): Boolean = equals754(a, 0.0)\n"
     );
     let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
         common::stdlib_jar(),
@@ -55,32 +57,36 @@ fn inlined_equality_keeps_the_checked_mode() {
     let (files, diagnostics) = common::capture_common_ir(&source, "InlineEqualityMode", platform);
     assert!(diagnostics.is_empty(), "frontend rejected: {diagnostics:?}");
     let file = files.into_iter().next().expect("one lowered file");
-    let use_body = file
-        .functions
-        .iter()
-        .find(|function| function.name == "use")
-        .and_then(|function| function.body)
-        .expect("use has a body");
-    let mut modes = Vec::new();
-    let mut stack = vec![use_body];
-    while let Some(expression) = stack.pop() {
-        if let krusty::ir::IrExpr::Equality { mode, op, .. } = file.expr(expression) {
-            assert_eq!(*op, krusty::ir::IrBinOp::Eq);
-            modes.push(*mode);
+    let equality_mode = |function_name: &str| {
+        let body = file
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .and_then(|function| function.body)
+            .unwrap_or_else(|| panic!("{function_name} has a body"));
+        let mut equalities = Vec::new();
+        let mut stack = vec![body];
+        while let Some(expression) = stack.pop() {
+            if let krusty::ir::IrExpr::Equality { mode, op, .. } = file.expr(expression) {
+                equalities.push((*op, *mode));
+            }
+            krusty::ir::for_each_child(&file.exprs, expression, &mut |child| stack.push(child));
         }
-        krusty::ir::for_each_child(&file.exprs, expression, &mut |child| stack.push(child));
-    }
-    modes.sort_by_key(|mode| match mode {
-        krusty::ir::FirEqualityMode::Structural => 0,
-        krusty::ir::FirEqualityMode::Ieee754 => 1,
-        krusty::ir::FirEqualityMode::Primitive => 2,
-    });
+        let [(op, mode)] = equalities.as_slice() else {
+            panic!("expected exactly one equality in {function_name}, found {equalities:?}")
+        };
+        assert_eq!(*op, krusty::ir::IrBinOp::Eq);
+        *mode
+    };
     assert_eq!(
-        modes,
-        vec![
-            krusty::ir::FirEqualityMode::Structural,
-            krusty::ir::FirEqualityMode::Ieee754,
+        [
+            ("structuralUse", equality_mode("structuralUse")),
+            ("ieeeUse", equality_mode("ieeeUse")),
         ],
-        "inlining must copy the checked equality mode"
+        [
+            ("structuralUse", krusty::ir::EqualityMode::Structural),
+            ("ieeeUse", krusty::ir::EqualityMode::Ieee754),
+        ],
+        "each inline call must keep its own checked equality mode"
     );
 }

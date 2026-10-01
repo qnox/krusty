@@ -7,6 +7,37 @@ use super::*;
 use crate::ir::ExprId;
 
 impl Emitter<'_> {
+    /// Whether emitting a comparison introduces non-linear JVM control flow in its subtree.
+    ///
+    /// This is a physical realization decision: the recorded equality mode determines whether a
+    /// checked equality materializes through a branch, while child expressions retain their own
+    /// control-flow classification.
+    pub(super) fn comparison_emits_control_flow(&self, expression: ExprId) -> bool {
+        use IrBinOp::*;
+        match self.ir.expr(expression) {
+            IrExpr::Equality { op, mode, lhs, rhs } => {
+                (*mode != crate::equality::EqualityMode::Structural
+                    && matches!(op, Eq | Ne)
+                    && self.value_ty(*lhs).is_jvm_scalar())
+                    || (matches!(op, Eq | Ne)
+                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
+                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
+                    || self.emits_control_flow(*lhs)
+                    || self.emits_control_flow(*rhs)
+            }
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
+                    || matches!(op, RefEq | RefNe)
+                    || (matches!(op, Eq | Ne)
+                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
+                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
+                    || self.emits_control_flow(*lhs)
+                    || self.emits_control_flow(*rhs)
+            }
+            other => panic!("comparison control-flow query received {other:?}"),
+        }
+    }
+
     /// Mark the comparison's line at the instruction that decides it, after its operands.
     ///
     /// kotlinc marks the comparison expression's line right before the deciding instruction on every
@@ -60,7 +91,12 @@ impl Emitter<'_> {
     fn comparison_parts(
         &self,
         expression: ExprId,
-    ) -> (IrBinOp, ExprId, ExprId, Option<crate::fir::FirEqualityMode>) {
+    ) -> (
+        IrBinOp,
+        ExprId,
+        ExprId,
+        Option<crate::equality::EqualityMode>,
+    ) {
         match *self.ir.expr(expression) {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => (op, lhs, rhs, None),
             IrExpr::Equality { op, mode, lhs, rhs } => (op, lhs, rhs, Some(mode)),
@@ -91,16 +127,17 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::fir::FirEqualityMode>,
+        mode: Option<crate::equality::EqualityMode>,
         code: &mut CodeBuilder,
     ) {
         // kotlinc's `Ieee754Equals` produces its Boolean itself, and `!=` is `Not` over it.
         // A recorded mode is the checker's decision. Storage types after inline substitution do
         // not choose again.
         let ieee = match mode {
-            Some(crate::fir::FirEqualityMode::Ieee754) => true,
+            Some(crate::equality::EqualityMode::Ieee754) => true,
             Some(
-                crate::fir::FirEqualityMode::Structural | crate::fir::FirEqualityMode::Primitive,
+                crate::equality::EqualityMode::Structural
+                | crate::equality::EqualityMode::Primitive,
             ) => false,
             None => matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs),
         };
@@ -198,7 +235,7 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::fir::FirEqualityMode>,
+        mode: Option<crate::equality::EqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
@@ -230,7 +267,7 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::fir::FirEqualityMode>,
+        mode: Option<crate::equality::EqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
@@ -258,8 +295,8 @@ impl Emitter<'_> {
             }
             return true;
         }
-        let recorded_ieee = mode == Some(crate::fir::FirEqualityMode::Ieee754);
-        let recorded_structural = mode == Some(crate::fir::FirEqualityMode::Structural);
+        let recorded_ieee = mode == Some(crate::equality::EqualityMode::Ieee754);
+        let recorded_structural = mode == Some(crate::equality::EqualityMode::Structural);
         if matches!(op, Eq | Ne)
             && (recorded_ieee || (mode.is_none() && self.is_ieee754_equality(lhs, rhs)))
         {

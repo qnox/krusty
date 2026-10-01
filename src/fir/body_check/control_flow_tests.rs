@@ -3,7 +3,7 @@ use super::test_support::{
     jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::FirEqualityMode;
+use crate::equality::EqualityMode;
 
 #[test]
 fn elvis_mixed_numeric_branches_retain_their_number_supertype() {
@@ -159,7 +159,7 @@ fn equality_accepts_a_concrete_inhabitant_of_a_type_parameter_bound() {
         root.kind,
         FirExprKind::Equality {
             operation: FirBinaryOperation::Equal,
-            mode: FirEqualityMode::Structural,
+            mode: EqualityMode::Structural,
             ..
         }
     ));
@@ -179,7 +179,7 @@ fn equality_accepts_erasure_overlapping_generic_interface_views() {
         root.kind,
         FirExprKind::Equality {
             operation: FirBinaryOperation::Equal,
-            mode: FirEqualityMode::Structural,
+            mode: EqualityMode::Structural,
             ..
         }
     ));

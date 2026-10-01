@@ -68,7 +68,7 @@ mod value_class_facts;
 mod when_facts;
 
 pub use crate::enclosing_declarations::EnclosingDeclaration;
-pub use crate::fir::FirEqualityMode;
+pub use crate::equality::EqualityMode;
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
@@ -725,7 +725,7 @@ pub enum IrExpr {
     /// storage types substitution may have produced.
     Equality {
         op: IrBinOp,
-        mode: crate::fir::FirEqualityMode,
+        mode: EqualityMode,
         lhs: ExprId,
         rhs: ExprId,
     },
