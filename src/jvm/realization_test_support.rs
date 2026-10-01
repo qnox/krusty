@@ -24,11 +24,17 @@ pub(crate) fn realize_calls(ir: &mut IrFile, stems: &[&str], classpath: &Classpa
     let mut property_realizations = super::property_realizations::PropertyRealizations::default();
     super::local_properties::realize(ir, &mut property_realizations)
         .expect("every local property access is realized");
-    super::module_calls::realize(ir, &stems, classpath, &mut property_realizations)
-        .expect("every module call is realized");
     let callables =
         crate::backend::CheckedBackendCallables::freeze(ir, &ClasspathCallables(classpath))
             .expect("every selected dependency callable has a frozen realization");
+    super::module_calls::realize(
+        ir,
+        &stems,
+        classpath,
+        &callables,
+        &mut property_realizations,
+    )
+    .expect("every module call is realized");
     let mut default_call_operands = super::default_call_operands::DefaultCallOperands::default();
     super::external_calls::realize(ir, classpath, &callables, &mut default_call_operands)
         .expect("every dependency call is realized");

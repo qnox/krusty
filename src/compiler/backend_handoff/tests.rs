@@ -102,7 +102,7 @@ class Direct : Base(2)
 
 class Child : Base {
     constructor() : super(1)
-    override fun greet(name: String): String = name + seed
+    override fun greet(name: String): String = super.greet(name) + seed
     override val tag: String get() = "child"
 }
 
@@ -123,9 +123,9 @@ fun properties(): Int {
 /// Every callable fact of the file, with its identity, in identity order.
 type Recorded = Vec<(ExternalCallableId, BackendCallableFact)>;
 
-/// Each side-table source of a dependency identity, read straight off the checked IR the backend
-/// receives, and the identities it carries.
-fn side_table_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalCallableId)> {
+/// Each non-ordinary-call source of a dependency identity, read straight off the checked IR the
+/// backend receives, and the identities it carries.
+fn dependency_identity_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalCallableId)> {
     use crate::fir::{
         FirCallTarget, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget,
     };
@@ -151,16 +151,18 @@ fn side_table_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalCal
         }
     }
     for expression in &ir.exprs {
-        if let crate::ir::IrExpr::Call {
-            callee:
+        if let crate::ir::IrExpr::Call { callee, .. } = expression {
+            match callee {
                 crate::ir::Callee::ModuleWithDefaults {
                     default_provider: ResolvedFunctionOverrideTarget::External(provider),
                     ..
-                },
-            ..
-        } = expression
-        {
-            carriers.push(("default provider", *provider));
+                } => carriers.push(("default provider", *provider)),
+                crate::ir::Callee::Super {
+                    declaration: Some(ResolvedFunctionOverrideTarget::External(declaration)),
+                    ..
+                } => carriers.push(("super call", *declaration)),
+                _ => {}
+            }
         }
     }
     for plan in ir
@@ -271,7 +273,7 @@ impl Backend for FactRecorder {
         }
         self.carriers
             .borrow_mut()
-            .extend(side_table_carriers(&file.ir));
+            .extend(dependency_identity_carriers(&file.ir));
         self.property_carriers
             .borrow_mut()
             .extend(property_carriers(&file.ir));
@@ -616,7 +618,7 @@ fn same_named_repository_members_have_distinct_facts() {
 }
 
 #[test]
-fn every_side_table_source_of_a_dependency_callable_is_frozen() {
+fn every_nonordinary_carrier_of_a_dependency_callable_is_frozen() {
     let (callables, _, carriers, _) = frozen_facts(SOURCES);
     let frozen = callables
         .iter()
@@ -638,6 +640,7 @@ fn every_side_table_source_of_a_dependency_callable_is_frozen() {
             "function override",
             "property override",
             "secondary super constructor",
+            "super call",
             "super constructor",
         ]
     );
@@ -698,6 +701,75 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
         CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource).map(|_| ()),
         Err(DependencyFactError::UnknownCallable(target))
     );
+}
+
+#[test]
+fn a_plugin_added_dependency_super_call_is_frozen_once() {
+    let mut ir = crate::ir::IrFile::default();
+    let mut facts = CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource)
+        .expect("an empty file has no dependency facts");
+    let target = ExternalCallableId::from_raw(7);
+    let owner = type_name("fixture/Legacy");
+    let holder = crate::libraries::NonvirtualCallRealization {
+        owner: type_name("fixture/Legacy$DefaultImpls"),
+        descriptor: "(Lfixture/Legacy;)I".to_string(),
+    };
+    ir.add_expr(crate::ir::IrExpr::Call {
+        callee: crate::ir::Callee::Super {
+            owner,
+            dispatch_owner: type_name("fixture/Child"),
+            enclosing_dispatch: false,
+            kind: crate::ir::IrSuperCallKind::Function,
+            name: "value".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            interface: true,
+            realization: crate::libraries::MemberRealization::Dispatch,
+            descriptor: "()I".to_string(),
+            declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::External(target)),
+            defaults: Vec::new(),
+            source_member: None,
+        },
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+
+    let mut declaration = crate::libraries::LibraryCallable::library(
+        owner,
+        "value",
+        Vec::new(),
+        Ty::Int,
+        Ty::Int,
+        "()I",
+    );
+    declaration.owner_is_interface = true;
+    declaration.nonvirtual_realization = Some(Box::new(holder.clone()));
+    let realization = crate::libraries::ExternalCallableRealization {
+        callable: declaration,
+        kind: ExternalCallableKind::Member,
+    };
+    let queries = std::cell::Cell::new(0);
+    facts
+        .freeze_plugin_super_callables(&ir, |identity| {
+            queries.set(queries.get() + 1);
+            (identity == target).then(|| realization.clone())
+        })
+        .expect("the plugin-selected identity has a provider record");
+    assert_eq!(queries.get(), 1);
+    assert_eq!(
+        facts
+            .callable(target)
+            .expect("the plugin-selected identity is frozen")
+            .nonvirtual_realization
+            .as_deref(),
+        Some(&holder)
+    );
+
+    facts
+        .freeze_plugin_super_callables(&ir, |_| {
+            panic!("a frozen identity must not be queried again")
+        })
+        .expect("re-freezing a finalized IR preserves the original fact");
 }
 
 #[test]
