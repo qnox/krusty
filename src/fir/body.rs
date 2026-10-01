@@ -1374,7 +1374,7 @@ pub enum FirExprKind {
     /// Source `==`/`!=` with the equality mode the checker selected from the static operand types.
     Equality {
         operation: FirBinaryOperation,
-        mode: crate::equality::EqualityMode,
+        mode: crate::types::EqualityMode,
         lhs: FirExprId,
         rhs: FirExprId,
     },

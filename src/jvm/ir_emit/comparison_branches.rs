@@ -16,7 +16,7 @@ impl Emitter<'_> {
         use IrBinOp::*;
         match self.ir.expr(expression) {
             IrExpr::Equality { op, mode, lhs, rhs } => {
-                (*mode != crate::equality::EqualityMode::Structural
+                (*mode != crate::ir::EqualityMode::Structural
                     && matches!(op, Eq | Ne)
                     && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
@@ -91,12 +91,7 @@ impl Emitter<'_> {
     fn comparison_parts(
         &self,
         expression: ExprId,
-    ) -> (
-        IrBinOp,
-        ExprId,
-        ExprId,
-        Option<crate::equality::EqualityMode>,
-    ) {
+    ) -> (IrBinOp, ExprId, ExprId, Option<crate::ir::EqualityMode>) {
         match *self.ir.expr(expression) {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => (op, lhs, rhs, None),
             IrExpr::Equality { op, mode, lhs, rhs } => (op, lhs, rhs, Some(mode)),
@@ -127,18 +122,15 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::equality::EqualityMode>,
+        mode: Option<crate::ir::EqualityMode>,
         code: &mut CodeBuilder,
     ) {
         // kotlinc's `Ieee754Equals` produces its Boolean itself, and `!=` is `Not` over it.
         // A recorded mode is the checker's decision. Storage types after inline substitution do
         // not choose again.
         let ieee = match mode {
-            Some(crate::equality::EqualityMode::Ieee754) => true,
-            Some(
-                crate::equality::EqualityMode::Structural
-                | crate::equality::EqualityMode::Primitive,
-            ) => false,
+            Some(crate::ir::EqualityMode::Ieee754) => true,
+            Some(crate::ir::EqualityMode::Structural | crate::ir::EqualityMode::Primitive) => false,
             None => matches!(op, IrBinOp::Eq | IrBinOp::Ne) && self.is_ieee754_equality(lhs, rhs),
         };
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && ieee {
@@ -235,7 +227,7 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::equality::EqualityMode>,
+        mode: Option<crate::ir::EqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
@@ -267,7 +259,7 @@ impl Emitter<'_> {
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
-        mode: Option<crate::equality::EqualityMode>,
+        mode: Option<crate::ir::EqualityMode>,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
@@ -295,8 +287,8 @@ impl Emitter<'_> {
             }
             return true;
         }
-        let recorded_ieee = mode == Some(crate::equality::EqualityMode::Ieee754);
-        let recorded_structural = mode == Some(crate::equality::EqualityMode::Structural);
+        let recorded_ieee = mode == Some(crate::ir::EqualityMode::Ieee754);
+        let recorded_structural = mode == Some(crate::ir::EqualityMode::Structural);
         if matches!(op, Eq | Ne)
             && (recorded_ieee || (mode.is_none() && self.is_ieee754_equality(lhs, rhs)))
         {

@@ -137,7 +137,7 @@ impl Emitter<'_> {
                 } => (*lhs, *rhs),
                 IrExpr::Equality {
                     op: IrBinOp::Eq,
-                    mode: crate::equality::EqualityMode::Primitive,
+                    mode: crate::ir::EqualityMode::Primitive,
                     lhs,
                     rhs,
                 } => (*lhs, *rhs),

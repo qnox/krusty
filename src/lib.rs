@@ -25,7 +25,6 @@ pub mod diag;
 pub mod diagnostic_wording;
 pub mod dump;
 pub mod enclosing_declarations;
-pub mod equality;
 pub mod features;
 pub mod fir;
 pub mod fir_lower;

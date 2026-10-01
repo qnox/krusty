@@ -3,7 +3,7 @@ use super::test_support::{
     jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::equality::EqualityMode;
+use crate::types::EqualityMode;
 
 #[test]
 fn elvis_mixed_numeric_branches_retain_their_number_supertype() {

@@ -1,7 +1,6 @@
 //! `krusty-ir` to JavaScript source emission.
 
-use crate::equality::EqualityMode;
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{Callee, EqualityMode, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
 use crate::types::Ty;
 

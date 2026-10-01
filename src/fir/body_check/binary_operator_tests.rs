@@ -2,8 +2,8 @@ use super::test_support::{
     checked_function_body, checked_function_body_with_platform, jvm_semantics, root_expression,
 };
 use super::*;
-use crate::equality::EqualityMode;
 use crate::fir::{FirBody, FirConstant};
+use crate::types::EqualityMode;
 
 /// The only built-in binary operation in `body`, as `(operation, lhs, rhs)`.
 fn binary(body: &FirBody, operation: FirBinaryOperation) -> (FirExprId, FirExprId) {
