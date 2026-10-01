@@ -1,12 +1,12 @@
 //! Frozen facts about the dependency callables one checked file's IR selected.
 //!
-//! Checked IR names a dependency callable only by the opaque identity its provider assigned. This
-//! table copies, once per file at the frontend/backend boundary, what that provider normalized for
-//! exactly the identities the file's IR holds, so a backend can read a dependency callable's facts
-//! without asking the provider about it while it emits. It covers callables only; dependency
-//! classifiers still reach a backend through `CheckedBackendClassifiers`, which asks the provider.
-//! It answers only for an identity the IR already holds: there is no lookup by name, owner, or
-//! signature.
+//! Checked IR names a dependency callable or property only by the opaque identity its provider
+//! assigned. This table copies, once per file at the frontend/backend boundary, what that provider
+//! normalized for exactly the identities the file's IR holds, so a backend can read a dependency
+//! callable's or property's facts without asking the provider about it while it emits. It covers
+//! callables and properties only; dependency classifiers still reach a backend through
+//! `CheckedBackendClassifiers`, which asks the provider. It answers only for an identity the IR
+//! already holds: there is no lookup by name, owner, or signature.
 
 mod references;
 
@@ -54,19 +54,40 @@ pub struct BackendCallableFact {
     pub generic_sig: Option<Box<GenericSig>>,
 }
 
+/// What the provider normalized for one selected dependency property.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendPropertyFact {
+    /// The property's Kotlin name, decoded by its provider.
+    pub name: Box<str>,
+    pub getter: ExternalCallableId,
+    pub setter: Option<ExternalCallableId>,
+    /// The declaring owner the provider published for its getter.
+    pub owner: TypeName,
+    /// The exact result type of the provider's getter declaration, before any use-site
+    /// substitution: the property's type as its declaration states it.
+    pub result: Ty,
+    /// The provider normalized this property as its value class's underlying storage property.
+    pub declares_value_class_storage: bool,
+    /// Provider-normalized compile-time payload. Common IR owns the semantic value; a target may
+    /// choose a physical constant representation but never asks the provider for it again.
+    pub compile_time_constant: Option<crate::ir::IrConst>,
+}
+
 /// A checked file referenced a dependency identity its provider cannot answer for. Checked IR only
 /// holds identities a provider assigned, so this is an internal error, never a user diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyFactError {
     UnknownCallable(ExternalCallableId),
     UnknownProperty(ExternalPropertyId),
+    InvalidPropertyConstant(ExternalPropertyId),
 }
 
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
-/// identity the file's IR references.
+/// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
+    properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
 }
 
 impl CheckedBackendCallables {
@@ -77,17 +98,44 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
-        for callable in referenced.callables {
-            facts.freeze_callable(callable, provider)?;
-        }
         for property in referenced.properties {
             let realization = provider
                 .external_property(property)
                 .ok_or(DependencyFactError::UnknownProperty(property))?;
-            facts.freeze_callable(realization.getter, provider)?;
+            let compile_time_constant = realization
+                .compile_time_constant
+                .as_ref()
+                .map(|constant| {
+                    crate::ir::IrConst::from_library_constant(constant)
+                        .ok_or(DependencyFactError::InvalidPropertyConstant(property))
+                })
+                .transpose()?;
+            let owner = facts
+                .freeze_callable(realization.getter, provider)?
+                .physical_owner;
+            let result = provider
+                .external_callable(realization.getter)
+                .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
+                .callable
+                .ret;
             if let Some(setter) = realization.setter {
                 facts.freeze_callable(setter, provider)?;
             }
+            facts.properties.insert(
+                property,
+                BackendPropertyFact {
+                    name: realization.name.into_boxed_str(),
+                    getter: realization.getter,
+                    setter: realization.setter,
+                    owner,
+                    result,
+                    declares_value_class_storage: realization.declares_value_class_storage,
+                    compile_time_constant,
+                },
+            );
+        }
+        for callable in referenced.callables {
+            facts.freeze_callable(callable, provider)?;
         }
         Ok(facts)
     }
@@ -135,5 +183,11 @@ impl CheckedBackendCallables {
     /// is not one of this file's.
     pub fn callable(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
         self.callables.get(&identity)
+    }
+
+    /// The fact for a dependency property identity this file's IR holds. `None` means the identity
+    /// is not one of this file's.
+    pub fn property(&self, identity: ExternalPropertyId) -> Option<&BackendPropertyFact> {
+        self.properties.get(&identity)
     }
 }

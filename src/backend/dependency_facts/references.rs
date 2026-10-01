@@ -14,7 +14,7 @@ use crate::ir::{
     IrFile, IrProgressionSource,
 };
 
-/// The dependency callables one checked file names, each once.
+/// The dependency callables and properties one checked file names, each once.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReferencedDependencies {
     pub callables: BTreeSet<ExternalCallableId>,
@@ -176,6 +176,10 @@ impl ReferencedDependencies {
                 }
                 IrCheckedConstructorTarget::Module(_) => {}
             },
+            IrCheckedOperation::ExternalPropertyRead { target, .. }
+            | IrCheckedOperation::ExternalPropertyWrite { target, .. } => {
+                self.properties.insert(*target);
+            }
             IrCheckedOperation::RangeLoop {
                 source,
                 unsigned_compare,
@@ -184,10 +188,6 @@ impl ReferencedDependencies {
                 self.progression(source);
                 self.callables
                     .extend(unsigned_compare.iter().map(|compare| compare.function));
-            }
-            IrCheckedOperation::ExternalPropertyRead { target, .. }
-            | IrCheckedOperation::ExternalPropertyWrite { target, .. } => {
-                self.properties.insert(*target);
             }
             IrCheckedOperation::PropertyReference { target, .. } => {
                 self.property_reference(target);
