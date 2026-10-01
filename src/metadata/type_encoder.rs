@@ -69,6 +69,9 @@ pub(crate) struct StringTable {
     dedup: HashMap<(String, Vec<u8>), u32>,
     /// Classifiers already interned with `DESC_TO_CLASS_ID`. A repeat does not render `Lname;`.
     descriptor_ids: HashMap<TypeName, u32>,
+    /// Times this table prepared a class id from the classifier instead of reusing `descriptor_ids`.
+    #[cfg(test)]
+    class_id_preparations: u32,
     /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
     /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
     local_names: Vec<u32>,
@@ -124,17 +127,27 @@ impl StringTable {
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
-        if allows_descriptor_shortcut(classifier) {
-            if let Some(&index) = self.descriptor_ids.get(&classifier) {
-                return index;
-            }
+        if let Some(&index) = self.descriptor_ids.get(&classifier) {
+            return index;
+        }
+        #[cfg(test)]
+        {
+            self.class_id_preparations += 1;
+        }
+        let encoded = class_id_of(classifier);
+        if encoded.descriptor_shortcut {
             let mut record = Pb::new();
             record.field_varint(3, 2); // DESC_TO_CLASS_ID
             let index = self.intern(format!("L{};", classifier.render()), record);
             self.descriptor_ids.insert(classifier, index);
             return index;
         }
-        self.class_literal(class_id_of(classifier).literal, false)
+        self.class_literal(encoded.literal, false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn class_id_preparations(&self) -> u32 {
+        self.class_id_preparations
     }
 
     /// A local classifier's id: the raw internal name of the classifier declared in executable
@@ -954,21 +967,21 @@ mod tests {
     }
 
     #[test]
-    fn repeated_descriptor_class_id_keeps_one_table_entry() {
+    fn repeated_descriptor_class_id_prepares_the_classifier_once() {
         let mut strings = StringTable::default();
         let classifier = crate::types::type_name("sample/Box");
         let first = strings.class_id(classifier);
-        let len = strings.strings.len();
+        assert_eq!(strings.class_id_preparations(), 1);
         assert_eq!(strings.class_id(classifier), first);
-        assert_eq!(strings.strings.len(), len);
+        assert_eq!(strings.class_id_preparations(), 1);
         assert_eq!(strings.strings[first as usize], "Lsample/Box;");
 
-        let nested = crate::types::type_name("pkg/Outer").nested_child("Inner");
+        let nested = crate::types::type_name("sample/Outer").nested_child("Inner");
         let nested_id = strings.class_id(nested);
-        assert_eq!(strings.strings[nested_id as usize], "Lpkg/Outer$Inner;");
-        let len = strings.strings.len();
+        assert_eq!(strings.class_id_preparations(), 2);
+        assert_eq!(strings.strings[nested_id as usize], "Lsample/Outer$Inner;");
         assert_eq!(strings.class_id(nested), nested_id);
-        assert_eq!(strings.strings.len(), len);
+        assert_eq!(strings.class_id_preparations(), 2);
     }
 
     #[test]
