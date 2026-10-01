@@ -40,6 +40,7 @@ mod return_unboxing;
 mod substitution_coercions;
 mod suspend_results;
 mod synth_members;
+mod type_operation_roles;
 mod unboxing_rewrites;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
@@ -52,14 +53,15 @@ use call_results::CallTypes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
 use operand_nullness::{operand_nonnull, operand_null_only};
+use representation::erase;
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    is_boxed_value_class,
+    is_boxed_value_class, type_operation_internal_name,
 };
 use result_tail_boxing::box_vc_tail;
 use std::collections::{HashMap, HashSet};
 use suspend_results::{record_suspend_results, suspend_result_representation};
-use unboxing_rewrites::{narrow_wrap, unbox_wrap, unbox_wrap_nullable};
+use unboxing_rewrites::{narrow_wrap, unbox_call, unbox_wrap, unbox_wrap_nullable};
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -208,6 +210,7 @@ pub(crate) fn lower_value_classes(
         return true;
     }
     call_result_boundaries::realize(ir, &callable_under);
+    type_operation_roles::record_primitive_array_allocation_carriers(ir, &under);
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
     // resolved value classes belong to this source module. `IrFile::is_value_class_name` already
     // recognizes same-file and external/module declarations, so copying `under` into a second public
@@ -304,7 +307,7 @@ pub(crate) fn lower_value_classes(
             // from the node after this pass.
             let physical = match expression {
                 IrExpr::PropertyRead { ty, .. } | IrExpr::PropertyWrite { ty, .. } => {
-                    erase(ty, &under)
+                    representation::carrier_slot(*ty, &under).unwrap_or_else(|| erase(ty, &under))
                 }
                 _ => unreachable!("the accessor match above accepted only property operations"),
             };
@@ -1037,7 +1040,12 @@ pub(crate) fn lower_value_classes(
         for (ci, c) in ir.classes.iter().enumerate() {
             for (mi, &fid) in c.methods.iter().enumerate() {
                 if let Some(fq) = ir.functions[fid as usize].ret.non_null().obj_internal() {
-                    if under.contains_key(&fq) {
+                    // A primitive-array value class keeps its semantic name through erasure, but the
+                    // JVM result is the carrier. Marking that return boxed checkcasts the carrier
+                    // to the box.
+                    if under.contains_key(&fq)
+                        && representation::carrier_slot(Ty::obj_name(fq), &under).is_none()
+                    {
                         m.insert((ci as u32, mi as u32), fq);
                     }
                 }
@@ -1064,7 +1072,10 @@ pub(crate) fn lower_value_classes(
                     .source_function()
                     .and_then(|function| ir.functions.get(function as usize))
                     .and_then(|function| function.ret.non_null().obj_internal())
-                    .filter(|classifier| under.contains_key(classifier)),
+                    .filter(|classifier| under.contains_key(classifier))
+                    .filter(|classifier| {
+                        representation::carrier_slot(Ty::obj_name(*classifier), &under).is_none()
+                    }),
                 _ => None,
             };
             let suspended = match ir.value_class_suspend_calls.get(&id) {
@@ -1622,18 +1633,8 @@ pub(crate) fn lower_value_classes(
     // an external value class (`((Result)boxed).unbox-impl()`) — `unbox-impl` is invoked on the boxed `X`,
     // so erasing the cast to the underlying would leave an `Object` on the stack (`VerifyError`). The cast
     // is only emitted as part of an unbox sequence, so preserving it can't affect a plain `as Result`.
-    let unbox_receiver_casts: HashSet<u32> = ir
-        .exprs
-        .iter()
-        .filter_map(|e| match e {
-            IrExpr::Call {
-                callee: Callee::Virtual { name, .. },
-                dispatch_receiver: Some(r),
-                ..
-            } if name == "unbox-impl" => Some(*r),
-            _ => None,
-        })
-        .collect();
+    let unbox_receiver_casts: HashSet<u32> =
+        type_operation_roles::recorded_unbox_type_operation_receivers(ir).collect();
 
     // 3. Erase every type carried inside an expression (locals, casts, vararg/array elements, …).
     //    Inside a value-class member body, an `is X`/`(X)other` whose type IS a value class must stay
@@ -2491,7 +2492,10 @@ pub(crate) fn lower_value_classes(
                 // carrier implementation. Any earlier property/call stamp described the pre-rewrite
                 // box; publish the implementation result now so a following sole-property read does
                 // not try to unbox a carrier that is already primitive/reference-underlying.
-                ir.physical_types.insert(id, result);
+                ir.physical_types.insert(
+                    id,
+                    representation::carrier_slot(result, &under).unwrap_or(result),
+                );
                 // The physical static call gains the former dispatch receiver at parameter zero.
                 // Keep the checked declaration coordinates aligned with that new argument vector:
                 // otherwise parameter zero from the source declaration is incorrectly applied to
@@ -2519,18 +2523,7 @@ pub(crate) fn lower_value_classes(
                         .get(&owner)
                         .map(|ty| erase(ty, &under))
                         .unwrap_or(Ty::Error);
-                    ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner,
-                            name: "unbox-impl".to_string(),
-                            descriptor: format!("(){}", desc(&underlying)),
-                            params: None,
-                            interface: false,
-                            module_target: None,
-                        },
-                        dispatch_receiver: Some(receiver),
-                        args: Vec::new(),
-                    })
+                    unbox_call(ir, receiver, owner, &underlying)
                 } else {
                     receiver
                 };
@@ -2622,6 +2615,10 @@ pub(crate) fn lower_value_classes(
             // the binding named. Leaving the binding would ask the later name stamp to rename
             // a call that no longer exists.
             accessor_names::retire_replaced_accessor_call(ir, id);
+            // A user member whose static name is `unbox-impl` shares that spelling with the
+            // representation call synthesized for `equals-impl`. Replacing the representation call
+            // must drop its type-operation edge; the replacement is a different operation.
+            type_operation_roles::retire_unbox_type_operation_edge(ir, id);
             ir.exprs[i] = r;
         }
     }
@@ -2630,14 +2627,7 @@ pub(crate) fn lower_value_classes(
     // Preserve those casts just like the unbox receivers that existed before expression-type erasure.
     let unbox_receiver_casts: HashSet<u32> = unbox_receiver_casts
         .into_iter()
-        .chain(ir.exprs.iter().filter_map(|e| match e {
-            IrExpr::Call {
-                callee: Callee::Virtual { name, .. },
-                dispatch_receiver: Some(receiver),
-                ..
-            } if name == "unbox-impl" => Some(*receiver),
-            _ => None,
-        }))
+        .chain(type_operation_roles::recorded_unbox_type_operation_receivers(ir))
         .collect();
 
     // 5. Box/unbox at call boundaries, per function so each value's slot type is known: an UNBOXED
@@ -3922,7 +3912,10 @@ pub(crate) fn lower_value_classes(
     // declarations owned by this source module.
     accessor_names::stamp_synthesized(ir, &callable_under);
 
-    property_references::realize(ir, &callable_under, property_reference_realizations)
+    let realized =
+        property_references::realize(ir, &callable_under, property_reference_realizations);
+    type_operation_roles::record_primitive_array_type_operations(ir, &under);
+    realized
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -4499,6 +4492,11 @@ fn repr(
         // Reading a captured mutable local through its `Ref` holder: its representation is that of the
         // boxed element type (`var res: Result<T>?` → a boxed `Result`).
         IrExpr::RefGet { elem, .. } => repr_of_ty(elem, under),
+        // An array allocation produces the array type's own representation. A primitive-array
+        // value class in the rewrite map is that carrier; a missing declaration stays `NotVc`.
+        IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
+            repr_of_ty(array_type, under)
+        }
         IrExpr::Block { value: Some(v), .. } => repr(
             exprs,
             rets,
@@ -4584,7 +4582,6 @@ fn prop_access(
         );
     }
     let inner = if inferred_boxed {
-        let d = desc(&u);
         let dispatch = if ir
             .physical_types
             .get(&receiver)
@@ -4598,18 +4595,7 @@ fn prop_access(
         } else {
             receiver
         };
-        ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: x,
-                name: "unbox-impl".to_string(),
-                descriptor: format!("(){d}"),
-                params: None,
-                interface: false,
-                module_target: None,
-            },
-            dispatch_receiver: Some(dispatch),
-            args: vec![],
-        })
+        unbox_call(ir, dispatch, x, &u)
     } else {
         receiver
     };
@@ -5192,14 +5178,6 @@ fn sam_declares_vc_return(
     ir.lambda_sam_signature
         .get(&impl_fn)
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
-}
-
-fn erase(t: &Ty, under: &Under) -> Ty {
-    crate::value_classes::project_underlying(
-        member_names::value_class_bound_occurrence(*t, under),
-        under,
-        &JvmUnderlyingProjection,
-    )
 }
 
 /// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class

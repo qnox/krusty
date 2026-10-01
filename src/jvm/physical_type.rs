@@ -17,6 +17,10 @@ fn jvm_reference_array_element(semantic: Ty) -> Ty {
         // JVM-reference marker for the unsigned wrapper (`UInt?` -> `Lkotlin/UInt;`), and prevents
         // `Ty::array` from selecting the specialized `UIntArray`/`[I` representation here.
         Ty::nullable(semantic)
+    } else if crate::jvm::names::boxed_primitive_array_element(semantic).is_some() {
+        // `Array<UIntArray>` stores the box. Projecting the element through `ir_ty_to_jvm` would
+        // turn it into `IntArray` and allocate `int[][]`.
+        semantic
     } else {
         reference_array_element(ir_ty_to_jvm(&semantic))
     };

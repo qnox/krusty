@@ -96,6 +96,65 @@ pub(crate) fn boxed_value_class_names(ir: &IrFile) -> impl Iterator<Item = TypeN
         .filter(|&classifier| !has_native_carrier(classifier))
 }
 
+/// A value class whose own name is a primitive-array classifier and whose declared carrier is an
+/// array. The semantic name and the carrier are different JVM classes that share one descriptor
+/// (`kotlin/UIntArray` and `int[]` are both `[I`). The rewrite map is the authority: a signed
+/// primitive array is not in it, and a user value class over an array has a name that is not itself
+/// a primitive-array classifier.
+pub(super) fn primitive_array_value_class(
+    classifier: TypeName,
+    under: &crate::value_classes::UnderlyingTypes,
+) -> Option<(TypeName, Ty)> {
+    if crate::types::prim_array_element(classifier).is_none() {
+        return None;
+    }
+    let carrier = under.get(&classifier).copied()?.non_null();
+    carrier.is_array().then_some((classifier, carrier))
+}
+
+/// The JVM slot published for `ty` when erasure keeps the semantic name so element reads stay
+/// unsigned. Publishing that name is the box (`is_boxed_vc` treats a physical stamp of the value
+/// class as the box). `None` leaves the caller's existing publication in place.
+pub(super) fn carrier_slot(ty: Ty, under: &crate::value_classes::UnderlyingTypes) -> Option<Ty> {
+    let name = ty.non_null().obj_internal()?;
+    let (_, carrier) = primitive_array_value_class(name, under)?;
+    Some(if ty.is_nullable() {
+        Ty::nullable(carrier)
+    } else {
+        carrier
+    })
+}
+
+/// Erase `t` through the value-class table. A primitive-array value class keeps its semantic name
+/// so element reads stay unsigned; its JVM descriptor is already the carrier. Physical slots use
+/// [`carrier_slot`] instead of this name.
+pub(super) fn erase(t: &Ty, under: &crate::value_classes::UnderlyingTypes) -> Ty {
+    if let Some(name) = t.non_null().obj_internal() {
+        if primitive_array_value_class(name, under).is_some() {
+            return *t;
+        }
+    }
+    crate::value_classes::project_underlying(
+        super::member_names::value_class_bound_occurrence(*t, under),
+        under,
+        &super::JvmUnderlyingProjection,
+    )
+}
+
+/// The classfile name a recorded type operation asks `instanceof` or `checkcast` to use.
+pub(crate) fn type_operation_internal_name(
+    operation: crate::ir::IrValueClassTypeOperation,
+) -> String {
+    match operation.role {
+        crate::ir::IrValueClassTypeRole::Box => {
+            crate::jvm::names::classfile_internal_name_of(operation.boxed_owner).to_string()
+        }
+        crate::ir::IrValueClassTypeRole::Carrier => {
+            crate::jvm::names::type_descriptor(operation.carrier)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +175,41 @@ mod tests {
         assert_eq!(
             boxed_value_class_names(&ir).collect::<Vec<_>>(),
             vec![count]
+        );
+    }
+
+    #[test]
+    fn an_unsigned_array_publishes_its_carrier_and_keeps_two_classfile_names() {
+        let array = crate::types::type_name("kotlin/UIntArray");
+        let carrier = Ty::obj("kotlin/IntArray");
+        let mut under = crate::value_classes::UnderlyingTypes::new();
+        under.insert(array, carrier);
+        assert_eq!(carrier_slot(Ty::obj_name(array), &under), Some(carrier));
+        assert_eq!(
+            carrier_slot(Ty::nullable(Ty::obj_name(array)), &under),
+            Some(Ty::nullable(carrier))
+        );
+        assert_eq!(
+            crate::jvm::names::type_descriptor(Ty::obj_name(array)),
+            crate::jvm::names::type_descriptor(carrier)
+        );
+        let shared = (array, carrier);
+        let operation = |role| crate::ir::IrValueClassTypeOperation {
+            boxed_owner: shared.0,
+            carrier: shared.1,
+            role,
+        };
+        assert_eq!(
+            type_operation_internal_name(operation(crate::ir::IrValueClassTypeRole::Box)),
+            "kotlin/UIntArray"
+        );
+        assert_eq!(
+            type_operation_internal_name(operation(crate::ir::IrValueClassTypeRole::Carrier)),
+            "[I"
+        );
+        assert!(
+            primitive_array_value_class(crate::types::type_name("kotlin/IntArray"), &under)
+                .is_none()
         );
     }
 }

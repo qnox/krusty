@@ -11,7 +11,7 @@ use crate::types::{stored_value_ty, Ty};
 
 use super::{
     box_prim_free, emit_num_conv, implicit_reference_coercion, ir_ty_to_jvm,
-    semantic_scalar_adapter, type_descriptor, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
+    semantic_scalar_adapter, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
 };
 
 impl Emitter<'_> {
@@ -24,15 +24,24 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         // A primitive target of `instanceof`/`checkcast` (`x is Int`) tests the boxed wrapper.
+        // A primitive-array value class records whether this operation names the box or the
+        // carrier; those two classes share one descriptor, so the record decides.
         let jvm_ty = ir_ty_to_jvm(&type_operand);
-        let internal = if jvm_ty.is_jvm_scalar() {
-            semantic_scalar_adapter(type_operand, jvm_ty)
-                .boxed_ref()
-                .map(crate::jvm::names::instanceof_internal_name)
-                .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
-        } else {
-            crate::jvm::names::instanceof_internal_name(jvm_ty)
-        };
+        let internal = self
+            .ir
+            .value_class_type_operations
+            .get(&expression)
+            .map(|operation| crate::jvm::value_classes::type_operation_internal_name(*operation))
+            .unwrap_or_else(|| {
+                if jvm_ty.is_jvm_scalar() {
+                    semantic_scalar_adapter(type_operand, jvm_ty)
+                        .boxed_ref()
+                        .map(crate::jvm::names::instanceof_internal_name)
+                        .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
+                } else {
+                    crate::jvm::names::instanceof_internal_name(jvm_ty)
+                }
+            });
         crate::trace_compiler!(
             "value_classes",
             "emit type op={op:?} arg={arg} {:?} arg_ty={:?} operand={type_operand:?} jvm={jvm_ty:?} internal={internal}",
@@ -136,7 +145,10 @@ impl Emitter<'_> {
                         crate::jvm::names::instanceof_internal_name(source) == internal
                     })
                 } else {
-                    type_descriptor(physical_arg) == type_descriptor(jvm_ty)
+                    // Compare the cast target that was actually chosen. A primitive-array value
+                    // class's carrier and box share a descriptor, so descriptor equality with the
+                    // JVM type would skip the checkcast that names the box.
+                    crate::jvm::names::instanceof_internal_name(physical_arg) == internal
                 };
                 if !redundant {
                     let class = self.cw.class_ref(&internal);

@@ -8,7 +8,7 @@ use crate::ir::{
     Callee, ClassId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile,
     IrTypeOp,
 };
-use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
+use crate::jvm::array_representation::prim_newarray_atype;
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
@@ -25,6 +25,7 @@ use field_visibility::{declared_field_access, default_accessor_access, is_jvm_fi
 
 mod access_bridges;
 mod annotation_impl;
+mod array_access;
 mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
@@ -9122,16 +9123,14 @@ impl<'a> Emitter<'a> {
                         // Another class constructing through a private constructor does the same.
                         // A call supplying defaults targets the public `$default` overload instead,
                         // which reaches the accessor itself.
-                        let use_accessor = default_parameters.is_empty()
-                            && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
-                                || self.ir.has_value_class_parameter_construction(e)
-                                || self.ir.construction_targets.get(&e).is_some_and(|target| {
-                                    constructor_accessors::reached_through_accessor(
-                                        *target,
-                                        self.ir.expression_owners.get(&e).copied(),
-                                        *internal,
-                                    )
-                                }));
+                        let use_accessor = constructor_accessors::uses_value_class_marker_accessor(
+                            self.ir,
+                            e,
+                            *internal,
+                            &owner,
+                            default_parameters.is_empty(),
+                            ctor_params.is_none(),
+                        );
                         let base_parameter_count = field_tys.len();
                         let source_parameter_count = base_parameter_count
                             .checked_sub(*default_prefix_count as usize)
@@ -10864,7 +10863,7 @@ impl<'a> Emitter<'a> {
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
                     let ci = self
                         .cw
-                        .class_ref(&crate::jvm::names::instanceof_internal_name(et.non_null()));
+                        .class_ref(&crate::jvm::names::anewarray_element_class(et));
                     code.anewarray(ci);
                 }
             }
@@ -10935,49 +10934,6 @@ impl<'a> Emitter<'a> {
             }
             _ => {}
         }
-    }
-
-    fn emit_array_get(&mut self, array: u32, index: u32, code: &mut CodeBuilder) {
-        let element = self.array_elem(array);
-        let reference_array = self.value_ty(array).is_reference_array();
-        if self.must_spill_across(index) {
-            self.emit_operands(&[array, index], code);
-        } else {
-            self.emit_value(array, code);
-            self.emit_value(index, code);
-        }
-        let (operation, words) = array_load_op(element, reference_array);
-        code.array_load(operation, words);
-        if let Some(primitive) = reference_array
-            .then(|| reference_array_scalar_adapter(element))
-            .flatten()
-        {
-            let array_descriptor = type_descriptor(self.value_ty(array));
-            let component = array_descriptor
-                .strip_prefix('[')
-                .unwrap_or("Ljava/lang/Object;");
-            unbox_prim_from_descriptor(self.cw, code, component, primitive);
-        }
-    }
-
-    fn emit_array_set(&mut self, array: u32, index: u32, value: u32, code: &mut CodeBuilder) {
-        let element = self.array_elem(array);
-        let reference_array = self.value_ty(array).is_reference_array();
-        if self.must_spill_across(index) || self.must_spill_across(value) {
-            self.emit_operands(&[array, index, value], code);
-        } else {
-            self.emit_value(array, code);
-            self.emit_value(index, code);
-            self.emit_value(value, code);
-        }
-        if let Some(primitive) = reference_array
-            .then(|| reference_array_scalar_adapter(element))
-            .flatten()
-        {
-            box_prim_free(self.cw, code, primitive);
-        }
-        let (operation, words) = array_store_op(element, reference_array);
-        code.array_store(operation, words);
     }
 
     /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead

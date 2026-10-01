@@ -437,3 +437,80 @@ fn a_value_class_box_is_not_a_number() {
     );
     assert!(!body.eliminate(&Meters));
 }
+
+/// `UIntArray` is an inline class over `int[]`. Returning that box as `Any?` is a real
+/// conversion: `is UIntArray` and `is IntArray` disagree. A null-safe `box-impl` is not redundant
+/// just because the carrier is already a reference.
+struct UnsignedArray;
+
+impl ValueClasses for UnsignedArray {
+    fn underlying_type(&self, internal_name: &str) -> Option<String> {
+        (internal_name == "kotlin/UIntArray").then(|| "[I".to_string())
+    }
+}
+
+#[test]
+fn a_returned_unsigned_array_box_stays() {
+    let mut body = Body::new(
+        "([I)Ljava/lang/Object;",
+        1,
+        vec![
+            var(ALOAD, 0),
+            call(
+                INVOKESTATIC,
+                "kotlin/UIntArray",
+                "box-impl",
+                "([I)Lkotlin/UIntArray;",
+            ),
+            op(ARETURN),
+        ],
+    );
+    let before = body.instructions();
+    assert!(!body.eliminate(&UnsignedArray));
+    assert_eq!(body.instructions(), before);
+}
+
+#[test]
+fn a_null_safe_unsigned_array_box_returned_as_any_stays() {
+    let mut method = MethodNode::new(0x0009, "take", "([I)Ljava/lang/Object;");
+    method.max_locals = 1;
+    let (start, null_path, end, done) = (
+        method.new_label(),
+        method.new_label(),
+        method.new_label(),
+        method.new_label(),
+    );
+    method.nodes = vec![
+        Node::Label(start),
+        Node::Insn(var(ALOAD, 0)),
+        Node::Insn(op(DUP)),
+        Node::Insn(Insn::Jump {
+            op: IFNULL,
+            target: null_path,
+        }),
+        Node::Insn(call(
+            INVOKESTATIC,
+            "kotlin/UIntArray",
+            "box-impl",
+            "([I)Lkotlin/UIntArray;",
+        )),
+        Node::Insn(Insn::Jump {
+            op: GOTO,
+            target: end,
+        }),
+        Node::Label(null_path),
+        Node::Insn(op(POP)),
+        Node::Insn(op(ACONST_NULL)),
+        Node::Label(end),
+        Node::Insn(op(ARETURN)),
+        Node::Label(done),
+    ];
+    let before = method.instructions().cloned().collect::<Vec<_>>();
+    let removed = eliminate(&mut method, "NboxKt", &UnsignedArray).expect("the analysis completes");
+    assert!(
+        !removed,
+        "null-safe box-impl was removed: {:?}",
+        method.instructions().collect::<Vec<_>>()
+    );
+    assert_eq!(method.instructions().cloned().collect::<Vec<_>>(), before);
+}

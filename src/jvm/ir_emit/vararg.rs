@@ -2,6 +2,7 @@
 
 use super::frame_map::TempRole;
 use super::*;
+use crate::jvm::array_representation::array_store_op;
 
 /// Emit one checked vararg value. Spread validation and both physical array-building strategies
 /// live here so frame-recording elements cannot accidentally be handled by only one call shape.
@@ -147,9 +148,7 @@ fn emit_reference_spread(
     code.push_int(0, emitter.cw);
     let element_class = emitter
         .cw
-        .class_ref(&crate::jvm::names::instanceof_internal_name(
-            element_type.non_null(),
-        ));
+        .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
     code.anewarray(element_class);
     let to_array = emitter.cw.methodref(
         builder,
@@ -190,9 +189,7 @@ pub(super) fn emit_packed_array(
         // Nullability does not change the reference array class.
         let class = emitter
             .cw
-            .class_ref(&crate::jvm::names::instanceof_internal_name(
-                element_type.non_null(),
-            ));
+            .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
         code.anewarray(class);
     }
 
@@ -238,9 +235,7 @@ fn emit_packed_array_through_temps(
     } else {
         let class = emitter
             .cw
-            .class_ref(&crate::jvm::names::instanceof_internal_name(
-                element_type.non_null(),
-            ));
+            .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
         code.anewarray(class);
     }
 
