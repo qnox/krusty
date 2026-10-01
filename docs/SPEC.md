@@ -10104,6 +10104,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fakeInlinerVariables.kt`-class `expectFailure(msg) { … }` calls — their remaining gap is the
   omitted fn-typed default's lowering.)
 
+- **A fun-interface expectation converts the lambda a conditional branch yields.** `val reader: Read = when { flag -> { text -> text.n } else -> { text -> text.n } }` and the same lambda written as the value of a branch block (`flag -> { { it.n } }`) both produce a `Read`. The checker already types the branch as the interface and records the conversion on the lambda. The value that leaves the `when`, `if`, or block is that conversion: the interface instance, not the function object check-cast to the interface. A direct `val reader: Read = { text -> text.n }` is the same conversion on the initializer itself. Tests: `fir::body_check::when_sam_tests` and `tests/when_branch_sam_e2e.rs`. Corpus: `codegen/box/sam/topLevelConversions.kt`.
+
 - **A TAIL-ONLY inline expansion produces its value; it does not loop to carry one out.** An
   expansion of a non-`Unit` inline function lowers to `var result = zero; loop@ while (true) { body;
   break@loop }; result`, because a non-local `return` from the middle of the body has to carry a
