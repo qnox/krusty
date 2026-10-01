@@ -6,7 +6,7 @@ use krusty::features::LangFeatures;
 use krusty::jvm::classpath::platform_jdk_modules;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum LogLevel {
+enum LogLevel {
     Trace,
     Debug,
     #[default]
@@ -52,8 +52,6 @@ pub struct LspOptions {
     deps_cache_max_bytes: Option<u64>,
     deps_sources: Option<bool>,
     dev: bool,
-    log_level: LogLevel,
-    log_categories: Vec<(String, LogLevel)>,
 }
 
 impl LspOptions {
@@ -101,8 +99,8 @@ impl LspOptions {
         let mut client = false;
         let mut multi_client = false;
         let mut socket = false;
-        let mut log_level_from_args = false;
-        let mut log_categories_from_args = false;
+        let mut log_level_arg = None;
+        let mut log_category_args = Vec::new();
         while let Some(argument) = args.next() {
             if let Some(value) = option_value(&argument, "--socket", &mut args)? {
                 parse_socket(&value)?;
@@ -110,17 +108,18 @@ impl LspOptions {
                 continue;
             }
             if let Some(value) = option_value(&argument, "--system-path", &mut args)? {
-                set_cache_dir(&mut options.deps_cache_dir, value)?;
+                // The system directory holds every tool's caches. Krusty owns only its child,
+                // so startup GC cannot delete a sibling `v*` tree.
+                let owned = PathBuf::from(value).join("krusty").join("deps");
+                set_cache_dir(&mut options.deps_cache_dir, owned)?;
                 continue;
             }
             if let Some(value) = option_value(&argument, "--log-level", &mut args)? {
-                options.log_level = LogLevel::parse(&value)?;
-                log_level_from_args = true;
+                log_level_arg = Some(value);
                 continue;
             }
             if let Some(value) = option_value(&argument, "--log-category", &mut args)? {
-                push_log_categories(&mut options.log_categories, &value)?;
-                log_categories_from_args = true;
+                log_category_args.push(value);
                 continue;
             }
             match argument.as_str() {
@@ -129,28 +128,20 @@ impl LspOptions {
                 "--multi-client" => multi_client = true,
                 "--dev" => options.dev = true,
                 "-cp" | "-classpath" | "-class-path" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| format!("{argument} requires a value"))?;
+                    let value = required_value(&argument, &mut args)?;
                     options.classpath.extend(std::env::split_paths(&value));
                 }
                 "-jdk-home" => {
-                    options.jdk_home = Some(PathBuf::from(
-                        args.next()
-                            .ok_or_else(|| "-jdk-home requires a value".to_string())?,
-                    ));
+                    let value = required_value("-jdk-home", &mut args)?;
+                    options.jdk_home = Some(PathBuf::from(value));
                 }
                 "-no-jdk" => options.no_jdk = true,
                 "-deps-cache-dir" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "-deps-cache-dir requires a value".to_string())?;
-                    set_cache_dir(&mut options.deps_cache_dir, value)?;
+                    let value = required_value("-deps-cache-dir", &mut args)?;
+                    set_cache_dir(&mut options.deps_cache_dir, PathBuf::from(value))?;
                 }
                 "-deps-cache-max-age-days" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "-deps-cache-max-age-days requires a value".to_string())?;
+                    let value = required_value("-deps-cache-max-age-days", &mut args)?;
                     options.deps_cache_max_age_days = Some(
                         value
                             .parse()
@@ -158,9 +149,7 @@ impl LspOptions {
                     );
                 }
                 "-deps-cache-max-bytes" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "-deps-cache-max-bytes requires a value".to_string())?;
+                    let value = required_value("-deps-cache-max-bytes", &mut args)?;
                     options.deps_cache_max_bytes = Some(
                         value
                             .parse()
@@ -192,16 +181,10 @@ impl LspOptions {
         if !stdio && (client || multi_client || socket) {
             return Err("socket transport is not supported; pass --stdio".to_string());
         }
-        if !log_level_from_args {
-            if let Some(value) = env("KOTLIN_LSP_LOG_LEVEL") {
-                options.log_level = LogLevel::parse(&value)?;
-            }
-        }
-        if !log_categories_from_args {
-            if let Some(value) = env("KOTLIN_LSP_LOG_CATEGORIES") {
-                push_log_categories(&mut options.log_categories, &value)?;
-            }
-        }
+        // Validated for launch compatibility and then dropped. Nothing in the server reads a
+        // logging owner, so the parsed selection is not part of the process configuration.
+        let log = select_log(log_level_arg, &log_category_args, env)?;
+        let _ = (log.level, log.categories.len());
         Ok(options)
     }
 
@@ -263,14 +246,6 @@ impl LspOptions {
     pub fn dev(&self) -> bool {
         self.dev
     }
-
-    pub fn log_level(&self) -> LogLevel {
-        self.log_level
-    }
-
-    pub fn log_categories(&self) -> &[(String, LogLevel)] {
-        &self.log_categories
-    }
 }
 
 fn option_value(
@@ -288,50 +263,112 @@ fn option_value(
         return Ok(Some(value.to_string()));
     }
     if rest.is_empty() {
-        return args
-            .next()
-            .map(Some)
-            .ok_or_else(|| format!("{name} requires a value"));
+        return required_value(name, args).map(Some);
     }
     Ok(None)
 }
 
-fn set_cache_dir(slot: &mut Option<PathBuf>, value: String) -> Result<(), String> {
+fn required_value(name: &str, args: &mut impl Iterator<Item = String>) -> Result<String, String> {
+    let value = args
+        .next()
+        .ok_or_else(|| format!("{name} requires a value"))?;
+    if value.is_empty() || is_recognized_option(&value) {
+        return Err(format!("{name} requires a value"));
+    }
+    Ok(value)
+}
+
+fn is_recognized_option(token: &str) -> bool {
+    let name = token.split_once('=').map_or(token, |(name, _)| name);
+    matches!(
+        name,
+        "--stdio"
+            | "--socket"
+            | "--client"
+            | "--multi-client"
+            | "--system-path"
+            | "--log-level"
+            | "--log-category"
+            | "--dev"
+            | "--help"
+            | "-h"
+            | "-cp"
+            | "-classpath"
+            | "-class-path"
+            | "-jdk-home"
+            | "-no-jdk"
+            | "-deps-cache-dir"
+            | "-deps-cache-max-age-days"
+            | "-deps-cache-max-bytes"
+            | "-deps-sources"
+            | "-no-deps-sources"
+    ) || name.starts_with("-X")
+}
+
+fn set_cache_dir(slot: &mut Option<PathBuf>, path: PathBuf) -> Result<(), String> {
     if slot.is_some() {
         return Err("pass either --system-path or -deps-cache-dir".to_string());
     }
-    *slot = Some(PathBuf::from(value));
+    if path.as_os_str().is_empty() {
+        return Err("cache directory requires a non-empty path".to_string());
+    }
+    *slot = Some(path);
     Ok(())
 }
 
 fn parse_socket(value: &str) -> Result<(), String> {
-    let port = value.split_once(':').map_or(value, |(_, port)| port);
-    if port.parse::<i32>().is_err() {
-        return Err(format!(
-            "'{value}' is not a valid socket. Expected <host>:<port>"
-        ));
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return Err(socket_error(value));
+    };
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err(socket_error(value));
     }
     Ok(())
 }
 
-fn push_log_categories(
-    categories: &mut Vec<(String, LogLevel)>,
-    value: &str,
-) -> Result<(), String> {
-    for entry in value.split(',') {
-        let entry = entry.trim();
-        let Some((category, level)) = entry.split_once(':') else {
-            return Err(category_level_error(entry));
-        };
-        if category.is_empty() || level.is_empty() {
-            return Err(category_level_error(entry));
+fn socket_error(value: &str) -> String {
+    format!("'{value}' is not a valid socket. Expected <host>:<port>")
+}
+
+struct LogSelection {
+    level: LogLevel,
+    categories: Vec<(String, LogLevel)>,
+}
+
+fn select_log(
+    level_from_args: Option<String>,
+    categories_from_args: &[String],
+    env: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<LogSelection, String> {
+    let level = if let Some(value) = level_from_args {
+        LogLevel::parse(&value)?
+    } else if let Some(value) = env("KOTLIN_LSP_LOG_LEVEL") {
+        LogLevel::parse(&value)?
+    } else {
+        LogLevel::Info
+    };
+    let mut categories = Vec::new();
+    if !categories_from_args.is_empty() {
+        for value in categories_from_args {
+            push_one_category(&mut categories, value)?;
         }
-        let category = category.trim();
-        if category.is_empty() {
-            return Err(format!("Category must be non-empty in '{entry}'"));
-        }
-        categories.push((category.to_string(), LogLevel::parse(level.trim())?));
+    } else if let Some(value) = env("KOTLIN_LSP_LOG_CATEGORIES") {
+        push_one_category(&mut categories, &value)?;
     }
+    Ok(LogSelection { level, categories })
+}
+
+fn push_one_category(categories: &mut Vec<(String, LogLevel)>, value: &str) -> Result<(), String> {
+    if value.contains(',') {
+        return Err(category_level_error(value));
+    }
+    let Some((category, level)) = value.split_once(':') else {
+        return Err(category_level_error(value));
+    };
+    if category.is_empty() || level.is_empty() || category.trim() != category {
+        return Err(category_level_error(value));
+    }
+    categories.push((category.to_string(), LogLevel::parse(level.trim())?));
     Ok(())
 }
 
@@ -355,13 +392,17 @@ Usage: krusty-lsp [options]
   --multi-client
       Accept another client after disconnect. Not supported, and it conflicts with --stdio and --client.
   --system-path <path>
-      Directory for caches and indexes. The same directory as -deps-cache-dir.
+      Kotlin LSP system directory. Krusty's dependency cache is <path>/krusty/deps.
+      This is the stdio launch subset: socket, client, and multiclient modes are not
+      implemented, and with no transport flag the server still speaks stdio.
   --log-level <LEVEL>
       TRACE, DEBUG, INFO, WARNING, ERROR, OFF, or ALL. Case-sensitive.
+      Accepted and validated for launch compatibility. It does not configure a logger.
       KOTLIN_LSP_LOG_LEVEL supplies the value when the option is absent.
   --log-category <category:LEVEL>
-      Per-category level. Repeat the option, or separate entries with commas.
-      KOTLIN_LSP_LOG_CATEGORIES supplies the value when the option is absent.
+      One category and level. Repeat the option for several categories.
+      Accepted and validated for launch compatibility. It does not configure a logger.
+      KOTLIN_LSP_LOG_CATEGORIES supplies one category:LEVEL when the option is absent.
   -cp, -classpath, -class-path <path>
   -jdk-home <path>
   -no-jdk
@@ -406,6 +447,13 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<LspOptions, String> {
         parse_env(args, |_| None)
+    }
+
+    fn invalid(args: &[&str]) -> String {
+        match LspOptions::parse_with(args.iter().map(|argument| argument.to_string()), |_| None) {
+            Err(OptionsError::Invalid(text)) => text,
+            other => panic!("expected an invalid-option error, got {other:?}"),
+        }
     }
 
     fn parse_env(
@@ -503,20 +551,30 @@ mod tests {
     }
 
     #[test]
-    fn stdio_launch_accepts_kotlin_lsp_cache_and_log_options() {
+    fn stdio_launch_keeps_krusty_cache_under_the_system_path() {
         let options = parse(&[
             "--stdio",
             "--system-path=/tmp/kotlin-lsp",
             "--log-level=DEBUG",
-            "--log-category=com.example:TRACE,indexing:INFO",
+            "--log-category=com.example:TRACE",
+            "--log-category=indexing:INFO",
             "--socket=127.0.0.1:9999",
         ])
         .unwrap();
-        assert_eq!(options.deps_cache_dir(), Some(Path::new("/tmp/kotlin-lsp")));
-        assert_eq!(options.log_level(), LogLevel::Debug);
         assert_eq!(
-            options.log_categories(),
-            &[
+            options.deps_cache_dir(),
+            Some(Path::new("/tmp/kotlin-lsp/krusty/deps"))
+        );
+        let log = select_log(
+            Some("DEBUG".to_string()),
+            &["com.example:TRACE".to_string(), "indexing:INFO".to_string()],
+            &mut |_| None,
+        )
+        .unwrap();
+        assert_eq!(log.level, LogLevel::Debug);
+        assert_eq!(
+            log.categories,
+            [
                 ("com.example".to_string(), LogLevel::Trace),
                 ("indexing".to_string(), LogLevel::Info),
             ]
@@ -525,55 +583,78 @@ mod tests {
 
     #[test]
     fn log_options_fall_back_to_the_kotlin_lsp_environment() {
-        let options = parse_env(&["--stdio"], |key| match key {
+        let from_env = select_log(None, &[], &mut |key| match key {
             "KOTLIN_LSP_LOG_LEVEL" => Some("WARNING".to_string()),
             "KOTLIN_LSP_LOG_CATEGORIES" => Some("resolve:ERROR".to_string()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(options.log_level(), LogLevel::Warning);
+        assert_eq!(from_env.level, LogLevel::Warning);
         assert_eq!(
-            options.log_categories(),
-            &[("resolve".to_string(), LogLevel::Error)]
+            from_env.categories,
+            [("resolve".to_string(), LogLevel::Error)]
         );
 
-        let overridden = parse_env(
-            &[
-                "--stdio",
-                "--log-level",
-                "OFF",
-                "--log-category",
-                "editor:DEBUG",
-            ],
-            |_| Some("TRACE".to_string()),
+        let overridden = select_log(
+            Some("OFF".to_string()),
+            &["editor:DEBUG".to_string()],
+            &mut |_| Some("TRACE".to_string()),
         )
         .unwrap();
-        assert_eq!(overridden.log_level(), LogLevel::Off);
+        assert_eq!(overridden.level, LogLevel::Off);
         assert_eq!(
-            overridden.log_categories(),
-            &[("editor".to_string(), LogLevel::Debug)]
+            overridden.categories,
+            [("editor".to_string(), LogLevel::Debug)]
         );
+        assert!(parse(&[
+            "--stdio",
+            "--log-level",
+            "OFF",
+            "--log-category",
+            "editor:DEBUG",
+        ])
+        .is_ok());
     }
 
     #[test]
     fn kotlin_lsp_launch_rejects_a_bad_level_category_or_socket() {
-        assert!(parse(&["--stdio", "--log-level=debug"])
-            .unwrap_err()
-            .contains("case-sensitive"));
-        assert!(parse(&["--stdio", "--log-category=:DEBUG"])
-            .unwrap_err()
-            .contains("not a valid category:level"));
-        assert!(parse(&["--stdio", "--log-category= :DEBUG"])
-            .unwrap_err()
-            .contains("not a valid category:level"));
         assert_eq!(
-            parse(&["--stdio", "--socket", "nope"]).unwrap_err(),
+            invalid(&["--stdio", "--log-level=debug"]),
+            "'debug' is not a valid log level. Supported values: TRACE, DEBUG, INFO, \
+             WARNING, ERROR, OFF, ALL (case-sensitive)"
+        );
+        assert_eq!(
+            invalid(&["--stdio", "--log-category=:DEBUG"]),
+            "':DEBUG' is not a valid category:level. Expected format <category>:<level>, \
+             e.g. com.example:DEBUG"
+        );
+        assert_eq!(
+            invalid(&["--stdio", "--log-category= :DEBUG"]),
+            "' :DEBUG' is not a valid category:level. Expected format <category>:<level>, \
+             e.g. com.example:DEBUG"
+        );
+        assert_eq!(
+            invalid(&["--stdio", "--log-category=com.example:TRACE,indexing:INFO"]),
+            "'com.example:TRACE,indexing:INFO' is not a valid category:level. Expected format \
+             <category>:<level>, e.g. com.example:DEBUG"
+        );
+        assert_eq!(
+            invalid(&["--stdio", "--socket", "nope"]),
             "'nope' is not a valid socket. Expected <host>:<port>"
         );
         assert_eq!(
-            parse(&["--socket=9999"]).unwrap_err(),
-            "socket transport is not supported; pass --stdio"
+            invalid(&["--socket=9999"]),
+            "'9999' is not a valid socket. Expected <host>:<port>"
         );
+        assert_eq!(
+            invalid(&["--socket=127.0.0.1:65536"]),
+            "'127.0.0.1:65536' is not a valid socket. Expected <host>:<port>"
+        );
+        assert_eq!(
+            invalid(&["--socket=127.0.0.1:-1"]),
+            "'127.0.0.1:-1' is not a valid socket. Expected <host>:<port>"
+        );
+        assert!(parse(&["--stdio", "--socket=[::1]:9999"]).is_ok());
         assert_eq!(
             parse(&["--stdio", "--client"]).unwrap_err(),
             "Can't use stdio mode with client mode"
@@ -587,16 +668,67 @@ mod tests {
             "Client mode doesn't support multiclient mode"
         );
         assert_eq!(
-            parse(&["--system-path", "/a", "-deps-cache-dir", "/b"]).unwrap_err(),
+            invalid(&["--system-path", "/a", "-deps-cache-dir", "/b"]),
             "pass either --system-path or -deps-cache-dir"
+        );
+        assert_eq!(
+            invalid(&["--system-path", ""]),
+            "--system-path requires a value"
+        );
+        assert_eq!(
+            invalid(&["--system-path="]),
+            "--system-path requires a value"
+        );
+        assert_eq!(
+            invalid(&["--system-path", "--stdio"]),
+            "--system-path requires a value"
         );
     }
 
     #[test]
-    fn help_is_not_a_startup_failure() {
-        let help = parse(&["--help"]).unwrap_err();
-        assert!(help.contains("--stdio"));
-        assert!(help.contains("--system-path"));
-        assert!(parse(&["-h"]).unwrap_err().contains("--log-level"));
+    fn help_is_the_help_variant_and_not_a_startup_error() {
+        for args in [["--help"], ["-h"]] {
+            match LspOptions::parse(args.iter().map(|argument| argument.to_string())) {
+                Err(OptionsError::Help(text)) => assert_eq!(text, help_text()),
+                Err(OptionsError::Invalid(text)) => {
+                    panic!("help was reported as a startup error: {text}")
+                }
+                Ok(_) => panic!("help was accepted as a launch"),
+            }
+        }
+    }
+
+    #[test]
+    fn system_path_gc_leaves_foreign_version_directories_in_place() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-system-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("v0")).unwrap();
+        std::fs::create_dir_all(root.join("v2")).unwrap();
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        std::fs::write(root.join("project").join("keep.txt"), b"keep").unwrap();
+
+        let options = LspOptions::parse([
+            "--system-path".to_string(),
+            root.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+        let cache = options.deps_cache_dir().unwrap();
+        assert_eq!(cache, root.join("krusty").join("deps"));
+        crate::deps_cache::gc(cache, 0, 0, u64::MAX).unwrap();
+
+        assert!(root.join("v0").is_dir());
+        assert!(root.join("v2").is_dir());
+        assert_eq!(
+            std::fs::read(root.join("project").join("keep.txt")).unwrap(),
+            b"keep"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
