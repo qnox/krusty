@@ -514,8 +514,10 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
 /// boxed `void`, so representation-only casts and checks name `java/lang/Void`; `instanceof Void`
 /// remains false for every realizable Kotlin value and for `null`.
 pub(crate) fn instanceof_internal_name(t: Ty) -> &'static str {
+    if t.mentions_pending() || t.mentions_error() {
+        unreachable!("a not-determined type reached a JVM instanceof name");
+    }
     match t {
-        Ty::Pending => unreachable!("a not-determined type reached a JVM instanceof name"),
         Ty::Nothing => classfile_internal_name_of(crate::types::wk::java_void()),
         Ty::String => "java/lang/String",
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
@@ -880,9 +882,45 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a not-determined type reached a JVM instanceof name")]
-    fn instanceof_name_rejects_an_undetermined_type() {
-        instanceof_internal_name(Ty::Pending);
+    fn instanceof_name_rejects_direct_and_nested_undetermined_types() {
+        let invalid = [
+            ("direct pending", Ty::Pending),
+            ("direct error", Ty::Error),
+            (
+                "object argument pending",
+                Ty::obj_args("sample/Box", &[Ty::Pending]),
+            ),
+            (
+                "object argument error",
+                Ty::obj_args("sample/Box", &[Ty::Error]),
+            ),
+            (
+                "function parameter pending",
+                Ty::fun(vec![Ty::Pending], Ty::Unit),
+            ),
+            (
+                "function parameter error",
+                Ty::fun(vec![Ty::Error], Ty::Unit),
+            ),
+            ("function return pending", Ty::fun(Vec::new(), Ty::Pending)),
+            ("function return error", Ty::fun(Vec::new(), Ty::Error)),
+        ];
+        for (label, ty) in invalid {
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = instanceof_internal_name(ty);
+            }));
+            let message = panicked.expect_err(label);
+            let text = message
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| message.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or_else(|| panic!("{label}: non-string panic"));
+            assert_eq!(
+                text,
+                "internal error: entered unreachable code: a not-determined type reached a JVM instanceof name",
+                "{label}"
+            );
+        }
     }
 
     #[test]
