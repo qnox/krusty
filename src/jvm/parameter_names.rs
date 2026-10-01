@@ -673,6 +673,7 @@ mod tests {
             receiver_parameter: Some(0),
             label: label.map(str::to_owned),
             form: crate::ir::IrLambdaForm::Literal,
+            class_provenance: None,
         };
 
         ir.lambda_origins.insert(function, origin(None));

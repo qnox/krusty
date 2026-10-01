@@ -1008,6 +1008,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrLambdaForm::AnonymousFunction
                         }
                     },
+                    class_provenance: None,
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");

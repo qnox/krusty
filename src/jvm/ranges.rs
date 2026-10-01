@@ -201,6 +201,7 @@ pub(super) fn realize(
             | IrExpr::Vararg { .. }
             | IrExpr::PluginPlaceholder { .. }
             | IrExpr::CurrentContinuation
+            | IrExpr::InlineFrameMarker
             | IrExpr::ForwardedSuperArgument { .. } => {}
         }
     }
