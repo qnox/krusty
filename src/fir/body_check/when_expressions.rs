@@ -148,11 +148,20 @@ impl BodyFirChecker<'_> {
                     .guard
                     .map(|guard| self.boolean_condition(guard))
                     .transpose()?;
+                let checked = self.expression(arm.body)?;
+                // A branch written as a lambda, or as a block whose value is one, is still that
+                // function until the conversion recorded for the expected fun interface is applied.
+                let result = if self.branch_has_recorded_sam(arm.body) {
+                    let target = self.expression_type(expression)?;
+                    self.with_recorded_sam_conversion(arm.body, checked, target)?
+                } else {
+                    checked
+                };
                 Ok(FirWhenBranch {
                     origin,
                     conditions: conditions.into_boxed_slice(),
                     guard,
-                    result: self.expression(arm.body)?,
+                    result,
                 })
             })
             .collect::<Result<Vec<_>, BodyCheckFailure>>();
