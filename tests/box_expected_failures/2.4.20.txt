@@ -207,7 +207,6 @@ sam/constructors/sameWrapperClass.kt
 sam/constructors/sameWrapperClass2.kt
 sam/topLevelConversions.kt
 secondaryConstructors/localClasses.kt
-specialBuiltins/enumAsOrdinaled.kt
 suspendConversion/suspendConversionNullableCCE.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt

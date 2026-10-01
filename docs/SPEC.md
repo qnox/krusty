@@ -1725,7 +1725,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
   order, and synthetic `values()`/`valueOf(String)`. `e.ordinal`/`e.name` are `Enum.ordinal()`/
-  `name()`; entry equality is reference identity (`==`). Entry constructor args are constant
+  `name()`; entry equality is reference identity (`==`). An interface property of the same spelling
+  is still the ordinary accessor `getOrdinal()`/`getName()`. When an enum implements that interface,
+  the inherited `Enum` member supplies the body and the enum emits the accessor as a bridge to
+  `ordinal()`/`name()` (`specialBuiltins/enumAsOrdinaled.kt`). Entry constructor args are constant
   expressions evaluated in `<clinit>` (branchy args are spilled to `<clinit>` temps).
 - **Enum entries with a body / abstract enum members**: an `abstract fun`/bodied entry makes the enum
   `ACC_ABSTRACT` (not `final`); each entry with a body (`ENTRY { override fun m() = … }`) is emitted
