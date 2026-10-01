@@ -54,7 +54,7 @@ impl Checker<'_> {
             LambdaCheckMode {
                 suspend: false,
                 coerce_return_to_unit: false,
-                expected_return: None,
+                result_constraint: LambdaResultConstraint::Open,
             },
         )
     }
