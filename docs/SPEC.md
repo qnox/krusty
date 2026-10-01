@@ -9818,6 +9818,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     was never published declines the expansion instead of guessing, because either guess silently
     erases something — the parameter's identity, or the splice.
     (`a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none`.)
+  - A lambda argument is one value when the DECLARED parameter is not a non-null function type.
+    `inline fun foo(x: Any) { x === x }; foo { 42 }` and `inline fun <T> same(x: T) = x === x`
+    each build one function object. Splicing the lambda at each use compares two instances, so the
+    identity check takes the failure branch. An extension receiver of function type is the same
+    shape: only a value parameter whose declaration type is a non-null function type, and which
+    the declaration did not mark `noinline`, is spliced. A nullable function parameter is not that
+    type — kotlinc rejects it unless the parameter writes `noinline`, and the argument is then one
+    object. A typealias of a non-null function type is that type, so a lambda passed to it is
+    spliced and may return from the caller. The expansion does not rediscover this from the index
+    or from `Ty::Fun` at the call: publication records receiver, splice, or materialize on the
+    parameter identity, and a missing or unaligned mode declines before the call is copied.
+    The call site's substitution does not change that — a type parameter specialized to a function
+    type is still a value.
+    (`inline_non_function_parameter_materializes_a_lambda_once`, the `inline/lambdaAsAny.kt` box,
+    `inline_type_parameter_materializes_a_lambda_once`,
+    `inline_nullable_function_parameter_materializes_its_lambda`, and
+    `inline_typealias_of_a_function_splices_its_lambda`.)
 
   Nothing is recovered from a name here: the role and the coordinate are recorded where the
   expansion is built, and the `$this$`/`$iv` spellings exist only at the JVM boundary. Tests:

@@ -931,6 +931,8 @@ mod inline_crossinline_object_e2e;
 mod inline_deep_coverage_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
+#[path = "inline_lambda_as_value_e2e.rs"]
+mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_expansion_e2e.rs"]
 mod inline_lambda_expansion_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]

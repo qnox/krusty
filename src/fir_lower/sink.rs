@@ -63,6 +63,7 @@ pub enum FirFileLoweringFailure {
         expected: u32,
         actual: u32,
     },
+    InvalidInlineParameterContract(CallableId),
     UndeterminedType(crate::ir::UndeterminedIrType),
     ValueIdentityOverflow,
     /// The frontend's selected entry point has no realization in this file's function arena.
@@ -1307,12 +1308,9 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 }
             }
-            let inline_modifiers = inline_parameter_modifiers(index, callable.id, &identities);
-            self.ir.fn_params.insert(function, {
-                let mut info = FnParamInfo::identities(identities);
-                info.inline_modifiers = inline_modifiers;
-                info
-            });
+            self.ir
+                .fn_params
+                .insert(function, FnParamInfo::identities(identities));
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
                 self.ir
                     .plugin_declaration_functions
@@ -1405,6 +1403,24 @@ impl<'a> CommonIrBodySink<'a> {
             .has(crate::fir::DeclarationFlags::COMPANION);
         if !default_fragment && self.ir.functions[function as usize].body.is_some() {
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+        }
+        if callable.is_inline() {
+            let (modifiers, modes) = body.inline_parameter_contract();
+            let info = self.ir.fn_params.get_mut(&function).ok_or(
+                FirFileLoweringFailure::InvalidInlineParameterContract(callable.id),
+            )?;
+            if modifiers.len() != info.identities.len()
+                || modes.len() != info.identities.len()
+                || (!info.inline_modifiers.is_empty()
+                    && info.inline_modifiers.as_slice() != modifiers)
+                || (!info.expansion_modes.is_empty() && info.expansion_modes.as_slice() != modes)
+            {
+                return Err(FirFileLoweringFailure::InvalidInlineParameterContract(
+                    callable.id,
+                ));
+            }
+            info.inline_modifiers = modifiers.to_vec();
+            info.expansion_modes = modes.to_vec();
         }
         let origin = body
             .roots()
@@ -1610,28 +1626,4 @@ fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
             ir.infix_fns.insert(function);
         }
     }
-}
-
-/// The inline modifier each parameter in `identities` wrote, parallel to it. The extension receiver is not a declared value parameter and never carries one.
-fn inline_parameter_modifiers(
-    index: &ResolvedModuleIndex,
-    callable: crate::fir::CallableId,
-    identities: &[crate::ir::IrParameterIdentity],
-) -> Vec<crate::types::InlineParameterModifier> {
-    use crate::types::InlineParameterModifier as Modifier;
-    let mut ordinal = 0;
-    identities
-        .iter()
-        .map(|identity| {
-            if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
-                return Modifier::None;
-            }
-            let flags = index
-                .callable_parameter(callable, ordinal)
-                .expect("published parameter-name count must address every parameter")
-                .flags();
-            ordinal += 1;
-            flags.inline_modifier()
-        })
-        .collect()
 }

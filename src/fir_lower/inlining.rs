@@ -31,9 +31,6 @@ enum InlineOperandRole {
     /// A declared value parameter the callee expands at each of its uses. It owns no local, so an
     /// argument that is already a local keeps the caller's slot.
     Spliced,
-    /// A declared value parameter whose role the index never published. Neither answer above can
-    /// be assumed from what is left: the expansion declines.
-    Unpublished,
 }
 
 /// One physical operand position of an inline expansion: the local it would materialize, and what
@@ -68,13 +65,36 @@ impl InlineOperand {
         }
     }
 
-    fn is_unpublished(&self) -> bool {
-        matches!(self.role, InlineOperandRole::Unpublished)
-    }
-
     fn is_spliced(&self) -> bool {
         matches!(self.role, InlineOperandRole::Spliced)
     }
+}
+
+/// The plan for one supplied argument, once its declaration mode is known.
+#[derive(Debug, PartialEq, Eq)]
+enum SuppliedOperandPlan {
+    Splice,
+    Reuse,
+    Copy,
+}
+
+/// `None` when this operand has no published mode. Callers decline before allocating.
+fn supplied_operand_plan(
+    mode: Option<crate::types::InlineExpansionMode>,
+    argument_is_local: bool,
+    argument_is_lambda: bool,
+) -> Option<SuppliedOperandPlan> {
+    Some(match mode? {
+        crate::types::InlineExpansionMode::Splice if argument_is_lambda => {
+            SuppliedOperandPlan::Splice
+        }
+        crate::types::InlineExpansionMode::Splice if argument_is_local => {
+            SuppliedOperandPlan::Reuse
+        }
+        crate::types::InlineExpansionMode::Splice
+        | crate::types::InlineExpansionMode::Materialize
+        | crate::types::InlineExpansionMode::Receiver => SuppliedOperandPlan::Copy,
+    })
 }
 
 impl BodyLowering<'_> {
@@ -208,13 +228,88 @@ impl BodyLowering<'_> {
                 FirTypeParameterRef::External { .. } => None,
             })
             .collect::<HashMap<_, _>>();
-        let operand_types = function_shape
+        // The declared parameter type, before this call's substitutions. A type parameter
+        // specialized to a function type is still not an inline lambda parameter.
+        let declared_operand_types = function_shape
             .dispatch_receiver
             .map(Ty::obj_name)
             .into_iter()
             .chain(function_shape.params.iter().copied())
+            .collect::<Vec<_>>();
+        let operand_types = declared_operand_types
+            .iter()
+            .copied()
             .map(|ty| ty_subst_keep_unbound(ty, &bindings))
             .collect::<Vec<_>>();
+        // The declaration published one mode per semantic parameter. A missing or unaligned mode
+        // declines before any operand is copied into the arena: guessing splice or copy would
+        // change identity and evaluation.
+        let modes = {
+            let stored = self.ir.inline_expansion_modes(function)?;
+            let mut modes = Vec::with_capacity(operands.len());
+            if self
+                .ir
+                .functions
+                .get(function as usize)?
+                .dispatch_receiver
+                .is_some()
+            {
+                modes.push(crate::types::InlineExpansionMode::Receiver);
+            }
+            modes.extend_from_slice(stored);
+            if modes.len() != operands.len() {
+                return None;
+            }
+            modes
+        };
+        // Resolve every operand's published mode before copying arguments. A receiver mode on a
+        // value parameter, or a mode list that does not cover the identities, declines here.
+        let mut parameter_names: Vec<InlineOperand> = Vec::new();
+        if self
+            .ir
+            .functions
+            .get(function as usize)?
+            .dispatch_receiver
+            .is_some()
+        {
+            parameter_names.push(InlineOperand::receiver(
+                self.ir.functions[function as usize].name.clone(),
+                IrInlineLocalRole::DispatchReceiver,
+            ));
+        }
+        if let Some(identities) = self.ir.function_parameter_identities(function) {
+            let mut mode_at = parameter_names.len();
+            for identity in identities {
+                let mode = modes.get(mode_at).copied()?;
+                mode_at += 1;
+                if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
+                    if mode != crate::types::InlineExpansionMode::Receiver {
+                        return None;
+                    }
+                    parameter_names.push(InlineOperand::receiver(
+                        self.ir.functions[function as usize].name.clone(),
+                        IrInlineLocalRole::ExtensionReceiver,
+                    ));
+                    continue;
+                }
+                parameter_names.push(InlineOperand {
+                    source_name: identity.source_name.clone(),
+                    local_role: IrInlineLocalRole::Value,
+                    role: match mode {
+                        crate::types::InlineExpansionMode::Splice => InlineOperandRole::Spliced,
+                        crate::types::InlineExpansionMode::Materialize => {
+                            InlineOperandRole::Materialized
+                        }
+                        crate::types::InlineExpansionMode::Receiver => return None,
+                    },
+                });
+            }
+            if mode_at != modes.len() {
+                return None;
+            }
+        } else if !modes.is_empty() {
+            return None;
+        }
         let operands = operands
             .iter()
             .map(|operand| {
@@ -253,49 +348,6 @@ impl BodyLowering<'_> {
         } else {
             vec![None; operands.len()]
         };
-        // Preserve the source name and semantic role/depth of every local this expansion
-        // materializes. Target-specific decoration is deferred until debug-info emission.
-        let mut parameter_names: Vec<InlineOperand> = Vec::new();
-        if self
-            .ir
-            .functions
-            .get(function as usize)?
-            .dispatch_receiver
-            .is_some()
-        {
-            parameter_names.push(InlineOperand::receiver(
-                self.ir.functions[function as usize].name.clone(),
-                IrInlineLocalRole::DispatchReceiver,
-            ));
-        }
-        if let Some(identities) = self.ir.function_parameter_identities(function) {
-            let mut ordinal = 0;
-            for identity in identities {
-                if matches!(identity.role, crate::ir::IrParameterRole::ExtensionReceiver) {
-                    parameter_names.push(InlineOperand::receiver(
-                        self.ir.functions[function as usize].name.clone(),
-                        IrInlineLocalRole::ExtensionReceiver,
-                    ));
-                    continue;
-                }
-                parameter_names.push(InlineOperand {
-                    source_name: identity.source_name.clone(),
-                    local_role: IrInlineLocalRole::Value,
-                    // `noinline` is the callee's own statement that this argument is a real
-                    // closure rather than a body spliced at each use.
-                    role: match self
-                        .index
-                        .callable_parameter(target, ordinal)
-                        .map(|parameter| parameter.flags().materializes_its_lambda())
-                    {
-                        Some(true) => InlineOperandRole::Materialized,
-                        Some(false) => InlineOperandRole::Spliced,
-                        None => InlineOperandRole::Unpublished,
-                    },
-                });
-                ordinal += 1;
-            }
-        }
         // Decide every operand BEFORE anything is allocated. A declined expansion must leave the
         // arena exactly as it found it: a copy made for a parameter the expansion then refuses is
         // an orphan node, and a temporary allocated for it shifts every local index after it.
@@ -311,10 +363,9 @@ impl BodyLowering<'_> {
         // blockImpl(p)`) then materialized a `Function0` whose implementation method was never
         // emitted.
         //
-        // The function TYPE alone does not say which is which. A `noinline` parameter is
-        // function-typed exactly like the spliced one beside it and is a real closure with its own
-        // local, name and lifetime, so the callee's declared role decides and the type only rules
-        // out the parameters that cannot splice at all.
+        // Which parameter splices was recorded with its identity: a non-null function type that
+        // did not write `noinline` splices, and a receiver, `noinline`, nullable function, type
+        // parameter, or `Any` materializes. The argument's type is not consulted again.
         //
         // A parameter with no name or no published role to align against is a broken contract
         // between this expansion and the callable's published header, not a shape to fall back on:
@@ -342,41 +393,38 @@ impl BodyLowering<'_> {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let mut plans = Vec::with_capacity(operands.len());
-        for (index, ((operand, lambda), ty)) in operands
-            .iter()
-            .zip(inline_lambdas)
-            .zip(&operand_types)
-            .enumerate()
-        {
+        let mut splice_lambda = vec![false; operands.len()];
+        for (index, (operand, lambda)) in operands.iter().zip(inline_lambdas).enumerate() {
             let Some(operand) = operand else {
-                plans.push(if default_lambdas.contains(&index) {
+                let splice = default_lambdas.contains(&index);
+                splice_lambda[index] = splice;
+                plans.push(if splice {
                     InlineOperandPlan::Splice
                 } else {
                     InlineOperandPlan::Default
                 });
                 continue;
             };
-            plans.push(match (self.ir.expr(*operand), lambda) {
-                (IrExpr::GetValue(_), None)
-                    if matches!(ty.non_null(), crate::types::Ty::Fun(_))
-                        && parameter_names
-                            .get(index)
-                            .is_some_and(InlineOperand::is_unpublished) =>
-                {
-                    return None
-                }
-                (IrExpr::GetValue(_), None) if parameter_names.get(index).is_none() => return None,
-                (IrExpr::GetValue(slot), None)
-                    if matches!(ty.non_null(), crate::types::Ty::Fun(_))
-                        && parameter_names
-                            .get(index)
-                            .is_some_and(InlineOperand::is_spliced) =>
-                {
+            if parameter_names.get(index).is_none() {
+                return None;
+            }
+            let plan = match supplied_operand_plan(
+                modes.get(index).copied(),
+                matches!(self.ir.expr(*operand), IrExpr::GetValue(_)),
+                lambda.is_some(),
+            ) {
+                Some(SuppliedOperandPlan::Splice) => InlineOperandPlan::Splice,
+                Some(SuppliedOperandPlan::Reuse) => {
+                    let IrExpr::GetValue(slot) = self.ir.expr(*operand) else {
+                        return None;
+                    };
                     InlineOperandPlan::Reuse(*slot)
                 }
-                (_, None) => InlineOperandPlan::Copy,
-                (_, Some(_)) => InlineOperandPlan::Splice,
-            });
+                Some(SuppliedOperandPlan::Copy) => InlineOperandPlan::Copy,
+                None => return None,
+            };
+            splice_lambda[index] = matches!(plan, InlineOperandPlan::Splice);
+            plans.push(plan);
         }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
@@ -418,6 +466,13 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         let mut inline_lambdas = inline_lambdas.to_vec();
+        // A copied lambda is a value. Leaving it in this table would replace every read with a
+        // fresh copy of the literal, so `x === x` would compare two objects.
+        for (lambda, splice) in inline_lambdas.iter_mut().zip(&splice_lambda) {
+            if !splice {
+                *lambda = None;
+            }
+        }
         let mut default_lambda_implementations = Vec::new();
         for &index in &default_lambdas {
             let lambda = self.inline_default_lambda(
@@ -1511,6 +1566,39 @@ fn tail_statement_block_chain(
             return Some(chain);
         }
         current = last;
+    }
+}
+
+#[cfg(test)]
+mod expansion_mode_tests {
+    use super::supplied_operand_plan;
+    use crate::types::InlineExpansionMode;
+
+    #[test]
+    fn a_missing_mode_declines_a_lambda_instead_of_copying_it() {
+        assert!(supplied_operand_plan(None, false, true).is_none());
+        assert!(supplied_operand_plan(None, true, false).is_none());
+    }
+
+    #[test]
+    fn a_published_mode_chooses_splice_reuse_or_copy() {
+        use super::SuppliedOperandPlan;
+        assert_eq!(
+            supplied_operand_plan(Some(InlineExpansionMode::Splice), false, true),
+            Some(SuppliedOperandPlan::Splice)
+        );
+        assert_eq!(
+            supplied_operand_plan(Some(InlineExpansionMode::Splice), true, false),
+            Some(SuppliedOperandPlan::Reuse)
+        );
+        assert_eq!(
+            supplied_operand_plan(Some(InlineExpansionMode::Materialize), false, true),
+            Some(SuppliedOperandPlan::Copy)
+        );
+        assert_eq!(
+            supplied_operand_plan(Some(InlineExpansionMode::Receiver), false, true),
+            Some(SuppliedOperandPlan::Copy)
+        );
     }
 }
 

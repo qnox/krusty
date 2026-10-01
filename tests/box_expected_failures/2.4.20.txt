@@ -118,7 +118,6 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/Ex
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 initializers/static_arrays.kt
 inline/callableReferenceOfLocalFun.kt
-inline/lambdaAsAny.kt
 inline/localDeclarationsClash.kt
 inlineClasses/boundCallableReferencePassedToInlineFunction.kt
 inlineClasses/boundCallableReferencePassedToInlineFunctionGeneric.kt

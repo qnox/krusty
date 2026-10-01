@@ -1868,6 +1868,10 @@ pub struct FirBody {
     bodiless_lifting_sites: Vec<FirLiftingSite>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
+    /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
+    /// this once; common lowering copies it without consulting declaration headers or types.
+    inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
+    inline_expansion_modes: Vec<crate::types::InlineExpansionMode>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1920,6 +1924,8 @@ impl FirBody {
             bodiless_lifting_sites: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
+            inline_parameter_modifiers: Vec::new(),
+            inline_expansion_modes: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2158,6 +2164,36 @@ impl FirBody {
 
     pub fn parameters(&self) -> &[FirValueParameter] {
         &self.parameters
+    }
+
+    pub(crate) fn publish_inline_parameter_contract(
+        &mut self,
+        modifiers: Vec<crate::types::InlineParameterModifier>,
+        modes: Vec<crate::types::InlineExpansionMode>,
+    ) {
+        assert!(
+            self.inline_parameter_modifiers.is_empty() && self.inline_expansion_modes.is_empty(),
+            "a FIR body may publish its inline parameter contract only once"
+        );
+        assert_eq!(
+            modifiers.len(),
+            modes.len(),
+            "inline parameter modifiers and modes are parallel"
+        );
+        self.inline_parameter_modifiers = modifiers;
+        self.inline_expansion_modes = modes;
+    }
+
+    pub(crate) fn inline_parameter_contract(
+        &self,
+    ) -> (
+        &[crate::types::InlineParameterModifier],
+        &[crate::types::InlineExpansionMode],
+    ) {
+        (
+            &self.inline_parameter_modifiers,
+            &self.inline_expansion_modes,
+        )
     }
 
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
@@ -2762,6 +2798,10 @@ impl FirBody {
 
     pub fn storage_payload_bytes(&self) -> usize {
         self.parameters.len() * std::mem::size_of::<FirValueParameter>()
+            + self.inline_parameter_modifiers.len()
+                * std::mem::size_of::<crate::types::InlineParameterModifier>()
+            + self.inline_expansion_modes.len()
+                * std::mem::size_of::<crate::types::InlineExpansionMode>()
             + self
                 .property_delegate
                 .as_ref()

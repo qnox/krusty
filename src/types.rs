@@ -12,7 +12,7 @@ pub(crate) use substitute::{
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
-pub use crate::inline_parameter_modifier::InlineParameterModifier;
+pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 pub(crate) use spelling::type_name_from_multifile_facade;

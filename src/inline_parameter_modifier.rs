@@ -58,3 +58,69 @@ impl InlineParameterModifier {
         !matches!(self, InlineParameterModifier::None)
     }
 }
+
+/// How an inline expansion treats one physical parameter.
+///
+/// The checker publishes this with the parameter identity. Call-site expansion only consumes it:
+/// it does not re-read the declaration index or decide from the argument's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineExpansionMode {
+    /// A dispatch or extension receiver. A lambda passed here is a value.
+    Receiver,
+    /// A non-null function parameter that did not write `noinline`. Its lambda is spliced.
+    Splice,
+    /// Every other parameter: `noinline`, a nullable or aliased-away non-function type, a type
+    /// parameter, `Any`, or a capture.
+    Materialize,
+}
+
+impl InlineExpansionMode {
+    /// `is_non_null_function` is the resolved declaration type, after typealias expansion, and is
+    /// false for `T?` even when `T` is a function type.
+    pub const fn declared(
+        is_receiver: bool,
+        is_non_null_function: bool,
+        modifier: InlineParameterModifier,
+    ) -> Self {
+        if is_receiver {
+            Self::Receiver
+        } else if matches!(modifier, InlineParameterModifier::Noinline) || !is_non_null_function {
+            Self::Materialize
+        } else {
+            Self::Splice
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InlineExpansionMode, InlineParameterModifier};
+
+    #[test]
+    fn a_non_null_function_parameter_splices_unless_it_wrote_noinline() {
+        assert_eq!(
+            InlineExpansionMode::declared(false, true, InlineParameterModifier::None),
+            InlineExpansionMode::Splice
+        );
+        assert_eq!(
+            InlineExpansionMode::declared(false, true, InlineParameterModifier::Crossinline),
+            InlineExpansionMode::Splice
+        );
+        assert_eq!(
+            InlineExpansionMode::declared(false, true, InlineParameterModifier::Noinline),
+            InlineExpansionMode::Materialize
+        );
+    }
+
+    #[test]
+    fn a_receiver_or_non_function_parameter_is_not_spliced() {
+        assert_eq!(
+            InlineExpansionMode::declared(true, true, InlineParameterModifier::None),
+            InlineExpansionMode::Receiver
+        );
+        assert_eq!(
+            InlineExpansionMode::declared(false, false, InlineParameterModifier::None),
+            InlineExpansionMode::Materialize
+        );
+    }
+}
