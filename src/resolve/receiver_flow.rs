@@ -367,7 +367,10 @@ impl CompletedFlow {
             checker.apply_narrowing_unchecked(scope, &path, ty);
         }
         for (name, ty) in self.locals {
-            checker.set_local_narrow(scope, &name, Some(ty));
+            // This is a fact proved by a completed expression, not a source write. Actual
+            // assignments already record their binding identity while they are checked; using the
+            // write API here would make an enclosing catch discard a still-valid entry narrowing.
+            scope.narrow_local(&name, Some(ty));
         }
     }
 
