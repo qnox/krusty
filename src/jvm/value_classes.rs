@@ -2615,6 +2615,10 @@ pub(crate) fn lower_value_classes(
             // the binding named. Leaving the binding would ask the later name stamp to rename
             // a call that no longer exists.
             accessor_names::retire_replaced_accessor_call(ir, id);
+            // A user member whose static name is `unbox-impl` shares that spelling with the
+            // representation call synthesized for `equals-impl`. Replacing the representation call
+            // must drop its type-operation edge; the replacement is a different operation.
+            type_operation_roles::retire_unbox_type_operation_edge(ir, id);
             ir.exprs[i] = r;
         }
     }

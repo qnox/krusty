@@ -36,6 +36,11 @@ pub(super) fn record_unbox_type_operation_edge(ir: &mut IrFile, call: ExprId, re
     );
 }
 
+/// `call` is about to be replaced, so it is no longer the unbox operation this edge named.
+pub(super) fn retire_unbox_type_operation_edge(ir: &mut IrFile, call: ExprId) {
+    ir.value_class_unbox_type_operation_edges.remove(&call);
+}
+
 /// Exact type-operation receivers of generated value-class unbox calls still present in the IR.
 pub(super) fn recorded_unbox_type_operation_receivers(
     ir: &IrFile,
@@ -188,6 +193,27 @@ mod tests {
         assert_eq!(
             crate::jvm::names::type_descriptor(Ty::obj_name(array)),
             crate::jvm::names::type_descriptor(carrier)
+        );
+    }
+
+    #[test]
+    fn replacing_a_recorded_unbox_call_drops_its_type_operation_edge() {
+        let array = crate::types::type_name("kotlin/UIntArray");
+        let carrier = Ty::obj("kotlin/IntArray");
+        let mut under = Under::new();
+        under.insert(array, carrier);
+        let mut ir = IrFile::default();
+        let arg = ir.add_expr(IrExpr::GetValue(0));
+        super::super::unboxing_rewrites::unbox_wrap(&mut ir, arg, array, &under);
+        let unbox_cast = ir.value_class_unbox_type_operation_edges[&arg];
+        ir.exprs[arg as usize] = IrExpr::Const(crate::ir::IrConst::Int(0));
+        retire_unbox_type_operation_edge(&mut ir, arg);
+
+        record_primitive_array_type_operations(&mut ir, &under);
+
+        assert_eq!(
+            ir.value_class_type_operations[&unbox_cast].role,
+            IrValueClassTypeRole::Carrier
         );
     }
 }
