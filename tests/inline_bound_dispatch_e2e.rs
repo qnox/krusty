@@ -85,7 +85,12 @@ fn disassemble(path: &Path) -> String {
 fn method_invokes(disassembly: &str, marker: &str) -> Vec<String> {
     common::method_instructions(disassembly, marker)
         .into_iter()
-        .filter(|line| line.contains("invoke"))
+        .filter_map(|line| {
+            let (_, instruction) = line.split_once(": ")?;
+            instruction
+                .contains("invoke")
+                .then(|| instruction.to_string())
+        })
         .collect()
 }
 
