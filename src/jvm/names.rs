@@ -842,12 +842,8 @@ mod tests {
         assert_eq!(function_invoke_descriptor(0), "()Ljava/lang/Object;");
         for arity in 0..=22 {
             let descriptor = function_invoke_descriptor(arity);
-            assert_eq!(
-                descriptor.matches("Ljava/lang/Object;").count(),
-                arity + 1,
-                "{arity}"
-            );
-            assert!(descriptor.ends_with(")Ljava/lang/Object;"), "{arity}");
+            let expected = format!("({})Ljava/lang/Object;", "Ljava/lang/Object;".repeat(arity));
+            assert_eq!(descriptor, expected, "{arity}");
         }
         let high = function_invoke_descriptor(23);
         assert!(std::ptr::eq(high, function_invoke_descriptor(40)));

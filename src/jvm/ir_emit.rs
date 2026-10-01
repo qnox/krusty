@@ -12279,8 +12279,6 @@ const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljav
 Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
-/// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
-/// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
 fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
 }
@@ -12289,6 +12287,8 @@ fn jvm_function_interface(arity: u8) -> &'static str {
     crate::jvm::names::function_interface_internal_name(usize::from(arity))
 }
 
+/// Erased `FunctionN.invoke` descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;`.
+/// Past arity 22 every call shares `([Ljava/lang/Object;)Ljava/lang/Object;`.
 fn jvm_function_invoke_descriptor(arity: u8) -> &'static str {
     crate::jvm::names::function_invoke_descriptor(usize::from(arity))
 }
