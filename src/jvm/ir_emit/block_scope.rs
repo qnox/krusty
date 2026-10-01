@@ -136,10 +136,7 @@ impl Emitter<'_> {
         if let Some(&line) = self.ir.expr_source_lines.get(&block) {
             code.inlined_line(u16::try_from(line).unwrap_or(u16::MAX));
         }
-        // This is a placeholder, not intrinsically executable code. A backend operation appended
-        // immediately after the expansion can occupy the boundary itself; otherwise ordinary nop
-        // cleanup decides whether this byte is required for the empty debug range.
-        code.line_placeholder();
+        code.nop();
     }
 
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes

@@ -2108,15 +2108,6 @@ pub struct Label {
 static NEXT_CODE_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
-struct LinePlaceholder {
-    offset: usize,
-    next_bind: u32,
-    line_marks: usize,
-    local_entries: usize,
-    exceptions: usize,
-}
-
-#[derive(Clone)]
 pub struct CodeBuilder {
     id: u64,
     pub bytes: Vec<u8>,
@@ -2137,9 +2128,6 @@ pub struct CodeBuilder {
     /// same offset: the next one appends after it instead of replacing it. See
     /// [`CodeBuilder::mark_line_retained`].
     retained_line_mark: Option<usize>,
-    /// A debugger-only `nop` that may be replaced by the next real instruction, provided no
-    /// offset-bearing side table changed after it was emitted.
-    line_placeholder_nop: Option<LinePlaceholder>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
@@ -2196,7 +2184,6 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             line_marks: Vec::new(),
             retained_line_mark: None,
-            line_placeholder_nop: None,
             local_entries: Vec::new(),
             implicit_void_return_pc: None,
             dead: false,
