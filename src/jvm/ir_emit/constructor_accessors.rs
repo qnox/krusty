@@ -20,6 +20,41 @@ use crate::jvm::method_parameters::{
 };
 use crate::types::TypeName;
 
+/// Whether this construction goes through the value-class `DefaultConstructorMarker` accessor.
+///
+/// An annotation implementation stores each member as its carrier. Its `<init>` does not take
+/// that marker, even when a member is an unsigned array.
+pub(super) fn uses_value_class_marker_accessor(
+    ir: &IrFile,
+    expression: crate::ir::ExprId,
+    owner: TypeName,
+    owner_spelling: &str,
+    defaults_empty: bool,
+    parameters_come_from_class: bool,
+) -> bool {
+    if !defaults_empty {
+        return false;
+    }
+    if ir
+        .class_id_by_name(owner)
+        .is_some_and(|class| ir.classes[class as usize].annotation_impl_of.is_some())
+    {
+        return false;
+    }
+    (parameters_come_from_class && ir.has_value_param_ctor(owner_spelling))
+        || ir.has_value_class_parameter_construction(expression)
+        || ir
+            .construction_targets
+            .get(&expression)
+            .is_some_and(|target| {
+                reached_through_accessor(
+                    *target,
+                    ir.expression_owners.get(&expression).copied(),
+                    owner,
+                )
+            })
+}
+
 /// Whether code in `caller` calls the `owner` constructor `target` through its accessor rather
 /// than directly. `caller` is `None` for package-level code.
 pub(super) fn reached_through_accessor(

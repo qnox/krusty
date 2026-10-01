@@ -1861,6 +1861,27 @@ pub struct SynthesizedAccessorCall {
     pub property: u32,
 }
 
+/// Which JVM class a value-class type operation names.
+///
+/// An unsigned array's box (`kotlin/UIntArray`) and its carrier (`int[]`) share one descriptor.
+/// Realization records which of the two this exact type operation names; emission reads the record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrValueClassTypeRole {
+    /// The value class itself (`kotlin/UIntArray`).
+    Box,
+    /// The declared carrier (`[I`).
+    Carrier,
+}
+
+/// Box owner, carrier, and the role of one type operation. The two classfile names can collide
+/// as descriptors, so the role is part of the record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrValueClassTypeOperation {
+    pub boxed_owner: TypeName,
+    pub carrier: Ty,
+    pub role: IrValueClassTypeRole,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2173,6 +2194,13 @@ pub struct IrFile {
     pub elvis_safe_call_guards: std::collections::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
+    /// Value-class type operations whose box and carrier are different JVM classes.
+    /// Realization writes the role; emission reads it and does not rediscover it.
+    pub value_class_type_operations: std::collections::HashMap<ExprId, IrValueClassTypeOperation>,
+    /// JVM value-class unbox call -> the exact type operation selected as its receiver. The
+    /// adaptation boundary records this edge when it creates the call; later representation
+    /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
+    pub(crate) value_class_unbox_type_operation_edges: std::collections::HashMap<ExprId, ExprId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

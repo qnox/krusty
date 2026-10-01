@@ -250,16 +250,5 @@ fn constant(ir: &mut IrFile, value: IrConst) -> ExprId {
 }
 
 fn unbox(ir: &mut IrFile, receiver: ExprId, owner: TypeName, carrier: &Ty) -> ExprId {
-    ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
-            owner,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){}", desc(carrier)),
-            params: None,
-            interface: false,
-            module_target: None,
-        },
-        dispatch_receiver: Some(receiver),
-        args: vec![],
-    })
+    super::unboxing_rewrites::unbox_call(ir, receiver, owner, carrier)
 }

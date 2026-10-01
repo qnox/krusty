@@ -190,8 +190,8 @@ so establish the reference answer before concluding anything about it. `(UIntArr
 IntArray` looked like a free choice — the box corpus never asks it, and Kotlin/Native answers the
 opposite — but `kotlin.UIntArray` carries `box-impl`/`unbox-impl`, so the value class boxes at the
 `Any` boundary and kotlinc answers `false true false` for `is IntArray`/`is UIntArray`/`is
-LongArray`. krusty answers `true` there because it does not box; that is krusty's bug to fix, not a
-kotlinc bug to match. Running the reference compiler is what separated the two, which is why
+LongArray`. krusty boxes there too (`tests/unsigned_arrays_e2e.rs`). Running the reference
+compiler is what separated the two, which is why
 `docs/TEST_HARNESS.md` now insists on provisioning it.
 
 **Every supported reference version is an oracle, one at a time.** The `kotlin-versions` manifest
@@ -3103,10 +3103,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unsigned follows the member rule too (`value class Z(val x: UInt)` declares `getX-pVg5ArA()I`).
   Test: `tests/unsigned_property_getter_e2e.rs`.
 
+- **Unsigned arrays box at a reference supertype.** `UByteArray`/`UShortArray`/`UIntArray`/`ULongArray`
+  are inline classes over `byte[]`/`short[]`/`int[]`/`long[]`. The value-class table records that
+  carrier. Indexing, `size`, and a function whose parameter or result is the array itself keep the
+  carrier (a file-level parameter is still mangled: `take(a: UByteArray)` is
+  `take-GBYM_sE([B)I`). A property of that type stores the same carrier. A bridge checkcast of
+  that carrier names `[B`/`[I`, not `kotlin/UByteArray`. `is UIntArray` and the checkcast in front
+  of `unbox-impl` name the box; realization records that role on the type operation, and emission
+  reads the record. A consumer that is not the array — `Any`, `Iterable` (`forEach`), or a type
+  parameter — calls `box-impl` first. `Array<UIntArray>` stores that box
+  (`[Lkotlin/UIntArray;`), not `int[][]`, and reading an element unboxes it back to the carrier.
+  An annotation implementation constructor takes the carrier and does not add the value-class
+  `DefaultConstructorMarker` accessor. `UByteArray?` stays the carrier locally; the null-safe
+  `box-impl` is only the coercion to the supertype. `(UIntArray(1) as Any) is IntArray` is false.
+  Tests: `tests/unsigned_arrays_e2e.rs`.
+
   Still unmodeled, all of them REJECTED or skipped rather than miscompiled: `UIntRange` value iteration;
   and, for the narrow pair specifically, a `when` on a `UByte`/`UShort` subject (the arms-must-be-literals
   gate can't be satisfied — a bare `200u` arm types as `UInt`, and `200u.toUByte()` is not a literal),
-  `is UByte`/`is UShort`, `UByteArray`/`UShortArray`, ranges and `in`-tests, `hashCode()`, the bitwise
+  `is UByte`/`is UShort`, ranges and `in`-tests, `hashCode()`, the bitwise
   members (`and`/`or`/`inv`), a mixed-width operand pair (`UByte + UInt`), and an operator called by name
   (`a.plus(b)` — the checker doesn't surface the narrow receiver's metadata overloads). One known
   DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a

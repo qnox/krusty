@@ -352,7 +352,14 @@ pub fn type_descriptor(ty: Ty) -> String {
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            format!("[{}", type_descriptor(reference_array_element(e)))
+            let element = reference_array_element(e);
+            // `Array<UIntArray>` stores the box. The carrier descriptor `[I` would make the array
+            // `int[][]`, and storing `kotlin.UIntArray` then fails.
+            if let Some(name) = boxed_primitive_array_element(element) {
+                format!("[L{};", classfile_internal_name_of(name))
+            } else {
+                format!("[{}", type_descriptor(element))
+            }
         }
         Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
             primitive_array_descriptor(n).expect("checked in the guard")
@@ -385,6 +392,25 @@ pub fn type_descriptor(ty: Ty) -> String {
         // is only known to be `Any?`, so it erases to `Object` rather than to `X`.
         Ty::InProjection(_) => obj_desc_name(crate::types::type_name("java/lang/Object")),
     }
+}
+
+/// An element of Kotlin `Array<T>` that is itself an unsigned primitive-array value class.
+///
+/// The array stores the box (`kotlin/UIntArray`). The carrier descriptor is `[I`, so `anewarray`
+/// and `Array<UIntArray>` must not use that descriptor. This is the one place that decision is
+/// made; callers ask this helper instead of repeating it.
+pub(crate) fn boxed_primitive_array_element(element: Ty) -> Option<TypeName> {
+    let name = element.non_null().obj_internal()?;
+    crate::types::prim_array_element(name)
+        .is_some_and(Ty::is_unsigned)
+        .then_some(name)
+}
+
+/// The class operand of `anewarray` for `element`.
+pub(crate) fn anewarray_element_class(element: Ty) -> String {
+    boxed_primitive_array_element(element)
+        .map(|name| classfile_internal_name_of(name).to_string())
+        .unwrap_or_else(|| instanceof_internal_name(element.non_null()))
 }
 
 /// The class an `instanceof`/`checkcast` names for `t`.
@@ -709,6 +735,22 @@ mod tests {
     fn nullable_unsigned_primitive_descriptor_boxes_to_inline_class() {
         assert_eq!(type_descriptor(Ty::nullable(Ty::UInt)), "Lkotlin/UInt;");
         assert_eq!(type_descriptor(Ty::nullable(Ty::ULong)), "Lkotlin/ULong;");
+    }
+
+    #[test]
+    fn an_unsigned_array_carrier_is_not_its_boxed_class() {
+        let element = Ty::obj("kotlin/UIntArray");
+        assert_eq!(type_descriptor(element), "[I");
+        assert_eq!(instanceof_internal_name(element), "[I");
+        assert_eq!(
+            type_descriptor(Ty::obj_args("kotlin/Array", &[element])),
+            "[Lkotlin/UIntArray;"
+        );
+        assert_eq!(
+            type_descriptor(Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/IntArray")])),
+            "[[I"
+        );
+        assert_eq!(anewarray_element_class(element), "kotlin/UIntArray");
     }
 
     #[test]

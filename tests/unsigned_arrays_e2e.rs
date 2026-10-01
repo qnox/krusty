@@ -6,14 +6,10 @@
 //! decides the allocation, the load and the store opcode, and the array descriptor; only the reading
 //! of the bits is unsigned, and that happens above the array.
 //!
-//! What these do NOT cover is the boxed form. `kotlin.UIntArray` is a real class with `box-impl`
-//! and `unbox-impl`, so a value class crossing into `Any` becomes one — and krusty does not box
-//! there, which is a separate defect with its own shape, pinned at the end of this file.
-//!
-//! Only `each_width_allocates_loads_and_stores_through_its_own_opcodes` is evidence about the
-//! REPRESENTATION; it reads the bytecode. The rest are runtime semantic controls, and a runtime
-//! control cannot prove a representation: a bare `[I` is a nullable JVM reference and survives a
-//! generic round trip unchanged, so those programs pass whether or not anything was boxed.
+//! A use that stays on the array (`return` of `UIntArray`, an index, `size`) keeps that carrier.
+//! A use as a reference supertype (`Any`, `Iterable`, a type parameter) boxes through `box-impl`.
+//! `is IntArray` on the boxed value is false. `is UIntArray` and the checkcast in front of
+//! `unbox-impl` name the box; other casts of the same descriptor name the carrier.
 
 use super::common;
 
@@ -164,11 +160,9 @@ fn each_width_allocates_loads_and_stores_through_its_own_opcodes() {
 
 #[test]
 fn a_nullable_unsigned_array_carries_both_null_and_a_value() {
-    // A RUNTIME control, and only that: it pins that `null` and an array are both representable at
-    // a nullable unsigned type and that the array's own size survives. It says nothing about the
-    // representation — a bare `[I` is itself a nullable JVM reference, so this would pass whether
-    // or not the value class is boxed here. What krusty actually does at a reference boundary is
-    // the subject of `an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc` below.
+    // `UIntArray?` stays the carrier: null and a value are both representable, and `size` reads
+    // the array. Boxing happens when the value is consumed as a supertype, not because the local
+    // is nullable.
     agrees_with_kotlinc(
         "NullableUnsignedArray",
         "fun box(): String {\n\
@@ -183,9 +177,8 @@ fn a_nullable_unsigned_array_carries_both_null_and_a_value() {
 
 #[test]
 fn an_unsigned_array_through_a_generic_keeps_its_elements() {
-    // Also a runtime control. A type parameter erases to a reference, and this pins that the
-    // elements and length come back intact across that boundary — not that anything was boxed
-    // crossing it: a bare `[I` survives `identity<T>` unchanged, so this passes either way.
+    // A type parameter erases to a reference, so the argument is boxed on the way in and unboxed
+    // when the result is used as the array again.
     agrees_with_kotlinc(
         "GenericUnsignedArray",
         "fun <T> identity(value: T): T = value\n\
@@ -229,33 +222,194 @@ fn a_user_value_class_over_an_array_keeps_its_own_carrier() {
     );
 }
 
-/// The erasure question, recorded as the DIVERGENCE it is rather than deleted.
-///
-/// An earlier revision asserted only that krusty and kotlinc agree here, which failed and was
-/// removed — throwing away the evidence with it. It is kept now as what it always was: a krusty
-/// defect this change does not fix, pinned so it cannot be forgotten and so fixing it breaks a test
-/// that has to be updated deliberately.
-///
-/// `kotlin.UIntArray` carries `box-impl`/`unbox-impl`, so a value class crossing into `Any` becomes
-/// one and `is IntArray` is false. krusty does not box at that boundary and answers true. Both
-/// answers are asserted EXACTLY — `docs/SPEC.md` §6 — because equality alone would pass if the two
-/// ever drifted together, and because the point of this test is that they differ.
+/// `kotlin.UIntArray` carries `box-impl`/`unbox-impl`. Crossing into `Any` boxes, so `is IntArray`
+/// is false and `is UIntArray` is true. A bare `int[]` would answer the opposite on the first test.
 #[test]
-fn an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc() {
-    let src = "fun box(): String {\n\
-               \x20   val u: Any = UIntArray(1)\n\
-               \x20   val b: Any = ubyteArrayOf(1u)\n\
-               \x20   return \"\" + (u is IntArray) + \" \" + (u is UIntArray) + \" \" +\n\
-               \x20          (u is LongArray) + \" | \" + (b is ByteArray) + \" \" + (b is UByteArray)\n\
-               }\n";
-    assert_eq!(
-        common::kotlinc_box_result(src),
-        "false true false | false true",
-        "the reference compiler boxes the value class at the `Any` boundary"
+fn an_unsigned_array_boxes_when_used_as_any() {
+    agrees_with_kotlinc(
+        "UnsignedArrayBoxedAsAny",
+        "fun box(): String {\n\
+         \x20   val u: Any = UIntArray(1)\n\
+         \x20   val b: Any = ubyteArrayOf(1u)\n\
+         \x20   val text = \"\" + (u is IntArray) + \" \" + (u is UIntArray) + \" \" +\n\
+         \x20          (u is LongArray) + \" | \" + (b is ByteArray) + \" \" + (b is UByteArray)\n\
+         \x20   return if (text == \"false true false | false true\") \"OK\" else \"fail: $text\"\n\
+         }\n",
     );
+}
+
+/// `Iterable.forEach` is a reference consumer. The carrier is boxed, then `iterator()` runs on
+/// that box; indexing the same array stays on the carrier.
+#[test]
+fn an_unsigned_array_for_each_boxes_before_iteration() {
+    agrees_with_kotlinc(
+        "UnsignedArrayForEach",
+        "fun box(): String {\n\
+         \x20   var i = 0\n\
+         \x20   val a = ubyteArrayOf(3u, 2u, 1u)\n\
+         \x20   var text = \"\"\n\
+         \x20   a.forEach { e -> text += \"$e\"; if (e == a[i]) i++ }\n\
+         \x20   return if (text == \"321\" && i == 3) \"OK\" else \"fail: $text $i\"\n\
+         }\n",
+    );
+}
+
+/// A file-level function that takes an unsigned array is mangled, and the parameter stays the
+/// carrier. kotlinc's declaration for this exact signature is `take-GBYM_sE(byte[])`.
+#[test]
+fn an_unsigned_array_parameter_is_mangled() {
+    let body = "fun take(a: UByteArray): Int = a.size\n\
+         fun box(): String {\n\
+         \x20   val n = take(ubyteArrayOf(1u, 2u))\n\
+         \x20   return if (n == 2) \"OK\" else \"fail: $n\"\n\
+         }\n";
+    agrees_with_kotlinc("UnsignedArrayMangle", body);
+    let dumped = disassembled_box("UnsignedArrayMangle", body);
+    let declaration = dumped
+        .lines()
+        .find(|line| line.contains("take-GBYM_sE"))
+        .unwrap_or("")
+        .trim();
     assert_eq!(
-        common::expect_box_run_with_stdlib(src, "UnsignedArrayErasureDivergence"),
-        "true true false | true true",
-        "krusty does not box there yet — a known defect, not an accepted answer"
+        declaration, "public static final int take-GBYM_sE(byte[]);",
+        "mangled declaration missing from\n{dumped}"
+    );
+}
+
+/// `val buffer: UByteArray` stores `byte[]`. `buffer.copyOf` must not checkcast that carrier to
+/// `kotlin.UByteArray` before reading it.
+#[test]
+fn an_unsigned_array_property_is_already_the_carrier() {
+    agrees_with_kotlinc(
+        "UnsignedArrayProperty",
+        "class Holder(val buffer: UByteArray) {\n\
+         \x20   fun grown(): UByteArray = buffer.copyOf(buffer.size)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val values = Holder(ubyteArrayOf(1u)).grown()\n\
+         \x20   return if (values.size == 1 && values[0] == 1u.toUByte()) \"OK\" else \"fail\"\n\
+         }\n",
+    );
+    if common::corpus_ready() {
+        assert_eq!(
+            common::run_box_corpus_case("bridges/test25.kt").as_deref(),
+            Some("OK")
+        );
+    }
+}
+
+/// A value-class member that returns an unsigned array returns the carrier, not a box to unbox
+/// at the call.
+#[test]
+fn a_value_class_member_returns_an_unsigned_array_carrier() {
+    agrees_with_kotlinc(
+        "ValueClassUnsignedArrayReturn",
+        "@JvmInline\n\
+         value class Foo(val x: Int) {\n\
+         \x20   fun arr(): UByteArray = ubyteArrayOf(x.toUByte())\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val values = Foo(2).arr()\n\
+         \x20   return if (values.size == 1 && values[0] == 2u.toUByte()) \"OK\" else \"fail\"\n\
+         }\n",
+    );
+}
+
+/// A generic override specialized to `UByteArray` returns the carrier. Checkcasting that `byte[]`
+/// to `kotlin.UByteArray` is the bridge bug: the value is not the box.
+#[test]
+fn a_generic_unsigned_array_bridge_returns_the_carrier() {
+    agrees_with_kotlinc(
+        "UnsignedArrayBridge",
+        "abstract class Base<T> {\n\
+         \x20   abstract fun make(): T\n\
+         \x20   fun read(): T = make()\n\
+         }\n\
+         object Bytes : Base<UByteArray>() {\n\
+         \x20   override fun make(): UByteArray = ubyteArrayOf(255u)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val values = Bytes.read()\n\
+         \x20   return if (values.size == 1 && values[0] == 255u.toUByte()) \"OK\" else \"fail\"\n\
+         }\n",
+    );
+}
+
+/// Annotation instantiation passes the carrier into the impl constructor. The value-class marker
+/// accessor is not part of that ABI.
+#[test]
+fn an_annotation_unsigned_array_uses_the_carrier_constructor() {
+    agrees_with_kotlinc(
+        "UnsignedArrayAnnotation",
+        "// LANGUAGE: +InstantiationOfAnnotationClasses\n\
+         annotation class Ann(val array: UIntArray)\n\
+         annotation class Var(vararg val foo: UInt)\n\
+         fun box(): String {\n\
+         \x20   if (Ann(uintArrayOf()) != Ann(uintArrayOf())) return \"fail ann\"\n\
+         \x20   Var()\n\
+         \x20   return \"OK\"\n\
+         }\n",
+    );
+}
+
+/// `Array<UIntArray>` stores boxed `kotlin.UIntArray` values, so a cast to `Array<Any?>` can read
+/// them back. An `int[][]` allocation rejects that store. Indexing the element unboxes to the
+/// carrier before the inner load.
+#[test]
+fn an_array_of_unsigned_arrays_stores_the_box() {
+    agrees_with_kotlinc(
+        "ArrayOfUnsignedArray",
+        "fun box(): String {\n\
+         \x20   val values: Array<UIntArray> = Array(2) { uintArrayOf(it.toUInt()) }\n\
+         \x20   val raw = values as Array<Any?>\n\
+         \x20   val back = raw as Array<UIntArray>\n\
+         \x20   val text = \"${raw.size} ${back[1][0]}\"\n\
+         \x20   return if (text == \"2 1\") \"OK\" else \"fail: $text\"\n\
+         }\n",
+    );
+}
+
+/// The corpus file `initializers/static_arrays.kt`: every primitive array and `arrayOf` form
+/// prints through `joinToString`, including the four unsigned widths.
+#[test]
+fn static_arrays_join_to_string_matches_the_corpus() {
+    if !common::corpus_ready() {
+        return;
+    }
+    assert_eq!(
+        common::run_box_corpus_case("initializers/static_arrays.kt").as_deref(),
+        Some("OK")
+    );
+}
+
+/// `joinToString` walks an unsigned array as `Iterable`, which boxes, then prints the unsigned
+/// elements.
+#[test]
+fn unsigned_array_join_to_string_prints_unsigned_elements() {
+    agrees_with_kotlinc(
+        "UnsignedArrayJoin",
+        "fun box(): String {\n\
+         \x20   val text = uintArrayOf(13u, 14u, 4294967295u).joinToString()\n\
+         \x20   val bytes = ubyteArrayOf(20u, 21u, 200u).joinToString()\n\
+         \x20   return if (text == \"13, 14, 4294967295\" && bytes == \"20, 21, 200\") \"OK\"\n\
+         \x20          else \"fail: $text | $bytes\"\n\
+         }\n",
+    );
+}
+
+/// A nullable unsigned array returned as `Any?` boxes on the non-null path and stays null otherwise.
+/// `is UIntArray` is then true and `is IntArray` is false; the carrier alone answers the opposite.
+#[test]
+fn a_nullable_unsigned_array_boxes_when_returned_as_any() {
+    agrees_with_kotlinc(
+        "NullableUnsignedArrayAsAny",
+        "fun take(a: UIntArray?): Any? = a\n\
+         fun box(): String {\n\
+         \x20   val present = take(UIntArray(1))\n\
+         \x20   val absent = take(null)\n\
+         \x20   val text = \"\" + (present is UIntArray) + \" \" + (present is IntArray) + \" \" +\n\
+         \x20          (absent == null)\n\
+         \x20   return if (text == \"true false true\") \"OK\" else \"fail: $text\"\n\
+         }\n",
     );
 }

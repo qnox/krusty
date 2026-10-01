@@ -177,7 +177,12 @@ impl Emitter<'_> {
                 destination_semantic.is_none_or(|destination| {
                     destination.non_null().obj_internal() == Some(classifier)
                 });
+            // The box and the carrier of a primitive-array value class share a descriptor.
+            // A physical stamp that still names the value class is the box; unboxing it deletes
+            // a `box-impl` just emitted for a supertype coercion.
+            let physical_is_box = physical.non_null().obj_internal() == Some(classifier);
             if destination_is_concrete_value_class
+                && !physical_is_box
                 && type_descriptor(carrier) == type_descriptor(physical)
             {
                 let descriptor = format!("(){}", type_descriptor(carrier));
