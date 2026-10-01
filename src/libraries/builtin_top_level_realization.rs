@@ -672,24 +672,6 @@ mod tests {
     fn a_shape_equivalent_floating_range_has_no_realization() {
         let package = crate::types::wk::kotlin_ranges_package();
         let result = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
-        let shape = [Ty::Double];
-        assert_eq!(
-            function_realization(BuiltinFunctionDeclaration {
-                package,
-                name: "rangeTo",
-                kind: FnKind::Extension,
-                receiver: Some(Ty::Double),
-                params: &shape,
-                ret: result,
-                context_count: 0,
-                type_parameter_count: 0,
-                vararg: None,
-                is_suspend: false,
-                is_operator: true,
-                is_infix: false,
-            }),
-            None
-        );
         let callable = crate::libraries::LibraryCallable::library(
             package,
             "rangeTo",
@@ -698,10 +680,10 @@ mod tests {
             result,
             "",
         );
-        let mut function = FunctionInfo::plain(FnKind::Extension, Some(Ty::Double), callable);
-        function.flags.operator = true;
+        let mut same_shape = FunctionInfo::plain(FnKind::Extension, Some(Ty::Double), callable);
+        same_shape.flags.operator = true;
         assert_eq!(
-            normalized_function_realization(package, "rangeTo", &function),
+            normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
     }

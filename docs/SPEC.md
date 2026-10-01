@@ -10663,15 +10663,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
 
 - **A nearer `Double`/`Float` `rangeTo` replaces primitive `in`.** `x in a..b` for those
-  primitives is a direct IEEE comparison only when overload resolution selects the published
-  `RangesKt.rangeTo` methods (`(DD)` and `(FF)` returning `ClosedFloatingPointRange`). The
-  provider copies `FloatingRangeMembership` onto those methods, and onto the matching
-  `rangeUntil` methods (`(DD)` and `(FF)` returning `OpenEndRange`). A declaration with the
-  same Kotlin shape does not acquire it, including one in `kotlin.ranges`. A nearer operator
-  is an ordinary `rangeTo` call followed by `contains`. The generic `Comparable.rangeTo`
-  orders with `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`.
-  Integral ranges stay comparisons. Tests:
-  `jvm::ranges::tests::the_floating_range_catalog_carries_membership`,
+  primitives is a direct IEEE comparison only when overload resolution selects the exact catalog
+  `kotlin.ranges` `Double`/`Float` `rangeTo` declaration returning `ClosedFloatingPointRange`.
+  The provider copies `FloatingRangeMembership` from that catalog declaration onto its physical
+  realization; a declaration with the same shape outside the catalog, and `Comparable.rangeTo`
+  returning `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and `NaN in NaN..NaN` is
+  false only for the catalog operator). A declaration in a nearer scope is an ordinary `rangeTo`
+  call followed by `contains`. The generic `Comparable.rangeTo` orders with `compareTo`, so
+  `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay comparisons.
+  Tests:
+  `jvm::classpath::builtin_inventory::tests::floating_range_role_is_owned_by_the_exact_builtins_catalog`,
   `libraries::builtin_top_level_realization::tests::a_shape_equivalent_floating_range_has_no_realization`,
   `a_nearer_double_range_to_is_a_contains_call`,
   `tests/custom_floating_range_membership_e2e.rs`, box

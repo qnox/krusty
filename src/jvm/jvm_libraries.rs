@@ -840,11 +840,7 @@ impl JvmLibraries {
                     self.top_level_default_realization(&callable).map(Box::new);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
-            // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
-            // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
-            // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
-            // without per-call-site receiver checks.
+            // Classify a physical static extension by its metadata receiver, not its JVM shape.
             let generic_sig = generic_sig_for_callable;
             let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
                 FnKind::Extension
@@ -876,13 +872,16 @@ impl JvmLibraries {
             });
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
-            if overloads.iter().any(|candidate| {
+            if let Some(candidate) = overloads.iter_mut().find(|candidate| {
                 candidate.generic_sig.as_ref().is_some_and(|signature| {
                     signature.receiver == builtin.generic_sig.receiver
                         && signature.params == builtin.generic_sig.params
                         && signature.ret == builtin.generic_sig.ret
                 })
             }) {
+                candidate.callable.compiler_intrinsic = builtin
+                    .compiler_intrinsic
+                    .or(candidate.callable.compiler_intrinsic);
                 continue;
             }
             let inline = InlineKind::from_flags(builtin.is_inline, builtin.is_inline);
@@ -936,10 +935,11 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.annotations = builtin.annotations;
-            function.callable.compiler_intrinsic =
+            function.callable.compiler_intrinsic = builtin.compiler_intrinsic.or_else(|| {
                 crate::libraries::builtin_top_level_realization::normalized_function_realization(
                     pkg, name, &function,
-                );
+                )
+            });
             overloads.push(function);
         }
         overloads
@@ -4659,7 +4659,6 @@ impl JvmLibraries {
                     crate::libraries::builtin_top_level_realization::normalized_function_realization(
                         package, name, overload,
                     )
-                    .or_else(|| super::ranges::catalog_floating_range_membership(&overload.callable))
                 {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
                 }

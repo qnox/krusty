@@ -10,6 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtin_inventory;
 mod builtin_signatures;
 mod builtins_validation;
 mod candidate_union;
@@ -1077,6 +1078,8 @@ struct BuiltinsFile {
 struct BuiltinFunction {
     name: String,
     generic_sig: GenericSig,
+    /// Semantic role assigned while inventorying this exact `.kotlin_builtins` declaration.
+    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     only_input_type_formals: Vec<String>,
     param_names: Vec<String>,
     param_defaults: Vec<bool>,
@@ -1094,6 +1097,7 @@ struct BuiltinFunction {
 #[derive(Clone)]
 pub(super) struct BuiltinPackageFunction {
     pub generic_sig: GenericSig,
+    pub compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     pub only_input_type_formals: Vec<String>,
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -1156,42 +1160,46 @@ struct BuiltinConstructor {
 }
 
 impl BuiltinsFile {
-    fn from_package(package: super::metadata::BuiltinPackage) -> Self {
+    fn from_package(package_name: TypeName, package: super::metadata::BuiltinPackage) -> Self {
         let mut file = BuiltinsFile::default();
         for function in package.functions {
             let bounds = builtin_bounds(&function.formals, &HashMap::new());
+            let generic_sig = GenericSig {
+                formals: function.formals.iter().map(|p| p.name.clone()).collect(),
+                formal_bounds: function
+                    .formals
+                    .iter()
+                    .map(|p| {
+                        p.bounds
+                            .iter()
+                            .map(|bound| builtin_ty(bound, &bounds))
+                            .collect()
+                    })
+                    .collect(),
+                receiver: function
+                    .receiver
+                    .as_ref()
+                    .map(|receiver| builtin_ty(receiver, &bounds)),
+                params: function
+                    .params
+                    .iter()
+                    .map(|parameter| builtin_ty(parameter, &bounds))
+                    .collect(),
+                ret: builtin_ty(&function.ret, &bounds),
+                return_policy: Default::default(),
+            };
+            let compiler_intrinsic =
+                builtin_inventory::function_role(package_name, &function, &generic_sig);
             file.functions.push(BuiltinFunction {
                 name: function.name,
+                compiler_intrinsic,
                 only_input_type_formals: function
                     .formals
                     .iter()
                     .filter(|parameter| parameter.only_input)
                     .map(|parameter| parameter.name.clone())
                     .collect(),
-                generic_sig: GenericSig {
-                    formals: function.formals.iter().map(|p| p.name.clone()).collect(),
-                    formal_bounds: function
-                        .formals
-                        .iter()
-                        .map(|p| {
-                            p.bounds
-                                .iter()
-                                .map(|bound| builtin_ty(bound, &bounds))
-                                .collect()
-                        })
-                        .collect(),
-                    receiver: function
-                        .receiver
-                        .as_ref()
-                        .map(|receiver| builtin_ty(receiver, &bounds)),
-                    params: function
-                        .params
-                        .iter()
-                        .map(|parameter| builtin_ty(parameter, &bounds))
-                        .collect(),
-                    ret: builtin_ty(&function.ret, &bounds),
-                    return_policy: Default::default(),
-                },
+                generic_sig,
                 param_names: function.param_names,
                 param_defaults: function.param_defaults,
                 vararg: function.vararg,
@@ -2736,9 +2744,9 @@ impl Classpath {
                 };
                 match read {
                     EntryReadResult::Data(bytes) => match super::metadata::parse_builtins(&bytes) {
-                        Ok(package) => (
+                        Ok(decoded) => (
                             Ok(Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                                package,
+                                package, decoded,
                             )))),
                             true,
                         ),
@@ -2803,6 +2811,7 @@ impl Classpath {
         }
         let rc = found.unwrap_or_else(|| {
             std::sync::Arc::new(BuiltinsFile::from_package(
+                package,
                 super::metadata::BuiltinPackage::default(),
             ))
         });
@@ -2815,42 +2824,6 @@ impl Classpath {
     fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
         self.try_builtins_file_for_package(package)
             .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
-    }
-
-    pub(super) fn builtin_package_functions(
-        &self,
-        package: TypeName,
-        name: &str,
-    ) -> Vec<BuiltinPackageFunction> {
-        self.builtins_file_for_package(package)
-            .functions
-            .iter()
-            .filter(|function| function.name == name)
-            .map(|function| BuiltinPackageFunction {
-                generic_sig: function.generic_sig.clone(),
-                only_input_type_formals: function.only_input_type_formals.clone(),
-                params: function
-                    .generic_sig
-                    .receiver
-                    .iter()
-                    .chain(&function.generic_sig.params)
-                    .copied()
-                    .map(builtin_erased)
-                    .collect(),
-                ret: builtin_erased(function.generic_sig.ret),
-                param_names: function.param_names.clone(),
-                param_defaults: function.param_defaults.clone(),
-                vararg: function.vararg,
-                visibility: function.visibility,
-                is_inline: function.is_inline,
-                has_reified_type_params: function.has_reified_type_params,
-                is_suspend: function.is_suspend,
-                is_operator: function.is_operator,
-                is_infix: function.is_infix,
-                context_count: function.context_count,
-                annotations: function.annotations.clone(),
-            })
-            .collect()
     }
 
     /// The `.kotlin_builtins` fragment path for a package, mirroring kotlinc's
@@ -6698,6 +6671,7 @@ mod fq_tests {
         ));
         let pkg = type_name("kotlin/collections");
         let file = std::sync::Arc::new(BuiltinsFile::from_package(
+            pkg,
             super::super::metadata::BuiltinPackage::default(),
         ));
         let cache = global_entry_builtins_cache(&a.cache_key[0]);
