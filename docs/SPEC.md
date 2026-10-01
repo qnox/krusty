@@ -2442,6 +2442,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that mentions a formal becomes `*`, the classifier and nullability stay. A bare formal still fits
   anything. A function value against a class shape is left to final selection (SAM conversion).
   Test: `tests/postponed_constructor_applicability_e2e.rs`.
+- **An extension receiver can fix a builder lambda's type variable.** Inside `build { … }` for
+  `fun <FT> build(instructions: Buildee<FT>.() -> Unit)`, the lambda's receiver is `Buildee<FT>`
+  with `FT` still a variable of the postponed call. kotlinc's PCLA makes an extension declared on
+  `Buildee<UserKlass>` applicable to that receiver and adds `Buildee<FT> <: Buildee<UserKlass>` to
+  the call's constraint system, so `fun f() = build { extension() }` returns `Buildee<UserKlass>`.
+  krusty rejected the candidate because receiver matching compared the type arguments literally.
+  Receiver matching (`src/symbol_resolver/receiver_mro.rs`) now takes the postponed call's type
+  variables: a variable in the actual receiver is bound from the declared receiver's concrete
+  counterpart before the type-argument check, and anything else still has to match. The checker
+  passes the variables that the receiver mentions (`postponed_type_variables_in`). An implicit or
+  explicit extension call, an extension property read, and an extension property write (plain
+  assignment or increment) then record the receiver constraint in the postponed frame. The
+  implicit-return-type engine does the same through its active scoped frames
+  (`active_postponed_type_variables`, `commit_postponed_property_receiver`). Tests:
+  `tests/builder_inference_receivers_e2e.rs`; box: `inference/pcla/.../typeInfoSources/
+  ExtensionFunctions.kt`, `ExtensionProperties.kt`.
+  The constraint belongs to the extension's selection, never to its collection: an explicit write
+  `receiver.p = v` selects its target through the scope tower first (member property, member
+  setter, read-only member, member extension, then extension property,
+  `src/resolve/explicit_property_write.rs`), and only the selected extension records the receiver
+  constraint. With `class B<T> { var p: Int }` and `var B<String>.p`, `build { this.p = 1 }` writes
+  the member and does not fix `T = String`. Test: `tests/builder_inference_receivers_e2e.rs`
+  (`a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension`).
+- **A source extension's signature-stage candidate carries its declared receiver.** The module
+  provider keys top-level extensions by the erased receiver classifier, and the candidate it built
+  for an implicit return type used that key as the receiver. `Crate<Apple>.label()` and
+  `@JvmName("pearLabel") Crate<Pear>.label()` then looked identical to the signature engine, so
+  `fun inferred(c: Crate<Pear>) = c.label()` saw two equally specific candidates. The candidate now
+  carries the declared receiver (`sig.source_receiver`), as the checked-body stage already did.
+  Test: `tests/extension_receiver_specificity_e2e.rs`
+  (`receiver_type_arguments_select_an_inferred_bodys_extension`).
 - **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
   packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
   instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
@@ -8618,7 +8649,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-infix binary operator (`?:`, `+`, `..`, `in`, …) name nothing. A label written on the literal
   replaces the call's, and an anonymous function has none. The parser records the label
   (`parser::lambda_literals`); a receiver lambda's receiver local is `$this$<label>`, or `<this>`
-  without one. Test: `tests/lambda_receiver_label_e2e.rs`.
+  without one. The lambda's lifted implementation takes that receiver as a named value parameter,
+  so its `checkNotNullParameter` guard quotes the same `$this$<label>` rather than an extension
+  function's `<this>`. Test: `tests/lambda_receiver_label_e2e.rs`.
 - **Native `StringBuilder` throws where the JVM's throws, and a throw leaves it unchanged.** The
   native runtime's builder (`src/native/runtime/krusty_rt.c`) renders an appended value through its
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the

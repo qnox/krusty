@@ -86,6 +86,7 @@ mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod enum_entries;
 mod enum_entry_method_owner;
+mod explicit_property_write;
 mod expression_getter;
 mod finalized_projection;
 mod for_loop_iteration;
@@ -120,6 +121,7 @@ mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
 mod postponed_applicability;
+mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_write_selection;
 mod qualified_call_shaping;
@@ -217,6 +219,7 @@ pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
 };
 pub(crate) use override_plans::publish_override_plans;
+use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
@@ -2129,95 +2132,6 @@ struct GenericMemberQuery<'a> {
     expected_result: Option<Ty>,
 }
 
-#[derive(Clone, Default)]
-struct PostponedCallConstraints {
-    formals: Vec<String>,
-    lower: crate::symbol_resolver::GSigBinds,
-    upper: HashMap<String, Vec<Ty>>,
-    /// Diagnostics whose validity depends on the call solution. A lambda parameter still expressed
-    /// as the callee's type variable cannot answer member lookup yet; the finalized recheck either
-    /// resolves the expression or emits the error from its concrete receiver.
-    deferred_member_errors: Vec<(ExprId, Span, String)>,
-}
-
-impl PostponedCallConstraints {
-    fn for_formals(formals: &[String]) -> Self {
-        Self {
-            formals: formals.to_vec(),
-            ..Self::default()
-        }
-    }
-
-    fn mentions_formal(&self, ty: Ty) -> bool {
-        ty_mentions_param(ty, &self.formals)
-    }
-
-    fn constrain_assignable(
-        &mut self,
-        expected: Ty,
-        actual: Ty,
-        inferred: &crate::symbol_resolver::AssignabilityConstraints,
-        shadowed_formals: &std::collections::HashSet<String>,
-    ) {
-        crate::trace_compiler!(
-            "lambda_apply",
-            "postponed constrain expected={expected:?} actual={actual:?}"
-        );
-        for (formal, actual) in inferred.lower.iter().filter(|(formal, _)| {
-            self.formals.iter().any(|allowed| allowed == *formal)
-                && !shadowed_formals.contains(formal.as_str())
-        }) {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), *actual);
-            self.lower.insert(formal.clone(), merged);
-        }
-
-        for (formal, upper) in inferred.upper.iter().filter(|(formal, _)| {
-            self.formals.iter().any(|allowed| allowed == *formal)
-                && !shadowed_formals.contains(formal.as_str())
-        }) {
-            self.upper
-                .entry(formal.clone())
-                .or_default()
-                .extend(upper.iter().copied());
-        }
-    }
-
-    fn constrain_equal(&mut self, formal: &str, actual: Ty) {
-        if !self.formals.iter().any(|allowed| allowed == formal) {
-            return;
-        }
-        let merged =
-            crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), actual);
-        self.lower.insert(formal.to_string(), merged);
-        self.upper
-            .entry(formal.to_string())
-            .or_default()
-            .push(actual);
-    }
-
-    fn merge(&mut self, other: Self) {
-        for formal in other.formals {
-            if !self.formals.contains(&formal) {
-                self.formals.push(formal);
-            }
-        }
-        for (formal, actual) in other.lower {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
-            self.lower.insert(formal, merged);
-        }
-        for (formal, upper) in other.upper {
-            self.upper.entry(formal).or_default().extend(upper);
-        }
-        for diagnostic in other.deferred_member_errors {
-            if !self.deferred_member_errors.contains(&diagnostic) {
-                self.deferred_member_errors.push(diagnostic);
-            }
-        }
-    }
-}
-
 fn generic_member_lambda_params(
     source: &dyn SymbolSource,
     plan: &GenericMemberPlan,
@@ -3233,7 +3147,9 @@ struct MemberExtensionProperty {
 enum PropertyReadSelection {
     Member(Box<PropertyReadMemberSelection>),
     MemberExtension(Box<MemberExtensionProperty>),
-    Extension(Box<ResolvedPropertyAccess>),
+    /// The selected extension, with the actual receiver when it mentions a postponed call's type
+    /// variables: reading the property adds that receiver constraint to the call.
+    Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
 }
 
 struct PropertyReadMemberSelection {
@@ -13888,7 +13804,7 @@ impl<'a> Checker<'a> {
                             })
                         }
                         PropertyReadSelection::MemberExtension(_)
-                        | PropertyReadSelection::Extension(_) => false,
+                        | PropertyReadSelection::Extension(_, _) => false,
                     };
                     if private {
                         continue;
@@ -13911,7 +13827,9 @@ impl<'a> Checker<'a> {
         // Extension properties are a lower scope-tower level than members. Do not even collect
         // them while a member declaration can win: an ambiguous or inapplicable extension family
         // cannot poison an otherwise exact member read.
-        let extension = match self.resolver().select_extension_property(receiver, name) {
+        let type_variables = self.postponed_type_variables_in(receiver);
+        let resolver = self.resolver().with_type_variables(&type_variables);
+        let extension = match resolver.select_extension_property(receiver, name) {
             Ok(property) => property,
             Err(_) => return Err(PropertyReadAmbiguity::Extension),
         };
@@ -13928,12 +13846,13 @@ impl<'a> Checker<'a> {
                 self.select_context_arguments(scope, context_types)
                     .ok_or(PropertyReadAmbiguity::MissingContext)?
             };
-            return Ok(Some(PropertyReadSelection::Extension(Box::new(
-                ResolvedPropertyAccess {
+            return Ok(Some(PropertyReadSelection::Extension(
+                Box::new(ResolvedPropertyAccess {
                     property,
                     context_args,
-                },
-            ))));
+                }),
+                (!type_variables.is_empty()).then_some(receiver),
+            )));
         }
         Ok(None)
     }
@@ -14434,7 +14353,7 @@ impl<'a> Checker<'a> {
                     member.source_member,
                     member.stable_declaration,
                 ),
-                PropertyReadSelection::Extension(access) => {
+                PropertyReadSelection::Extension(access, _) => {
                     self.property_inference_failed(&access.property)
                 }
                 PropertyReadSelection::MemberExtension(_) => false,
@@ -14512,7 +14431,11 @@ impl<'a> Checker<'a> {
                     },
                 );
             }
-            PropertyReadSelection::Extension(access) => {
+            PropertyReadSelection::Extension(access, postponed_receiver) => {
+                if let Some((actual, declared)) = postponed_receiver.zip(access.property.receiver) {
+                    let span = self.span(expression);
+                    self.expect_assignable(declared, actual, span, "extension receiver");
+                }
                 self.expr_lowers
                     .insert(expression, ExprLowering::ExtensionPropertyGet { access });
             }
@@ -25240,264 +25163,7 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        let source_property = if rt.is_nullable() {
-            None
-        } else {
-            rt.obj_internal()
-                .and_then(|_| self.lookup_prop_with_owner_name(rt, &name))
-        };
-        let property_setter = if !rt.is_nullable() {
-            self.select_property_setter(rt, &name)
-        } else {
-            None
-        };
-        let classpath_property =
-            if !rt.is_nullable() && source_property.is_none() && property_setter.is_none() {
-                self.select_property_member(rt, &name)
-            } else {
-                None
-            };
-        let member_extension = if source_property.is_none()
-            && property_setter.is_none()
-            && classpath_property.is_none()
-        {
-            self.member_extension_property(scope, rt, &name)
-        } else {
-            Ok(None)
-        };
-        let extension_property = if matches!(member_extension, Ok(None)) {
-            self.resolver().select_extension_property(rt, &name)
-        } else {
-            Ok(None)
-        };
-        crate::trace_compiler!(
-            "resolve",
-            "member assignment name={name} receiver={rt:?} source_property={source_property:?} member_setter={} classpath_property={} member_extension={} extension_property={}",
-            property_setter.is_some(),
-            classpath_property.is_some(),
-            matches!(member_extension, Ok(Some(_))),
-            matches!(extension_property, Ok(Some(_))),
-        );
-        let assignment_expected = source_property
-            .map(|(_, ty, _, _, _)| ty)
-            .or_else(|| {
-                property_setter
-                    .as_ref()
-                    .and_then(|setter| setter.callable.params.first().copied())
-            })
-            .or_else(|| classpath_property.as_ref().map(|property| property.ret))
-            .or_else(|| {
-                member_extension
-                    .as_ref()
-                    .ok()
-                    .and_then(|property| property.as_ref().map(|property| property.ty))
-            })
-            .or_else(|| {
-                extension_property
-                    .as_ref()
-                    .ok()
-                    .and_then(|property| property.as_ref().map(|property| property.ty))
-            });
-        let vt = self.safe_member_assignment_value(
-            scope,
-            safe,
-            receiver,
-            receiver_ty,
-            value,
-            assignment_expected,
-        );
-        let span = self.file.stmt_spans[s.0 as usize];
-        let target_span = self.assignment_target_span(s);
-        if let Some((owner, lty, is_var, setter_visibility, stable_declaration)) =
-            source_property.filter(|(_, _, is_var, _, _)| *is_var || property_setter.is_none())
-        {
-            // A deferred `val` has no setter, but each constructor may initialize its backing field.
-            // Constructor scopes publish that one permission on the existing dispatch-property
-            // binding. Explicit `this.p = …` must consume the same binding as bare `p = …`; looking
-            // only at the class declaration here incorrectly turns the initialization into a
-            // reassignment.
-            let deferred_constructor_write = !is_var
-                && self.is_deferred_constructor_property_write(scope, receiver, &name, owner);
-            if !is_var && !deferred_constructor_write {
-                self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
-            } else if let Some(visibility) = setter_visibility {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, &name, owner, target_span);
-                }
-            }
-            self.expect_assignable(lty, vt, self.value_diagnostic_span(value, vt), "assignment");
-            if is_var || deferred_constructor_write {
-                let lowering = StmtLowering::MemberPropertyWrite {
-                    stable_declaration,
-                    backing_field: deferred_constructor_write,
-                    setter: None,
-                    setter_declaration: None,
-                    owner,
-                    ty: lty,
-                    interface: self.resolved_owner_is_interface(owner),
-                    context_access: None,
-                };
-                self.stmt_lowers.insert(s, lowering);
-            }
-            return;
-        }
-        if let Some(setter) = property_setter {
-            let setter_declaration = setter.stable_declaration;
-            let callable = setter.callable;
-            let pty = callable.params.first().copied().unwrap_or(Ty::Error);
-            self.expect_assignable(pty, vt, self.value_diagnostic_span(value, vt), "assignment");
-            let owner = callable.owner;
-            if setter.visibility != Visibility::Public {
-                self.reject_if_inaccessible(setter.visibility, &name, owner, target_span);
-            }
-            self.stmt_lowers.insert(
-                s,
-                StmtLowering::MemberPropertyWrite {
-                    stable_declaration: setter_declaration,
-                    backing_field: false,
-                    setter: Some(Box::new(callable.clone())),
-                    setter_declaration,
-                    owner,
-                    ty: callable.params.first().copied().unwrap_or(pty),
-                    interface: self.resolved_owner_is_interface(owner),
-                    context_access: None,
-                },
-            );
-            return;
-        }
-        if classpath_property.is_some() {
-            self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
-            return;
-        }
-        match member_extension {
-            Ok(Some(property)) => {
-                // A write is governed by the setter, not merely by the visibility of the readable
-                // property. Resolve that semantic fact here for every implicit-dispatch origin;
-                // lowering receives only an already-authorized accessor plan.
-                let write_visibility = property.setter_visibility.unwrap_or(property.visibility);
-                if write_visibility != Visibility::Public {
-                    self.reject_if_inaccessible(
-                        write_visibility,
-                        &name,
-                        property.owner,
-                        target_span,
-                    );
-                }
-                self.mark_extension_receiver_stmt_used(s, property.dispatch_receiver);
-                for source in &property.context_args {
-                    let ResolvedContextArgument::ImplicitReceiver(selected) = source else {
-                        continue;
-                    };
-                    if let Some(receiver) =
-                        self.implicit_receivers(scope).into_iter().find(|receiver| {
-                            receiver.ty == selected.ty && receiver.current == selected.current
-                        })
-                    {
-                        self.mark_extension_receiver_stmt_used(s, receiver);
-                    }
-                }
-                if !property.is_var {
-                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
-                }
-                self.expect_assignable(
-                    property.ty,
-                    vt,
-                    self.value_diagnostic_span(value, vt),
-                    "assignment",
-                );
-                self.stmt_lowers.insert(
-                    s,
-                    StmtLowering::MemberExtensionPropertyWrite {
-                        stable_declaration: property.stable_declaration,
-                        setter: property.setter.map(Box::new),
-                        dispatch_receiver: self
-                            .implicit_receiver_selection(property.dispatch_receiver),
-                        owner: property.owner,
-                        receiver: property.declared_receiver,
-                        ty: property.ty,
-                        context_params: property.context_params,
-                        context_args: property.context_args,
-                    },
-                );
-            }
-            Err(()) => {
-                self.diags.error(
-                    span,
-                    format!("overload resolution ambiguity for member '{name}'"),
-                );
-            }
-            Ok(None) => {
-                // Top-level extension-property write: `recv.name = value`.
-                match extension_property {
-                    Ok(Some(signature)) => {
-                        if signature.setter.is_none() {
-                            self.report_val_reassignment(
-                                target_span,
-                                "'val' cannot be reassigned.",
-                            );
-                        }
-                        self.expect_assignable(
-                            signature.ty,
-                            vt,
-                            self.value_diagnostic_span(value, vt),
-                            "assignment",
-                        );
-                        let context_args = if signature.context_count == 0 {
-                            Vec::new()
-                        } else {
-                            let Some(context_types) =
-                                signature.getter.params.get(1..1 + signature.context_count)
-                            else {
-                                self.diags.error(
-                                    target_span,
-                                    format!("No context argument for '{name}' found."),
-                                );
-                                return;
-                            };
-                            let Some(context_args) =
-                                self.select_context_arguments(scope, context_types)
-                            else {
-                                self.diags.error(
-                                    target_span,
-                                    format!("No context argument for '{name}' found."),
-                                );
-                                return;
-                            };
-                            context_args
-                        };
-                        self.stmt_lowers.insert(
-                            s,
-                            StmtLowering::ExtensionPropertyWrite {
-                                access: Box::new(ResolvedPropertyAccess {
-                                    property: signature,
-                                    context_args,
-                                }),
-                            },
-                        );
-                    }
-                    Err(_) => self.diags.error(
-                        span,
-                        format!("overload resolution ambiguity for extension property '{name}'"),
-                    ),
-                    Ok(None) => match rt {
-                        Ty::Error => {}
-                        Ty::Obj(..) => {
-                            let hidden_deprecated = self
-                                .resolver()
-                                .receiver_has_hidden_deprecated_member(rt, &name);
-                            self.diags.error(
-                                span,
-                                unresolved_member_message(&name, rt, hidden_deprecated),
-                            )
-                        }
-                        _ => self.diags.error(
-                            span,
-                            format!("cannot assign to a member of '{}'", rt.source_name()),
-                        ),
-                    },
-                }
-            }
-        }
+        self.assign_explicit_receiver_property(scope, s, receiver, &name, value, rt);
     }
 
     fn stmt_return(
@@ -68861,6 +68527,11 @@ impl<'a> Checker<'a> {
                     "extension receiver",
                 );
             }
+        } else if self.postponed_call_mentions(rt) {
+            // An implicit receiver over a postponed call's type variables adds the same receiver
+            // constraint to that call's system as an explicit one.
+            let span = self.call_callee_name_span(e);
+            self.expect_assignable(selected_receiver, rt, span, "extension receiver");
         }
         if selected.source_key.is_none() && selected.stable_declaration.is_none() {
             let slots = self
