@@ -4111,7 +4111,7 @@ fn array_actual_element_matches(receiver: Ty, declared: Ty) -> bool {
     };
     if receiver.is_reference_array() {
         let declared_stored = reference_array_element(ir_ty_to_jvm(&declared));
-        type_descriptor(declared_stored) == type_descriptor(ir_ty_to_jvm(&stored))
+        crate::jvm::names::same_type_descriptor(declared_stored, ir_ty_to_jvm(&stored))
     } else {
         declared == stored
     }
@@ -11646,7 +11646,10 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand, .. } => self.value_ty(*operand),
             IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
-            IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
+            IrExpr::Return(_)
+            | IrExpr::Throw { .. }
+            | IrExpr::Break { .. }
+            | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
