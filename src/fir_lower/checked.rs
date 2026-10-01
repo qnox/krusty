@@ -654,6 +654,7 @@ impl BodyLowering<'_> {
                 descriptor,
                 physical_result,
                 source,
+                external,
                 source_member,
                 suspend,
             } => {
@@ -705,6 +706,7 @@ impl BodyLowering<'_> {
                     realization: *realization,
                     descriptor: descriptor.clone(),
                     source: *source,
+                    external: *external,
                     defaults,
                     source_member: source_member.clone(),
                 };

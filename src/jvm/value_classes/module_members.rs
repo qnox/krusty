@@ -143,6 +143,7 @@ mod tests {
             physical_ret: Ty::Unit,
             descriptor: "".into(),
             realization: crate::libraries::MemberRealization::Dispatch,
+            nonvirtual: None,
             suspend,
             abstract_member: false,
             visibility: crate::types::Visibility::Public,

@@ -1129,6 +1129,8 @@ mod lateinit_field_visibility_e2e;
 mod lateinit_local_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
 mod lateinit_operand_stack_e2e;
+#[path = "legacy_interface_calls_e2e.rs"]
+mod legacy_interface_calls_e2e;
 #[path = "lib_dep_harness_e2e.rs"]
 mod lib_dep_harness_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]

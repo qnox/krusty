@@ -558,7 +558,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             generic_sig: None,
             singleton_dispatch: None,
             default_realization: None,
-            constructor_realization: None,
+            nonvirtual_realization: None,
             declared_ret: None,
         }
     }

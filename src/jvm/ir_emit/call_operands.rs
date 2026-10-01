@@ -123,6 +123,28 @@ impl Emitter<'_> {
         Some((format!("{owner}$DefaultImpls"), holder_descriptor))
     }
 
+    /// A static call's operands when common IR keeps its dispatch receiver apart from its
+    /// arguments, receiver first. kotlinc passes a dispatch receiver at its own class and never
+    /// widens it to the holder parameter's supertype: `super.f()` realized as the legacy
+    /// `I$DefaultImpls.f(LI;)` loads `this` with no `checkcast`. Only an erased `Object` narrows.
+    pub(super) fn receiver_operands(
+        &self,
+        receiver: u32,
+        args: &[u32],
+        physical: &mut [Ty],
+    ) -> Vec<u32> {
+        let source = self.value_ty(receiver);
+        if source.is_reference()
+            && physical[0].is_reference()
+            && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
+        {
+            physical[0] = source;
+        }
+        std::iter::once(receiver)
+            .chain(args.iter().copied())
+            .collect()
+    }
+
     /// Abandon a call whose operands cannot be pushed, leaving the current arm stack-correct.
     ///
     /// The caller must `return` immediately afterwards without emitting its `invoke*`. `ret` is the
