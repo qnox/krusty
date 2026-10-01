@@ -45,7 +45,9 @@ use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
 };
 use self::value_class_erasure::{
-    metadata_value_class_underlying, value_class_param_types, value_class_return_type,
+    meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
+    metadata_value_class_bound_carrier, metadata_value_class_underlying, value_class_param_types,
+    value_class_return_type,
 };
 
 use std::cell::{Cell, RefCell};
@@ -260,56 +262,6 @@ fn meta_param_compat(
         true
     } else {
         ty_erases_to_object(*desc) && !desc.is_array()
-    }
-}
-
-fn meta_param_exact(
-    name: Option<TypeName>,
-    nullable: bool,
-    desc: &Ty,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
-) -> bool {
-    let Some(name) = name else {
-        return ty_erases_to_object(*desc);
-    };
-    let ids = meta_ids();
-    if name == ids.array {
-        return matches!(desc, Ty::Obj(n, args)
-            if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
-    }
-    if let Some(width) = prim_array_width(name) {
-        return desc.obj_internal().and_then(prim_array_width) == Some(width);
-    }
-    if let Some(prim) = ids.prim.get(&name) {
-        if nullable {
-            return desc
-                .obj_internal()
-                .is_some_and(|actual| nullable_primitive_matches_descriptor(name, actual));
-        }
-        return match prim {
-            // An unsigned parameter is metadata-compatible with its own name and with the signed
-            // primitive it erases to (`UInt` <-> `Int`, `UByte` <-> `Byte`, …).
-            u if u.is_unsigned() => *desc == *u || Some(*desc) == u.scalar_value_repr(),
-            prim => desc == prim,
-        };
-    }
-    // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its metadata against
-    // the erased `J` exactly only through it (unsigned underlyings normalize like the mapped builtins:
-    // `UInt` → `Int`). Decided BEFORE the by-descriptor arms below, or a REFERENCE underlying is judged
-    // by the arm for its erasure and rejected — see `meta_param_compat`.
-    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
-        return erased.non_null() == desc.non_null();
-    }
-    if name == ids.unit {
-        *desc == Ty::Unit
-    } else if name == ids.nothing {
-        *desc == Ty::Nothing
-    } else if matches!(*desc, Ty::String) {
-        name == ids.string_kotlin || name == ids.string_java
-    } else {
-        desc.obj_internal().is_some_and(|desc_internal| {
-            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
-        })
     }
 }
 
@@ -1401,15 +1353,17 @@ fn function_parameter_erasure_matches(
 /// parameters first and the value parameters after them. Kotlin signs a context extension
 /// `(contexts…, receiver, values…)`, so only parameters PAST the context prefix are pushed along by
 /// the receiver.
-fn meta_descriptor_position(index: usize, context_count: usize, extension: bool) -> usize {
-    index + usize::from(extension && index >= context_count)
-}
-
+/// JVM carrier of a metadata type parameter whose class bound is a value class.
+///
+/// The signature parameter stays the type parameter, so it has no classifier of its own. A value-class
+/// class bound (`UInt` ahead of `Comparable<UInt>`) is what the descriptor erases to. Any other bound
+/// keeps the ordinary reference alignment.
 fn meta_callable_aligns(
     f: &super::metadata::MetaFn,
     desc_params: &[Ty],
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, usize)> {
     let extension = f.is_extension();
     let context_count = f.context_count();
@@ -1443,6 +1397,20 @@ fn meta_callable_aligns(
                 if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
                     return function_parameter_erasure_matches(signature, *d, classifier_arity);
                 }
+                if let Some(carrier) = signature_parameter
+                    .zip(f.generic_sig.as_ref())
+                    .filter(|(parameter, _)| matches!(parameter.non_null(), Ty::TyParam(..)))
+                    .and_then(|(parameter, signature)| {
+                        metadata_value_class_bound_carrier(
+                            parameter,
+                            signature,
+                            is_interface,
+                            value_underlying,
+                        )
+                    })
+                {
+                    return metadata_carrier_matches(carrier, d, false, value_underlying);
+                }
                 let class = signature_parameter
                     .and_then(|parameter| parameter.non_null().obj_internal())
                     .or(m.ty);
@@ -1464,6 +1432,20 @@ fn meta_callable_aligns(
             if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
                 return function_parameter_erasure_matches(signature, **d, classifier_arity);
             }
+            if let Some(carrier) = signature_parameter
+                .zip(f.generic_sig.as_ref())
+                .filter(|(parameter, _)| matches!(parameter.non_null(), Ty::TyParam(..)))
+                .and_then(|(parameter, signature)| {
+                    metadata_value_class_bound_carrier(
+                        parameter,
+                        signature,
+                        is_interface,
+                        value_underlying,
+                    )
+                })
+            {
+                return metadata_carrier_matches(carrier, d, true, value_underlying);
+            }
             let class = signature_parameter
                 .and_then(|parameter| parameter.non_null().obj_internal())
                 .or(m.ty);
@@ -1484,12 +1466,18 @@ fn aligned_meta_index(
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, usize)> {
     meta.fns_named(fn_name)
         .filter_map(|i| {
             let f = meta.fn_at(i as usize);
-            let alignment =
-                meta_callable_aligns(f, desc_params, value_underlying, classifier_arity);
+            let alignment = meta_callable_aligns(
+                f,
+                desc_params,
+                value_underlying,
+                classifier_arity,
+                is_interface,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "metadata alignment {fn_name} desc={desc_params:?} candidate_value_classes={:?} candidate_signature={:?} alignment={alignment:?}",
@@ -1513,6 +1501,7 @@ fn aligned_meta_callable<'a>(
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, &'a super::metadata::MetaFn)> {
     aligned_meta_index(
         meta,
@@ -1521,6 +1510,7 @@ fn aligned_meta_callable<'a>(
         desc_ret,
         value_underlying,
         classifier_arity,
+        is_interface,
     )
     .map(|(end, i)| (end, meta.fn_at(i)))
 }
@@ -2441,6 +2431,10 @@ impl Classpath {
                 desc_ret,
                 value_underlying,
                 &|ty| self.function_classifier_arity(ty),
+                &|name| {
+                    self.find_name(name)
+                        .is_some_and(|class| class.is_interface())
+                },
             )
             .map(|(_, idx)| meta.fn_at(idx))
             .and_then(|f| f.generic_sig.clone())
@@ -2495,6 +2489,10 @@ impl Classpath {
             desc_ret,
             value_underlying,
             &|ty| self.function_classifier_arity(ty),
+            &|name| {
+                self.find_name(name)
+                    .is_some_and(|class| class.is_interface())
+            },
         ) else {
             return MetadataCallFacts::fallback(if extension {
                 CallSig::default()

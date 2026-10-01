@@ -78,13 +78,7 @@ impl JvmLibraries {
         // Retain the invoked descriptor only as a physical realization. A suspend call's common
         // shape excludes its CPS continuation; the suspend pass appends that operand exactly once.
         let (mut physical_params, physical_ret) = super::super::parse_method_desc(descriptor)?;
-        if member.suspend()
-            && !physical_params.pop().is_some_and(|parameter| {
-                parameter
-                    .obj_internal()
-                    .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
-            })
-        {
+        if member.suspend() && physical_params.pop().is_none() {
             return None;
         }
         member.owner = Some(*owner);
@@ -93,11 +87,15 @@ impl JvmLibraries {
         // registration would retain the semantic name as though it were the emitted method.
         member.physical_name = (member.name != name).then(|| name.to_owned());
         member.descriptor = if member.suspend() {
-            super::super::strip_continuation_param(descriptor)
+            super::super::parameter_plans::logical_suspend_descriptor(descriptor)
         } else {
             descriptor.to_string()
         };
         member.physical_params = physical_params;
+        // This inline-body dependency now carries the logical, continuation-free call shape. Its
+        // cloned provider plan still described the physical CPS descriptor, so republish the exact
+        // source-only slots at the boundary where the continuation was removed.
+        super::super::parameter_plans::member(member, false, false);
         member.physical_ret = physical_ret;
         member.set_is_interface(interface);
         Some(member.clone())

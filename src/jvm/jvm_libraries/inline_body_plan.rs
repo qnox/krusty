@@ -9,7 +9,7 @@ mod iteration;
 mod recovery;
 
 use super::inline_capability::metadata_inline;
-use super::{JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR};
+use super::JvmLibraries;
 use crate::jvm::classreader::{ExcEntry, C};
 use crate::jvm::inline::{self, Insn};
 use crate::libraries::{
@@ -24,16 +24,6 @@ enum InlineDependency<T> {
     Found(T),
     Rejected,
     Unavailable,
-}
-
-fn suspend_body_descriptor(descriptor: &str) -> Option<String> {
-    let close = descriptor.rfind(')')?;
-    Some(format!(
-        "({}{}){}",
-        &descriptor[1..close],
-        CONTINUATION_PARAM_DESCRIPTOR,
-        &descriptor[close + 1..]
-    ))
 }
 
 fn callable_parameter_slots(parameters: &[Ty]) -> Vec<u16> {
@@ -715,7 +705,8 @@ impl JvmLibraries {
         // a cache hit builds neither.
         let suspend_descriptor;
         let body_descriptor = if callable.suspend {
-            suspend_descriptor = suspend_body_descriptor(&callable.descriptor)?;
+            suspend_descriptor =
+                super::parameter_plans::physical_suspend_descriptor(&callable.descriptor)?;
             suspend_descriptor.as_str()
         } else {
             callable.descriptor.as_str()
@@ -1223,6 +1214,7 @@ impl JvmLibraries {
 
 #[cfg(test)]
 mod tests {
+    use super::super::parameter_plans::physical_suspend_descriptor;
     use super::*;
     use crate::symbol_source::SymbolNamespace;
 
@@ -1326,7 +1318,7 @@ mod tests {
         let suspend_descriptor;
         let descriptor = if callable.suspend {
             suspend_descriptor =
-                suspend_body_descriptor(&callable.descriptor).expect("use body descriptor");
+                physical_suspend_descriptor(&callable.descriptor).expect("use body descriptor");
             suspend_descriptor.as_str()
         } else {
             callable.descriptor.as_str()

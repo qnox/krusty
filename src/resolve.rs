@@ -29615,6 +29615,7 @@ fun box(): String {
                         owner: Some(crate::types::type_name("test/Factory")),
                         physical_name: None,
                         physical_params: vec![Ty::obj("Config"), second],
+                        physical_parameter_plan: None,
                         params: vec![Ty::obj("Config"), second],
                         ret: Ty::String,
                         physical_ret: Ty::String,

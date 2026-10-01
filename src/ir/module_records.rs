@@ -12,6 +12,14 @@ pub struct IrModuleSource {
     pub package: TypeName,
 }
 
+/// One declaration type parameter copied with a referenced module callable. Only the semantic
+/// name and bounds participate in JVM class-bound erasure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrCallableTypeParameter {
+    pub semantic_name: String,
+    pub bounds: Box<[(Ty, bool)]>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrModuleCallable {
     pub source: IrModuleSource,
@@ -32,6 +40,9 @@ pub struct IrModuleCallable {
     /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
     /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
     pub parameters: Box<[Ty]>,
+    /// Declaration type parameters and their complete bounds. A JVM realization erases a call to
+    /// this declaration with the same primary class bound it uses for a same-file signature.
+    pub type_parameters: Box<[IrCallableTypeParameter]>,
     /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
     /// and parameter metadata on synthesized adapters instead of inventing positional names.
     pub parameter_identities: Box<[IrParameterIdentity]>,

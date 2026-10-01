@@ -71,6 +71,40 @@ fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
 /// JVM primary erasure for each declaration-owned type parameter. Reified-operation realization
 /// consumes the same map before descriptors erase their occurrences, so marker placeholders and
 /// method signatures cannot disagree about an intersection's physical class bound.
+/// Erase `parameters` with the same primary class bound `lower_function_type_parameters` writes
+/// onto a same-file function. A copied signature — a same-module call — uses this so its physical
+/// parameter vector is that function's vector.
+pub(super) fn erased_parameters(parameters: &[Ty], type_parameters: &[IrTypeParameter]) -> Vec<Ty> {
+    erase_with(parameters, &parameter_erasures(type_parameters))
+}
+
+/// Same erasure as [`erased_parameters`] for a referenced module callable, which copies the
+/// semantic name and bounds without the declaration's variance or reified flag.
+pub(super) fn erased_callable_parameters(
+    parameters: &[Ty],
+    type_parameters: &[crate::ir::IrCallableTypeParameter],
+) -> Vec<Ty> {
+    let type_parameters = type_parameters
+        .iter()
+        .map(|parameter| IrTypeParameter {
+            name: parameter.semantic_name.clone(),
+            semantic_name: parameter.semantic_name.clone(),
+            bounds: parameter.bounds.to_vec(),
+            variance: crate::types::TypeVariance::Invariant,
+            reified: false,
+        })
+        .collect::<Vec<_>>();
+    erased_parameters(parameters, &type_parameters)
+}
+
+fn erase_with(parameters: &[Ty], erasures: &HashMap<String, Ty>) -> Vec<Ty> {
+    parameters
+        .iter()
+        .copied()
+        .map(|parameter| physical_type(parameter, erasures))
+        .collect()
+}
+
 pub(super) fn parameter_erasures(parameters: &[IrTypeParameter]) -> HashMap<String, Ty> {
     let mut erasures = HashMap::new();
     for parameter in parameters {

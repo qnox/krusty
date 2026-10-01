@@ -109,6 +109,11 @@ impl Classpath {
                         owner: Some(owner),
                         physical_name,
                         physical_params: params.clone(),
+                        physical_parameter_plan: Some(
+                            crate::libraries::physical_parameter_plan::source_parameter_plan(
+                                params.len(),
+                            ),
+                        ),
                         params,
                         ret,
                         physical_ret,

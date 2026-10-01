@@ -12,7 +12,7 @@ use crate::types::{type_name, Ty};
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     /// `lower_value_classes` — a `@JvmInline value class` shape not yet supported.
     ValueClasses,
@@ -25,6 +25,8 @@ pub enum SkipReason {
     DefaultCalls,
     /// A plugin-generated checked `super` call could not be given a JVM invocation shape.
     SuperCalls,
+    /// A checked declaration argument no longer matched its selected JVM parameter boundary.
+    CallArguments(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -224,6 +226,16 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
+    }
+    // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
+    // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
+    // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
+    crate::jvm::physical_call_arguments::retarget_declaration_arguments(ir)
+        .map_err(SkipReason::CallArguments)?;
+    if !facts.default_call_operands.synchronize(ir) {
+        return Err(SkipReason::CallArguments(
+            "default call operand plan no longer matches its call".to_string(),
+        ));
     }
     // The JVM supplies default field values before any constructor runs. Elide only source
     // declaration stores recorded by exact ExprId; common IR and other targets keep them. Runs
@@ -704,6 +716,13 @@ impl JvmBackend {
             report_backend_pass_failure(reason, diags);
             return Vec::new();
         }
+        if !pass_facts.default_call_operands.synchronize(&ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "default call operand plan no longer matches its call".to_string(),
+            );
+            return Vec::new();
+        }
         if crate::jvm::declaration_collisions::validate(&ir, &pass_facts.override_results, diags)
             .is_err()
         {
@@ -848,13 +867,19 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CallArguments(detail) => {
+            diags.error(crate::diag::Span::new(0, 0), detail);
+            return;
+        }
         _ => {}
     }
     let what = match reason {
         SkipReason::ValueClasses => "value-class",
         SkipReason::Suspend => "suspend-function",
         SkipReason::Bridges => "bridge-method",
-        SkipReason::DefaultCalls | SkipReason::SuperCalls => unreachable!(),
+        SkipReason::DefaultCalls | SkipReason::SuperCalls | SkipReason::CallArguments(_) => {
+            unreachable!()
+        }
     };
     diags.error(
         crate::diag::Span::new(0, 0),
@@ -952,7 +977,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) = crate::jvm::external_calls::realize(
+        if let Err(error) = crate::jvm::external_calls::realize(
             &mut file.ir,
             &self.cp,
             &file.callables,
@@ -960,7 +985,7 @@ impl Backend for JvmBackend {
         ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
-                format!("internal error: missing JVM dependency realization for {target}"),
+                format!("internal error: missing JVM dependency realization for {error}"),
             );
             return Vec::new();
         }

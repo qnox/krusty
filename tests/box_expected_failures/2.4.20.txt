@@ -110,7 +110,6 @@ multiplatform/k2/expectStatic.kt
 multiplatform/k2/kt66970.kt
 nonLocalReturns/suspendConversion.kt
 nullCheckOptimization/kt22410.kt
-operatorConventions/BoundedGenericValueInRangeCheck.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
 properties/backingField/anySupertypeValueClassAnyMethodsWithExplicitBackingField.kt
 properties/backingField/genericSupertypeWithValueClassExplicitBackingField.kt

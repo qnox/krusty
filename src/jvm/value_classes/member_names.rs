@@ -157,6 +157,66 @@ pub(super) fn vc_member_entry_name(
     vc_mangle(source_name, params, ret, under, false, is_suspend)
 }
 
+/// JVM name and value-class-bound parameter replacements of a same-module call. Mangling sees the
+/// class bound (`UInt`), which is the value class the hash includes. Parameters whose class bound
+/// is not a value class retain the already-selected physical call shape; this boundary must not
+/// remap unrelated generic, function, `Unit`, or reference parameters.
+pub(super) fn module_call_jvm_name(
+    name: &str,
+    parameters: &[Ty],
+    type_parameters: &[crate::ir::IrCallableTypeParameter],
+    result: &Ty,
+    owner_is_value_class_member: bool,
+    owner_is_file: bool,
+    module_default_call: bool,
+    semantic_default: bool,
+    under: &Under,
+    suspend: bool,
+) -> (String, Vec<(usize, Ty)>) {
+    let base = if module_default_call {
+        name.strip_suffix("$default").unwrap_or(name)
+    } else {
+        name
+    };
+    let erased =
+        crate::jvm::generic_erasure::erased_callable_parameters(parameters, type_parameters);
+    let replacements = parameters
+        .iter()
+        .copied()
+        .zip(erased)
+        .enumerate()
+        .filter_map(|(index, (semantic, erased))| {
+            let classifier = erased.non_null().kotlin_class_internal()?;
+            matches!(semantic.non_null(), Ty::TyParam(..))
+                .then_some(())
+                .filter(|_| under.contains_key(&classifier))
+                .map(|_| (index, erased))
+        })
+        .collect::<Vec<_>>();
+    let mut mangling_parameters = parameters.to_vec();
+    for &(index, replacement) in &replacements {
+        mangling_parameters[index] = replacement;
+    }
+    let mangled = if owner_is_value_class_member {
+        vc_member_impl_name(base, &mangling_parameters, result, under, suspend)
+    } else {
+        vc_mangle_once(
+            base,
+            &mangling_parameters,
+            result,
+            under,
+            owner_is_file,
+            suspend,
+        )
+    };
+    let name = if module_default_call && !semantic_default {
+        format!("{mangled}$default")
+    } else {
+        mangled
+    };
+    (name, replacements)
+}
+
 /// kotlinc's name for a function whose JVM signature mentions a value class: `base-<hash>` (a
 /// value-class parameter, or a value-class return, triggers it). Plain `base` otherwise.
 pub(super) fn vc_mangle(
@@ -195,4 +255,48 @@ pub(super) fn vc_mangle(
     let rinfo = mangling_info(ret, under);
     let ret_opt = (rinfo.is_value && !is_file_class).then_some(&rinfo);
     crate::jvm::inline_class::mangled_name(base, &pinfo, ret_opt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{module_call_jvm_name, Under};
+    use crate::ir::IrCallableTypeParameter;
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn module_call_replaces_only_value_class_bounded_type_parameters() {
+        let mut under = Under::new();
+        under.insert(type_name("kotlin/UInt"), Ty::Int);
+        let parameters = [
+            Ty::ty_param("U", Ty::UInt),
+            Ty::Unit,
+            Ty::ty_param("T", Ty::obj("kotlin/Any")),
+            Ty::fun(vec![Ty::String], Ty::Int),
+        ];
+        let type_parameters = [
+            IrCallableTypeParameter {
+                semantic_name: "U".to_string(),
+                bounds: Box::new([(Ty::UInt, false)]),
+            },
+            IrCallableTypeParameter {
+                semantic_name: "T".to_string(),
+                bounds: Box::new([(Ty::obj("kotlin/Any"), false)]),
+            },
+        ];
+
+        let (_, replacements) = module_call_jvm_name(
+            "accept",
+            &parameters,
+            &type_parameters,
+            &Ty::Unit,
+            false,
+            true,
+            false,
+            false,
+            &under,
+            false,
+        );
+
+        assert_eq!(replacements, vec![(0, Ty::UInt)]);
+    }
 }

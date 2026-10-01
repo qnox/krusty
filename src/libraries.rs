@@ -13,12 +13,14 @@ mod core_builtins;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
 pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_kind::TypeKind;
+pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
@@ -269,6 +271,8 @@ pub struct LibraryMember {
     /// Declaration/ABI parameter types before call-site generic substitution. Resolution specializes
     /// [`Self::params`]; lowering consumes this stable parallel shape.
     pub physical_params: Vec<Ty>,
+    /// Named slots of [`Self::physical_params`]. A missing plan is not a source-parameter vector.
+    pub physical_parameter_plan: Option<Box<[PhysicalParameterSlot]>>,
     pub params: Vec<Ty>,
     pub ret: Ty,
     pub physical_ret: Ty,
@@ -747,6 +751,7 @@ pub struct SemanticSupertype {
 impl LibraryMember {
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
         let call_sig = CallSig::metadata_plain(params.len());
+        let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryMember {
             external_identity: None,
             external_default_provider: None,
@@ -756,6 +761,7 @@ impl LibraryMember {
             owner: None,
             physical_name: None,
             physical_params: params.clone(),
+            physical_parameter_plan: Some(parameter_plan),
             params,
             ret,
             physical_ret: ret,
@@ -912,6 +918,7 @@ impl LibraryCallable {
         physical_ret: Ty,
         descriptor: impl Into<String>,
     ) -> Self {
+        let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryCallable {
             external_identity: None,
             external_default_provider: None,
@@ -925,6 +932,7 @@ impl LibraryCallable {
             plugin_expression: None,
             inline_body_plan: None,
             physical_params: params.clone(),
+            physical_parameter_plan: Some(parameter_plan),
             params,
             ret,
             physical_ret,
@@ -972,6 +980,7 @@ impl LibraryCallable {
         );
         callable.reflection_name = Some("<init>".to_string());
         callable.physical_params = member.physical_params.clone();
+        callable.physical_parameter_plan = member.physical_parameter_plan.clone();
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
@@ -1053,6 +1062,8 @@ pub struct LibraryCallable {
     /// [`Self::params`], but it never changes this vector (`fun <T> id(x: T)` remains `Object`-erased
     /// when called as `id("x")`).
     pub physical_params: Vec<Ty>,
+    /// Named slots of [`Self::physical_params`]. A missing plan is not a source-parameter vector.
+    pub physical_parameter_plan: Option<Box<[PhysicalParameterSlot]>>,
     /// The *logical* return type — for a generic callable, the substituted type (`listOf<Int>` →
     /// `List<Int>`, `first()` → the element). The checker reports this.
     pub ret: Ty,
@@ -2149,6 +2160,7 @@ impl FunctionInfo {
             self.callable.descriptor.clone(),
         );
         member.physical_params = self.callable.physical_params.clone();
+        member.physical_parameter_plan = self.callable.physical_parameter_plan.clone();
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
         // Preserve the selected declaration's pre-substitution results when a generic `FunctionInfo`

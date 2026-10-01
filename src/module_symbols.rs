@@ -922,6 +922,9 @@ fn fn_info(
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
         physical_params: params.clone(),
+        physical_parameter_plan: Some(
+            crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
+        ),
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
@@ -1040,6 +1043,9 @@ fn source_callable(
         plugin_expression: None,
         descriptor: String::new(),
         physical_params: params.clone(),
+        physical_parameter_plan: Some(
+            crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
+        ),
         params,
         ret,
         physical_ret: ret,

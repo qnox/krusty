@@ -99,8 +99,8 @@ pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
-    IrClassifierKind, IrHeaderAnnotation, IrModuleCallable, IrModuleClassifier,
-    IrModuleMemberAccess, IrModuleSource,
+    IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
+    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
 };
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
@@ -138,6 +138,15 @@ pub enum IrCheckedArgument {
         array_type: Ty,
         elements: Vec<(ExprId, bool)>,
     },
+}
+
+/// One supplied argument edge whose declaration parameter mentions a type parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrDeclarationArgumentBoundary {
+    pub argument: ExprId,
+    pub parameter: u32,
+    pub declaration: crate::types::Ty,
+    pub retarget_coercion: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2355,6 +2364,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: std::collections::HashSet<ExprId>,
+    /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
+    /// A target may adapt only these exact edges, and only when its own carrier rules select them.
+    pub declaration_argument_boundaries:
+        std::collections::HashMap<ExprId, Box<[IrDeclarationArgumentBoundary]>>,
     /// Realized dependency-call `ExprId` → declaration parameter types in the order of the call's
     /// ordinary argument vector. These are copied from the provider record selected by FIR, never
     /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
@@ -2362,6 +2375,10 @@ pub struct IrFile {
     /// parameter and a generic `T` parameter erase to JVM `Object`, but only the latter takes a box.
     /// Dispatch receivers stay separate; a static realization prepends its selected receiver.
     pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
+    /// Call `ExprId` → JVM parameter types in declaration order. Semantic `call_declared_params`
+    /// stay the Kotlin types; this plan is only the physical slot a selected argument edge is
+    /// adapted to. Mask and marker operands are not entries.
+    pub physical_call_parameters: std::collections::HashMap<ExprId, Box<[Ty]>>,
     /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
     /// argument order. A generic constructor can consume a value-class box through bare `T` even
     /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission

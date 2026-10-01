@@ -562,6 +562,9 @@ impl<'a> StreamedModuleSymbols<'a> {
             plugin_expression: None,
             descriptor: String::new(),
             physical_params: parameters.clone(),
+            physical_parameter_plan: Some(
+                crate::libraries::physical_parameter_plan::source_parameter_plan(parameters.len()),
+            ),
             params: parameters,
             ret: result,
             physical_ret: result,

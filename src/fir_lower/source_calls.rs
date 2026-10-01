@@ -1,5 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
+mod argument_boundaries;
+
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
@@ -95,29 +97,6 @@ pub(super) struct ModuleConstructorRequest<'a> {
 /// Whether the checked source-order operand stream is already in selected parameter order. Missing
 /// defaults have no evaluation and therefore do not disturb the order; repeated vararg fragments
 /// remain adjacent at one parameter and are grouped without reordering their elements.
-fn arguments_follow_parameter_order(
-    arguments: &[IrCheckedArgument],
-    preceding_parameter: Option<u32>,
-) -> bool {
-    let mut previous = preceding_parameter;
-    for argument in arguments {
-        let parameter = match argument {
-            IrCheckedArgument::Expression { parameter, .. } => *parameter,
-            IrCheckedArgument::Vararg {
-                parameter,
-                elements,
-                ..
-            } if !elements.is_empty() => *parameter,
-            IrCheckedArgument::Default { .. } | IrCheckedArgument::Vararg { .. } => continue,
-        };
-        if previous.is_some_and(|previous| parameter < previous) {
-            return false;
-        }
-        previous = Some(parameter);
-    }
-    true
-}
-
 impl BodyLowering<'_> {
     /// Whether a checked common-IR operand contains a suspension that belongs to the current body.
     /// The checker/lowering maps are authoritative; this performs no callable lookup. A lambda body
@@ -399,6 +378,8 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
             })?;
+        let boundary_defaults = defaults.clone();
+        let boundary_parameters = parameter_types.clone();
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
         // vector so every operand has one checked slot. It is still a receiver, not a source value
         // parameter, and Kotlin default-mask ordinals count only value parameters. Publish the
@@ -426,6 +407,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
+        argument_boundaries::record(&mut self.ir, call, &boundary_parameters, &boundary_defaults);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver
@@ -894,6 +876,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
+        argument_boundaries::record(&mut self.ir, call, &parameter_types, &defaults);
         Some(self.wrap_call_statements(statements, call))
     }
 
@@ -925,7 +908,7 @@ impl BodyLowering<'_> {
         let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
             && !preserve_inline_lambdas
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-            && arguments_follow_parameter_order(arguments, extension_receiver_parameter);
+            && argument_boundaries::follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
             dispatch_receiver
@@ -1373,7 +1356,7 @@ impl BodyLowering<'_> {
         // evaluates every operand once, in source order.
         let direct =
             !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-                && arguments_follow_parameter_order(arguments, None);
+                && argument_boundaries::follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1695,6 +1678,12 @@ impl BodyLowering<'_> {
             }),
             None => return None,
         };
+        argument_boundaries::record(
+            &mut self.ir,
+            call,
+            &selected_declaration_parameter_types,
+            &default_argument_positions,
+        );
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
@@ -1797,15 +1786,17 @@ impl BodyLowering<'_> {
                                 ..
                             } => {
                                 let declared = *declared_parameters.get(parameter)?;
-                                if !parameter_ty.is_reference() && declared.is_reference() {
-                                    self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: value,
-                                        type_operand: declared,
-                                    })
-                                } else {
-                                    value
-                                }
+                                let value =
+                                    if !parameter_ty.is_reference() && declared.is_reference() {
+                                        self.ir.add_expr(IrExpr::TypeOp {
+                                            op: IrTypeOp::ImplicitCoercion,
+                                            arg: value,
+                                            type_operand: declared,
+                                        })
+                                    } else {
+                                        value
+                                    };
+                                value
                             }
                             CheckedArgumentPolicy::Selected { .. } => value,
                         })

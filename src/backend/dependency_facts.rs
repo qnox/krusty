@@ -42,6 +42,10 @@ pub struct BackendCallableFact {
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
+    /// Exact physical slot roles published by the provider while it aligned metadata with the
+    /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles
+    /// from arity or descriptor spelling.
+    pub physical_parameter_plan: Option<Box<[crate::libraries::PhysicalParameterSlot]>>,
     pub physical_ret: Ty,
     pub descriptor: String,
     pub inline: InlineKind,
@@ -163,6 +167,7 @@ impl CheckedBackendCallables {
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
+                    physical_parameter_plan: callable.physical_parameter_plan,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
                     inline: callable.inline,
