@@ -25,6 +25,9 @@ impl ResolvedValueParameterFlags {
     const LEGACY_CONTEXT_RECEIVER: u16 = 1 << 9;
     const PROPERTY_SETTER_VALUE: u16 = 1 << 10;
     const CROSSINLINE: u16 = 1 << 11;
+    /// A named context parameter. Distinct from the unset state: a context-prefix slot that never
+    /// published a role must stay a failure, not collapse into this role.
+    const NAMED_CONTEXT: u16 = 1 << 12;
 
     pub const fn new(vararg: bool, default: bool, property: bool, mutable_property: bool) -> Self {
         let mut bits = 0;
@@ -129,13 +132,14 @@ impl ResolvedValueParameterFlags {
     }
 
     pub const fn with_context_kind(mut self, kind: crate::types::ContextParameterKind) -> Self {
+        self.0 &= !(Self::ANONYMOUS_CONTEXT | Self::LEGACY_CONTEXT_RECEIVER | Self::NAMED_CONTEXT);
         match kind {
             crate::types::ContextParameterKind::Anonymous => self.0 |= Self::ANONYMOUS_CONTEXT,
             crate::types::ContextParameterKind::LegacyReceiver => {
                 self.0 |= Self::LEGACY_CONTEXT_RECEIVER
             }
-            crate::types::ContextParameterKind::None
-            | crate::types::ContextParameterKind::Named => {}
+            crate::types::ContextParameterKind::Named => self.0 |= Self::NAMED_CONTEXT,
+            crate::types::ContextParameterKind::None => {}
         }
         self
     }
@@ -145,8 +149,10 @@ impl ResolvedValueParameterFlags {
             crate::types::ContextParameterKind::Anonymous
         } else if self.0 & Self::LEGACY_CONTEXT_RECEIVER != 0 {
             crate::types::ContextParameterKind::LegacyReceiver
-        } else {
+        } else if self.0 & Self::NAMED_CONTEXT != 0 {
             crate::types::ContextParameterKind::Named
+        } else {
+            crate::types::ContextParameterKind::None
         }
     }
 
@@ -299,11 +305,14 @@ impl ResolvedModuleIndex {
         let parameter = self.callable_parameter(callable, ordinal)?;
         let name = self.callable_parameter_name(callable, ordinal)?;
         if ordinal < header.shape.context_parameter_count {
-            return Some(ResolvedParameterIdentity::declared(
-                ordinal,
-                name,
-                parameter.flags.context_kind(),
-            ));
+            let kind = parameter.flags.context_kind();
+            // An inconsistent context-prefix slot is a frontend failure. `declared(..., None)`
+            // is only for an ordinary parameter; using it here would turn the slot into `Source`
+            // or `Unnamed` from its spelling.
+            if kind == crate::types::ContextParameterKind::None {
+                return None;
+            }
+            return Some(ResolvedParameterIdentity::declared(ordinal, name, kind));
         }
         Some(if parameter.flags.is_property_setter_value() {
             ResolvedParameterIdentity::PropertySetterValue
@@ -437,5 +446,104 @@ impl ResolvedModuleIndex {
             + self.callable_behaviors.len()
                 * (std::mem::size_of::<CallableId>()
                     + std::mem::size_of::<ResolvedCallableBehavior>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResolvedParameterIdentity;
+    use crate::fir::{
+        CallableId, DeclarationId, ResolvedCallableShape, ResolvedModuleIndex,
+        ResolvedValueParameterFlags,
+    };
+    use crate::types::{ContextParameterKind, Ty};
+
+    fn publish(
+        context_parameter_count: u32,
+        parameters: &[(&str, ContextParameterKind)],
+    ) -> (ResolvedModuleIndex, CallableId) {
+        let mut index = ResolvedModuleIndex::default();
+        let declaration = DeclarationId::from_raw(1);
+        let callable = CallableId::from_raw(1);
+        index
+            .publish_signature(
+                declaration,
+                (0..parameters.len()).map(|_| Ty::Int),
+                Ty::Unit,
+            )
+            .expect("the fixture types are publishable");
+        let context_value_count = parameters
+            .iter()
+            .take(context_parameter_count as usize)
+            .filter(|(_, kind)| *kind == ContextParameterKind::Named)
+            .count() as u32;
+        index.publish_function_shape(
+            callable,
+            declaration,
+            "sample",
+            ResolvedCallableShape {
+                context_parameter_count,
+                context_value_count,
+                extension_receiver: None,
+            },
+            false,
+        );
+        index.publish_callable_parameters(
+            callable,
+            parameters.iter().map(|(name, kind)| {
+                (
+                    *name,
+                    ResolvedValueParameterFlags::new(false, false, false, false)
+                        .with_context_kind(*kind),
+                )
+            }),
+        );
+        (index, callable)
+    }
+
+    #[test]
+    fn context_prefix_roles_stay_distinct_from_ordinary_parameters() {
+        let (index, callable) = publish(
+            3,
+            &[
+                ("named", ContextParameterKind::Named),
+                ("_", ContextParameterKind::Anonymous),
+                ("_", ContextParameterKind::LegacyReceiver),
+                ("value", ContextParameterKind::None),
+                ("", ContextParameterKind::None),
+            ],
+        );
+        assert_eq!(
+            index.callable_parameter_identities(callable, 5).as_deref(),
+            Some(
+                &[
+                    ResolvedParameterIdentity::ContextValue {
+                        ordinal: 0,
+                        source_name: "named".into(),
+                    },
+                    ResolvedParameterIdentity::AnonymousContextParameter { ordinal: 1 },
+                    ResolvedParameterIdentity::LegacyContextReceiver { ordinal: 2 },
+                    ResolvedParameterIdentity::Source("value".into()),
+                    ResolvedParameterIdentity::Unnamed { ordinal: 4 },
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn a_context_prefix_without_a_published_role_fails_closed() {
+        let (index, callable) = publish(
+            1,
+            &[
+                ("slot", ContextParameterKind::None),
+                ("value", ContextParameterKind::None),
+            ],
+        );
+        assert_eq!(index.callable_parameter_identity(callable, 0), None);
+        assert_eq!(
+            index.callable_parameter_identity(callable, 1),
+            Some(ResolvedParameterIdentity::Source("value".into()))
+        );
+        assert_eq!(index.callable_parameter_identities(callable, 2), None);
     }
 }
